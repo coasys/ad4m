@@ -1,0 +1,1800 @@
+
+> @coasys/ad4m-integration-tests@0.10.0-prerelease test-all:windows C:\Users\fayee\dev\ad4m\tests\js
+> node scripts/cleanup.js && pnpm run test-simple && node scripts/cleanup.js && pnpm run test-app && node scripts/cleanup.js && pnpm run test-auth && node scripts/cleanup.js && pnpm run test-integration && node scripts/cleanup.js && pnpm run test-prolog-and-literals
+
+
+> @coasys/ad4m-integration-tests@0.10.0-prerelease test-simple C:\Users\fayee\dev\ad4m\tests\js
+> ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/simple.test.ts
+
+
+
+  Integration
+C:\Users\fayee\dev\ad4m\tests\js\bootstrapSeed.json
+C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice
+Starting executor
+USING LOCAL BOOTSTRAP & PROXY URL:  https://bootstrap.holo.host wss://signal.holotest.net
+Waiting for executor to settle...
+[2024-07-26T07:30:32Z INFO  rust_executor] Initializing Ad4mDb...
+
+[2024-07-26T07:30:32Z WARN  rust_executor] adminCredential is not set or empty, empty token will possess admin capabilities.
+[2024-07-26T07:30:32Z INFO  rust_executor] Initializing Prolog service...
+[2024-07-26T07:30:32Z INFO  rust_executor] Starting js_core...
+
+[2024-07-26T07:30:32Z INFO  rust_executor::js_core::string_module_loader] Module is not a file path, importing as raw module string
+
+[2024-07-26T07:30:32Z INFO  rust_executor::js_core::string_module_loader] Module is not a file path, importing as raw module string
+
+[2024-07-26T07:30:33Z INFO  rust_executor::js_core] AD4M JS engine init completed, with result: ()
+
+[2024-07-26T07:30:33Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: AD4M executor starting with config: 
+
+[2024-07-26T07:30:33Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: {"appDataPath":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\simpleAlice","networkBootstrapSeed":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\simpleAlice\\mainnet_seed.seed","languageLanguageOnly":false,"runDappServer":false,"gqlPort":15600,"hcPortAdmin":15601,"hcPortApp":15602,"hcUseLocalProxy":true,"hcUseMdns":true,"hcUseProxy":true,"hcUseBootstrap":true,"hcProxyUrl":"wss://signal.holotest.net","hcBootstrapUrl":"https://bootstrap.holo.host","connectHolochain":false,"adminCredential":null,"localhost":true,"autoPermitCapRequests":true,"tls":null,"logHolochainMetrics":true} 
+
+[2024-07-26T07:30:33Z INFO  rust_executor::js_core] AD4M coreInit() completed Succesfully: "[object Object]"
+
+[2024-07-26T07:30:33Z INFO  rust_executor] js_core initialized.
+[2024-07-26T07:30:33Z INFO  rust_executor] Starting GraphQL...
+
+[2024-07-26T07:30:33Z INFO  warp::server] Server::run; addr=127.0.0.1:15600
+[2024-07-26T07:30:33Z INFO  warp::server] listening on http://127.0.0.1:15600
+
+Creating ad4m client
+Generating agent
+[2024-07-26T07:30:33Z INFO  warp::server] 127.0.0.1:54151 "GET /graphql HTTP/1.1" 101 "-" "-" 74.2µs
+
+[2024-07-26T07:30:33Z DEBUG rust_executor::pubsub] Subscribing to topic: agent-updated-topic
+[2024-07-26T07:30:33Z DEBUG rust_executor::pubsub] Subscribing to topic: agent-status-changed-topic
+[2024-07-26T07:30:33Z DEBUG rust_executor::pubsub] Subscribing to topic: apps-changed
+[2024-07-26T07:30:33Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-added-topic
+[2024-07-26T07:30:33Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-updated-topic
+[2024-07-26T07:30:33Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-removed-topic
+[2024-07-26T07:30:33Z DEBUG rust_executor::pubsub] Subscribing to topic: runtime-messaged-received-topic
+[2024-07-26T07:30:33Z DEBUG rust_executor::pubsub] Subscribing to topic: exception-occurred-topic
+[2024-07-26T07:30:33Z DEBUG rust_executor::pubsub] Subscribing to topic: runtime-notification-triggered-topic
+
+[2024-07-26T07:30:33Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Init HolochainService with data path:  C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\h\d . Conductor path:  C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\h\c . Resource path:   
+[2024-07-26T07:30:33Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Holochain ports: admin=15601 app=15602 
+
+[2024-07-26T07:30:33Z INFO  rust_executor::holochain_service] Starting holochain conductor with config: ConductorConfig {
+        tracing_override: None,
+        data_root_path: Some(
+            DataRootPath(
+                "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\simpleAlice\\ad4m\\h\\c",
+            ),
+        ),
+        keystore: LairServerInProc {
+            lair_root: None,
+        },
+        dpki: None,
+        admin_interfaces: None,
+        network: KitsuneP2pConfig {
+            transport_pool: [
+                WebRTC {
+                    signal_url: "wss://signal.holotest.net",
+                },
+            ],
+            bootstrap_service: Some(
+                Url2 {
+                    url: "https://bootstrap.holo.host/",
+                },
+            ),
+            tuning_params: KitsuneP2pTuningParams {
+                gossip_strategy: "sharded-gossip",
+                gossip_loop_iteration_delay_ms: 1000,
+                gossip_outbound_target_mbps: 100.0,
+                gossip_inbound_target_mbps: 100.0,
+                gossip_historic_outbound_target_mbps: 100.0,
+                gossip_historic_inbound_target_mbps: 100.0,
+                gossip_burst_ratio: 100.0,
+                gossip_peer_on_success_next_gossip_delay_ms: 60000,
+                gossip_peer_on_error_next_gossip_delay_ms: 300000,
+                gossip_agent_info_update_interval_ms: 300000,
+                gossip_round_timeout_ms: 60000,
+                gossip_redundancy_target: 100.0,
+                gossip_max_batch_size: 1000000,
+                gossip_dynamic_arcs: true,
+                gossip_arc_clamping: "none",
+                default_rpc_single_timeout_ms: 60000,
+                default_rpc_multi_remote_agent_count: 3,
+                default_rpc_multi_remote_request_grace_ms: 3000,
+                agent_info_expires_after_ms: 1200000,
+                tls_in_mem_session_storage: 512,
+                proxy_keepalive_ms: 120000,
+                proxy_to_expire_ms: 300000,
+                concurrent_limit_per_thread: 4096,
+                tx2_quic_max_idle_timeout_ms: 60000,
+                tx2_pool_max_connection_count: 4096,
+                tx2_channel_count_per_connection: 2,
+                tx2_implicit_timeout_ms: 60000,
+                tx2_initial_connect_retry_delay_ms: 200,
+                tx5_connection_count_max: 4096,
+                tx5_send_buffer_bytes_max: 65536,
+                tx5_recv_buffer_bytes_max: 65536,
+                tx5_incoming_message_bytes_max: 536870912,
+                tx5_message_size_max: 16777216,
+                tx5_internal_event_channel_size: 1024,
+                tx5_timeout_s: 60,
+                tx5_backoff_start_s: 5,
+                tx5_backoff_max_s: 60,
+                tx5_ban_time_s: 10,
+                tx5_min_ephemeral_udp_port: 1,
+                tx5_max_ephemeral_udp_port: 65535,
+                danger_tls_keylog: "no_keylog",
+                danger_gossip_recent_threshold_secs: 900,
+                disable_publish: false,
+                disable_recent_gossip: false,
+                disable_historical_gossip: false,
+                bootstrap_check_delay_backoff_multiplier: 2,
+                bootstrap_max_delay_s: 300,
+            },
+            network_type: QuicMdns,
+            tracing_scope: None,
+        },
+        db_sync_strategy: Fast,
+        tuning_params: None,
+    }
+
+# lair-keystore connection_url # named-pipe:\\.\pipe\nxofsKegIcpL9cZ90TvU_?k=NOyEdVQGNyuTmaScz5UqnqfLCBf_t-dOTcjgOd0wJ0E #
+# lair-keystore running #
+
+[2024-07-26T07:30:34Z WARN  holochain::conductor::state] Using default NetworkCompatParams
+
+
+###HOLOCHAIN_SETUP###
+###HOLOCHAIN_SETUP_END###
+
+[2024-07-26T07:30:34Z INFO  rust_executor::holochain_service] Started holochain conductor
+
+[2024-07-26T07:30:34Z INFO  rust_executor::holochain_service] Added app interface: Ok(15602)
+
+[2024-07-26T07:30:34Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Holochain run complete 
+
+[2024-07-26T07:30:34Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Holochain init complete 
+[2024-07-26T07:30:34Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Wait for agent 
+
+[2024-07-26T07:30:34Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js 
+
+[2024-07-26T07:30:34Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js with hash QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2 
+
+[2024-07-26T07:30:34Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js
+
+[2024-07-26T07:30:34Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:30:34Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:30:39Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:30:39Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE\bundle.js 
+
+[2024-07-26T07:30:39Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:00:39 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:30:39Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE\bundle.js with hash QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE 
+
+[2024-07-26T07:30:39Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE\bundle.js
+
+[2024-07-26T07:30:39Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:30:39Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:30:39Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installing DNAs for language QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE 
+
+[2024-07-26T07:30:39Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installed DNA's: [object Object] 
+[2024-07-26T07:30:39Z INFO  rust_executor::js_core::utils_extension] [JSCORE]:  with result: 
+
+[2024-07-26T07:30:39Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: {"installed_app_id":"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE","cell_info":{"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE-agent-store":[{"provisioned":{"cell_id":[{"0":132,"1":45,"2":36,"3":198,"4":122,"5":29,"6":67,"7":215,"8":234,"9":243,"10":232,"11":215,"12":186,"13":254,"14":119,"15":14,"16":17,"17":136,"18":237,"19":150,"20":140,"21":162,"22":211,"23":205,"24":22,"25":73,"26":124,"27":241,"28":67,"29":164,"30":246,"31":101,"32":3,"33":185,"34":99,"35":151,"36":37,"37":170,"38":123},{"0":132,"1":32,"2":36,"3":173,"4":236,"5":250,"6":226,"7":52,"8":241,"9":28,"10":72,"11":187,"12":52,"13":63,"14":191,"15":207,"16":102,"17":185,"18":185,"19":29,"20":88,"21":218,"22":79,"23":109,"24":1,"25":217,"26":32,"27":60,"28":240,"29":185,"30":97,"31":179,"32":120,"33":45,"34":204,"35":177,"36":200,"37":179,"38":247}],"dna_modifiers":{"network_seed":"00000000-0000-0000-0000-000000000000","properties":{"0":192},"origin_time":1644620719470323,"quantum_time":{"secs":300,"nanos":0}},"name":"agent-store"}}]},"status":"running","agent_pub_key":{"0":132,"1":32,"2":36,"3":173,"4":236,"5":250,"6":226,"7":52,"8":241,"9":28,"10":72,"11":187,"12":52,"13":63,"14":191,"15":207,"16":102,"17":185,"18":185,"19":29,"20":88,"21":218,"22":79,"23":109,"24":1,"25":217,"26":32,"27":60,"28":240,"29":185,"30":97,"31":179,"32":120,"33":45,"34":204,"35":177,"36":200,"37":179,"38":247},"manifest":{"manifest_version":"1","name":"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE","description":null,"roles":[{"name":"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE-agent-store","provisioning":null,"dna":{"path":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\simpleAlice\\ad4m\\h\\d\\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE-agent-store.dna","modifiers":{"network_seed":null,"properties":null,"origin_time":null,"quantum_time":null},"installed_hash":"uhC0kxnodQ9fq8-jXuv53DhGI7ZaMotPNFkl88UOk9mUDuWOXJap7","clone_limit":0}}]}} 
+
+[2024-07-26T07:30:44Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:30:44Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5\bundle.js 
+
+[2024-07-26T07:30:44Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:00:44 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:30:45Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5\bundle.js with hash QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5 
+
+[2024-07-26T07:30:45Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5\bundle.js
+
+[2024-07-26T07:30:45Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:30:45Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS\bundle.js 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:00:50 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:30:50Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS\bundle.js with hash QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS\bundle.js
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:30:50Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:30:50Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js with hash QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:30:50Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Core languages init'd 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: wait for languages 
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: finished wait 
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Agent doesn't have direct message language set yet. Creating from template... 
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Cloning direct message language from template... 
+
+[2024-07-26T07:30:50Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: Now creating clone with parameters: [object Object] 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.readAndTemplateHolochainDNA: unpacking DNA 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::holochain_service] UnPacked dna at path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\simpleAlice\\ad4m\\languages\\temp\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ"
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.readAndTemplateHolochainDNA: packing DNA 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::holochain_service] Got dna name: "direct-message-language"
+
+[2024-07-26T07:30:50Z INFO  rust_executor::holochain_service] Packed dna at path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\simpleAlice\\ad4m\\languages\\temp\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ\\direct-message-language.dna"
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Writing meta & bundle path:  tst-tmp\languages\meta-QmzSYwdkL5PGWgfmHuDcQ3SKZi82qPRGrmNCau4GwyvV6KQZ7mz.json tst-tmp\languages\bundle-QmzSYwdkL5PGWgfmHuDcQ3SKZi82qPRGrmNCau4GwyvV6KQZ7mz.js 
+
+[2024-07-26T07:30:50Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: DM Language cloned... 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwdkL5PGWgfmHuDcQ3SKZi82qPRGrmNCau4GwyvV6KQZ7mz\bundle.js 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:00:50 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:30:50Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwdkL5PGWgfmHuDcQ3SKZi82qPRGrmNCau4GwyvV6KQZ7mz\bundle.js with hash QmzSYwdkL5PGWgfmHuDcQ3SKZi82qPRGrmNCau4GwyvV6KQZ7mz 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\simpleAlice\ad4m\languages\QmzSYwdkL5PGWgfmHuDcQ3SKZi82qPRGrmNCau4GwyvV6KQZ7mz\bundle.js
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:30:50Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:30:50Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installing DNAs for language QmzSYwdkL5PGWgfmHuDcQ3SKZi82qPRGrmNCau4GwyvV6KQZ7mz 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installed DNA's: [object Object] 
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]:  with result: 
+
+[2024-07-26T07:30:50Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: {"installed_app_id":"QmzSYwdkL5PGWgfmHuDcQ3SKZi82qPRGrmNCau4GwyvV6KQZ7mz","cell_info":{"QmzSYwdkL5PGWgfmHuDcQ3SKZi82qPRGrmNCau4GwyvV6KQZ7mz-direct-message-language":[{"provisioned":{"cell_id":[{"0":132,"1":45,"2":36,"3":219,"4":159,"5":245,"6":233,"7":77,"8":152,"9":154,"10":182,"11":174,"12":73,"13":178,"14":133,"15":72,"16":211,"17":44,"18":100,"19":5,"20":73,"21":81,"22":222,"23":26,"24":196,"25":158,"26":253,"27":91,"28":108,"29":132,"30":229,"31":99,"32":132,"33":124,"34":107,"35":253,"36":20,"37":163,"38":46},{"0":132,"1":32,"2":36,"3":173,"4":236,"5":250,"6":226,"7":52,"8":241,"9":28,"10":72,"11":187,"12":52,"13":63,"14":191,"15":207,"16":102,"17":185,"18":185,"19":29,"20":88,"21":218,"22":79,"23":109,"24":1,"25":217,"26":32,"27":60,"28":240,"29":185,"30":97,"31":179,"32":120,"33":45,"34":204,"35":177,"36":200,"37":179,"38":247}],"dna_modifiers":{"network_seed":"8b98f57c-2f66-4fe9-91a7-4b072b4d0b11","properties":{"0":131,"1":185,"2":114,"3":101,"4":99,"5":105,"6":112,"7":105,"8":101,"9":110,"10":116,"11":95,"12":104,"13":99,"14":95,"15":97,"16":103,"17":101,"18":110,"19":116,"20":95,"21":112,"22":117,"23":98,"24":107,"25":101,"26":121,"27":217,"28":78,"29":56,"30":52,"31":50,"32":48,"33":50,"34":52,"35":97,"36":100,"37":101,"38":99,"39":102,"40":97,"41":101,"42":50,"43":51,"44":52,"45":102,"46":49,"47":49,"48":99,"49":52,"50":56,"51":98,"52":98,"53":51,"54":52,"55":51,"56":102,"57":98,"58":102,"59":99,"60":102,"61":54,"62":54,"63":98,"64":57,"65":98,"66":57,"67":49,"68":100,"69":53,"70":56,"71":100,"72":97,"73":52,"74":102,"75":54,"76":100,"77":48,"78":49,"79":100,"80":57,"81":50,"82":48,"83":51,"84":99,"85":102,"86":48,"87":98,"88":57,"89":54,"90":49,"91":98,"92":51,"93":55,"94":56,"95":50,"96":100,"97":99,"98":99,"99":98,"100":49,"101":99,"102":56,"103":98,"104":51,"105":102,"106":55,"107":173,"108":114,"109":101,"110":99,"111":105,"112":112,"113":105,"114":101,"115":110,"116":116,"117":95,"118":100,"119":105,"120":100,"121":217,"122":56,"123":100,"124":105,"125":100,"126":58,"127":107,"128":101,"129":121,"130":58,"131":122,"132":54,"133":77,"134":107,"135":112,"136":82,"137":100,"138":118,"139":80,"140":110,"141":83,"142":55,"143":104,"144":116,"145":110,"146":66,"147":87,"148":52,"149":88,"150":78,"151":121,"152":87,"153":52,"154":68,"155":86,"156":98,"157":115,"158":76,"159":100,"160":119,"161":87,"162":106,"163":117,"164":120,"165":121,"166":52,"167":121,"168":102,"169":100,"170":56,"171":67,"172":83,"173":85,"174":103,"175":122,"176":57,"177":51,"178":56,"179":163,"180":117,"181":105,"182":100,"183":217,"184":36,"185":56,"186":98,"187":57,"188":56,"189":102,"190":53,"191":55,"192":99,"193":45,"194":50,"195":102,"196":54,"197":54,"198":45,"199":52,"200":102,"201":101,"202":57,"203":45,"204":57,"205":49,"206":97,"207":55,"208":45,"209":52,"210":98,"211":48,"212":55,"213":50,"214":98,"215":52,"216":100,"217":48,"218":98,"219":49,"220":49},"origin_time":1644620719470000,"quantum_time":{"secs":300,"nanos":0}},"name":"direct-message-language"}}]},"status":"running","agent_pub_key":{"0":132,"1":32,"2":36,"3":173,"4":236,"5":250,"6":226,"7":52,"8":241,"9":28,"10":72,"11":187,"12":52,"13":63,"14":191,"15":207,"16":102,"17":185,"18":185,"19":29,"20":88,"21":218,"22":79,"23":109,"24":1,"25":217,"26":32,"27":60,"28":240,"29":185,"30":97,"31":179,"32":120,"33":45,"34":204,"35":177,"36":200,"37":179,"38":247},"manifest":{"manifest_version":"1","name":"QmzSYwdkL5PGWgfmHuDcQ3SKZi82qPRGrmNCau4GwyvV6KQZ7mz","description":null,"roles":[{"name":"QmzSYwdkL5PGWgfmHuDcQ3SKZi82qPRGrmNCau4GwyvV6KQZ7mz-direct-message-language","provisioning":null,"dna":{"path":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\simpleAlice\\ad4m\\h\\d\\QmzSYwdkL5PGWgfmHuDcQ3SKZi82qPRGrmNCau4GwyvV6KQZ7mz-direct-message-language.dna","modifiers":{"network_seed":null,"properties":null,"origin_time":null,"quantum_time":null},"installed_hash":"uhC0k25_16U2YmrauSbKFSNMsZAVJUd4axJ79W2yE5WOEfGv9FKMu","clone_limit":0}}]}} 
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: setting holochains signal callback for language QmzSYwdkL5PGWgfmHuDcQ3SKZi82qPRGrmNCau4GwyvV6KQZ7mz 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: adding callback on dm language 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: did:key:z6MkpRdvPnS7htnBW4XNyW4DVbsLdwWjuxy4yfd8CSUgz938 did:key:z6MkpRdvPnS7htnBW4XNyW4DVbsLdwWjuxy4yfd8CSUgz938 
+
+[2024-07-26T07:30:50Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: DM Language installed... 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Storing agent profile {"did":"did:key:z6MkpRdvPnS7htnBW4XNyW4DVbsLdwWjuxy4yfd8CSUgz938","directMessageLanguage":"QmzSYwdkL5PGWgfmHuDcQ3SKZi82qPRGrmNCau4GwyvV6KQZ7mz","perspective":{"links":[]}} 
+
+[2024-07-26T07:30:50Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: [34m 2024-07-26T07:30:50.863Z HolochainService calling zome function: agent-store agent_store create_agent_expression {"author":"did:key:z6MkpRdvPnS7htnBW4XNyW4DVbsLdwW 
+    For language with address QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE [0m 
+
+[2024-07-26T07:30:50Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE" "agent-store" "agent_store" "create_agent_expression"
+
+[2024-07-26T07:30:52Z WARN  holochain::core::ribosome::real_ribosome] 'cache.get(cache_key, &wasm)' exceeded MID time threshold elapsed=1.1443833s intervals=[1, 1000, 10000]
+
+[2024-07-26T07:30:52Z ERROR rust_executor::js_core::utils_extension] [JSCORE]: [31m HolochainService: ERROR calling zome function: Error: Wasm runtime error while working with Ribosome: RuntimeError: WasmError { file: "C:\\Users\\fayee\\.cargo\\git\\checkouts\\holochain-392a7f3c4fd375dd\\10841e4\\crates\\holochain\\src\\core\\ribosome\\real_ribosome.rs", line: 405, error: Compile("Error while importing \"__wbindgen_placeholder__\".\"__wbindgen_describe\": unknown import. Expected Function(FunctionType { params: [I32], results: [] })") }: RuntimeError: WasmError { file: "C:\\Users\\fayee\\.cargo\\git\\checkouts\\holochain-392a7f3c4fd375dd\\10841e4\\crates\\holochain\\src\\core\\ribosome\\real_ribosome.rs", line: 405, error: Compile("Error while importing \"__wbindgen_placeholder__\".\"__wbindgen_describe\": unknown import. Expected Function(FunctionType { params: [I32], results: [] })") }: WasmError { file: "C:\\Users\\fayee\\.cargo\\git\\checkouts\\holochain-392a7f3c4fd375dd\\10841e4\\crates\\holochain\\src\\core\\ribosome\\real_ribosome.rs", line: 405, error: Compile("Error while importing \"__wbindgen_placeholder__\".\"__wbindgen_describe\": unknown import. Expected Function(FunctionType { params: [I32], results: [] })") } [0m 
+
+[2024-07-26T07:30:52Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: DM Language published... 
+[2024-07-26T07:30:52Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Agent's direct message language successfully cloned, installed and published! 
+
+[2024-07-26T07:30:52Z INFO  rust_executor::graphql::mutation_resolvers] AD4M init complete
+
+Done
+    ✔ should get agent status
+killed executor with true
+
+
+  1 passing (20s)
+
+
+> @coasys/ad4m-integration-tests@0.10.0-prerelease test-app C:\Users\fayee\dev\ad4m\tests\js
+> ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/app.test.ts
+
+
+
+  Apps integration tests
+C:\Users\fayee\dev\ad4m\tests\js\bootstrapSeed.json
+C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent
+Starting executor
+USING LOCAL BOOTSTRAP & PROXY URL:  https://bootstrap.holo.host wss://signal.holotest.net
+Waiting for executor to settle...
+[2024-07-26T07:30:56Z INFO  rust_executor] Initializing Ad4mDb...
+
+[2024-07-26T07:30:56Z INFO  rust_executor] Initializing Prolog service...
+[2024-07-26T07:30:56Z INFO  rust_executor] Starting js_core...
+
+[2024-07-26T07:30:56Z INFO  rust_executor::js_core::string_module_loader] Module is not a file path, importing as raw module string
+
+[2024-07-26T07:30:56Z INFO  rust_executor::js_core::string_module_loader] Module is not a file path, importing as raw module string
+
+[2024-07-26T07:30:56Z INFO  rust_executor::js_core] AD4M JS engine init completed, with result: ()
+
+[2024-07-26T07:30:56Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: AD4M executor starting with config: 
+
+[2024-07-26T07:30:56Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: {"appDataPath":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\apps-agent","networkBootstrapSeed":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\apps-agent\\mainnet_seed.seed","languageLanguageOnly":false,"runDappServer":false,"gqlPort":15000,"hcPortAdmin":15001,"hcPortApp":15002,"hcUseLocalProxy":true,"hcUseMdns":true,"hcUseProxy":true,"hcUseBootstrap":true,"hcProxyUrl":"wss://signal.holotest.net","hcBootstrapUrl":"https://bootstrap.holo.host","connectHolochain":false,"adminCredential":"123","localhost":true,"autoPermitCapRequests":true,"tls":null,"logHolochainMetrics":true} 
+
+[2024-07-26T07:30:56Z INFO  rust_executor::js_core] AD4M coreInit() completed Succesfully: "[object Object]"
+
+[2024-07-26T07:30:56Z INFO  rust_executor] js_core initialized.
+[2024-07-26T07:30:56Z INFO  rust_executor] Starting GraphQL...
+
+[2024-07-26T07:30:56Z INFO  warp::server] Server::run; addr=127.0.0.1:15000
+[2024-07-26T07:30:56Z INFO  warp::server] listening on http://127.0.0.1:15000
+
+[2024-07-26T07:30:56Z INFO  warp::server] 127.0.0.1:54271 "GET /graphql HTTP/1.1" 101 "-" "-" 33.2µs
+
+[2024-07-26T07:30:56Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Init HolochainService with data path:  C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\h\d . Conductor path:  C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\h\c . Resource path:   
+[2024-07-26T07:30:56Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Holochain ports: admin=15001 app=15002 
+
+[2024-07-26T07:30:56Z INFO  rust_executor::holochain_service] Starting holochain conductor with config: ConductorConfig {
+        tracing_override: None,
+        data_root_path: Some(
+            DataRootPath(
+                "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\apps-agent\\ad4m\\h\\c",
+            ),
+        ),
+        keystore: LairServerInProc {
+            lair_root: None,
+        },
+        dpki: None,
+        admin_interfaces: None,
+        network: KitsuneP2pConfig {
+            transport_pool: [
+                WebRTC {
+                    signal_url: "wss://signal.holotest.net",
+                },
+            ],
+            bootstrap_service: Some(
+                Url2 {
+                    url: "https://bootstrap.holo.host/",
+                },
+            ),
+            tuning_params: KitsuneP2pTuningParams {
+                gossip_strategy: "sharded-gossip",
+                gossip_loop_iteration_delay_ms: 1000,
+                gossip_outbound_target_mbps: 100.0,
+                gossip_inbound_target_mbps: 100.0,
+                gossip_historic_outbound_target_mbps: 100.0,
+                gossip_historic_inbound_target_mbps: 100.0,
+                gossip_burst_ratio: 100.0,
+                gossip_peer_on_success_next_gossip_delay_ms: 60000,
+                gossip_peer_on_error_next_gossip_delay_ms: 300000,
+                gossip_agent_info_update_interval_ms: 300000,
+                gossip_round_timeout_ms: 60000,
+                gossip_redundancy_target: 100.0,
+                gossip_max_batch_size: 1000000,
+                gossip_dynamic_arcs: true,
+                gossip_arc_clamping: "none",
+                default_rpc_single_timeout_ms: 60000,
+                default_rpc_multi_remote_agent_count: 3,
+                default_rpc_multi_remote_request_grace_ms: 3000,
+                agent_info_expires_after_ms: 1200000,
+                tls_in_mem_session_storage: 512,
+                proxy_keepalive_ms: 120000,
+                proxy_to_expire_ms: 300000,
+                concurrent_limit_per_thread: 4096,
+                tx2_quic_max_idle_timeout_ms: 60000,
+                tx2_pool_max_connection_count: 4096,
+                tx2_channel_count_per_connection: 2,
+                tx2_implicit_timeout_ms: 60000,
+                tx2_initial_connect_retry_delay_ms: 200,
+                tx5_connection_count_max: 4096,
+                tx5_send_buffer_bytes_max: 65536,
+                tx5_recv_buffer_bytes_max: 65536,
+                tx5_incoming_message_bytes_max: 536870912,
+                tx5_message_size_max: 16777216,
+                tx5_internal_event_channel_size: 1024,
+                tx5_timeout_s: 60,
+                tx5_backoff_start_s: 5,
+                tx5_backoff_max_s: 60,
+                tx5_ban_time_s: 10,
+                tx5_min_ephemeral_udp_port: 1,
+                tx5_max_ephemeral_udp_port: 65535,
+                danger_tls_keylog: "no_keylog",
+                danger_gossip_recent_threshold_secs: 900,
+                disable_publish: false,
+                disable_recent_gossip: false,
+                disable_historical_gossip: false,
+                bootstrap_check_delay_backoff_multiplier: 2,
+                bootstrap_max_delay_s: 300,
+            },
+            network_type: QuicMdns,
+            tracing_scope: None,
+        },
+        db_sync_strategy: Fast,
+        tuning_params: None,
+    }
+
+# lair-keystore connection_url # named-pipe:\\.\pipe\DMP-iRXgdADg1mAWTRs26?k=CfH_68lSxwVh4f2GUAWzxxNaAciPJPZfqjQHxtLJQyA #
+# lair-keystore running #
+
+[2024-07-26T07:30:57Z WARN  holochain::conductor::state] Using default NetworkCompatParams
+
+
+###HOLOCHAIN_SETUP###
+###HOLOCHAIN_SETUP_END###
+
+[2024-07-26T07:30:57Z INFO  rust_executor::holochain_service] Started holochain conductor
+
+[2024-07-26T07:30:57Z INFO  rust_executor::holochain_service] Added app interface: Ok(15002)
+
+[2024-07-26T07:30:57Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Holochain run complete 
+
+[2024-07-26T07:30:57Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Holochain init complete 
+[2024-07-26T07:30:57Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Wait for agent 
+
+[2024-07-26T07:30:57Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js 
+
+[2024-07-26T07:30:57Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js with hash QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2 
+
+[2024-07-26T07:30:57Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js
+
+[2024-07-26T07:30:57Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:30:57Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:02Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:31:02Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE\bundle.js 
+
+[2024-07-26T07:31:02Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:01:02 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:31:02Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE\bundle.js with hash QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE 
+
+[2024-07-26T07:31:02Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE\bundle.js
+
+[2024-07-26T07:31:02Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:02Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:02Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installing DNAs for language QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE 
+
+[2024-07-26T07:31:03Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installed DNA's: [object Object] 
+[2024-07-26T07:31:03Z INFO  rust_executor::js_core::utils_extension] [JSCORE]:  with result: 
+
+[2024-07-26T07:31:03Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: {"installed_app_id":"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE","cell_info":{"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE-agent-store":[{"provisioned":{"cell_id":[{"0":132,"1":45,"2":36,"3":198,"4":122,"5":29,"6":67,"7":215,"8":234,"9":243,"10":232,"11":215,"12":186,"13":254,"14":119,"15":14,"16":17,"17":136,"18":237,"19":150,"20":140,"21":162,"22":211,"23":205,"24":22,"25":73,"26":124,"27":241,"28":67,"29":164,"30":246,"31":101,"32":3,"33":185,"34":99,"35":151,"36":37,"37":170,"38":123},{"0":132,"1":32,"2":36,"3":6,"4":4,"5":24,"6":104,"7":147,"8":22,"9":108,"10":57,"11":63,"12":156,"13":127,"14":234,"15":11,"16":124,"17":175,"18":171,"19":77,"20":37,"21":106,"22":113,"23":255,"24":30,"25":83,"26":109,"27":170,"28":105,"29":214,"30":165,"31":204,"32":34,"33":129,"34":99,"35":42,"36":42,"37":116,"38":121}],"dna_modifiers":{"network_seed":"00000000-0000-0000-0000-000000000000","properties":{"0":192},"origin_time":1644620719470323,"quantum_time":{"secs":300,"nanos":0}},"name":"agent-store"}}]},"status":"running","agent_pub_key":{"0":132,"1":32,"2":36,"3":6,"4":4,"5":24,"6":104,"7":147,"8":22,"9":108,"10":57,"11":63,"12":156,"13":127,"14":234,"15":11,"16":124,"17":175,"18":171,"19":77,"20":37,"21":106,"22":113,"23":255,"24":30,"25":83,"26":109,"27":170,"28":105,"29":214,"30":165,"31":204,"32":34,"33":129,"34":99,"35":42,"36":42,"37":116,"38":121},"manifest":{"manifest_version":"1","name":"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE","description":null,"roles":[{"name":"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE-agent-store","provisioning":null,"dna":{"path":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\apps-agent\\ad4m\\h\\d\\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE-agent-store.dna","modifiers":{"network_seed":null,"properties":null,"origin_time":null,"quantum_time":null},"installed_hash":"uhC0kxnodQ9fq8-jXuv53DhGI7ZaMotPNFkl88UOk9mUDuWOXJap7","clone_limit":0}}]}} 
+
+[2024-07-26T07:31:08Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:31:08Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5\bundle.js 
+
+[2024-07-26T07:31:08Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:01:08 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:31:08Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5\bundle.js with hash QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5 
+
+[2024-07-26T07:31:08Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5\bundle.js
+
+[2024-07-26T07:31:08Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:08Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS\bundle.js 
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:01:13 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:31:13Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS\bundle.js with hash QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS 
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS\bundle.js
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:13Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:13Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js with hash QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2 
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:13Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Core languages init'd 
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: wait for languages 
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: finished wait 
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Agent doesn't have direct message language set yet. Creating from template... 
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Cloning direct message language from template... 
+
+[2024-07-26T07:31:13Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: Now creating clone with parameters: [object Object] 
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.readAndTemplateHolochainDNA: unpacking DNA 
+
+[2024-07-26T07:31:13Z INFO  rust_executor::holochain_service] UnPacked dna at path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\apps-agent\\ad4m\\languages\\temp\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ"
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.readAndTemplateHolochainDNA: packing DNA 
+
+[2024-07-26T07:31:13Z INFO  rust_executor::holochain_service] Got dna name: "direct-message-language"
+
+[2024-07-26T07:31:13Z INFO  rust_executor::holochain_service] Packed dna at path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\apps-agent\\ad4m\\languages\\temp\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ\\direct-message-language.dna"
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Writing meta & bundle path:  tst-tmp\languages\meta-QmzSYwdYKLDGxRkgYaEEejZF5L3uaVjdLZMeJPPLq1X2nVyV3B5.json tst-tmp\languages\bundle-QmzSYwdYKLDGxRkgYaEEejZF5L3uaVjdLZMeJPPLq1X2nVyV3B5.js 
+
+[2024-07-26T07:31:13Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: DM Language cloned... 
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwdYKLDGxRkgYaEEejZF5L3uaVjdLZMeJPPLq1X2nVyV3B5\bundle.js 
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:01:13 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:31:13Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwdYKLDGxRkgYaEEejZF5L3uaVjdLZMeJPPLq1X2nVyV3B5\bundle.js with hash QmzSYwdYKLDGxRkgYaEEejZF5L3uaVjdLZMeJPPLq1X2nVyV3B5 
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\apps-agent\ad4m\languages\QmzSYwdYKLDGxRkgYaEEejZF5L3uaVjdLZMeJPPLq1X2nVyV3B5\bundle.js
+
+[2024-07-26T07:31:13Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:13Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:13Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installing DNAs for language QmzSYwdYKLDGxRkgYaEEejZF5L3uaVjdLZMeJPPLq1X2nVyV3B5 
+
+[2024-07-26T07:31:14Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installed DNA's: [object Object] 
+[2024-07-26T07:31:14Z INFO  rust_executor::js_core::utils_extension] [JSCORE]:  with result: 
+
+[2024-07-26T07:31:14Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: {"installed_app_id":"QmzSYwdYKLDGxRkgYaEEejZF5L3uaVjdLZMeJPPLq1X2nVyV3B5","cell_info":{"QmzSYwdYKLDGxRkgYaEEejZF5L3uaVjdLZMeJPPLq1X2nVyV3B5-direct-message-language":[{"provisioned":{"cell_id":[{"0":132,"1":45,"2":36,"3":150,"4":200,"5":126,"6":8,"7":159,"8":187,"9":149,"10":238,"11":226,"12":33,"13":176,"14":63,"15":223,"16":68,"17":1,"18":166,"19":255,"20":236,"21":1,"22":49,"23":238,"24":93,"25":185,"26":87,"27":121,"28":106,"29":105,"30":65,"31":9,"32":1,"33":39,"34":4,"35":191,"36":226,"37":7,"38":238},{"0":132,"1":32,"2":36,"3":6,"4":4,"5":24,"6":104,"7":147,"8":22,"9":108,"10":57,"11":63,"12":156,"13":127,"14":234,"15":11,"16":124,"17":175,"18":171,"19":77,"20":37,"21":106,"22":113,"23":255,"24":30,"25":83,"26":109,"27":170,"28":105,"29":214,"30":165,"31":204,"32":34,"33":129,"34":99,"35":42,"36":42,"37":116,"38":121}],"dna_modifiers":{"network_seed":"218a34b7-896e-4a20-9498-ca56ae765294","properties":{"0":131,"1":185,"2":114,"3":101,"4":99,"5":105,"6":112,"7":105,"8":101,"9":110,"10":116,"11":95,"12":104,"13":99,"14":95,"15":97,"16":103,"17":101,"18":110,"19":116,"20":95,"21":112,"22":117,"23":98,"24":107,"25":101,"26":121,"27":217,"28":78,"29":56,"30":52,"31":50,"32":48,"33":50,"34":52,"35":48,"36":54,"37":48,"38":52,"39":49,"40":56,"41":54,"42":56,"43":57,"44":51,"45":49,"46":54,"47":54,"48":99,"49":51,"50":57,"51":51,"52":102,"53":57,"54":99,"55":55,"56":102,"57":101,"58":97,"59":48,"60":98,"61":55,"62":99,"63":97,"64":102,"65":97,"66":98,"67":52,"68":100,"69":50,"70":53,"71":54,"72":97,"73":55,"74":49,"75":102,"76":102,"77":49,"78":101,"79":53,"80":51,"81":54,"82":100,"83":97,"84":97,"85":54,"86":57,"87":100,"88":54,"89":97,"90":53,"91":99,"92":99,"93":50,"94":50,"95":56,"96":49,"97":54,"98":51,"99":50,"100":97,"101":50,"102":97,"103":55,"104":52,"105":55,"106":57,"107":173,"108":114,"109":101,"110":99,"111":105,"112":112,"113":105,"114":101,"115":110,"116":116,"117":95,"118":100,"119":105,"120":100,"121":217,"122":56,"123":100,"124":105,"125":100,"126":58,"127":107,"128":101,"129":121,"130":58,"131":122,"132":54,"133":77,"134":107,"135":109,"136":119,"137":109,"138":54,"139":70,"140":119,"141":100,"142":65,"143":51,"144":115,"145":86,"146":109,"147":117,"148":98,"149":110,"150":90,"151":102,"152":76,"153":81,"154":84,"155":85,"156":69,"157":80,"158":99,"159":119,"160":66,"161":77,"162":121,"163":114,"164":68,"165":77,"166":84,"167":83,"168":66,"169":120,"170":98,"171":98,"172":119,"173":89,"174":74,"175":103,"176":98,"177":82,"178":115,"179":163,"180":117,"181":105,"182":100,"183":217,"184":36,"185":50,"186":49,"187":56,"188":97,"189":51,"190":52,"191":98,"192":55,"193":45,"194":56,"195":57,"196":54,"197":101,"198":45,"199":52,"200":97,"201":50,"202":48,"203":45,"204":57,"205":52,"206":57,"207":56,"208":45,"209":99,"210":97,"211":53,"212":54,"213":97,"214":101,"215":55,"216":54,"217":53,"218":50,"219":57,"220":52},"origin_time":1644620719470000,"quantum_time":{"secs":300,"nanos":0}},"name":"direct-message-language"}}]},"status":"running","agent_pub_key":{"0":132,"1":32,"2":36,"3":6,"4":4,"5":24,"6":104,"7":147,"8":22,"9":108,"10":57,"11":63,"12":156,"13":127,"14":234,"15":11,"16":124,"17":175,"18":171,"19":77,"20":37,"21":106,"22":113,"23":255,"24":30,"25":83,"26":109,"27":170,"28":105,"29":214,"30":165,"31":204,"32":34,"33":129,"34":99,"35":42,"36":42,"37":116,"38":121},"manifest":{"manifest_version":"1","name":"QmzSYwdYKLDGxRkgYaEEejZF5L3uaVjdLZMeJPPLq1X2nVyV3B5","description":null,"roles":[{"name":"QmzSYwdYKLDGxRkgYaEEejZF5L3uaVjdLZMeJPPLq1X2nVyV3B5-direct-message-language","provisioning":null,"dna":{"path":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\apps-agent\\ad4m\\h\\d\\QmzSYwdYKLDGxRkgYaEEejZF5L3uaVjdLZMeJPPLq1X2nVyV3B5-direct-message-language.dna","modifiers":{"network_seed":null,"properties":null,"origin_time":null,"quantum_time":null},"installed_hash":"uhC0klsh-CJ-7le7iIbA_30QBpv_sATHuXblXeWppQQkBJwS_4gfu","clone_limit":0}}]}} 
+[2024-07-26T07:31:14Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: setting holochains signal callback for language QmzSYwdYKLDGxRkgYaEEejZF5L3uaVjdLZMeJPPLq1X2nVyV3B5 
+
+[2024-07-26T07:31:14Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: adding callback on dm language 
+
+[2024-07-26T07:31:14Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: did:key:z6Mkmwm6FwdA3sVmubnZfLQTUEPcwBMyrDMTSBxbbwYJgbRs did:key:z6Mkmwm6FwdA3sVmubnZfLQTUEPcwBMyrDMTSBxbbwYJgbRs 
+
+[2024-07-26T07:31:14Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: DM Language installed... 
+
+[2024-07-26T07:31:14Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Storing agent profile {"did":"did:key:z6Mkmwm6FwdA3sVmubnZfLQTUEPcwBMyrDMTSBxbbwYJgbRs","directMessageLanguage":"QmzSYwdYKLDGxRkgYaEEejZF5L3uaVjdLZMeJPPLq1X2nVyV3B5","perspective":{"links":[]}} 
+
+[2024-07-26T07:31:14Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: [34m 2024-07-26T07:31:14.567Z HolochainService calling zome function: agent-store agent_store create_agent_expression {"author":"did:key:z6Mkmwm6FwdA3sVmubnZfLQTUEPcwBM 
+    For language with address QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE [0m 
+
+[2024-07-26T07:31:14Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE" "agent-store" "agent_store" "create_agent_expression"
+
+[2024-07-26T07:31:15Z WARN  holochain::core::ribosome::real_ribosome] 'cache.get(cache_key, &wasm)' exceeded MID time threshold elapsed=1.2669841s intervals=[1, 1000, 10000]
+
+[2024-07-26T07:31:15Z ERROR rust_executor::js_core::utils_extension] [JSCORE]: [31m HolochainService: ERROR calling zome function: Error: Wasm runtime error while working with Ribosome: RuntimeError: WasmError { file: "C:\\Users\\fayee\\.cargo\\git\\checkouts\\holochain-392a7f3c4fd375dd\\10841e4\\crates\\holochain\\src\\core\\ribosome\\real_ribosome.rs", line: 405, error: Compile("Error while importing \"__wbindgen_placeholder__\".\"__wbindgen_describe\": unknown import. Expected Function(FunctionType { params: [I32], results: [] })") }: RuntimeError: WasmError { file: "C:\\Users\\fayee\\.cargo\\git\\checkouts\\holochain-392a7f3c4fd375dd\\10841e4\\crates\\holochain\\src\\core\\ribosome\\real_ribosome.rs", line: 405, error: Compile("Error while importing \"__wbindgen_placeholder__\".\"__wbindgen_describe\": unknown import. Expected Function(FunctionType { params: [I32], results: [] })") }: WasmError { file: "C:\\Users\\fayee\\.cargo\\git\\checkouts\\holochain-392a7f3c4fd375dd\\10841e4\\crates\\holochain\\src\\core\\ribosome\\real_ribosome.rs", line: 405, error: Compile("Error while importing \"__wbindgen_placeholder__\".\"__wbindgen_describe\": unknown import. Expected Function(FunctionType { params: [I32], results: [] })") } [0m 
+
+[2024-07-26T07:31:15Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: DM Language published... 
+[2024-07-26T07:31:15Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Agent's direct message language successfully cloned, installed and published! 
+
+[2024-07-26T07:31:15Z INFO  rust_executor::graphql::mutation_resolvers] AD4M init complete
+
+[2024-07-26T07:31:15Z INFO  warp::server] 127.0.0.1:54469 "GET /graphql HTTP/1.1" 101 "-" "-" 24.8µs
+
+======================================
+Got capability request: 
+
+AuthInfo { app_name: "demo-app", app_desc: "demo-desc", app_domain: Some("test.ad4m.org"), app_url: Some("https://demo-link"), app_icon_path: None, capabilities: Some([Capability { with: Resource { domain: "agent", pointers: ["*"] }, can: ["*"] }]) }
+--------------------------------------
+Random number challenge: 570606
+======================================
+
+[2024-07-26T07:31:15Z INFO  warp::server] 127.0.0.1:54470 "GET /graphql HTTP/1.1" 101 "-" "-" 9.5µs
+
+[2024-07-26T07:31:15Z INFO  warp::server] 127.0.0.1:54471 "GET /graphql HTTP/1.1" 101 "-" "-" 9.7µs
+
+    ✔ once token issued user can get all authenticated apps
+[2024-07-26T07:31:15Z INFO  warp::server] 127.0.0.1:54472 "GET /graphql HTTP/1.1" 101 "-" "-" 17.7µs
+
+[2024-07-26T07:31:15Z INFO  warp::server] 127.0.0.1:54473 "GET /graphql HTTP/1.1" 101 "-" "-" 15.2µs
+
+======================================
+Got capability request: 
+AuthInfo { app_name: "demo-app", app_desc: "demo-desc", app_domain: Some("test.ad4m.org"), app_url: Some("https://demo-link"), app_icon_path: None, capabilities: Some([Capability { with: Resource { domain: "agent", pointers: ["*"] }, can: ["*"] }]) }
+
+--------------------------------------
+Random number challenge: 232091
+======================================
+
+[2024-07-26T07:31:15Z INFO  warp::server] 127.0.0.1:54474 "GET /graphql HTTP/1.1" 101 "-" "-" 10.8µs
+
+[2024-07-26T07:31:15Z INFO  warp::server] 127.0.0.1:54475 "GET /graphql HTTP/1.1" 101 "-" "-" 11.9µs
+
+    ✔ can revoke token
+[2024-07-26T07:31:15Z INFO  warp::server] 127.0.0.1:54476 "GET /graphql HTTP/1.1" 101 "-" "-" 9.3µs
+
+[2024-07-26T07:31:15Z INFO  warp::server] 127.0.0.1:54477 "GET /graphql HTTP/1.1" 101 "-" "-" 12.1µs
+
+======================================
+Got capability request: 
+
+AuthInfo { app_name: "demo-app", app_desc: "demo-desc", app_domain: Some("test.ad4m.org"), app_url: Some("https://demo-link"), app_icon_path: None, capabilities: Some([Capability { with: Resource { domain: "agent", pointers: ["*"] }, can: ["*"] }]) }
+--------------------------------------
+Random number challenge: 284554
+======================================
+
+[2024-07-26T07:31:15Z INFO  warp::server] 127.0.0.1:54478 "GET /graphql HTTP/1.1" 101 "-" "-" 8.4µs
+
+[2024-07-26T07:31:15Z INFO  warp::server] 127.0.0.1:54479 "GET /graphql HTTP/1.1" 101 "-" "-" 9.8µs
+
+    ✔ can remove apps
+killed executor with true
+
+
+  3 passing (20s)
+
+
+> @coasys/ad4m-integration-tests@0.10.0-prerelease test-auth C:\Users\fayee\dev\ad4m\tests\js
+> ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/authentication.test.ts
+
+
+
+  Authentication integration tests
+    admin credential is not set
+C:\Users\fayee\dev\ad4m\tests\js\bootstrapSeed.json
+C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent
+Starting executor
+USING LOCAL BOOTSTRAP & PROXY URL:  https://bootstrap.holo.host wss://signal.holotest.net
+Waiting for executor to settle...
+[2024-07-26T07:31:20Z INFO  rust_executor] Initializing Ad4mDb...
+
+[2024-07-26T07:31:20Z WARN  rust_executor] adminCredential is not set or empty, empty token will possess admin capabilities.
+[2024-07-26T07:31:20Z INFO  rust_executor] Initializing Prolog service...
+[2024-07-26T07:31:20Z INFO  rust_executor] Starting js_core...
+
+[2024-07-26T07:31:20Z INFO  rust_executor::js_core::string_module_loader] Module is not a file path, importing as raw module string
+
+[2024-07-26T07:31:20Z INFO  rust_executor::js_core::string_module_loader] Module is not a file path, importing as raw module string
+
+[2024-07-26T07:31:20Z INFO  rust_executor::js_core] AD4M JS engine init completed, with result: ()
+
+[2024-07-26T07:31:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: AD4M executor starting with config: 
+
+[2024-07-26T07:31:20Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: {"appDataPath":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\unauth-agent","networkBootstrapSeed":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\unauth-agent\\mainnet_seed.seed","languageLanguageOnly":false,"runDappServer":false,"gqlPort":15100,"hcPortAdmin":15101,"hcPortApp":15102,"hcUseLocalProxy":true,"hcUseMdns":true,"hcUseProxy":true,"hcUseBootstrap":true,"hcProxyUrl":"wss://signal.holotest.net","hcBootstrapUrl":"https://bootstrap.holo.host","connectHolochain":false,"adminCredential":null,"localhost":true,"autoPermitCapRequests":true,"tls":null,"logHolochainMetrics":true} 
+
+[2024-07-26T07:31:20Z INFO  rust_executor::js_core] AD4M coreInit() completed Succesfully: "[object Object]"
+
+[2024-07-26T07:31:20Z INFO  rust_executor] js_core initialized.
+[2024-07-26T07:31:20Z INFO  rust_executor] Starting GraphQL...
+
+[2024-07-26T07:31:20Z INFO  warp::server] Server::run; addr=127.0.0.1:15100
+[2024-07-26T07:31:20Z INFO  warp::server] listening on http://127.0.0.1:15100
+
+[2024-07-26T07:31:20Z INFO  warp::server] 127.0.0.1:54512 "GET /graphql HTTP/1.1" 101 "-" "-" 22.9µs
+
+[2024-07-26T07:31:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Init HolochainService with data path:  C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\h\d . Conductor path:  C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\h\c . Resource path:   
+[2024-07-26T07:31:20Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Holochain ports: admin=15101 app=15102 
+
+[2024-07-26T07:31:20Z INFO  rust_executor::holochain_service] Starting holochain conductor with config: ConductorConfig {
+        tracing_override: None,
+        data_root_path: Some(
+            DataRootPath(
+                "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\unauth-agent\\ad4m\\h\\c",
+            ),
+        ),
+        keystore: LairServerInProc {
+            lair_root: None,
+        },
+        dpki: None,
+        admin_interfaces: None,
+        network: KitsuneP2pConfig {
+            transport_pool: [
+                WebRTC {
+                    signal_url: "wss://signal.holotest.net",
+                },
+            ],
+            bootstrap_service: Some(
+                Url2 {
+                    url: "https://bootstrap.holo.host/",
+                },
+            ),
+            tuning_params: KitsuneP2pTuningParams {
+                gossip_strategy: "sharded-gossip",
+                gossip_loop_iteration_delay_ms: 1000,
+                gossip_outbound_target_mbps: 100.0,
+                gossip_inbound_target_mbps: 100.0,
+                gossip_historic_outbound_target_mbps: 100.0,
+                gossip_historic_inbound_target_mbps: 100.0,
+                gossip_burst_ratio: 100.0,
+                gossip_peer_on_success_next_gossip_delay_ms: 60000,
+                gossip_peer_on_error_next_gossip_delay_ms: 300000,
+                gossip_agent_info_update_interval_ms: 300000,
+                gossip_round_timeout_ms: 60000,
+                gossip_redundancy_target: 100.0,
+                gossip_max_batch_size: 1000000,
+                gossip_dynamic_arcs: true,
+                gossip_arc_clamping: "none",
+                default_rpc_single_timeout_ms: 60000,
+                default_rpc_multi_remote_agent_count: 3,
+                default_rpc_multi_remote_request_grace_ms: 3000,
+                agent_info_expires_after_ms: 1200000,
+                tls_in_mem_session_storage: 512,
+                proxy_keepalive_ms: 120000,
+                proxy_to_expire_ms: 300000,
+                concurrent_limit_per_thread: 4096,
+                tx2_quic_max_idle_timeout_ms: 60000,
+                tx2_pool_max_connection_count: 4096,
+                tx2_channel_count_per_connection: 2,
+                tx2_implicit_timeout_ms: 60000,
+                tx2_initial_connect_retry_delay_ms: 200,
+                tx5_connection_count_max: 4096,
+                tx5_send_buffer_bytes_max: 65536,
+                tx5_recv_buffer_bytes_max: 65536,
+                tx5_incoming_message_bytes_max: 536870912,
+                tx5_message_size_max: 16777216,
+                tx5_internal_event_channel_size: 1024,
+                tx5_timeout_s: 60,
+                tx5_backoff_start_s: 5,
+                tx5_backoff_max_s: 60,
+                tx5_ban_time_s: 10,
+                tx5_min_ephemeral_udp_port: 1,
+                tx5_max_ephemeral_udp_port: 65535,
+                danger_tls_keylog: "no_keylog",
+                danger_gossip_recent_threshold_secs: 900,
+                disable_publish: false,
+                disable_recent_gossip: false,
+                disable_historical_gossip: false,
+                bootstrap_check_delay_backoff_multiplier: 2,
+                bootstrap_max_delay_s: 300,
+            },
+            network_type: QuicMdns,
+            tracing_scope: None,
+        },
+        db_sync_strategy: Fast,
+        tuning_params: None,
+    }
+
+# lair-keystore connection_url # named-pipe:\\.\pipe\_2NnyjmnYBEAXF9F1arY_?k=MZ-XKU_VO261IYYFxr_1rJAY2J43VURvpitj0j85HDk #
+# lair-keystore running #
+
+[2024-07-26T07:31:21Z WARN  holochain::conductor::state] Using default NetworkCompatParams
+
+
+###HOLOCHAIN_SETUP###
+###HOLOCHAIN_SETUP_END###
+
+[2024-07-26T07:31:21Z INFO  rust_executor::holochain_service] Started holochain conductor
+
+[2024-07-26T07:31:21Z INFO  rust_executor::holochain_service] Added app interface: Ok(15102)
+
+[2024-07-26T07:31:21Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Holochain run complete 
+
+[2024-07-26T07:31:21Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Holochain init complete 
+[2024-07-26T07:31:21Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Wait for agent 
+
+[2024-07-26T07:31:21Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js 
+
+[2024-07-26T07:31:21Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js with hash QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2 
+
+[2024-07-26T07:31:21Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js
+
+[2024-07-26T07:31:21Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:21Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:31:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE\bundle.js 
+
+[2024-07-26T07:31:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:01:26 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:31:26Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE\bundle.js with hash QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE 
+
+[2024-07-26T07:31:26Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE\bundle.js
+
+[2024-07-26T07:31:27Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:27Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:27Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installing DNAs for language QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE 
+
+[2024-07-26T07:31:27Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installed DNA's: [object Object] 
+[2024-07-26T07:31:27Z INFO  rust_executor::js_core::utils_extension] [JSCORE]:  with result: 
+
+[2024-07-26T07:31:27Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: {"installed_app_id":"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE","cell_info":{"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE-agent-store":[{"provisioned":{"cell_id":[{"0":132,"1":45,"2":36,"3":198,"4":122,"5":29,"6":67,"7":215,"8":234,"9":243,"10":232,"11":215,"12":186,"13":254,"14":119,"15":14,"16":17,"17":136,"18":237,"19":150,"20":140,"21":162,"22":211,"23":205,"24":22,"25":73,"26":124,"27":241,"28":67,"29":164,"30":246,"31":101,"32":3,"33":185,"34":99,"35":151,"36":37,"37":170,"38":123},{"0":132,"1":32,"2":36,"3":250,"4":133,"5":17,"6":33,"7":136,"8":243,"9":43,"10":239,"11":151,"12":206,"13":189,"14":83,"15":160,"16":226,"17":92,"18":8,"19":164,"20":18,"21":250,"22":122,"23":64,"24":103,"25":202,"26":176,"27":137,"28":37,"29":184,"30":227,"31":74,"32":11,"33":46,"34":122,"35":206,"36":215,"37":247,"38":131}],"dna_modifiers":{"network_seed":"00000000-0000-0000-0000-000000000000","properties":{"0":192},"origin_time":1644620719470323,"quantum_time":{"secs":300,"nanos":0}},"name":"agent-store"}}]},"status":"running","agent_pub_key":{"0":132,"1":32,"2":36,"3":250,"4":133,"5":17,"6":33,"7":136,"8":243,"9":43,"10":239,"11":151,"12":206,"13":189,"14":83,"15":160,"16":226,"17":92,"18":8,"19":164,"20":18,"21":250,"22":122,"23":64,"24":103,"25":202,"26":176,"27":137,"28":37,"29":184,"30":227,"31":74,"32":11,"33":46,"34":122,"35":206,"36":215,"37":247,"38":131},"manifest":{"manifest_version":"1","name":"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE","description":null,"roles":[{"name":"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE-agent-store","provisioning":null,"dna":{"path":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\unauth-agent\\ad4m\\h\\d\\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE-agent-store.dna","modifiers":{"network_seed":null,"properties":null,"origin_time":null,"quantum_time":null},"installed_hash":"uhC0kxnodQ9fq8-jXuv53DhGI7ZaMotPNFkl88UOk9mUDuWOXJap7","clone_limit":0}}]}} 
+
+[2024-07-26T07:31:32Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:31:32Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5\bundle.js 
+
+[2024-07-26T07:31:32Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:01:32 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:31:32Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5\bundle.js with hash QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5 
+
+[2024-07-26T07:31:32Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5\bundle.js
+
+[2024-07-26T07:31:32Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:32Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:37Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:31:37Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS\bundle.js 
+
+[2024-07-26T07:31:37Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:01:37 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:31:37Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS\bundle.js with hash QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS 
+
+[2024-07-26T07:31:37Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS\bundle.js
+
+[2024-07-26T07:31:37Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:37Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:37Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js with hash QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2 
+
+[2024-07-26T07:31:37Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js
+
+[2024-07-26T07:31:37Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:37Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:37Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Core languages init'd 
+
+[2024-07-26T07:31:37Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: wait for languages 
+
+[2024-07-26T07:31:37Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: finished wait 
+[2024-07-26T07:31:37Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Agent doesn't have direct message language set yet. Creating from template... 
+[2024-07-26T07:31:37Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Cloning direct message language from template... 
+
+[2024-07-26T07:31:37Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: Now creating clone with parameters: [object Object] 
+
+[2024-07-26T07:31:37Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.readAndTemplateHolochainDNA: unpacking DNA 
+
+[2024-07-26T07:31:37Z INFO  rust_executor::holochain_service] UnPacked dna at path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\unauth-agent\\ad4m\\languages\\temp\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ"
+
+[2024-07-26T07:31:37Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.readAndTemplateHolochainDNA: packing DNA 
+
+[2024-07-26T07:31:37Z INFO  rust_executor::holochain_service] Got dna name: "direct-message-language"
+
+[2024-07-26T07:31:38Z INFO  rust_executor::holochain_service] Packed dna at path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\unauth-agent\\ad4m\\languages\\temp\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ\\direct-message-language.dna"
+
+[2024-07-26T07:31:38Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Writing meta & bundle path:  tst-tmp\languages\meta-QmzSYwdogFixkt4Sas6BvQhEPrqYEjqt9U8pQh8CnwMfbva5PJ3.json tst-tmp\languages\bundle-QmzSYwdogFixkt4Sas6BvQhEPrqYEjqt9U8pQh8CnwMfbva5PJ3.js 
+
+[2024-07-26T07:31:38Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: DM Language cloned... 
+
+[2024-07-26T07:31:38Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:31:38Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwdogFixkt4Sas6BvQhEPrqYEjqt9U8pQh8CnwMfbva5PJ3\bundle.js 
+
+[2024-07-26T07:31:38Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:01:38 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:31:38Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwdogFixkt4Sas6BvQhEPrqYEjqt9U8pQh8CnwMfbva5PJ3\bundle.js with hash QmzSYwdogFixkt4Sas6BvQhEPrqYEjqt9U8pQh8CnwMfbva5PJ3 
+
+[2024-07-26T07:31:38Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\unauth-agent\ad4m\languages\QmzSYwdogFixkt4Sas6BvQhEPrqYEjqt9U8pQh8CnwMfbva5PJ3\bundle.js
+
+[2024-07-26T07:31:38Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:38Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:38Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installing DNAs for language QmzSYwdogFixkt4Sas6BvQhEPrqYEjqt9U8pQh8CnwMfbva5PJ3 
+
+[2024-07-26T07:31:39Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installed DNA's: [object Object] 
+[2024-07-26T07:31:39Z INFO  rust_executor::js_core::utils_extension] [JSCORE]:  with result: 
+
+[2024-07-26T07:31:39Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: {"installed_app_id":"QmzSYwdogFixkt4Sas6BvQhEPrqYEjqt9U8pQh8CnwMfbva5PJ3","cell_info":{"QmzSYwdogFixkt4Sas6BvQhEPrqYEjqt9U8pQh8CnwMfbva5PJ3-direct-message-language":[{"provisioned":{"cell_id":[{"0":132,"1":45,"2":36,"3":93,"4":167,"5":189,"6":231,"7":124,"8":110,"9":97,"10":189,"11":197,"12":215,"13":219,"14":129,"15":172,"16":176,"17":119,"18":48,"19":163,"20":133,"21":223,"22":196,"23":60,"24":65,"25":78,"26":244,"27":212,"28":198,"29":143,"30":93,"31":216,"32":99,"33":229,"34":157,"35":72,"36":72,"37":18,"38":212},{"0":132,"1":32,"2":36,"3":250,"4":133,"5":17,"6":33,"7":136,"8":243,"9":43,"10":239,"11":151,"12":206,"13":189,"14":83,"15":160,"16":226,"17":92,"18":8,"19":164,"20":18,"21":250,"22":122,"23":64,"24":103,"25":202,"26":176,"27":137,"28":37,"29":184,"30":227,"31":74,"32":11,"33":46,"34":122,"35":206,"36":215,"37":247,"38":131}],"dna_modifiers":{"network_seed":"1d86e52b-e58c-4e9f-938c-e2b3135e02a0","properties":{"0":131,"1":185,"2":114,"3":101,"4":99,"5":105,"6":112,"7":105,"8":101,"9":110,"10":116,"11":95,"12":104,"13":99,"14":95,"15":97,"16":103,"17":101,"18":110,"19":116,"20":95,"21":112,"22":117,"23":98,"24":107,"25":101,"26":121,"27":217,"28":78,"29":56,"30":52,"31":50,"32":48,"33":50,"34":52,"35":102,"36":97,"37":56,"38":53,"39":49,"40":49,"41":50,"42":49,"43":56,"44":56,"45":102,"46":51,"47":50,"48":98,"49":101,"50":102,"51":57,"52":55,"53":99,"54":101,"55":98,"56":100,"57":53,"58":51,"59":97,"60":48,"61":101,"62":50,"63":53,"64":99,"65":48,"66":56,"67":97,"68":52,"69":49,"70":50,"71":102,"72":97,"73":55,"74":97,"75":52,"76":48,"77":54,"78":55,"79":99,"80":97,"81":98,"82":48,"83":56,"84":57,"85":50,"86":53,"87":98,"88":56,"89":101,"90":51,"91":52,"92":97,"93":48,"94":98,"95":50,"96":101,"97":55,"98":97,"99":99,"100":101,"101":100,"102":55,"103":102,"104":55,"105":56,"106":51,"107":173,"108":114,"109":101,"110":99,"111":105,"112":112,"113":105,"114":101,"115":110,"116":116,"117":95,"118":100,"119":105,"120":100,"121":217,"122":56,"123":100,"124":105,"125":100,"126":58,"127":107,"128":101,"129":121,"130":58,"131":122,"132":54,"133":77,"134":107,"135":107,"136":106,"137":53,"138":72,"139":53,"140":74,"141":88,"142":66,"143":50,"144":80,"145":114,"146":74,"147":104,"148":115,"149":82,"150":53,"151":76,"152":70,"153":120,"154":89,"155":116,"156":101,"157":87,"158":86,"159":84,"160":115,"161":52,"162":107,"163":65,"164":115,"165":115,"166":121,"167":78,"168":112,"169":67,"170":52,"171":110,"172":82,"173":105,"174":66,"175":112,"176":110,"177":85,"178":84,"179":163,"180":117,"181":105,"182":100,"183":217,"184":36,"185":49,"186":100,"187":56,"188":54,"189":101,"190":53,"191":50,"192":98,"193":45,"194":101,"195":53,"196":56,"197":99,"198":45,"199":52,"200":101,"201":57,"202":102,"203":45,"204":57,"205":51,"206":56,"207":99,"208":45,"209":101,"210":50,"211":98,"212":51,"213":49,"214":51,"215":53,"216":101,"217":48,"218":50,"219":97,"220":48},"origin_time":1644620719470000,"quantum_time":{"secs":300,"nanos":0}},"name":"direct-message-language"}}]},"status":"running","agent_pub_key":{"0":132,"1":32,"2":36,"3":250,"4":133,"5":17,"6":33,"7":136,"8":243,"9":43,"10":239,"11":151,"12":206,"13":189,"14":83,"15":160,"16":226,"17":92,"18":8,"19":164,"20":18,"21":250,"22":122,"23":64,"24":103,"25":202,"26":176,"27":137,"28":37,"29":184,"30":227,"31":74,"32":11,"33":46,"34":122,"35":206,"36":215,"37":247,"38":131},"manifest":{"manifest_version":"1","name":"QmzSYwdogFixkt4Sas6BvQhEPrqYEjqt9U8pQh8CnwMfbva5PJ3","description":null,"roles":[{"name":"QmzSYwdogFixkt4Sas6BvQhEPrqYEjqt9U8pQh8CnwMfbva5PJ3-direct-message-language","provisioning":null,"dna":{"path":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\unauth-agent\\ad4m\\h\\d\\QmzSYwdogFixkt4Sas6BvQhEPrqYEjqt9U8pQh8CnwMfbva5PJ3-direct-message-language.dna","modifiers":{"network_seed":null,"properties":null,"origin_time":null,"quantum_time":null},"installed_hash":"uhC0kXae953xuYb3F19uBrLB3MKOF38Q8QU701MaPXdhj5Z1ISBLU","clone_limit":0}}]}} 
+[2024-07-26T07:31:39Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: setting holochains signal callback for language QmzSYwdogFixkt4Sas6BvQhEPrqYEjqt9U8pQh8CnwMfbva5PJ3 
+
+[2024-07-26T07:31:39Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: adding callback on dm language 
+
+[2024-07-26T07:31:39Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: did:key:z6Mkkj5H5JXB2PrJhsR5LFxYteWVTs4kAssyNpC4nRiBpnUT did:key:z6Mkkj5H5JXB2PrJhsR5LFxYteWVTs4kAssyNpC4nRiBpnUT 
+
+[2024-07-26T07:31:39Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: DM Language installed... 
+
+[2024-07-26T07:31:39Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Storing agent profile {"did":"did:key:z6Mkkj5H5JXB2PrJhsR5LFxYteWVTs4kAssyNpC4nRiBpnUT","directMessageLanguage":"QmzSYwdogFixkt4Sas6BvQhEPrqYEjqt9U8pQh8CnwMfbva5PJ3","perspective":{"links":[]}} 
+
+[2024-07-26T07:31:39Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: [34m 2024-07-26T07:31:39.008Z HolochainService calling zome function: agent-store agent_store create_agent_expression {"author":"did:key:z6Mkkj5H5JXB2PrJhsR5LFxYteWVTs4 
+    For language with address QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE [0m 
+
+[2024-07-26T07:31:39Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE" "agent-store" "agent_store" "create_agent_expression"
+
+[2024-07-26T07:31:40Z WARN  holochain::core::ribosome::real_ribosome] 'cache.get(cache_key, &wasm)' exceeded MID time threshold elapsed=1.4369919s intervals=[1, 1000, 10000]
+
+[2024-07-26T07:31:40Z ERROR rust_executor::js_core::utils_extension] [JSCORE]: [31m HolochainService: ERROR calling zome function: Error: Wasm runtime error while working with Ribosome: RuntimeError: WasmError { file: "C:\\Users\\fayee\\.cargo\\git\\checkouts\\holochain-392a7f3c4fd375dd\\10841e4\\crates\\holochain\\src\\core\\ribosome\\real_ribosome.rs", line: 405, error: Compile("Error while importing \"__wbindgen_placeholder__\".\"__wbindgen_describe\": unknown import. Expected Function(FunctionType { params: [I32], results: [] })") }: RuntimeError: WasmError { file: "C:\\Users\\fayee\\.cargo\\git\\checkouts\\holochain-392a7f3c4fd375dd\\10841e4\\crates\\holochain\\src\\core\\ribosome\\real_ribosome.rs", line: 405, error: Compile("Error while importing \"__wbindgen_placeholder__\".\"__wbindgen_describe\": unknown import. Expected Function(FunctionType { params: [I32], results: [] })") }: WasmError { file: "C:\\Users\\fayee\\.cargo\\git\\checkouts\\holochain-392a7f3c4fd375dd\\10841e4\\crates\\holochain\\src\\core\\ribosome\\real_ribosome.rs", line: 405, error: Compile("Error while importing \"__wbindgen_placeholder__\".\"__wbindgen_describe\": unknown import. Expected Function(FunctionType { params: [I32], results: [] })") } [0m 
+
+[2024-07-26T07:31:40Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: DM Language published... 
+[2024-07-26T07:31:40Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Agent's direct message language successfully cloned, installed and published! 
+
+[2024-07-26T07:31:40Z INFO  rust_executor::graphql::mutation_resolvers] AD4M init complete
+
+[2024-07-26T07:31:40Z INFO  warp::server] 127.0.0.1:54682 "GET /graphql HTTP/1.1" 101 "-" "-" 16.9µs
+
+[2024-07-26T07:31:40Z INFO  warp::server] 127.0.0.1:54683 "GET /graphql HTTP/1.1" 101 "-" "-" 9.4µs
+
+======================================
+Got capability request: 
+AuthInfo { app_name: "demo-app", app_desc: "demo-desc", app_domain: Some("test.ad4m.org"), app_url: Some("https://demo-link"), app_icon_path: None, capabilities: Some([Capability { with: Resource { domain: "agent", pointers: ["*"] }, can: ["READ"] }]) }
+
+--------------------------------------
+Random number challenge: 241835
+======================================
+
+[2024-07-26T07:31:40Z INFO  warp::server] 127.0.0.1:54684 "GET /graphql HTTP/1.1" 101 "-" "-" 8.1µs
+
+[2024-07-26T07:31:40Z INFO  warp::server] 127.0.0.1:54685 "GET /graphql HTTP/1.1" 101 "-" "-" 9.5µs
+
+      ✔ unauthenticated user has all the capabilities
+killed executor with true
+    admin credential is set
+C:\Users\fayee\dev\ad4m\tests\js\bootstrapSeed.json
+C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent
+Starting executor
+USING LOCAL BOOTSTRAP & PROXY URL:  https://bootstrap.holo.host wss://signal.holotest.net
+Waiting for executor to settle...
+[2024-07-26T07:31:41Z INFO  rust_executor] Initializing Ad4mDb...
+
+[2024-07-26T07:31:41Z INFO  rust_executor] Initializing Prolog service...
+[2024-07-26T07:31:41Z INFO  rust_executor] Starting js_core...
+
+[2024-07-26T07:31:41Z INFO  rust_executor::js_core::string_module_loader] Module is not a file path, importing as raw module string
+
+[2024-07-26T07:31:41Z INFO  rust_executor::js_core::string_module_loader] Module is not a file path, importing as raw module string
+
+[2024-07-26T07:31:41Z INFO  rust_executor::js_core] AD4M JS engine init completed, with result: ()
+
+[2024-07-26T07:31:41Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: AD4M executor starting with config: 
+
+[2024-07-26T07:31:41Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: {"appDataPath":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\auth-agent","networkBootstrapSeed":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\auth-agent\\mainnet_seed.seed","languageLanguageOnly":false,"runDappServer":false,"gqlPort":15200,"hcPortAdmin":15202,"hcPortApp":15203,"hcUseLocalProxy":true,"hcUseMdns":true,"hcUseProxy":true,"hcUseBootstrap":true,"hcProxyUrl":"wss://signal.holotest.net","hcBootstrapUrl":"https://bootstrap.holo.host","connectHolochain":false,"adminCredential":"123","localhost":true,"autoPermitCapRequests":true,"tls":null,"logHolochainMetrics":true} 
+
+[2024-07-26T07:31:41Z INFO  rust_executor::js_core] AD4M coreInit() completed Succesfully: "[object Object]"
+
+[2024-07-26T07:31:41Z INFO  rust_executor] js_core initialized.
+
+[2024-07-26T07:31:41Z INFO  rust_executor] Starting GraphQL...
+
+[2024-07-26T07:31:41Z INFO  warp::server] Server::run; addr=127.0.0.1:15200
+[2024-07-26T07:31:41Z INFO  warp::server] listening on http://127.0.0.1:15200
+
+[2024-07-26T07:31:41Z INFO  warp::server] 127.0.0.1:54688 "GET /graphql HTTP/1.1" 101 "-" "-" 22.9µs
+
+[2024-07-26T07:31:41Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Init HolochainService with data path:  C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\h\d . Conductor path:  C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\h\c . Resource path:   
+[2024-07-26T07:31:41Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Holochain ports: admin=15202 app=15203 
+
+[2024-07-26T07:31:41Z INFO  rust_executor::holochain_service] Starting holochain conductor with config: ConductorConfig {
+        tracing_override: None,
+        data_root_path: Some(
+            DataRootPath(
+                "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\auth-agent\\ad4m\\h\\c",
+            ),
+        ),
+        keystore: LairServerInProc {
+            lair_root: None,
+        },
+        dpki: None,
+        admin_interfaces: None,
+        network: KitsuneP2pConfig {
+            transport_pool: [
+                WebRTC {
+                    signal_url: "wss://signal.holotest.net",
+                },
+            ],
+            bootstrap_service: Some(
+                Url2 {
+                    url: "https://bootstrap.holo.host/",
+                },
+            ),
+            tuning_params: KitsuneP2pTuningParams {
+                gossip_strategy: "sharded-gossip",
+                gossip_loop_iteration_delay_ms: 1000,
+                gossip_outbound_target_mbps: 100.0,
+                gossip_inbound_target_mbps: 100.0,
+                gossip_historic_outbound_target_mbps: 100.0,
+                gossip_historic_inbound_target_mbps: 100.0,
+                gossip_burst_ratio: 100.0,
+                gossip_peer_on_success_next_gossip_delay_ms: 60000,
+                gossip_peer_on_error_next_gossip_delay_ms: 300000,
+                gossip_agent_info_update_interval_ms: 300000,
+                gossip_round_timeout_ms: 60000,
+                gossip_redundancy_target: 100.0,
+                gossip_max_batch_size: 1000000,
+                gossip_dynamic_arcs: true,
+                gossip_arc_clamping: "none",
+                default_rpc_single_timeout_ms: 60000,
+                default_rpc_multi_remote_agent_count: 3,
+                default_rpc_multi_remote_request_grace_ms: 3000,
+                agent_info_expires_after_ms: 1200000,
+                tls_in_mem_session_storage: 512,
+                proxy_keepalive_ms: 120000,
+                proxy_to_expire_ms: 300000,
+                concurrent_limit_per_thread: 4096,
+                tx2_quic_max_idle_timeout_ms: 60000,
+                tx2_pool_max_connection_count: 4096,
+                tx2_channel_count_per_connection: 2,
+                tx2_implicit_timeout_ms: 60000,
+                tx2_initial_connect_retry_delay_ms: 200,
+                tx5_connection_count_max: 4096,
+                tx5_send_buffer_bytes_max: 65536,
+                tx5_recv_buffer_bytes_max: 65536,
+                tx5_incoming_message_bytes_max: 536870912,
+                tx5_message_size_max: 16777216,
+                tx5_internal_event_channel_size: 1024,
+                tx5_timeout_s: 60,
+                tx5_backoff_start_s: 5,
+                tx5_backoff_max_s: 60,
+                tx5_ban_time_s: 10,
+                tx5_min_ephemeral_udp_port: 1,
+                tx5_max_ephemeral_udp_port: 65535,
+                danger_tls_keylog: "no_keylog",
+                danger_gossip_recent_threshold_secs: 900,
+                disable_publish: false,
+                disable_recent_gossip: false,
+                disable_historical_gossip: false,
+                bootstrap_check_delay_backoff_multiplier: 2,
+                bootstrap_max_delay_s: 300,
+            },
+            network_type: QuicMdns,
+            tracing_scope: None,
+        },
+        db_sync_strategy: Fast,
+        tuning_params: None,
+    }
+
+# lair-keystore connection_url # named-pipe:\\.\pipe\vmRxa0_dJ6u0PUivRyGlN?k=nUkS9KlgF5DbupnRXpelEGr_rKSD1BOcqVDWEEV4wCg #
+# lair-keystore running #
+
+[2024-07-26T07:31:42Z WARN  holochain::conductor::state] Using default NetworkCompatParams
+
+
+###HOLOCHAIN_SETUP###
+###HOLOCHAIN_SETUP_END###
+
+[2024-07-26T07:31:43Z INFO  rust_executor::holochain_service] Started holochain conductor
+
+[2024-07-26T07:31:43Z INFO  rust_executor::holochain_service] Added app interface: Ok(15203)
+
+[2024-07-26T07:31:43Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Holochain run complete 
+
+[2024-07-26T07:31:43Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Holochain init complete 
+[2024-07-26T07:31:43Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Wait for agent 
+
+[2024-07-26T07:31:43Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js 
+
+[2024-07-26T07:31:43Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js with hash QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2 
+
+[2024-07-26T07:31:43Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js
+
+[2024-07-26T07:31:43Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:43Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:48Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:31:48Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE\bundle.js 
+
+[2024-07-26T07:31:48Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:01:48 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:31:48Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE\bundle.js with hash QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE 
+
+[2024-07-26T07:31:48Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE\bundle.js
+
+[2024-07-26T07:31:48Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:48Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:48Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installing DNAs for language QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE 
+
+[2024-07-26T07:31:48Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installed DNA's: [object Object] 
+[2024-07-26T07:31:48Z INFO  rust_executor::js_core::utils_extension] [JSCORE]:  with result: 
+
+[2024-07-26T07:31:48Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: {"installed_app_id":"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE","cell_info":{"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE-agent-store":[{"provisioned":{"cell_id":[{"0":132,"1":45,"2":36,"3":198,"4":122,"5":29,"6":67,"7":215,"8":234,"9":243,"10":232,"11":215,"12":186,"13":254,"14":119,"15":14,"16":17,"17":136,"18":237,"19":150,"20":140,"21":162,"22":211,"23":205,"24":22,"25":73,"26":124,"27":241,"28":67,"29":164,"30":246,"31":101,"32":3,"33":185,"34":99,"35":151,"36":37,"37":170,"38":123},{"0":132,"1":32,"2":36,"3":157,"4":123,"5":77,"6":195,"7":144,"8":203,"9":26,"10":254,"11":54,"12":0,"13":140,"14":157,"15":11,"16":112,"17":171,"18":91,"19":32,"20":183,"21":167,"22":16,"23":90,"24":157,"25":80,"26":14,"27":158,"28":230,"29":66,"30":82,"31":59,"32":170,"33":13,"34":160,"35":17,"36":174,"37":136,"38":68}],"dna_modifiers":{"network_seed":"00000000-0000-0000-0000-000000000000","properties":{"0":192},"origin_time":1644620719470323,"quantum_time":{"secs":300,"nanos":0}},"name":"agent-store"}}]},"status":"running","agent_pub_key":{"0":132,"1":32,"2":36,"3":157,"4":123,"5":77,"6":195,"7":144,"8":203,"9":26,"10":254,"11":54,"12":0,"13":140,"14":157,"15":11,"16":112,"17":171,"18":91,"19":32,"20":183,"21":167,"22":16,"23":90,"24":157,"25":80,"26":14,"27":158,"28":230,"29":66,"30":82,"31":59,"32":170,"33":13,"34":160,"35":17,"36":174,"37":136,"38":68},"manifest":{"manifest_version":"1","name":"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE","description":null,"roles":[{"name":"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE-agent-store","provisioning":null,"dna":{"path":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\auth-agent\\ad4m\\h\\d\\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE-agent-store.dna","modifiers":{"network_seed":null,"properties":null,"origin_time":null,"quantum_time":null},"installed_hash":"uhC0kxnodQ9fq8-jXuv53DhGI7ZaMotPNFkl88UOk9mUDuWOXJap7","clone_limit":0}}]}} 
+
+[2024-07-26T07:31:53Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:31:53Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5\bundle.js 
+
+[2024-07-26T07:31:53Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:01:53 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:31:53Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5\bundle.js with hash QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5 
+
+[2024-07-26T07:31:53Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5\bundle.js
+
+[2024-07-26T07:31:53Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:53Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:58Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:31:58Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS\bundle.js 
+
+[2024-07-26T07:31:58Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:01:58 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:31:58Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS\bundle.js with hash QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS 
+
+[2024-07-26T07:31:58Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS\bundle.js
+
+[2024-07-26T07:31:58Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:58Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:58Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js with hash QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2 
+
+[2024-07-26T07:31:58Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js
+
+[2024-07-26T07:31:58Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:58Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:58Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Core languages init'd 
+
+[2024-07-26T07:31:58Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: wait for languages 
+
+[2024-07-26T07:31:58Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: finished wait 
+[2024-07-26T07:31:58Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Agent doesn't have direct message language set yet. Creating from template... 
+[2024-07-26T07:31:58Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Cloning direct message language from template... 
+
+[2024-07-26T07:31:58Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: Now creating clone with parameters: [object Object] 
+
+[2024-07-26T07:31:58Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.readAndTemplateHolochainDNA: unpacking DNA 
+
+[2024-07-26T07:31:58Z INFO  rust_executor::holochain_service] UnPacked dna at path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\auth-agent\\ad4m\\languages\\temp\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ"
+
+[2024-07-26T07:31:58Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.readAndTemplateHolochainDNA: packing DNA 
+
+[2024-07-26T07:31:58Z INFO  rust_executor::holochain_service] Got dna name: "direct-message-language"
+
+[2024-07-26T07:31:59Z INFO  rust_executor::holochain_service] Packed dna at path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\auth-agent\\ad4m\\languages\\temp\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ\\direct-message-language.dna"
+
+[2024-07-26T07:31:59Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Writing meta & bundle path:  tst-tmp\languages\meta-QmzSYwdhuemPVtwk1mSBW7ZgZp3jWrphKNafKCPds9nezUz8oZR.json tst-tmp\languages\bundle-QmzSYwdhuemPVtwk1mSBW7ZgZp3jWrphKNafKCPds9nezUz8oZR.js 
+
+[2024-07-26T07:31:59Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: DM Language cloned... 
+
+[2024-07-26T07:31:59Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:31:59Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwdhuemPVtwk1mSBW7ZgZp3jWrphKNafKCPds9nezUz8oZR\bundle.js 
+
+[2024-07-26T07:31:59Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:01:59 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:31:59Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwdhuemPVtwk1mSBW7ZgZp3jWrphKNafKCPds9nezUz8oZR\bundle.js with hash QmzSYwdhuemPVtwk1mSBW7ZgZp3jWrphKNafKCPds9nezUz8oZR 
+
+[2024-07-26T07:31:59Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\auth-agent\ad4m\languages\QmzSYwdhuemPVtwk1mSBW7ZgZp3jWrphKNafKCPds9nezUz8oZR\bundle.js
+
+[2024-07-26T07:31:59Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:31:59Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:31:59Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installing DNAs for language QmzSYwdhuemPVtwk1mSBW7ZgZp3jWrphKNafKCPds9nezUz8oZR 
+
+[2024-07-26T07:31:59Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installed DNA's: [object Object] 
+[2024-07-26T07:31:59Z INFO  rust_executor::js_core::utils_extension] [JSCORE]:  with result: 
+
+[2024-07-26T07:31:59Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: {"installed_app_id":"QmzSYwdhuemPVtwk1mSBW7ZgZp3jWrphKNafKCPds9nezUz8oZR","cell_info":{"QmzSYwdhuemPVtwk1mSBW7ZgZp3jWrphKNafKCPds9nezUz8oZR-direct-message-language":[{"provisioned":{"cell_id":[{"0":132,"1":45,"2":36,"3":144,"4":1,"5":238,"6":121,"7":122,"8":242,"9":53,"10":246,"11":5,"12":253,"13":223,"14":73,"15":193,"16":152,"17":49,"18":154,"19":24,"20":177,"21":253,"22":239,"23":77,"24":175,"25":231,"26":124,"27":58,"28":159,"29":151,"30":215,"31":92,"32":57,"33":38,"34":81,"35":105,"36":144,"37":221,"38":214},{"0":132,"1":32,"2":36,"3":157,"4":123,"5":77,"6":195,"7":144,"8":203,"9":26,"10":254,"11":54,"12":0,"13":140,"14":157,"15":11,"16":112,"17":171,"18":91,"19":32,"20":183,"21":167,"22":16,"23":90,"24":157,"25":80,"26":14,"27":158,"28":230,"29":66,"30":82,"31":59,"32":170,"33":13,"34":160,"35":17,"36":174,"37":136,"38":68}],"dna_modifiers":{"network_seed":"b314d700-2edb-4a1e-a514-e10532503614","properties":{"0":131,"1":185,"2":114,"3":101,"4":99,"5":105,"6":112,"7":105,"8":101,"9":110,"10":116,"11":95,"12":104,"13":99,"14":95,"15":97,"16":103,"17":101,"18":110,"19":116,"20":95,"21":112,"22":117,"23":98,"24":107,"25":101,"26":121,"27":217,"28":78,"29":56,"30":52,"31":50,"32":48,"33":50,"34":52,"35":57,"36":100,"37":55,"38":98,"39":52,"40":100,"41":99,"42":51,"43":57,"44":48,"45":99,"46":98,"47":49,"48":97,"49":102,"50":101,"51":51,"52":54,"53":48,"54":48,"55":56,"56":99,"57":57,"58":100,"59":48,"60":98,"61":55,"62":48,"63":97,"64":98,"65":53,"66":98,"67":50,"68":48,"69":98,"70":55,"71":97,"72":55,"73":49,"74":48,"75":53,"76":97,"77":57,"78":100,"79":53,"80":48,"81":48,"82":101,"83":57,"84":101,"85":101,"86":54,"87":52,"88":50,"89":53,"90":50,"91":51,"92":98,"93":97,"94":97,"95":48,"96":100,"97":97,"98":48,"99":49,"100":49,"101":97,"102":101,"103":56,"104":56,"105":52,"106":52,"107":173,"108":114,"109":101,"110":99,"111":105,"112":112,"113":105,"114":101,"115":110,"116":116,"117":95,"118":100,"119":105,"120":100,"121":217,"122":56,"123":100,"124":105,"125":100,"126":58,"127":107,"128":101,"129":121,"130":58,"131":122,"132":54,"133":77,"134":107,"135":111,"136":114,"137":74,"138":89,"139":89,"140":71,"141":85,"142":98,"143":81,"144":120,"145":80,"146":65,"147":54,"148":113,"149":107,"150":54,"151":106,"152":98,"153":53,"154":72,"155":99,"156":68,"157":116,"158":55,"159":87,"160":112,"161":114,"162":105,"163":50,"164":49,"165":122,"166":105,"167":80,"168":116,"169":103,"170":116,"171":121,"172":109,"173":68,"174":112,"175":54,"176":104,"177":114,"178":49,"179":163,"180":117,"181":105,"182":100,"183":217,"184":36,"185":98,"186":51,"187":49,"188":52,"189":100,"190":55,"191":48,"192":48,"193":45,"194":50,"195":101,"196":100,"197":98,"198":45,"199":52,"200":97,"201":49,"202":101,"203":45,"204":97,"205":53,"206":49,"207":52,"208":45,"209":101,"210":49,"211":48,"212":53,"213":51,"214":50,"215":53,"216":48,"217":51,"218":54,"219":49,"220":52},"origin_time":1644620719470000,"quantum_time":{"secs":300,"nanos":0}},"name":"direct-message-language"}}]},"status":"running","agent_pub_key":{"0":132,"1":32,"2":36,"3":157,"4":123,"5":77,"6":195,"7":144,"8":203,"9":26,"10":254,"11":54,"12":0,"13":140,"14":157,"15":11,"16":112,"17":171,"18":91,"19":32,"20":183,"21":167,"22":16,"23":90,"24":157,"25":80,"26":14,"27":158,"28":230,"29":66,"30":82,"31":59,"32":170,"33":13,"34":160,"35":17,"36":174,"37":136,"38":68},"manifest":{"manifest_version":"1","name":"QmzSYwdhuemPVtwk1mSBW7ZgZp3jWrphKNafKCPds9nezUz8oZR","description":null,"roles":[{"name":"QmzSYwdhuemPVtwk1mSBW7ZgZp3jWrphKNafKCPds9nezUz8oZR-direct-message-language","provisioning":null,"dna":{"path":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\auth-agent\\ad4m\\h\\d\\QmzSYwdhuemPVtwk1mSBW7ZgZp3jWrphKNafKCPds9nezUz8oZR-direct-message-language.dna","modifiers":{"network_seed":null,"properties":null,"origin_time":null,"quantum_time":null},"installed_hash":"uhC0kkAHueXryNfYF_d9JwZgxmhix_e9Nr-d8Op-X11w5JlFpkN3W","clone_limit":0}}]}} 
+[2024-07-26T07:31:59Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: setting holochains signal callback for language QmzSYwdhuemPVtwk1mSBW7ZgZp3jWrphKNafKCPds9nezUz8oZR 
+
+[2024-07-26T07:31:59Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: adding callback on dm language 
+
+[2024-07-26T07:31:59Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: did:key:z6MkorJYYGUbQxPA6qk6jb5HcDt7Wpri21ziPtgtymDp6hr1 did:key:z6MkorJYYGUbQxPA6qk6jb5HcDt7Wpri21ziPtgtymDp6hr1 
+
+[2024-07-26T07:31:59Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: DM Language installed... 
+
+[2024-07-26T07:31:59Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Storing agent profile {"did":"did:key:z6MkorJYYGUbQxPA6qk6jb5HcDt7Wpri21ziPtgtymDp6hr1","directMessageLanguage":"QmzSYwdhuemPVtwk1mSBW7ZgZp3jWrphKNafKCPds9nezUz8oZR","perspective":{"links":[]}} 
+
+[2024-07-26T07:31:59Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: [34m 2024-07-26T07:31:59.840Z HolochainService calling zome function: agent-store agent_store create_agent_expression {"author":"did:key:z6MkorJYYGUbQxPA6qk6jb5HcDt7Wpr 
+    For language with address QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE [0m 
+
+[2024-07-26T07:31:59Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE" "agent-store" "agent_store" "create_agent_expression"
+
+[2024-07-26T07:32:01Z WARN  holochain::core::ribosome::real_ribosome] 'cache.get(cache_key, &wasm)' exceeded MID time threshold elapsed=1.5919167s intervals=[1, 1000, 10000]
+
+[2024-07-26T07:32:01Z ERROR rust_executor::js_core::utils_extension] [JSCORE]: [31m HolochainService: ERROR calling zome function: Error: Wasm runtime error while working with Ribosome: RuntimeError: WasmError { file: "C:\\Users\\fayee\\.cargo\\git\\checkouts\\holochain-392a7f3c4fd375dd\\10841e4\\crates\\holochain\\src\\core\\ribosome\\real_ribosome.rs", line: 405, error: Compile("Error while importing \"__wbindgen_placeholder__\".\"__wbindgen_describe\": unknown import. Expected Function(FunctionType { params: [I32], results: [] })") }: RuntimeError: WasmError { file: "C:\\Users\\fayee\\.cargo\\git\\checkouts\\holochain-392a7f3c4fd375dd\\10841e4\\crates\\holochain\\src\\core\\ribosome\\real_ribosome.rs", line: 405, error: Compile("Error while importing \"__wbindgen_placeholder__\".\"__wbindgen_describe\": unknown import. Expected Function(FunctionType { params: [I32], results: [] })") }: WasmError { file: "C:\\Users\\fayee\\.cargo\\git\\checkouts\\holochain-392a7f3c4fd375dd\\10841e4\\crates\\holochain\\src\\core\\ribosome\\real_ribosome.rs", line: 405, error: Compile("Error while importing \"__wbindgen_placeholder__\".\"__wbindgen_describe\": unknown import. Expected Function(FunctionType { params: [I32], results: [] })") } [0m 
+
+[2024-07-26T07:32:01Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: DM Language published... 
+
+[2024-07-26T07:32:01Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Agent's direct message language successfully cloned, installed and published! 
+[2024-07-26T07:32:01Z INFO  rust_executor::graphql::mutation_resolvers] AD4M init complete
+
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54805 "GET /graphql HTTP/1.1" 101 "-" "-" 14.7µs
+
+[
+  {
+    message: 'Capability is not matched, you have capabilities: [Capability { with: Resource { domain: "agent", pointers: ["*"] }, can: ["AUTHENTICATE"] }], expected: Capability { with: Resource { domain: "agent", pointers: ["*"] }, can: ["READ"] }',
+    locations: [ { line: 2, column: 3 } ],
+    path: [ 'agentStatus' ]
+  }
+]
+      ✔ unauthenticated user can not query agent status
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54806 "GET /graphql HTTP/1.1" 101 "-" "-" 20µs
+
+======================================
+Got capability request: 
+AuthInfo { app_name: "demo-app", app_desc: "demo-desc", app_domain: Some("test.ad4m.org"), app_url: Some("https://demo-link"), app_icon_path: None, capabilities: Some([Capability { with: Resource { domain: "agent", pointers: ["*"] }, can: ["READ"] }]) }
+
+      ✔ unauthenticated user can request capability
+--------------------------------------
+Random number challenge: 369612
+======================================
+
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54807 "GET /graphql HTTP/1.1" 101 "-" "-" 9µs
+
+======================================
+Got capability request: 
+AuthInfo { app_name: "demo-app", app_desc: "demo-desc", app_domain: Some("test.ad4m.org"), app_url: Some("https://demo-link"), app_icon_path: None, capabilities: Some([Capability { with: Resource { domain: "agent", pointers: ["*"] }, can: ["READ"] }]) }
+
+--------------------------------------
+Random number challenge: 295290
+======================================
+
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54808 "GET /graphql HTTP/1.1" 101 "-" "-" 11.8µs
+
+      ✔ admin user can permit capability
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54809 "GET /graphql HTTP/1.1" 101 "-" "-" 8.6µs
+
+======================================
+Got capability request: 
+AuthInfo { app_name: "demo-app", app_desc: "demo-desc", app_domain: Some("test.ad4m.org"), app_url: Some("https://demo-link"), app_icon_path: None, capabilities: Some([Capability { with: Resource { domain: "agent", pointers: ["*"] }, can: ["READ"] }]) }
+
+--------------------------------------
+Random number challenge: 713536
+======================================
+
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54810 "GET /graphql HTTP/1.1" 101 "-" "-" 8.6µs
+
+      ✔ unauthenticated user can generate jwt with a secret
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54811 "GET /graphql HTTP/1.1" 101 "-" "-" 11.7µs
+
+======================================
+Got capability request: 
+AuthInfo { app_name: "demo-app", app_desc: "demo-desc", app_domain: Some("test.ad4m.org"), app_url: Some("https://demo-link"), app_icon_path: None, capabilities: Some([Capability { with: Resource { domain: "agent", pointers: ["*"] }, can: ["READ"] }]) }
+
+--------------------------------------
+Random number challenge: 943635
+======================================
+
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54812 "GET /graphql HTTP/1.1" 101 "-" "-" 9.6µs
+
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54813 "GET /graphql HTTP/1.1" 101 "-" "-" 13.4µs
+
+      ✔ authenticated user can query agent status if capability matched
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54814 "GET /graphql HTTP/1.1" 101 "-" "-" 10.5µs
+
+[
+  {
+    message: 'InvalidToken',
+    locations: [ { line: 2, column: 3 } ],
+    path: [ 'agentStatus' ]
+  }
+]
+      ✔ user with invalid jwt can not query agent status
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54815 "GET /graphql HTTP/1.1" 101 "-" "-" 9.9µs
+
+======================================
+Got capability request: 
+
+AuthInfo { app_name: "demo-app", app_desc: "demo-desc", app_domain: Some("test.ad4m.org"), app_url: Some("https://demo-link"), app_icon_path: None, capabilities: Some([Capability { with: Resource { domain: "agent", pointers: ["*"] }, can: ["CREATE"] }]) }
+--------------------------------------
+Random number challenge: 837085
+======================================
+
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54816 "GET /graphql HTTP/1.1" 101 "-" "-" 10µs
+
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54817 "GET /graphql HTTP/1.1" 101 "-" "-" 10.7µs
+
+[
+  {
+    message: 'Capability is not matched, you have capabilities: [Capability { with: Resource { domain: "agent", pointers: ["*"] }, can: ["CREATE"] }], expected: Capability { with: Resource { domain: "agent", pointers: ["*"] }, can: ["READ"] }',
+    locations: [ { line: 2, column: 3 } ],
+    path: [ 'agentStatus' ]
+  }
+]
+      ✔ authenticated user can not query agent status if capability is not matched
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54818 "GET /graphql HTTP/1.1" 101 "-" "-" 10µs
+
+======================================
+Got capability request: 
+AuthInfo { app_name: "demo-app", app_desc: "demo-desc", app_domain: Some("test.ad4m.org"), app_url: Some("https://demo-link"), app_icon_path: None, capabilities: Some([Capability { with: Resource { domain: "agent", pointers: ["*"] }, can: ["READ"] }]) }
+
+--------------------------------------
+Random number challenge: 776530
+======================================
+
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54819 "GET /graphql HTTP/1.1" 101 "-" "-" 9.4µs
+
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54820 "GET /graphql HTTP/1.1" 101 "-" "-" 9.9µs
+
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54821 "GET /graphql HTTP/1.1" 101 "-" "-" 9.2µs
+
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54822 "GET /graphql HTTP/1.1" 101 "-" "-" 18.1µs
+
+[
+  {
+    message: 'Unauthorized access',
+    locations: [ { line: 2, column: 3 } ],
+    path: [ 'agentStatus' ]
+  }
+]
+      ✔ user with revoked token can not query agent status
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54823 "GET /graphql HTTP/1.1" 101 "-" "-" 14.3µs
+
+[2024-07-26T07:32:01Z INFO  warp::server] 127.0.0.1:54824 "GET /graphql HTTP/1.1" 101 "-" "-" 7.5µs
+
+[2024-07-26T07:32:01Z DEBUG rust_executor::pubsub] Subscribing to topic: exception-occurred-topic
+
+======================================
+Got capability request: 
+AuthInfo { app_name: "demo-app", app_desc: "demo-desc", app_domain: Some("test.ad4m.org"), app_url: Some("https://demo-link"), app_icon_path: None, capabilities: Some([Capability { with: Resource { domain: "agent", pointers: ["*"] }, can: ["READ"] }]) }
+--------------------------------------
+Random number challenge: 879247
+======================================
+
+      ✔ requesting a capability toke should trigger a CapabilityRequested exception (1005ms)
+
+
+  10 passing (43s)
+
+
+> @coasys/ad4m-integration-tests@0.10.0-prerelease test-integration C:\Users\fayee\dev\ad4m\tests\js
+> ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/integration.test.ts
+
+
+
+  Integration tests
+C:\Users\fayee\dev\ad4m\tests\js\bootstrapSeed.json
+C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice
+Starting executor
+USING LOCAL BOOTSTRAP & PROXY URL:  http://127.0.0.1:54859 ws://127.0.0.1:54860
+Waiting for executor to settle...
+[2024-07-26T07:32:07Z INFO  rust_executor] Initializing Ad4mDb...
+
+[2024-07-26T07:32:07Z WARN  rust_executor] adminCredential is not set or empty, empty token will possess admin capabilities.
+[2024-07-26T07:32:07Z INFO  rust_executor] Initializing Prolog service...
+[2024-07-26T07:32:07Z INFO  rust_executor] Starting js_core...
+
+[2024-07-26T07:32:07Z INFO  rust_executor::js_core::string_module_loader] Module is not a file path, importing as raw module string
+
+[2024-07-26T07:32:07Z INFO  rust_executor::js_core::string_module_loader] Module is not a file path, importing as raw module string
+
+[2024-07-26T07:32:07Z INFO  rust_executor::js_core] AD4M JS engine init completed, with result: ()
+
+[2024-07-26T07:32:07Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: AD4M executor starting with config: 
+
+[2024-07-26T07:32:07Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: {"appDataPath":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice","networkBootstrapSeed":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\mainnet_seed.seed","languageLanguageOnly":false,"runDappServer":false,"gqlPort":15300,"hcPortAdmin":15301,"hcPortApp":15302,"hcUseLocalProxy":true,"hcUseMdns":true,"hcUseProxy":true,"hcUseBootstrap":true,"hcProxyUrl":"ws://127.0.0.1:54860","hcBootstrapUrl":"http://127.0.0.1:54859","connectHolochain":false,"adminCredential":null,"localhost":true,"autoPermitCapRequests":true,"tls":null,"logHolochainMetrics":true} 
+
+[2024-07-26T07:32:07Z INFO  rust_executor::js_core] AD4M coreInit() completed Succesfully: "[object Object]"
+
+[2024-07-26T07:32:07Z INFO  rust_executor] js_core initialized.
+[2024-07-26T07:32:07Z INFO  rust_executor] Starting GraphQL...
+
+[2024-07-26T07:32:07Z INFO  warp::server] Server::run; addr=127.0.0.1:15300
+[2024-07-26T07:32:07Z INFO  warp::server] listening on http://127.0.0.1:15300
+
+    Agent / Agent-Setup
+      basic agent operations
+[2024-07-26T07:32:07Z INFO  warp::server] 127.0.0.1:54873 "GET /graphql HTTP/1.1" 101 "-" "-" 22.8µs
+
+[2024-07-26T07:32:07Z DEBUG rust_executor::pubsub] Subscribing to topic: agent-updated-topic
+[2024-07-26T07:32:07Z DEBUG rust_executor::pubsub] Subscribing to topic: agent-status-changed-topic
+[2024-07-26T07:32:07Z DEBUG rust_executor::pubsub] Subscribing to topic: apps-changed
+[2024-07-26T07:32:07Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-added-topic
+[2024-07-26T07:32:07Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-updated-topic
+[2024-07-26T07:32:07Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-removed-topic
+[2024-07-26T07:32:07Z DEBUG rust_executor::pubsub] Subscribing to topic: runtime-messaged-received-topic
+[2024-07-26T07:32:07Z DEBUG rust_executor::pubsub] Subscribing to topic: exception-occurred-topic
+[2024-07-26T07:32:07Z DEBUG rust_executor::pubsub] Subscribing to topic: runtime-notification-triggered-topic
+
+[2024-07-26T07:32:07Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Init HolochainService with data path:  C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\h\d . Conductor path:  C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\h\c . Resource path:   
+[2024-07-26T07:32:07Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Holochain ports: admin=15301 app=15302 
+
+[2024-07-26T07:32:07Z INFO  rust_executor::holochain_service] Starting holochain conductor with config: ConductorConfig {
+        tracing_override: None,
+        data_root_path: Some(
+            DataRootPath(
+                "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\h\\c",
+            ),
+        ),
+        keystore: LairServerInProc {
+            lair_root: None,
+        },
+        dpki: None,
+        admin_interfaces: None,
+        network: KitsuneP2pConfig {
+            transport_pool: [
+                WebRTC {
+                    signal_url: "ws://127.0.0.1:54860",
+                },
+            ],
+            bootstrap_service: Some(
+                Url2 {
+                    url: "http://127.0.0.1:54859/",
+                },
+            ),
+            tuning_params: KitsuneP2pTuningParams {
+                gossip_strategy: "sharded-gossip",
+                gossip_loop_iteration_delay_ms: 1000,
+                gossip_outbound_target_mbps: 100.0,
+                gossip_inbound_target_mbps: 100.0,
+                gossip_historic_outbound_target_mbps: 100.0,
+                gossip_historic_inbound_target_mbps: 100.0,
+                gossip_burst_ratio: 100.0,
+                gossip_peer_on_success_next_gossip_delay_ms: 60000,
+                gossip_peer_on_error_next_gossip_delay_ms: 300000,
+                gossip_agent_info_update_interval_ms: 300000,
+                gossip_round_timeout_ms: 60000,
+                gossip_redundancy_target: 100.0,
+                gossip_max_batch_size: 1000000,
+                gossip_dynamic_arcs: true,
+                gossip_arc_clamping: "none",
+                default_rpc_single_timeout_ms: 60000,
+                default_rpc_multi_remote_agent_count: 3,
+                default_rpc_multi_remote_request_grace_ms: 3000,
+                agent_info_expires_after_ms: 1200000,
+                tls_in_mem_session_storage: 512,
+                proxy_keepalive_ms: 120000,
+                proxy_to_expire_ms: 300000,
+                concurrent_limit_per_thread: 4096,
+                tx2_quic_max_idle_timeout_ms: 60000,
+                tx2_pool_max_connection_count: 4096,
+                tx2_channel_count_per_connection: 2,
+                tx2_implicit_timeout_ms: 60000,
+                tx2_initial_connect_retry_delay_ms: 200,
+                tx5_connection_count_max: 4096,
+                tx5_send_buffer_bytes_max: 65536,
+                tx5_recv_buffer_bytes_max: 65536,
+                tx5_incoming_message_bytes_max: 536870912,
+                tx5_message_size_max: 16777216,
+                tx5_internal_event_channel_size: 1024,
+                tx5_timeout_s: 60,
+                tx5_backoff_start_s: 5,
+                tx5_backoff_max_s: 60,
+                tx5_ban_time_s: 10,
+                tx5_min_ephemeral_udp_port: 1,
+                tx5_max_ephemeral_udp_port: 65535,
+                danger_tls_keylog: "no_keylog",
+                danger_gossip_recent_threshold_secs: 900,
+                disable_publish: false,
+                disable_recent_gossip: false,
+                disable_historical_gossip: false,
+                bootstrap_check_delay_backoff_multiplier: 2,
+                bootstrap_max_delay_s: 300,
+            },
+            network_type: QuicMdns,
+            tracing_scope: None,
+        },
+        db_sync_strategy: Fast,
+        tuning_params: None,
+    }
+
+# lair-keystore connection_url # named-pipe:\\.\pipe\70cQ1uDVkXy8h7KWMg6dy?k=Fs6kBnbXXDEQ7bbrhcbTEhVH4_8aGJcqbpSU-5PF7hM #
+# lair-keystore running #
+
+[2024-07-26T07:32:08Z WARN  holochain::conductor::state] Using default NetworkCompatParams
+
+
+###HOLOCHAIN_SETUP###
+###HOLOCHAIN_SETUP_END###
+
+[2024-07-26T07:32:08Z INFO  rust_executor::holochain_service] Started holochain conductor
+
+[2024-07-26T07:32:08Z INFO  rust_executor::holochain_service] Added app interface: Ok(15302)
+
+[2024-07-26T07:32:08Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Holochain run complete 
+
+[2024-07-26T07:32:08Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Holochain init complete 
+[2024-07-26T07:32:08Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Wait for agent 
+
+[2024-07-26T07:32:08Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js 
+
+[2024-07-26T07:32:08Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js with hash QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2 
+
+[2024-07-26T07:32:08Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js
+
+[2024-07-26T07:32:08Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:32:08Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:32:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:32:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE\bundle.js 
+
+[2024-07-26T07:32:13Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:02:13 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:32:13Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE\bundle.js with hash QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE 
+
+[2024-07-26T07:32:13Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE\bundle.js
+
+[2024-07-26T07:32:13Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:32:13Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:32:13Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installing DNAs for language QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE 
+
+[2024-07-26T07:32:14Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installed DNA's: [object Object] 
+[2024-07-26T07:32:14Z INFO  rust_executor::js_core::utils_extension] [JSCORE]:  with result: 
+
+[2024-07-26T07:32:14Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: {"installed_app_id":"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE","cell_info":{"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE-agent-store":[{"provisioned":{"cell_id":[{"0":132,"1":45,"2":36,"3":198,"4":122,"5":29,"6":67,"7":215,"8":234,"9":243,"10":232,"11":215,"12":186,"13":254,"14":119,"15":14,"16":17,"17":136,"18":237,"19":150,"20":140,"21":162,"22":211,"23":205,"24":22,"25":73,"26":124,"27":241,"28":67,"29":164,"30":246,"31":101,"32":3,"33":185,"34":99,"35":151,"36":37,"37":170,"38":123},{"0":132,"1":32,"2":36,"3":132,"4":134,"5":48,"6":174,"7":62,"8":97,"9":181,"10":67,"11":2,"12":66,"13":25,"14":214,"15":223,"16":2,"17":158,"18":8,"19":155,"20":225,"21":159,"22":72,"23":13,"24":99,"25":144,"26":39,"27":51,"28":176,"29":185,"30":121,"31":16,"32":52,"33":76,"34":108,"35":240,"36":119,"37":250,"38":137}],"dna_modifiers":{"network_seed":"00000000-0000-0000-0000-000000000000","properties":{"0":192},"origin_time":1644620719470323,"quantum_time":{"secs":300,"nanos":0}},"name":"agent-store"}}]},"status":"running","agent_pub_key":{"0":132,"1":32,"2":36,"3":132,"4":134,"5":48,"6":174,"7":62,"8":97,"9":181,"10":67,"11":2,"12":66,"13":25,"14":214,"15":223,"16":2,"17":158,"18":8,"19":155,"20":225,"21":159,"22":72,"23":13,"24":99,"25":144,"26":39,"27":51,"28":176,"29":185,"30":121,"31":16,"32":52,"33":76,"34":108,"35":240,"36":119,"37":250,"38":137},"manifest":{"manifest_version":"1","name":"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE","description":null,"roles":[{"name":"QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE-agent-store","provisioning":null,"dna":{"path":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\h\\d\\QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE-agent-store.dna","modifiers":{"network_seed":null,"properties":null,"origin_time":null,"quantum_time":null},"installed_hash":"uhC0kxnodQ9fq8-jXuv53DhGI7ZaMotPNFkl88UOk9mUDuWOXJap7","clone_limit":0}}]}} 
+
+[2024-07-26T07:32:19Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:32:19Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5\bundle.js 
+
+[2024-07-26T07:32:19Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:02:19 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:32:19Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5\bundle.js with hash QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5 
+
+[2024-07-26T07:32:19Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdjgDBV1mpq42HXF6RzubNbwoSiFVZeQevJU3Rwa6hE5i5\bundle.js
+
+[2024-07-26T07:32:19Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:32:19Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:32:24Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:32:24Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS\bundle.js 
+
+[2024-07-26T07:32:24Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:02:24 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:32:24Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS\bundle.js with hash QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS 
+
+[2024-07-26T07:32:24Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwddxFCzVD63LgR8MTBaUEcwf9jhB3XjLbYBp2q8V1MqVtS\bundle.js
+
+[2024-07-26T07:32:24Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:32:24Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:32:24Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js with hash QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2 
+
+[2024-07-26T07:32:24Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdYyneMATUn7gaJMHJZPE9nodSZ9vG8QU72uhXjS5XpBG2\bundle.js
+
+[2024-07-26T07:32:24Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:32:24Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:32:24Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Core languages init'd 
+
+[2024-07-26T07:32:24Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: wait for languages 
+
+[2024-07-26T07:32:24Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: finished wait 
+[2024-07-26T07:32:24Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Agent doesn't have direct message language set yet. Creating from template... 
+[2024-07-26T07:32:24Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Cloning direct message language from template... 
+
+[2024-07-26T07:32:24Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: Now creating clone with parameters: [object Object] 
+
+[2024-07-26T07:32:24Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.readAndTemplateHolochainDNA: unpacking DNA 
+
+[2024-07-26T07:32:24Z INFO  rust_executor::holochain_service] UnPacked dna at path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\languages\\temp\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ"
+
+[2024-07-26T07:32:24Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.readAndTemplateHolochainDNA: packing DNA 
+
+[2024-07-26T07:32:24Z INFO  rust_executor::holochain_service] Got dna name: "direct-message-language"
+
+[2024-07-26T07:32:24Z INFO  rust_executor::holochain_service] Packed dna at path: "C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\languages\\temp\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ\\QmzSYwdePqjD3uuZiKNGLy32XHWEeHKY61vU5knzAQw9PtC7cxJ\\direct-message-language.dna"
+
+[2024-07-26T07:32:24Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Writing meta & bundle path:  tst-tmp\languages\meta-QmzSYwdkrYhjUvt8VJQBx8tX2LeA444gxwPV1JH91EJmTsBVZTv.json tst-tmp\languages\bundle-QmzSYwdkrYhjUvt8VJQBx8tX2LeA444gxwPV1JH91EJmTsBVZTv.js 
+
+[2024-07-26T07:32:24Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: DM Language cloned... 
+
+[2024-07-26T07:32:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.installLanguage: INSTALLING LANGUAGE: [object Object] 
+
+[2024-07-26T07:32:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Saving at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdkrYhjUvt8VJQBx8tX2LeA444gxwPV1JH91EJmTsBVZTv\bundle.js 
+
+[2024-07-26T07:32:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Fri Jul 26 2024 13:02:25 GMT+0530 (India Standard Time) LanguageController.installLanguage: installed language 
+
+[2024-07-26T07:32:25Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: loading language at path C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdkrYhjUvt8VJQBx8tX2LeA444gxwPV1JH91EJmTsBVZTv\bundle.js with hash QmzSYwdkrYhjUvt8VJQBx8tX2LeA444gxwPV1JH91EJmTsBVZTv 
+
+[2024-07-26T07:32:25Z INFO  rust_executor::js_core::utils_extension] Trying to load module: file://C:\Users\fayee\dev\ad4m\tests\js\tst-tmp\agents\alice\ad4m\languages\QmzSYwdkrYhjUvt8VJQBx8tX2LeA444gxwPV1JH91EJmTsBVZTv\bundle.js
+
+[2024-07-26T07:32:25Z INFO  rust_executor::js_core] Module loaded!
+
+[2024-07-26T07:32:25Z WARN  rust_executor::js_core::utils_extension] [JSCORE]: LanguageController.loadLanguage: language loaded! 
+
+[2024-07-26T07:32:25Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installing DNAs for language QmzSYwdkrYhjUvt8VJQBx8tX2LeA444gxwPV1JH91EJmTsBVZTv 
+
+[2024-07-26T07:32:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: Installed DNA's: [object Object] 
+[2024-07-26T07:32:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]:  with result: 
+
+[2024-07-26T07:32:25Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: {"installed_app_id":"QmzSYwdkrYhjUvt8VJQBx8tX2LeA444gxwPV1JH91EJmTsBVZTv","cell_info":{"QmzSYwdkrYhjUvt8VJQBx8tX2LeA444gxwPV1JH91EJmTsBVZTv-direct-message-language":[{"provisioned":{"cell_id":[{"0":132,"1":45,"2":36,"3":120,"4":185,"5":89,"6":23,"7":239,"8":105,"9":170,"10":173,"11":163,"12":35,"13":126,"14":49,"15":154,"16":216,"17":22,"18":44,"19":205,"20":233,"21":85,"22":101,"23":78,"24":110,"25":47,"26":173,"27":170,"28":29,"29":108,"30":31,"31":129,"32":75,"33":65,"34":137,"35":195,"36":174,"37":165,"38":15},{"0":132,"1":32,"2":36,"3":132,"4":134,"5":48,"6":174,"7":62,"8":97,"9":181,"10":67,"11":2,"12":66,"13":25,"14":214,"15":223,"16":2,"17":158,"18":8,"19":155,"20":225,"21":159,"22":72,"23":13,"24":99,"25":144,"26":39,"27":51,"28":176,"29":185,"30":121,"31":16,"32":52,"33":76,"34":108,"35":240,"36":119,"37":250,"38":137}],"dna_modifiers":{"network_seed":"e186b5a8-d261-458f-8037-d01e4d2df2cc","properties":{"0":131,"1":185,"2":114,"3":101,"4":99,"5":105,"6":112,"7":105,"8":101,"9":110,"10":116,"11":95,"12":104,"13":99,"14":95,"15":97,"16":103,"17":101,"18":110,"19":116,"20":95,"21":112,"22":117,"23":98,"24":107,"25":101,"26":121,"27":217,"28":78,"29":56,"30":52,"31":50,"32":48,"33":50,"34":52,"35":56,"36":52,"37":56,"38":54,"39":51,"40":48,"41":97,"42":101,"43":51,"44":101,"45":54,"46":49,"47":98,"48":53,"49":52,"50":51,"51":48,"52":50,"53":52,"54":50,"55":49,"56":57,"57":100,"58":54,"59":100,"60":102,"61":48,"62":50,"63":57,"64":101,"65":48,"66":56,"67":57,"68":98,"69":101,"70":49,"71":57,"72":102,"73":52,"74":56,"75":48,"76":100,"77":54,"78":51,"79":57,"80":48,"81":50,"82":55,"83":51,"84":51,"85":98,"86":48,"87":98,"88":57,"89":55,"90":57,"91":49,"92":48,"93":51,"94":52,"95":52,"96":99,"97":54,"98":99,"99":102,"100":48,"101":55,"102":55,"103":102,"104":97,"105":56,"106":57,"107":173,"108":114,"109":101,"110":99,"111":105,"112":112,"113":105,"114":101,"115":110,"116":116,"117":95,"118":100,"119":105,"120":100,"121":217,"122":56,"123":100,"124":105,"125":100,"126":58,"127":107,"128":101,"129":121,"130":58,"131":122,"132":54,"133":77,"134":107,"135":103,"136":107,"137":54,"138":54,"139":104,"140":86,"141":82,"142":70,"143":70,"144":56,"145":65,"146":54,"147":55,"148":50,"149":113,"150":114,"151":89,"152":86,"153":69,"154":53,"155":50,"156":118,"157":52,"158":54,"159":115,"160":100,"161":71,"162":114,"163":97,"164":77,"165":104,"166":54,"167":70,"168":70,"169":81,"170":57,"171":77,"172":102,"173":88,"174":100,"175":80,"176":84,"177":101,"178":76,"179":163,"180":117,"181":105,"182":100,"183":217,"184":36,"185":101,"186":49,"187":56,"188":54,"189":98,"190":53,"191":97,"192":56,"193":45,"194":100,"195":50,"196":54,"197":49,"198":45,"199":52,"200":53,"201":56,"202":102,"203":45,"204":56,"205":48,"206":51,"207":55,"208":45,"209":100,"210":48,"211":49,"212":101,"213":52,"214":100,"215":50,"216":100,"217":102,"218":50,"219":99,"220":99},"origin_time":1644620719470000,"quantum_time":{"secs":300,"nanos":0}},"name":"direct-message-language"}}]},"status":"running","agent_pub_key":{"0":132,"1":32,"2":36,"3":132,"4":134,"5":48,"6":174,"7":62,"8":97,"9":181,"10":67,"11":2,"12":66,"13":25,"14":214,"15":223,"16":2,"17":158,"18":8,"19":155,"20":225,"21":159,"22":72,"23":13,"24":99,"25":144,"26":39,"27":51,"28":176,"29":185,"30":121,"31":16,"32":52,"33":76,"34":108,"35":240,"36":119,"37":250,"38":137},"manifest":{"manifest_version":"1","name":"QmzSYwdkrYhjUvt8VJQBx8tX2LeA444gxwPV1JH91EJmTsBVZTv","description":null,"roles":[{"name":"QmzSYwdkrYhjUvt8VJQBx8tX2LeA444gxwPV1JH91EJmTsBVZTv-direct-message-language","provisioning":null,"dna":{"path":"C:\\Users\\fayee\\dev\\ad4m\\tests\\js\\tst-tmp\\agents\\alice\\ad4m\\h\\d\\QmzSYwdkrYhjUvt8VJQBx8tX2LeA444gxwPV1JH91EJmTsBVZTv-direct-message-language.dna","modifiers":{"network_seed":null,"properties":null,"origin_time":null,"quantum_time":null},"installed_hash":"uhC0keLlZF-9pqq2jI34xmtgWLM3pVWVObi-tqh1sH4FLQYnDrqUP","clone_limit":0}}]}} 
+[2024-07-26T07:32:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: HolochainService: setting holochains signal callback for language QmzSYwdkrYhjUvt8VJQBx8tX2LeA444gxwPV1JH91EJmTsBVZTv 
+
+[2024-07-26T07:32:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: adding callback on dm language 
+
+[2024-07-26T07:32:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: did:key:z6Mkgk66hVRFF8A672qrYVE52v46sdGraMh6FFQ9MfXdPTeL did:key:z6Mkgk66hVRFF8A672qrYVE52v46sdGraMh6FFQ9MfXdPTeL 
+
+[2024-07-26T07:32:25Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: DM Language installed... 
+
+[2024-07-26T07:32:25Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Storing agent profile {"did":"did:key:z6Mkgk66hVRFF8A672qrYVE52v46sdGraMh6FFQ9MfXdPTeL","directMessageLanguage":"QmzSYwdkrYhjUvt8VJQBx8tX2LeA444gxwPV1JH91EJmTsBVZTv","perspective":{"links":[]}} 
+
+[2024-07-26T07:32:25Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: [34m 2024-07-26T07:32:25.694Z HolochainService calling zome function: agent-store agent_store create_agent_expression {"author":"did:key:z6Mkgk66hVRFF8A672qrYVE52v46sdG 
+    For language with address QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE [0m 
+
+[2024-07-26T07:32:25Z INFO  rust_executor::holochain_service] Calling zome function: "QmzSYwdZfxLvW1DkEEqDG66roy3pBNakmZwiKBM6g3n8HQZJndE" "agent-store" "agent_store" "create_agent_expression"
+
+[2024-07-26T07:32:26Z WARN  holochain::core::ribosome::real_ribosome] 'cache.get(cache_key, &wasm)' exceeded MID time threshold elapsed=1.2292989s intervals=[1, 1000, 10000]
+
+[2024-07-26T07:32:26Z ERROR rust_executor::js_core::utils_extension] [JSCORE]: [31m HolochainService: ERROR calling zome function: Error: Wasm runtime error while working with Ribosome: RuntimeError: WasmError { file: "C:\\Users\\fayee\\.cargo\\git\\checkouts\\holochain-392a7f3c4fd375dd\\10841e4\\crates\\holochain\\src\\core\\ribosome\\real_ribosome.rs", line: 405, error: Compile("Error while importing \"__wbindgen_placeholder__\".\"__wbindgen_describe\": unknown import. Expected Function(FunctionType { params: [I32], results: [] })") }: RuntimeError: WasmError { file: "C:\\Users\\fayee\\.cargo\\git\\checkouts\\holochain-392a7f3c4fd375dd\\10841e4\\crates\\holochain\\src\\core\\ribosome\\real_ribosome.rs", line: 405, error: Compile("Error while importing \"__wbindgen_placeholder__\".\"__wbindgen_describe\": unknown import. Expected Function(FunctionType { params: [I32], results: [] })") }: WasmError { file: "C:\\Users\\fayee\\.cargo\\git\\checkouts\\holochain-392a7f3c4fd375dd\\10841e4\\crates\\holochain\\src\\core\\ribosome\\real_ribosome.rs", line: 405, error: Compile("Error while importing \"__wbindgen_placeholder__\".\"__wbindgen_describe\": unknown import. Expected Function(FunctionType { params: [I32], results: [] })") } [0m 
+
+[2024-07-26T07:32:26Z DEBUG rust_executor::js_core::utils_extension] [JSCORE]: DM Language published... 
+[2024-07-26T07:32:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Agent's direct message language successfully cloned, installed and published! 
+
+[2024-07-26T07:32:26Z INFO  rust_executor::graphql::mutation_resolvers] AD4M init complete
+
+        1) can get and create agent store
+cleanedPerspective {
+  links: [
+    {
+      author: 'did:test',
+      timestamp: '2024-07-26T07:32:26.962Z',
+      data: [Object],
+      proof: [Object]
+    }
+  ]
+}
+[2024-07-26T07:32:26Z INFO  rust_executor::js_core::utils_extension] [JSCORE]: Storing agent profile {"did":"did:key:z6Mkgk66hVRFF8A672qrYVE52v46sdGraMh6FFQ9MfXdPTeL","directMessageLanguage":"QmzSYwdkrYhjUvt8VJQBx8tX2LeA444gxwPV1JH91EJmTsBVZTv","perspective":{"links":[{"author":"did:test","timestamp":"2024-07-26T07:32:26.962Z","data":{"predicate":"pred","source":"src","target":"target"},"proof":{"key":"key","signature":"sig","valid":false,"invalid":true},"status":null}]}} 
+
+FATAL PANIC PanicInfo {
+    payload: Any { .. },
+    message: Some(
+        called `Result::unwrap()` on an `Err` value: main key not found. call createMainKey() first,
+    ),
+    location: Location {
+        file: "rust-executor\\src\\agent\\mod.rs",
+        line: 35,
+        col: 10,
+    },
+    can_unwind: true,
+    force_no_backtrace
+: false,
+}
+thread '<unnamed>' panicked at rust-executor\src\agent\mod.rs:35:10:
+called `Result::unwrap()` on an `Err` value: main key not found. call createMainKey() first
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+[
+  {
+    message: 'channel closed',
+    locations: [ { line: 2, column: 3 } ],
+    path: [ 'agentUpdatePublicPerspective' ]
+  }
+]
+        2) can get and create agent expression profile
+kkkk 1
+[2024-07-26T07:32:27Z DEBUG rust_executor::pubsub] Subscribing to topic: agent-updated-topic
+[2024-07-26T07:32:27Z DEBUG rust_executor::pubsub] Subscribing to topic: agent-status-changed-topic
+
+kkkk 2
+kkkk 3
+[2024-07-26T07:32:27Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-link-added-topic
+[2024-07-26T07:32:27Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-link-removed-topic
+[2024-07-26T07:32:27Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-link-updated-topic
+[2024-07-26T07:32:27Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-sync-state-change-topic
+
+kkkk 4
+FATAL PANIC PanicInfo {
+    payload: Any { .. },
+    message: Some(
+        called `Result::unwrap()` on an `Err` value: PoisonError { .. },
+    ),
+    location: Location {
+        file: "rust-executor\\src\\wallet.rs",
+        line: 169,
+        col: 44,
+    },
+    can_unwind: true,
+    force_no_backtrace: false,
+}
+thread 'graphql_server' panicked at rust-executor\src\wallet.rs:169:44:
+called `Result::unwrap()` on an `Err` value: PoisonError { .. }
+
+FATAL PANIC PanicInfo {
+    payload: Any { .. },
+    
+message: Some(
+        called `Result::unwrap()` on an `Err` value: PoisonError { .. },
+    ),
+    location: Location {
+        file: "rust-executor\\src\\wallet.rs",
+        line: 169,
+        col: 44,
+    },
+    can_unwind: true,
+    force_no_backtrace: false,
+}
+thread 'graphql_server' panicked at rust-executor\src\wallet.rs:169:44:
+called `Result::unwrap()` on an `Err` value: PoisonError { .. }
+
+[2024-07-26T07:32:30Z INFO  warp::server] 127.0.0.1:55106 "GET /graphql HTTP/1.1" 101 "-" "-" 17µs
+
+[2024-07-26T07:32:30Z DEBUG rust_executor::pubsub] Subscribing to topic: agent-updated-topic
+[2024-07-26T07:32:30Z WARN  rust_executor::pubsub] Found closed subscriber, removing...
+[2024-07-26T07:32:30Z WARN  rust_executor::pubsub] Found closed subscriber, removing...
+[2024-07-26T07:32:30Z WARN  rust_executor::pubsub] Found closed subscriber, removing...
+[2024-07-26T07:32:30Z WARN  rust_executor::pubsub] Found closed subscriber, removing...
+[2024-07-26T07:32:30Z WARN  rust_executor::pubsub] Found closed subscriber, removing...
+[2024-07-26T07:32:30Z WARN  rust_executor::pubsub] Found closed subscriber, removing...
+[2024-07-26T07:32:30Z WARN  rust_executor::pubsub] Found closed subscriber, removing...
+[2024-07-26T07:32:30Z WARN  rust_executor::pubsub] Found closed subscriber, removing...
+[2024-07-26T07:32:30Z WARN  rust_executor::pubsub] Found closed subscriber, removing...
+[2024-07-26T07:32:30Z WARN  rust_executor::pubsub] Found closed subscriber, removing...
+[2024-07-26T07:32:30Z WARN  rust_executor::pubsub] Found closed subscriber, removing...
+[2024-07-26T07:32:30Z WARN  rust_executor::pubsub] Found closed subscriber, removing...
+[2024-07-26T07:32:30Z WARN  rust_executor::pubsub] Found closed subscriber, removing...
+[2024-07-26T07:32:30Z WARN  rust_executor::pubsub] Found closed subscriber, removing...
+[2024-07-26T07:32:30Z WARN  rust_executor::pubsub] Found closed subscriber, removing...
+[2024-07-26T07:32:30Z DEBUG rust_executor::pubsub] Subscribing to topic: agent-status-changed-topic
+[2024-07-26T07:32:30Z DEBUG rust_executor::pubsub] Subscribing to topic: apps-changed
+[2024-07-26T07:32:30Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-added-topic
+[2024-07-26T07:32:30Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-updated-topic
+[2024-07-26T07:32:30Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-removed-topic
+[2024-07-26T07:32:30Z DEBUG rust_executor::pubsub] Subscribing to topic: runtime-messaged-received-topic
+[2024-07-26T07:32:30Z DEBUG rust_executor::pubsub] Subscribing to topic: exception-occurred-topic
+[2024-07-26T07:32:30Z DEBUG rust_executor::pubsub] Subscribing to topic: runtime-notification-triggered-topic
+[2024-07-26T07:32:30Z DEBUG rust_executor::pubsub] Subscribing to topic: agent-updated-topic
+[2024-07-26T07:32:30Z DEBUG rust_executor::pubsub] Subscribing to topic: agent-status-changed-topic
+
+[2024-07-26T07:32:30Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-link-added-topic
+
+[2024-07-26T07:32:30Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-link-removed-topic
+
+[2024-07-26T07:32:30Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-link-updated-topic
+[2024-07-26T07:32:30Z DEBUG rust_executor::pubsub] Subscribing to topic: perspective-sync-state-change-topic
+
+FATAL PANIC PanicInfo {
+    payload: 
+Any { .. },
+    message: Some(
+        called `Result::unwrap()` on an `Err` value: PoisonError { .. },
+    ),
+    location: Location {
+        file: "rust-executor\\src\\wallet.rs",
+
+        line: 169,
+        col: 44,
+    },
+    can_unwind: true,
+
+    force_no_backtrace: false,
+}
+thread 'graphql_server' panicked at rust-executor\src\wallet.rs:169:44:
+called `Result::unwrap()` on an `Err` value: PoisonError { .. }
+
+
+
+#
+# Fatal error in , line 0
+# Check failed: maybe_code.has_value().
+#
+#
+#
+#FailureMessage Object: 000000B0E1BFB8E0
+
+==== C stack trace ===============================
+
+
+	v8::base::debug::StackTrace::StackTrace [0x00007FF72397F8DB+27] (.\..\..\..\..\v8\src\base\debug\stack_trace_win.cc:173)
+
+	v8::platform::`anonymous namespace'::PrintStackTrace [0x00007FF72397EA17+39] (.\..\..\..\..\v8\src\libplatform\default-platform.cc:28)
+
+
+	V8_Fatal [0x00007FF7239DAD3A+266] (
+.\..\..\..\..\v8\src\base\logging.cc:204)
+
+	v8::internal::Heap::GcSafeFindCodeForInnerPointer [0x00007FF723A713DA+170] (.\..\..\..\..\v8\src\heap\heap.cc:7364
+)
+
+	v8::internal::InnerPointerToCodeCache::GetCacheEntry [0x00007FF723B4C9B5+149] (.\..\..\..\..\v8\src\execution\frames.cc
+:3578)
+
+	v8::internal::ExitFrame::Iterate [0x00007FF723B4B037+55] (
+.\..\..\..\..\v8\src\execution\frames.cc:1008)
+
+	v8::internal::Isolate::Iterate [0x00007FF723A43DF0+432] (.\..\..\..\..\v8\src\execution\isolate.cc:625)
+
+
+	v8::internal::Heap::IterateRoots [0x00007FF723A6BE39+457] (.\..\..\..\..\v8\src\heap\heap.cc:4989)
+
+	v8::internal::MarkCompactCollector::MarkRoots [0x00007FF723DB3109+57] (.\..\..\..\..\v8\src\heap\mark-compact.cc:
+1851)
+
+	v8::internal::MarkCompactCollector::MarkLiveObjects [0x00007FF723DAB217+1623] (.\..\..\..\..\v8\src\heap\mark-compact.cc:
+2447)
+
+	v8::internal::MarkCompactCollector::CollectGarbage [0x00007FF723DAAB58+104] (.\..\..\..\..\v8\src\heap\mark-compact.cc:441)
+
+
+	v8::internal::Heap::MarkCompact [0x00007FF723A66874+292] (.\..\..\..\..\v8\src\heap\heap.cc:
+2824)
+
+	v8::internal::Heap::PerformGarbageCollection [0x00007FF723A65EB2+1074] (.\..\..\..\..\v8\src\heap\heap.cc:
+2508)
+
+	v8::internal::Heap::CollectGarbage::<lambda_9>::operator() [0x00007FF723A776C8+1080] (.\..\..\..\..\v8\src\heap\heap.cc:1914)
+
+	heap::base::Stack::SetMarkerAndCallbackImpl<`lambda at ..\..\..\..\v8\src\heap\heap.cc:1873:40'> [0x00007FF723A77274+20] (.\..\..\..\..\v8\src\heap\base\stack.h
+:169)
+
+	PushAllRegistersAndIterateStack [0x00007FF723FE3469+109]
+
+        3) can mutate agent public profile

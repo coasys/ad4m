@@ -44,4 +44,5 @@ syntect = "5.0"
 ctrlc = "3.4.0"
 
 #holochain_kitsune_p2p = "0.3.0-beta-dev.37"
-kitsune_p2p_types = { version = "0.3.2-rc.0", git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739" }
+# kitsune_p2p_types = { version = "0.4.0-dev.6", git = "https://github.com/coasys/holochain.git", rev = "dbc501b27e1728132655860993a08633136d9139" }
+kitsune_p2p_types = { version = "0.4.0-dev.6", path = "../../holochain/crates/kitsune_p2p/types" }

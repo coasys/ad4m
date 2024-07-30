@@ -17,7 +17,7 @@ import { Connect } from "./components/Connect";
 import Apps from "./components/Apps";
 import TrayMessage from "./components/TrayMessage";
 
-const App = () => {
+export const App = () => {
   const [opened, setOpened] = useState(false);
   const {
     state: { candidate, did, auth, notifications },

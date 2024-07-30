@@ -75,16 +75,16 @@ jsonwebtoken = "8.3.0"
 
 webbrowser = "0.8.12"
 
-# holochain = { version = "0.3.1-rc.0", features = ["test_utils", "default"] }
-# holochain_cli_bundle = { version = "0.3.1-rc.0" }
-# holochain_types = { version = "0.3.1-rc.0" }
-# holochain_cli_run_local_services = { version = "0.3.1-rc.0" }
-# kitsune_p2p_types = { version = "0.3.1-rc.0" }
-holochain = { version = "0.3.2-rc.1", features = ["test_utils", "default"], git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739" }
-holochain_cli_bundle = { version = "0.3.2-rc.1", git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739" }
-holochain_types = { version = "0.3.2-rc.1", git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739" }
-holochain_cli_run_local_services = { version = "0.3.2-rc.0", git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739" }
-kitsune_p2p_types = { version = "0.3.2-rc.0", git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739" }
+holochain = { version = "0.4.0-dev.7", features = ["test_utils", "default"], path = "../../holochain/crates/holochain" }
+holochain_cli_bundle = { version = "0.4.0-dev.7", path = "../../holochain/crates/hc_bundle" }
+holochain_types = { version = "0.4.0-dev.7", path = "../../holochain/crates/holochain_types" }
+holochain_cli_run_local_services = { version = "0.4.0-dev.7", path = "../../holochain/crates/hc_run_local_services" }
+kitsune_p2p_types = { version = "0.4.0-dev.6", path = "../../holochain/crates/kitsune_p2p/types" }
+# holochain = { version = "0.4.0-dev.7", features = ["test_utils", "default"], git = "https://github.com/coasys/holochain.git", rev = "dbc501b27e1728132655860993a08633136d9139" }
+# holochain_cli_bundle = { version = "0.4.0-dev.7", git = "https://github.com/coasys/holochain.git", rev = "dbc501b27e1728132655860993a08633136d9139" }
+# holochain_types = { version = "0.4.0-dev.7", git = "https://github.com/coasys/holochain.git", rev = "dbc501b27e1728132655860993a08633136d9139" }
+# holochain_cli_run_local_services = { version = "0.4.0-dev.7", git = "https://github.com/coasys/holochain.git", rev = "dbc501b27e1728132655860993a08633136d9139" }
+# kitsune_p2p_types = { version = "0.4.0-dev.6", git = "https://github.com/coasys/holochain.git", rev = "dbc501b27e1728132655860993a08633136d9139" }
 
 scryer-prolog = { version = "0.9.4" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
