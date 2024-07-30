@@ -11,7 +11,6 @@ export default function Settings({
   changeUrl,
   changePort,
   clearState,
-  isMobile
 }) {
   const proxyClasses = `button ${
     isRemote ? "button--primary" : "button--secondary"
@@ -81,7 +80,6 @@ export default function Settings({
                 Connect
               </button>
             </div>`}
-            ${isMobile ? html`
             <div class="text-center">or</div>
             <div class="buttons">
             <button 
@@ -91,7 +89,6 @@ export default function Settings({
                 Clear state
               </button>
             </div
-              `: null}
     </div>
   `;
 }

@@ -843,7 +843,6 @@ export class Ad4mConnectElement extends LitElement {
         connectToPort: this._client.connectToPort,
         connectRemote: this.connectRemote,
         clearState: this.clearState,
-        isMobile: this._isMobile,
       });
     }
 
