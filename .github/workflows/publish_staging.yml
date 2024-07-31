@@ -165,8 +165,10 @@ jobs:
 
     - name: Sign the app
       if: matrix.platform != 'macos-latest'
+      env:
+        APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
       run: |
-        codesign --deep --force --verify --verbose --sign "Developer ID Application: Your Name (Your Team ID)" "/Users/runner/work/ad4m/ad4m/target/universal-apple-darwin/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_universal.dmg"
+        codesign --deep --force --verify --verbose --sign "$APPLE_SIGNING_IDENTITY" "/Users/runner/work/ad4m/ad4m/target/universal-apple-darwin/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_universal.dmg"
 
     - name: Upload Release Deb Asset
       id: upload-release-deb-asset
