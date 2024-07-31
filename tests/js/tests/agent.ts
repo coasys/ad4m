@@ -24,6 +24,7 @@ export default function agentTests(testContext: TestContext) {
                 // expect(create.name).to.equal("test");
     
                 const lockAgent = await ad4mClient.agent.lock("passphrase");
+                await sleep(3000)
                 expect(lockAgent.isInitialized).to.be.true;
                 expect(lockAgent.isUnlocked).to.be.false;
 

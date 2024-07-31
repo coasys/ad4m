@@ -16,7 +16,7 @@ export async function connectWebSocket(url, timeout = 10000) {
       if (!url.includes("localhost")) {
         resolve(new WebSocket(url));
       }
-      
+
       const websocket = new WebSocket(url);
 
       websocket.onopen = () => {
@@ -39,10 +39,10 @@ export async function checkPort(port: number) {
   try {
     const res = await fetch(`http://localhost:${port}/graphql/`, {
       signal: Timeout().signal,
-      mode: "no-cors",
+      mode: "cors",
     });
 
-    if (res.status === 400 || res.status === 0) {
+    if (res.status === 400 || res.status === 0 || res.status === 200) {
       return port;
     } else {
       throw new Error(`Could not connect to port ${port}`);
