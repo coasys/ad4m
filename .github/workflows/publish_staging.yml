@@ -136,7 +136,6 @@ jobs:
       env:
         APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
         APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-        PROVISIONING_PROFILE: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
       run: |
         echo $APPLE_CERTIFICATE | base64 --decode > certificate.p12
         security create-keychain -p "actions" build.keychain
@@ -144,7 +143,6 @@ jobs:
         security list-keychain -d user -s build.keychain
         security unlock-keychain -p "actions" build.keychain
         mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-        echo $PROVISIONING_PROFILE | base64 --decode > ~/Library/MobileDevice/Provisioning\ Profiles/profile.mobileprovision
         security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "actions" build.keychain
 
     - name: Build AD4M-CLI & build Launcher binary (macos/linux-latest)
@@ -154,6 +152,10 @@ jobs:
         TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         APPLE_ID: ${{ secrets.APPLE_ID }}
         APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
       run: pnpm run package-ad4m
 
     - name:  Build AD4M-CLI & build Launcher binary (windows-latest)
@@ -162,11 +164,6 @@ jobs:
         TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
         TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
       run: pnpm run package-ad4m
-
-    - name: Sign the app
-      if: matrix.platform != 'macos-latest'
-      run: |
-        codesign --deep --force --verify --verbose --sign "Developer ID Application: Your Name (Your Team ID)" "/Users/runner/work/ad4m/ad4m/target/universal-apple-darwin/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_universal.dmg"
 
     - name: Upload Release Deb Asset
       id: upload-release-deb-asset
