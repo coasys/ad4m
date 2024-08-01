@@ -92,6 +92,8 @@ pub async fn init_engine_facts(all_links: Vec<DecoratedLinkExpression>, neighbou
     // link/5
     lines.push(":- discontiguous(triple/3).".to_string());
     lines.push(":- discontiguous(link/5).".to_string());
+    lines.push(":- dynamic(triple/3).".to_string());
+    lines.push(":- dynamic(link/5).".to_string());
 
     let links_without_sdna: Vec<_> = all_links.iter().filter(|l| !is_sdna_link(&l.data)).collect();
 
