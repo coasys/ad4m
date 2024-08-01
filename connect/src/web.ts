@@ -893,18 +893,22 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   mobileView() {
-    return MobileAppLogoButton(({
-      openModal: () => {
-        this.changeUIState("settings");
-        this._isOpen = !this._isOpen;
-      }
-    }))
+    if (this.mobile) {
+      return MobileAppLogoButton(({
+        openModal: () => {
+          this.changeUIState("settings");
+          this._isOpen = !this._isOpen;
+        }
+      }))
+    }
+
+    return null;
   }
 
   render() {
     console.log(this.authState,  this.connectionState, this.uiState, this._isOpen);
     if (this._isOpen === false) {
-      if (this.authState === "authenticated" && this.mobile) {
+      if (this.authState === "authenticated") {
         return this.mobileView();
       }
 
