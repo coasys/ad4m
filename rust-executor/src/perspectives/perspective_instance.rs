@@ -18,7 +18,7 @@ use crate::prolog_service::engine::PrologEngine;
 use crate::pubsub::{get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC};
 use crate::{db::Ad4mDb, types::*};
 use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveState, PerspectiveStateFilter};
-use super::sdna::{init_engine_facts, link_fact, triple_fact};
+use super::sdna::{generic_link_fact, init_engine_facts, is_sdna_link};
 use super::update_perspective;
 use super::utils::{prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string};
 use json5;
@@ -858,7 +858,13 @@ impl PerspectiveInstance {
                 log::error!("Error spawning Prolog engine: {:?}", e)
             };
 
-            let did_update = if (&diff.removals.is_empty()).clone() {
+            let fact_rebuild_needed = !(&diff.removals.is_empty()).clone() || 
+                diff.additions
+                    .iter()
+                    .find(|link| is_sdna_link(&link.data))
+                    .is_some();
+
+            let did_update = if !fact_rebuild_needed {
                 let mut assertions: Vec::<String> = Vec::new();
                 for addition in &diff.additions {
                     assertions.push(generic_link_fact("assert_link_and_triple", addition));

@@ -84,7 +84,7 @@ async fn node_facts(all_links: &Vec<&DecoratedLinkExpression>) -> Result<Vec<Str
 }
 
 
-fn is_sdna_link(link: &Link) -> bool {
+pub fn is_sdna_link(link: &Link) -> bool {
     link.source == "ad4m://self" && ["ad4m://has_subject_class", "ad4m://has_flow", "ad4m://has_custom_sdna"].contains(&link.predicate.as_deref().unwrap_or(""))
 }
 
