@@ -892,16 +892,20 @@ export class Ad4mConnectElement extends LitElement {
     }
   }
 
+  mobileView() {
+    return MobileAppLogoButton(({
+      openModal: () => {
+        this.changeUIState("settings");
+        this._isOpen = !this._isOpen;
+      }
+    }))
+  }
+
   render() {
     console.log(this.authState,  this.connectionState, this.uiState, this._isOpen);
     if (this._isOpen === false) {
       if (this.authState === "authenticated" && this.mobile) {
-        return MobileAppLogoButton(({
-          openModal: () => {
-            this.changeUIState("settings");
-            this._isOpen = true;
-          }
-        }))
+        return this.mobileView();
       }
 
       return null
@@ -912,6 +916,7 @@ export class Ad4mConnectElement extends LitElement {
         <div class="dialog">
           ${Header()}
           <main class="dialog__content">${this.renderViews()}</main>
+          ${this.mobileView()}
         </div>
         <div class="ad4mConnect__backdrop" />
       </div>
