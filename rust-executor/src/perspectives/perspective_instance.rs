@@ -1243,7 +1243,7 @@ impl PerspectiveInstance {
                                 prolog_value_to_json_string(property_value.clone())
                             }
                         },
-                        x => {
+                        _x => {
                             //println!("Couldn't get expression subjectentity: {:?}", x);
                             prolog_value_to_json_string(property_value.clone())
                         }
