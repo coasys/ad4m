@@ -18,7 +18,7 @@ use crate::prolog_service::engine::PrologEngine;
 use crate::pubsub::{get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC};
 use crate::{db::Ad4mDb, types::*};
 use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveState, PerspectiveStateFilter};
-use super::sdna::init_engine_facts;
+use super::sdna::{init_engine_facts, link_fact, triple_fact};
 use super::update_perspective;
 use super::utils::{prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string};
 use json5;
@@ -858,11 +858,42 @@ impl PerspectiveInstance {
                 log::error!("Error spawning Prolog engine: {:?}", e)
             };
 
-            if let Err(e) = self_clone.update_prolog_engine_facts().await {
-                log::error!(
-                    "Error while updating Prolog engine facts: {:?}", e
-                );
+            let did_update = if (&diff.removals.is_empty()).clone() {
+                let mut assertions: Vec::<String> = Vec::new();
+                for addition in &diff.additions {
+                    assertions.push(format!("asserta({})", triple_fact(addition)));
+                    assertions.push(format!("asserta({})", link_fact(addition)));
+                };
+
+                let query = format!("{}.", assertions.join(","));
+                match self_clone.prolog_query(query).await {
+                    Ok(QueryResolution::True) => true,
+                    Err(e) => {
+                        log::error!(
+                            "Error while running assertion query to updating Prolog engine facts: {:?}", e
+                        );
+                        false
+                    }
+                    other => {
+                        log::error!(
+                            "Error getting non-true result from assertion query while updating Prolog engine facts: {:?}", other
+                        );
+                        false
+                    }
+                }
             } else {
+                match self_clone.update_prolog_engine_facts().await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log::error!(
+                            "Error while updating Prolog engine facts: {:?}", e
+                        );
+                        false
+                    }
+                }
+            };
+
+            if did_update {
                 self_clone.pubsub_publish_diff(diff).await;
                 let after =  self_clone.notification_trigger_snapshot().await;
                 let new_matches = Self::subtract_before_notification_matches(before, after);

@@ -7,13 +7,13 @@ use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use log;
 
-fn triple_fact(l: &DecoratedLinkExpression) -> String {
-    format!("triple(\"{}\", \"{}\", \"{}\").", l.data.source, l.data.predicate.as_ref().unwrap_or(&"".to_string()), l.data.target)
+pub fn triple_fact(l: &DecoratedLinkExpression) -> String {
+    format!("triple(\"{}\", \"{}\", \"{}\")", l.data.source, l.data.predicate.as_ref().unwrap_or(&"".to_string()), l.data.target)
 }
 
-fn link_fact(l: &DecoratedLinkExpression) -> String {
+pub fn link_fact(l: &DecoratedLinkExpression) -> String {
     format!(
-        "link(\"{}\", \"{}\", \"{}\", {}, \"{}\").",
+        "link(\"{}\", \"{}\", \"{}\", {}, \"{}\")",
         l.data.source,
         l.data.predicate.as_ref().unwrap_or(&"".to_string()),
         l.data.target,
@@ -96,10 +96,10 @@ pub async fn init_engine_facts(all_links: Vec<DecoratedLinkExpression>, neighbou
     let links_without_sdna: Vec<_> = all_links.iter().filter(|l| !is_sdna_link(&l.data)).collect();
 
     for link in &links_without_sdna {
-        lines.push(triple_fact(link));
+        lines.push(format!("{}.", triple_fact(link)));
     }
     for link in &links_without_sdna {
-        lines.push(link_fact(link));
+        lines.push(format!("{}.", link_fact(link)));
     }
 
     // reachable/2
