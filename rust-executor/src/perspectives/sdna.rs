@@ -7,13 +7,18 @@ use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use log;
 
-pub fn triple_fact(l: &DecoratedLinkExpression) -> String {
+fn triple_fact(l: &DecoratedLinkExpression) -> String {
     format!("triple(\"{}\", \"{}\", \"{}\")", l.data.source, l.data.predicate.as_ref().unwrap_or(&"".to_string()), l.data.target)
 }
 
-pub fn link_fact(l: &DecoratedLinkExpression) -> String {
+fn link_fact(l: &DecoratedLinkExpression) -> String {
+    generic_link_fact("link", l)
+}
+
+pub fn generic_link_fact(predicate_name: &str, l: &DecoratedLinkExpression) -> String {
     format!(
-        "link(\"{}\", \"{}\", \"{}\", {}, \"{}\")",
+        "{}(\"{}\", \"{}\", \"{}\", {}, \"{}\")",
+        predicate_name,
         l.data.source,
         l.data.predicate.as_ref().unwrap_or(&"".to_string()),
         l.data.target,
@@ -324,6 +329,22 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
     "#;
 
     lines.extend(json_parser.split('\n').map(|s| s.to_string()));
+
+
+    let assert_link = r#"
+    assert_link(Source, Predicate, Target, Timestamp, Author) :-
+        \+ link(Source, Predicate, Target, Timestamp, Author),
+        assertz(link(Source, Predicate, Target, Timestamp, Author)).
+
+    assert_triple(Source, Predicate, Target) :-
+        \+ triple(Source, Predicate, Target),
+        assertz(triple(Source, Predicate, Target)).
+
+    assert_link_and_triple(Source, Predicate, Target, Timestamp, Author) :-
+        (assert_link(Source, Predicate, Target, Timestamp, Author) ; true),
+        (assert_triple(Source, Predicate, Target) ; true).
+"#;
+    lines.extend(assert_link.split('\n').map(|s| s.to_string()));
 
     lines.push(format!("agent_did(\"{}\").", agent::did()));    
 

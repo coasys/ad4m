@@ -861,8 +861,7 @@ impl PerspectiveInstance {
             let did_update = if (&diff.removals.is_empty()).clone() {
                 let mut assertions: Vec::<String> = Vec::new();
                 for addition in &diff.additions {
-                    assertions.push(format!("assertz({})", triple_fact(addition)));
-                    assertions.push(format!("assertz({})", link_fact(addition)));
+                    assertions.push(generic_link_fact("assert_link_and_triple", addition));
                 };
 
                 let query = format!("{}.", assertions.join(","));
