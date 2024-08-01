@@ -325,11 +325,6 @@ export default class Ad4mConnect {
         },
       }),
       on: {
-        connecting: () => {
-          if (!this.requestedRestart) {
-            this.notifyConnectionChange("connecting");
-          }
-        },
         opened: (socket: WebSocket) => {
           this.activeSocket = socket;
         },
