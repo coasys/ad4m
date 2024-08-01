@@ -239,12 +239,16 @@ export default class Ad4mConnect {
       if (port) {
         const found = await checkPort(port);
         this.setPort(found);
-      } else {
-        const port = await this.findPort();
-        this.setPort(port);
-      }
 
-      return this.buildClient();
+        return this.buildClient();
+      } else {
+        if (this.url.includes("localhost")) {
+          const port = await this.findPort();
+          this.setPort(port);
+
+          return this.buildClient();
+        }
+      }
     } catch (error) {
       this.notifyConnectionChange("not_connected");
       this.notifyAuthChange("unauthenticated");
@@ -266,6 +270,7 @@ export default class Ad4mConnect {
       await connectWebSocket(this.url, 10000);
       return this.buildClient();
     } catch (e) {
+      this.notifyConnectionChange("not_connected");
       return this.connectToPort();
     }
   }
@@ -290,9 +295,20 @@ export default class Ad4mConnect {
 
     // Make sure the url is valid
     try {
-      new WebSocket(this.url);
+      const websocket = new WebSocket(this.url);
+
+      websocket.onerror = (error) => {
+        this.notifyConnectionChange("not_connected");
+      };
+
+      setTimeout(() => {
+        if (websocket.readyState !== WebSocket.OPEN) {
+          this.notifyConnectionChange("not_connected");
+        }
+      }, 10000);
     } catch (e) {
       this.notifyConnectionChange("not_connected");
+      return;
     }
 
     if (this.apolloClient && this.wsClient) {

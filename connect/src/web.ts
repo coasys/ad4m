@@ -692,6 +692,7 @@ export class Ad4mConnectElement extends LitElement {
       this._isOpen = true;
     }
     if (event === "not_connected") {
+      this._isOpen = true;
       this.changeUIState("start");
     }
     const customEvent = new CustomEvent("connectionstatechange", {

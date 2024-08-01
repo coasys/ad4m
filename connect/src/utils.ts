@@ -13,19 +13,19 @@ function Timeout() {
 export async function connectWebSocket(url, timeout = 10000) {
   return Promise.race([
     new Promise((resolve, reject) => {
-      if (!url.includes("localhost")) {
-        resolve(new WebSocket(url));
+      try {
+        const websocket = new WebSocket(url);
+  
+        websocket.onopen = () => {
+          resolve(websocket);
+        };
+  
+        websocket.onerror = (error) => {
+          reject(error);
+        };
+      } catch (e) {
+        reject(e);
       }
-
-      const websocket = new WebSocket(url);
-
-      websocket.onopen = () => {
-        resolve(websocket);
-      };
-
-      websocket.onerror = (error) => {
-        reject(error);
-      };
     }),
     new Promise((resolve, reject) => {
       setTimeout(() => {
