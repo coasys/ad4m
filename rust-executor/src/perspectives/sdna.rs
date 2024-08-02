@@ -8,12 +8,17 @@ use std::convert::TryFrom;
 use log;
 
 fn triple_fact(l: &DecoratedLinkExpression) -> String {
-    format!("triple(\"{}\", \"{}\", \"{}\").", l.data.source, l.data.predicate.as_ref().unwrap_or(&"".to_string()), l.data.target)
+    format!("triple(\"{}\", \"{}\", \"{}\")", l.data.source, l.data.predicate.as_ref().unwrap_or(&"".to_string()), l.data.target)
 }
 
 fn link_fact(l: &DecoratedLinkExpression) -> String {
+    generic_link_fact("link", l)
+}
+
+pub fn generic_link_fact(predicate_name: &str, l: &DecoratedLinkExpression) -> String {
     format!(
-        "link(\"{}\", \"{}\", \"{}\", {}, \"{}\").",
+        "{}(\"{}\", \"{}\", \"{}\", {}, \"{}\")",
+        predicate_name,
         l.data.source,
         l.data.predicate.as_ref().unwrap_or(&"".to_string()),
         l.data.target,
@@ -79,7 +84,7 @@ async fn node_facts(all_links: &Vec<&DecoratedLinkExpression>) -> Result<Vec<Str
 }
 
 
-fn is_sdna_link(link: &Link) -> bool {
+pub fn is_sdna_link(link: &Link) -> bool {
     link.source == "ad4m://self" && ["ad4m://has_subject_class", "ad4m://has_flow", "ad4m://has_custom_sdna"].contains(&link.predicate.as_deref().unwrap_or(""))
 }
 
@@ -92,14 +97,16 @@ pub async fn init_engine_facts(all_links: Vec<DecoratedLinkExpression>, neighbou
     // link/5
     lines.push(":- discontiguous(triple/3).".to_string());
     lines.push(":- discontiguous(link/5).".to_string());
+    lines.push(":- dynamic(triple/3).".to_string());
+    lines.push(":- dynamic(link/5).".to_string());
 
     let links_without_sdna: Vec<_> = all_links.iter().filter(|l| !is_sdna_link(&l.data)).collect();
 
     for link in &links_without_sdna {
-        lines.push(triple_fact(link));
+        lines.push(format!("{}.", triple_fact(link)));
     }
     for link in &links_without_sdna {
-        lines.push(link_fact(link));
+        lines.push(format!("{}.", link_fact(link)));
     }
 
     // reachable/2
@@ -322,6 +329,22 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
     "#;
 
     lines.extend(json_parser.split('\n').map(|s| s.to_string()));
+
+
+    let assert_link = r#"
+    assert_link(Source, Predicate, Target, Timestamp, Author) :-
+        \+ link(Source, Predicate, Target, Timestamp, Author),
+        assertz(link(Source, Predicate, Target, Timestamp, Author)).
+
+    assert_triple(Source, Predicate, Target) :-
+        \+ triple(Source, Predicate, Target),
+        assertz(triple(Source, Predicate, Target)).
+
+    assert_link_and_triple(Source, Predicate, Target, Timestamp, Author) :-
+        (assert_link(Source, Predicate, Target, Timestamp, Author) ; true),
+        (assert_triple(Source, Predicate, Target) ; true).
+"#;
+    lines.extend(assert_link.split('\n').map(|s| s.to_string()));
 
     lines.push(format!("agent_did(\"{}\").", agent::did()));    
 
