@@ -498,7 +498,7 @@ describe("Prolog + Literals", () => {
                 before(async () => {
                     // @ts-ignore
                     const { name, sdna } = Message.generateSDNA();
-                    perspective!.addSdna(name, sdna, "subject_class")
+                    await perspective!.addSdna(name, sdna, "subject_class")
                 })
 
                 it("can find instances through the exact flag link", async() => {

@@ -18,7 +18,7 @@ use crate::prolog_service::engine::PrologEngine;
 use crate::pubsub::{get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC};
 use crate::{db::Ad4mDb, types::*};
 use crate::graphql::graphql_types::{DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveState, PerspectiveStateFilter};
-use super::sdna::init_engine_facts;
+use super::sdna::{generic_link_fact, init_engine_facts, is_sdna_link};
 use super::update_perspective;
 use super::utils::{prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string};
 use json5;
@@ -858,11 +858,47 @@ impl PerspectiveInstance {
                 log::error!("Error spawning Prolog engine: {:?}", e)
             };
 
-            if let Err(e) = self_clone.update_prolog_engine_facts().await {
-                log::error!(
-                    "Error while updating Prolog engine facts: {:?}", e
-                );
+            let fact_rebuild_needed = !(&diff.removals.is_empty()).clone() || 
+                diff.additions
+                    .iter()
+                    .find(|link| is_sdna_link(&link.data))
+                    .is_some();
+
+            let did_update = if !fact_rebuild_needed {
+                let mut assertions: Vec::<String> = Vec::new();
+                for addition in &diff.additions {
+                    assertions.push(generic_link_fact("assert_link_and_triple", addition));
+                };
+
+                let query = format!("{}.", assertions.join(","));
+                match self_clone.prolog_query(query).await {
+                    Ok(QueryResolution::True) => true,
+                    Err(e) => {
+                        log::error!(
+                            "Error while running assertion query to updating Prolog engine facts: {:?}", e
+                        );
+                        false
+                    }
+                    other => {
+                        log::error!(
+                            "Error getting non-true result from assertion query while updating Prolog engine facts: {:?}", other
+                        );
+                        false
+                    }
+                }
             } else {
+                match self_clone.update_prolog_engine_facts().await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log::error!(
+                            "Error while updating Prolog engine facts: {:?}", e
+                        );
+                        false
+                    }
+                }
+            };
+
+            if did_update {
                 self_clone.pubsub_publish_diff(diff).await;
                 let after =  self_clone.notification_trigger_snapshot().await;
                 let new_matches = Self::subtract_before_notification_matches(before, after);
@@ -1181,13 +1217,13 @@ impl PerspectiveInstance {
             let property_values_result = self.prolog_query(format!(r#"subject_class("{}", C), property_getter(C, "{}", "{}", Value)"#, class_name, base_expression, p)).await?;
             if let Some(property_value) = prolog_get_first_binding(&property_values_result, "Value") {
                 let result = self.prolog_query(format!(r#"subject_class("{}", C), property_resolve(C, "{}")"#, class_name, p)).await?;
-                println!("resolve query result for {}: {:?}", p, result);
+                //println!("resolve query result for {}: {:?}", p, result);
                 let resolve_expression_uri = QueryResolution::False != result;
-                println!("resolve_expression_uri for {}: {:?}", p, resolve_expression_uri);
+                //println!("resolve_expression_uri for {}: {:?}", p, resolve_expression_uri);
                 let value = if resolve_expression_uri {
                     match &property_value {
                         scryer_prolog::machine::parsed_results::Value::String(s) => {
-                            println!("getting expr url: {}", s);
+                            //println!("getting expr url: {}", s);
                             let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
 
                             if let Some(ref mut js) = *lock {
@@ -1207,8 +1243,8 @@ impl PerspectiveInstance {
                                 prolog_value_to_json_string(property_value.clone())
                             }
                         },
-                        x => {
-                            println!("Couldn't get expression subjectentity: {:?}", x);
+                        _x => {
+                            //println!("Couldn't get expression subjectentity: {:?}", x);
                             prolog_value_to_json_string(property_value.clone())
                         }
                     }
@@ -1217,7 +1253,7 @@ impl PerspectiveInstance {
                 };
                 object.insert(p.clone(), value);
             } else {
-                log::error!("Couldn't get a property value for class: `{}`, property: `{}`, base: `{}`\nProlog query result was: {:?}", class_name, p, base_expression, property_values_result);
+                //log::error!("Couldn't get a property value for class: `{}`, property: `{}`, base: `{}`\nProlog query result was: {:?}", class_name, p, base_expression, property_values_result);
                 object.insert(p.clone(), "null".to_string());
             };
         }
@@ -1230,7 +1266,7 @@ impl PerspectiveInstance {
             if let Some(collection_value) = prolog_get_first_binding(&collection_values_result, "Value") {
                 object.insert(c.clone(), prolog_value_to_json_string(collection_value));
             } else {
-                log::error!("Couldn't get a collection value for class: `{}`, collection: `{}`, base: `{}`\nProlog query result was: {:?}", class_name, c, base_expression, collection_values_result);
+                //log::error!("Couldn't get a collection value for class: `{}`, collection: `{}`, base: `{}`\nProlog query result was: {:?}", class_name, c, base_expression, collection_values_result);
                 object.insert(c.clone(), "[]".to_string());
             }
         }
