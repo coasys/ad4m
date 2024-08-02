@@ -9,6 +9,6 @@
   width: 100%;
   min-width: 100%;
   background-color: var(--background-color);
-  background-image: url("bg01.jpg");
+  background-image: url("/bg01.jpg");
   background-size: auto 100%;
 }

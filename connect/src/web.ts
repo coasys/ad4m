@@ -692,6 +692,7 @@ export class Ad4mConnectElement extends LitElement {
       this._isOpen = true;
     }
     if (event === "not_connected") {
+      this._isOpen = true;
       this.changeUIState("start");
     }
     const customEvent = new CustomEvent("connectionstatechange", {
@@ -891,16 +892,24 @@ export class Ad4mConnectElement extends LitElement {
     }
   }
 
+  mobileView() {
+    if (this.mobile) {
+      return MobileAppLogoButton(({
+        openModal: () => {
+          this.changeUIState("settings");
+          this._isOpen = !this._isOpen;
+        }
+      }))
+    }
+
+    return null;
+  }
+
   render() {
     console.log(this.authState,  this.connectionState, this.uiState, this._isOpen);
     if (this._isOpen === false) {
-      if (this.authState === "authenticated" && this.mobile) {
-        return MobileAppLogoButton(({
-          openModal: () => {
-            this.changeUIState("settings");
-            this._isOpen = true;
-          }
-        }))
+      if (this.authState === "authenticated") {
+        return this.mobileView();
       }
 
       return null
@@ -911,6 +920,7 @@ export class Ad4mConnectElement extends LitElement {
         <div class="dialog">
           ${Header()}
           <main class="dialog__content">${this.renderViews()}</main>
+          ${this.mobileView()}
         </div>
         <div class="ad4mConnect__backdrop" />
       </div>
