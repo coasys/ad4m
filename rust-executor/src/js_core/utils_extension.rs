@@ -2,9 +2,9 @@ use std::borrow::Cow;
 
 use cid::Cid;
 use deno_core::{error::AnyError, include_js_files, op2, Extension, Op};
+use log::{debug, error, info, warn};
 use multibase::Base;
 use multihash::{Code, MultihashDigest};
-use log::{error, info, debug, warn};
 
 use super::JS_CORE_HANDLE;
 

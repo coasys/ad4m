@@ -3,23 +3,23 @@ extern crate lazy_static;
 
 pub mod agent;
 mod config;
+mod db;
+mod entanglement_service;
 mod globals;
 mod graphql;
 mod holochain_service;
-mod entanglement_service;
+pub mod init;
 mod js_core;
+mod languages;
+mod neighbourhoods;
+mod perspectives;
 mod prolog;
 mod prolog_service;
+mod pubsub;
+mod runtime_service;
+mod types;
 mod utils;
 mod wallet;
-mod types;
-mod runtime_service;
-mod perspectives;
-mod db;
-pub mod init;
-mod pubsub;
-mod neighbourhoods;
-mod languages;
 
 #[cfg(test)]
 mod test_utils;

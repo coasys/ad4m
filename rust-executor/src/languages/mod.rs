@@ -1,15 +1,19 @@
-pub mod language;
 mod byte_array;
+pub mod language;
 
-use std::sync::{Arc, Mutex};
 use deno_core::error::AnyError;
+use std::sync::{Arc, Mutex};
 
-use crate::{graphql::graphql_types::{DecoratedNeighbourhoodExpression, Neighbourhood}, js_core::JsCoreHandle};
 use crate::types::Address;
+use crate::{
+    graphql::graphql_types::{DecoratedNeighbourhoodExpression, Neighbourhood},
+    js_core::JsCoreHandle,
+};
 use language::Language;
 
 lazy_static! {
-    static ref LANGUAGE_CONTROLLER_INSTANCE: Arc<Mutex<Option<LanguageController>>> = Arc::new(Mutex::new(None));
+    static ref LANGUAGE_CONTROLLER_INSTANCE: Arc<Mutex<Option<LanguageController>>> =
+        Arc::new(Mutex::new(None));
 }
 
 #[derive(Clone)]
@@ -24,17 +28,23 @@ impl LanguageController {
     }
 
     pub fn global_instance() -> LanguageController {
-        LANGUAGE_CONTROLLER_INSTANCE.lock().unwrap().as_ref().expect("LanguageController not initialized").clone()
+        LANGUAGE_CONTROLLER_INSTANCE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("LanguageController not initialized")
+            .clone()
     }
 
     fn new(js_core: JsCoreHandle) -> Self {
-        Self {
-            js_core,
-        }
+        Self { js_core }
     }
 
     pub async fn install_language(language: Address) -> Result<(), AnyError> {
-        Self::global_instance().js_core.execute("await core.waitForLanguages()".into()).await?;
+        Self::global_instance()
+            .js_core
+            .execute("await core.waitForLanguages()".into())
+            .await?;
 
         let script = format!(
             r#"JSON.stringify(
@@ -47,7 +57,10 @@ impl LanguageController {
     }
 
     pub async fn create_neighbourhood(neighbourhood: Neighbourhood) -> Result<Address, AnyError> {
-        Self::global_instance().js_core.execute("await core.waitForLanguages()".into()).await?;
+        Self::global_instance()
+            .js_core
+            .execute("await core.waitForLanguages()".into())
+            .await?;
 
         let neighbourhood_json = serde_json::to_string(&neighbourhood)?;
         let script = format!(
@@ -65,8 +78,13 @@ impl LanguageController {
         Ok(result)
     }
 
-    pub async fn get_neighbourhood(address: Address) -> Result<Option<DecoratedNeighbourhoodExpression>, AnyError> {
-        Self::global_instance().js_core.execute("await core.waitForLanguages()".into()).await?;
+    pub async fn get_neighbourhood(
+        address: Address,
+    ) -> Result<Option<DecoratedNeighbourhoodExpression>, AnyError> {
+        Self::global_instance()
+            .js_core
+            .execute("await core.waitForLanguages()".into())
+            .await?;
 
         let script = format!(
             r#"
@@ -79,12 +97,16 @@ impl LanguageController {
             address,
         );
         let result: String = Self::global_instance().js_core.execute(script).await?;
-        let neighbourhood: Option<DecoratedNeighbourhoodExpression> = serde_json::from_str(&result)?;
+        let neighbourhood: Option<DecoratedNeighbourhoodExpression> =
+            serde_json::from_str(&result)?;
         Ok(neighbourhood)
     }
 
     pub async fn language_by_address(address: Address) -> Result<Option<Language>, AnyError> {
-        Self::global_instance().js_core.execute("await core.waitForLanguages()".into()).await?;
+        Self::global_instance()
+            .js_core
+            .execute("await core.waitForLanguages()".into())
+            .await?;
 
         let script = format!(
             r#"

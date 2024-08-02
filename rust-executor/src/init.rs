@@ -12,7 +12,10 @@ pub fn init(
     data_path: Option<String>,
     network_bootstrap_seed: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
-    std::env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server");
+    std::env::set_var(
+        "RUST_LOG",
+        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server",
+    );
     let _ = env_logger::try_init();
 
     //Get the default data path if none is provided
@@ -80,7 +83,7 @@ fn write_seed_config(
 fn clean_ad4m_data(
     app_data_path: &PathBuf,
     should_clear_state: bool,
-    should_clear_everything: bool
+    should_clear_everything: bool,
 ) -> Result<(), Box<dyn Error>> {
     if app_data_path.exists() {
         let binary_path = app_data_path.join("binary");

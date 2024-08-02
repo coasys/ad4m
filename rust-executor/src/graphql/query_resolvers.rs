@@ -1,11 +1,17 @@
 #![allow(non_snake_case)]
-use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
-use crate::{db::Ad4mDb, holochain_service::get_holochain_service, perspectives::{all_perspectives, get_perspective, utils::prolog_resolution_to_string}, runtime_service::RuntimeService, types::{DecoratedLinkExpression, Notification}};
-use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
-use std::{env};
 use super::graphql_types::*;
+use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
+use crate::{
+    db::Ad4mDb,
+    holochain_service::get_holochain_service,
+    perspectives::{all_perspectives, get_perspective, utils::prolog_resolution_to_string},
+    runtime_service::RuntimeService,
+    types::{DecoratedLinkExpression, Notification},
+};
+use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
+use std::env;
 
-use crate::{agent::{capabilities::*, signatures}};
+use crate::agent::{capabilities::*, signatures};
 
 pub struct Query;
 
@@ -14,10 +20,10 @@ impl Query {
     async fn agent(&self, context: &RequestContext) -> FieldResult<Agent> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
         AgentService::with_global_instance(|agent_service| {
-            let mut agent = agent_service.agent.clone().ok_or(FieldError::new(
-                "Agent not found",
-                Value::null(),
-            ))?;
+            let mut agent = agent_service
+                .agent
+                .clone()
+                .ok_or(FieldError::new("Agent not found", Value::null()))?;
 
             if agent.perspective.is_some() {
                 agent.perspective.as_mut().unwrap().verify_link_signatures();
@@ -63,7 +69,6 @@ impl Query {
             let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
             Ok(agent_ref.agent.clone())
         }
-
     }
 
     async fn agent_get_apps(&self, context: &RequestContext) -> FieldResult<Vec<Apps>> {
@@ -81,10 +86,10 @@ impl Query {
 
     async fn agent_is_locked(&self, _context: &RequestContext) -> FieldResult<bool> {
         AgentService::with_global_instance(|agent_service| {
-            let _agent = agent_service.agent.clone().ok_or(FieldError::new(
-                "Agent not found",
-                Value::null(),
-            ))?;
+            let _agent = agent_service
+                .agent
+                .clone()
+                .ok_or(FieldError::new("Agent not found", Value::null()))?;
 
             Ok(!agent_service.is_unlocked())
         })
@@ -93,9 +98,7 @@ impl Query {
     async fn agent_status(&self, context: &RequestContext) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
 
-        AgentService::with_global_instance(|agent_service| {
-            Ok(agent_service.dump())
-        })
+        AgentService::with_global_instance(|agent_service| Ok(agent_service.dump()))
     }
 
     async fn expression(
@@ -255,13 +258,15 @@ impl Query {
     async fn neighbourhood_has_telepresence_adapter(
         &self,
         context: &RequestContext,
-        #[allow(non_snake_case)]
-        perspectiveUUID: String,
+        #[allow(non_snake_case)] perspectiveUUID: String,
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
         Ok(get_perspective(&uuid)
-            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .ok_or(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid
+            )))?
             .has_telepresence_adapter()
             .await)
     }
@@ -269,13 +274,15 @@ impl Query {
     async fn neighbourhood_online_agents(
         &self,
         context: &RequestContext,
-        #[allow(non_snake_case)]
-        perspectiveUUID: String,
+        #[allow(non_snake_case)] perspectiveUUID: String,
     ) -> FieldResult<Vec<OnlineAgent>> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
         get_perspective(&uuid)
-            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .ok_or(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid
+            )))?
             .online_agents()
             .await
             .map_err(|e| FieldError::from(e.to_string()))
@@ -284,13 +291,15 @@ impl Query {
     async fn neighbourhood_other_agents(
         &self,
         context: &RequestContext,
-        #[allow(non_snake_case)]
-        perspectiveUUID: String,
+        #[allow(non_snake_case)] perspectiveUUID: String,
     ) -> FieldResult<Vec<String>> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
         get_perspective(&uuid)
-            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .ok_or(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid
+            )))?
             .others()
             .await
             .map_err(|e| FieldError::from(e.to_string()))
@@ -325,7 +334,10 @@ impl Query {
         )?;
 
         Ok(get_perspective(&uuid)
-            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .ok_or(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid
+            )))?
             .get_links(&query)
             .await?)
     }
@@ -341,10 +353,15 @@ impl Query {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        Ok(prolog_resolution_to_string(get_perspective(&uuid)
-            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
-            .prolog_query(query)
-            .await?))
+        Ok(prolog_resolution_to_string(
+            get_perspective(&uuid)
+                .ok_or(FieldError::from(format!(
+                    "No perspective found with uuid {}",
+                    uuid
+                )))?
+                .prolog_query(query)
+                .await?,
+        ))
     }
 
     async fn perspective_snapshot(
@@ -358,13 +375,14 @@ impl Query {
         )?;
 
         let all_links = get_perspective(&uuid)
-            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .ok_or(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid
+            )))?
             .get_links(&LinkQuery::default())
             .await?;
 
-        Ok(Perspective {
-            links: all_links,
-        })
+        Ok(Perspective { links: all_links })
     }
 
     async fn perspectives(&self, context: &RequestContext) -> FieldResult<Vec<PerspectiveHandle>> {
@@ -391,9 +409,8 @@ impl Query {
             &RUNTIME_FRIEND_STATUS_READ_CAPABILITY,
         )?;
 
-        let friends = RuntimeService::with_global_instance(|runtime_service| {
-            runtime_service.get_friends()
-        });
+        let friends =
+            RuntimeService::with_global_instance(|runtime_service| runtime_service.get_friends());
 
         if !friends.contains(&did.clone()) {
             log::error!("Friend not found: {}", did);
@@ -441,10 +458,10 @@ impl Query {
 
     async fn runtime_info(&self, _context: &RequestContext) -> FieldResult<RuntimeInfo> {
         AgentService::with_global_instance(|agent_service| {
-            agent_service.agent.clone().ok_or(FieldError::new(
-                "Agent not found",
-                Value::null(),
-            ))?;
+            agent_service
+                .agent
+                .clone()
+                .ok_or(FieldError::new("Agent not found", Value::null()))?;
 
             Ok(RuntimeInfo {
                 is_initialized: agent_service.is_initialized(),
@@ -479,7 +496,7 @@ impl Query {
             .map(|val| format!(r#"{{ filter: "{}" }}"#, val))
             .unwrap_or_else(|| String::from("{ filter: null }"));
         let script = format!(
-             r#"JSON.stringify(await (await core.myDirectMessageLanguage()).directMessageAdapter.inbox("{}"))"#,
+            r#"JSON.stringify(await (await core.myDirectMessageLanguage()).directMessageAdapter.inbox("{}"))"#,
             filter_str,
         );
         let mut js = context.js_handle.clone();
@@ -516,15 +533,12 @@ impl Query {
             .map_err(|e| coasys_juniper::FieldError::new(e, coasys_juniper::Value::Null))
     }
 
-
     async fn runtime_notifications(
         &self,
         context: &RequestContext,
     ) -> FieldResult<Vec<Notification>> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        let notifications_result = Ad4mDb::with_global_instance(|db| {
-            db.get_notifications()
-        });
+        let notifications_result = Ad4mDb::with_global_instance(|db| db.get_notifications());
         if let Err(e) = notifications_result {
             return Err(FieldError::new(e.to_string(), Value::null()));
         }

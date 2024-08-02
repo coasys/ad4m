@@ -89,7 +89,7 @@ pub async fn add_link(
     source: String,
     target: String,
     predicate: Option<String>,
-    status: Option<String>
+    status: Option<String>,
 ) -> Result<AddLinkPerspectiveAddLink> {
     let response_data: add_link::ResponseData = query(
         executor_url,
@@ -101,7 +101,7 @@ pub async fn add_link(
                 target,
                 predicate,
             },
-            status
+            status,
         }),
     )
     .await
@@ -143,7 +143,7 @@ pub async fn remove_link(
                     invalid: link.proof.invalid,
                     valid: link.proof.valid,
                 },
-                status: link.status
+                status: link.status,
             },
         }),
     )
@@ -363,7 +363,7 @@ impl PerspectivesClient {
         source: String,
         target: String,
         predicate: Option<String>,
-        status: Option<String>
+        status: Option<String>,
     ) -> Result<AddLinkPerspectiveAddLink> {
         add_link(
             self.info.executor_url.clone(),
@@ -372,7 +372,7 @@ impl PerspectivesClient {
             source,
             target,
             predicate,
-            status
+            status,
         )
         .await
     }

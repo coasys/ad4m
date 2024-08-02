@@ -56,9 +56,7 @@ pub fn check_capability(
     Ok(())
 }
 
-pub fn check_token_revoked(
-    token: &String,
-) -> Result<(), String> {
+pub fn check_token_revoked(token: &String) -> Result<(), String> {
     if let Some(app) = apps_map::get_apps().iter().find(|app| app.token == *token) {
         if app.revoked.unwrap_or(false) {
             return Err("Unauthorized access".to_string());

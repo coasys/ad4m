@@ -1,10 +1,13 @@
+use coasys_juniper::{GraphQLObject, GraphQLValue};
 use deno_core::{anyhow::anyhow, error::AnyError};
 use serde::{Deserialize, Serialize};
-use coasys_juniper::{
-    GraphQLObject, GraphQLValue,
-};
 
-use crate::{agent::signatures::verify, graphql::graphql_types::{LinkExpressionInput, LinkInput, LinkStatus, NotificationInput, PerspectiveInput}};
+use crate::{
+    agent::signatures::verify,
+    graphql::graphql_types::{
+        LinkExpressionInput, LinkInput, LinkStatus, NotificationInput, PerspectiveInput,
+    },
+};
 use regex::Regex;
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -60,8 +63,6 @@ impl<T: GraphQLValue + Serialize> From<Expression<T>> for VerifiedExpression<T> 
     }
 }
 
-
-
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Link {
@@ -111,7 +112,8 @@ impl TryFrom<LinkExpressionInput> for LinkExpression {
             predicate: input.data.predicate,
             source: input.data.source,
             target: input.data.target,
-        }.normalize();
+        }
+        .normalize();
         Ok(LinkExpression {
             author: input.author,
             timestamp: input.timestamp,
@@ -126,18 +128,19 @@ impl TryFrom<LinkExpressionInput> for LinkExpression {
 }
 
 impl LinkExpression {
-     pub fn from_input_without_proof(input: LinkExpressionInput) -> Self {
+    pub fn from_input_without_proof(input: LinkExpressionInput) -> Self {
         let data = Link {
             predicate: input.data.predicate,
             source: input.data.source,
             target: input.data.target,
-        }.normalize();
+        }
+        .normalize();
         LinkExpression {
             author: input.author,
             timestamp: input.timestamp,
             data,
             proof: ExpressionProof::default(),
-            status: input.status.into()
+            status: input.status.into(),
         }
     }
 }
@@ -164,8 +167,6 @@ impl From<Expression<Link>> for LinkExpression {
         }
     }
 }
-
-
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -227,7 +228,6 @@ impl From<DecoratedLinkExpression> for LinkExpression {
     }
 }
 
-
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct Perspective {
     pub links: Vec<LinkExpression>,
@@ -235,7 +235,8 @@ pub struct Perspective {
 
 impl From<PerspectiveInput> for Perspective {
     fn from(input: PerspectiveInput) -> Self {
-        let links = input.links
+        let links = input
+            .links
             .into_iter()
             .map(|link| LinkExpression::try_from(link))
             .filter_map(Result::ok)
@@ -321,7 +322,10 @@ impl TryFrom<String> for ExpressionRef {
             }
         }
 
-        Err(anyhow!("Couldn't parse string as expression URL or DID: {}", value))
+        Err(anyhow!(
+            "Couldn't parse string as expression URL or DID: {}",
+            value
+        ))
     }
 }
 
@@ -344,7 +348,7 @@ impl PerspectiveDiff {
     pub fn from_additions(additions: Vec<LinkExpression>) -> PerspectiveDiff {
         PerspectiveDiff {
             additions,
-            removals: vec![]
+            removals: vec![],
         }
     }
 

@@ -1,9 +1,11 @@
 use crate::formatting::{print_message_perspective, print_sent_message_perspective};
+use crate::util::string_2_perspective_snapshot;
 use ad4m_client::Ad4mClient;
 use anyhow::Result;
 use clap::Subcommand;
-use kitsune_p2p_types::{agent_info::AgentInfoSigned, dependencies::lair_keystore_api::dependencies::base64};
-use crate::util::string_2_perspective_snapshot;
+use kitsune_p2p_types::{
+    agent_info::AgentInfoSigned, dependencies::lair_keystore_api::dependencies::base64,
+};
 
 #[derive(Debug, Subcommand)]
 pub enum RuntimeFunctions {
@@ -131,7 +133,6 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
                             .expect("Failed to decode AgentInfoSigned"),
                         encoded_info,
                     )
-
                 })
                 .collect();
 
@@ -148,15 +149,15 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
                 ad4m_client.runtime.hc_add_agent_infos(infos).await?;
                 println!("Holochain agent infos added!");
             } else {
-            let mut rl = rustyline::Editor::<()>::new()?;
-            let readline = rl.readline("Please enter the encoded agent infos string: ");
-            match readline {
-                Ok(line) => {
-                    ad4m_client.runtime.hc_add_agent_infos(line).await?;
-                    println!("Holochain agent infos added!");
-                },
-                Err(_) => println!("Failed to read line"),
-            }
+                let mut rl = rustyline::Editor::<()>::new()?;
+                let readline = rl.readline("Please enter the encoded agent infos string: ");
+                match readline {
+                    Ok(line) => {
+                        ad4m_client.runtime.hc_add_agent_infos(line).await?;
+                        println!("Holochain agent infos added!");
+                    }
+                    Err(_) => println!("Failed to read line"),
+                }
             }
         }
         RuntimeFunctions::VerifySignature {

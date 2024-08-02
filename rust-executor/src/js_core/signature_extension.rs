@@ -1,8 +1,8 @@
+use crate::agent::signatures::{verify, verify_string_signed_by_did};
+use crate::types::Expression;
 use deno_core::{error::AnyError, include_js_files, op2, Extension, Op};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use crate::types::Expression;
-use crate::agent::signatures::{verify_string_signed_by_did, verify};
 
 use super::utils::sort_json_value;
 
@@ -34,7 +34,7 @@ fn signature_verify(
         data: sort_json_value(&expr.data),
         proof: expr.proof,
     };
-    let is_valid =  verify(&sorted_expression)?;
+    let is_valid = verify(&sorted_expression)?;
     Ok(SignatureVerificationResult { is_valid })
 }
 

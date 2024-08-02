@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::graphql::graphql_types::{Agent, AgentStatus, Perspective};
 
 use crate::types::{Expression, ExpressionProof};
-use crate::wallet::{Wallet};
+use crate::wallet::Wallet;
 
 pub mod capabilities;
 pub mod signatures;
@@ -136,14 +136,8 @@ impl AgentService {
     }
 
     pub fn new(app_path: String) -> AgentService {
-        let agent_path = format!(
-            "{}/ad4m/agent.json",
-            app_path
-        );
-        let agent_profile_path = format!(
-            "{}/ad4m/agentProfile.json",
-            app_path
-        );
+        let agent_path = format!("{}/ad4m/agent.json", app_path);
+        let agent_profile_path = format!("{}/ad4m/agentProfile.json", app_path);
 
         AgentService {
             did: None,

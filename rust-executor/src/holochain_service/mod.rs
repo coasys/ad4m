@@ -12,17 +12,19 @@ use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
-use holochain::tracing::instrument::WithSubscriber;
-use holochain_types::websocket::AllowedOrigins;
-use kitsune_p2p_types::config::{KitsuneP2pTuningParams, KitsuneP2pConfig, NetworkType, TransportConfig};
-use kitsune_p2p_types::dependencies::url2::Url2;
 use holochain::prelude::{
-    ExternIO, HoloHash, InstallAppPayload, Signal,
-    Signature, Timestamp, ZomeCallResponse, ZomeCallUnsigned
+    ExternIO, HoloHash, InstallAppPayload, Signal, Signature, Timestamp, ZomeCallResponse,
+    ZomeCallUnsigned,
 };
 use holochain::test_utils::itertools::Either;
+use holochain::tracing::instrument::WithSubscriber;
 use holochain_types::dna::ValidatedDnaManifest;
-use log::{info, error};
+use holochain_types::websocket::AllowedOrigins;
+use kitsune_p2p_types::config::{
+    KitsuneP2pConfig, KitsuneP2pTuningParams, NetworkType, TransportConfig,
+};
+use kitsune_p2p_types::dependencies::url2::Url2;
+use log::{error, info};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::select;
@@ -36,8 +38,8 @@ pub(crate) mod holochain_service_extension;
 pub(crate) mod interface;
 
 pub(crate) use interface::{
-    get_holochain_service, HolochainServiceInterface,
-    HolochainServiceRequest, HolochainServiceResponse, maybe_get_holochain_service
+    get_holochain_service, maybe_get_holochain_service, HolochainServiceInterface,
+    HolochainServiceRequest, HolochainServiceResponse,
 };
 
 use self::interface::set_holochain_service;
@@ -49,10 +51,9 @@ pub fn agent_infos_from_str(agent_infos: &str) -> Result<Vec<AgentInfoSigned>, A
     let agent_infos: Vec<AgentInfoSigned> = agent_infos
         .into_iter()
         .map(|encoded_info| {
-            let info_bytes = base64::decode(encoded_info)
-                .expect("Failed to decode base64 AgentInfoSigned");
-            AgentInfoSigned::decode(&info_bytes)
-                .expect("Failed to decode AgentInfoSigned")
+            let info_bytes =
+                base64::decode(encoded_info).expect("Failed to decode base64 AgentInfoSigned");
+            AgentInfoSigned::decode(&info_bytes).expect("Failed to decode AgentInfoSigned")
         })
         .collect();
 
@@ -105,17 +106,14 @@ impl HolochainService {
                     let mut service = HolochainService::new(local_config).await.unwrap();
                     let conductor_clone = service.conductor.clone();
 
-                    
-
                     // Spawn a new task to forward items from the stream to the receiver
                     let spawned_sig = tokio::spawn(async move {
 
                         let mut streams: tokio_stream::StreamMap<String, tokio_stream::wrappers::BroadcastStream<Signal>> = tokio_stream::StreamMap::new();
-                        conductor_clone.list_apps(Some(AppStatusFilter::Running)).await.unwrap().into_iter().for_each(|app| {                            
+                        conductor_clone.list_apps(Some(AppStatusFilter::Running)).await.unwrap().into_iter().for_each(|app| {
                             let sig_broadcasters = conductor_clone.subscribe_to_app_signals(app.installed_app_id.clone());
                             streams.insert(app.installed_app_id.clone(), tokio_stream::wrappers::BroadcastStream::new(sig_broadcasters));
-                        });    
-
+                        });
 
                         response_sender
                             .send(HolochainServiceResponse::InitComplete(Ok(())))
@@ -343,8 +341,9 @@ impl HolochainService {
             let config = ConductorConfig::load_yaml(&conductor_yaml_path)?;
             config
         } else {
-        let mut config = ConductorConfig::default();
-        let data_root_path: DataRootPath = PathBuf::from(local_config.conductor_path.clone()).into();
+            let mut config = ConductorConfig::default();
+            let data_root_path: DataRootPath =
+                PathBuf::from(local_config.conductor_path.clone()).into();
             config.data_root_path = Some(data_root_path);
             config.admin_interfaces = None;
 
@@ -414,7 +413,11 @@ impl HolochainService {
 
         let interface = conductor
             .clone()
-            .add_app_interface(Either::Left(local_config.app_port), AllowedOrigins::Any, None)
+            .add_app_interface(
+                Either::Left(local_config.app_port),
+                AllowedOrigins::Any,
+                None,
+            )
             .await;
 
         info!("Added app interface: {:?}", interface);
@@ -445,8 +448,7 @@ impl HolochainService {
                     .await
                     .map_err(|e| anyhow!("Could not install app: {:?}", e))?;
 
-                self
-                    .conductor
+                self.conductor
                     .clone()
                     .enable_app(app_id.clone())
                     .await
@@ -608,7 +610,7 @@ impl HolochainService {
 
     pub async fn log_network_metrics(&self) -> Result<(), AnyError> {
         let metrics = self.conductor.dump_network_metrics(None).await?;
-        info!("Network metrics: {}",metrics);
+        info!("Network metrics: {}", metrics);
 
         let stats = self.conductor.dump_network_stats().await?;
         info!("Network stats: {}", stats);
@@ -620,21 +622,32 @@ impl HolochainService {
         let path = PathBuf::from(path);
         let name = holochain_cli_bundle::get_dna_name(&path).await?;
         info!("Got dna name: {:?}", name);
-        let pack = holochain_cli_bundle::pack::<ValidatedDnaManifest>(&path, None, name, false).await?;
+        let pack =
+            holochain_cli_bundle::pack::<ValidatedDnaManifest>(&path, None, name, false).await?;
         info!("Packed dna at path: {:#?}", pack.0);
         Ok(pack.0.to_str().unwrap().to_string())
     }
 
     pub async fn unpack_dna(path: String) -> Result<String, AnyError> {
         let path = PathBuf::from(path);
-        let pack = holochain_cli_bundle::unpack::<ValidatedDnaManifest>("dna", &path, None, true).await?;
+        let pack =
+            holochain_cli_bundle::unpack::<ValidatedDnaManifest>("dna", &path, None, true).await?;
         info!("UnPacked dna at path: {:#?}", pack);
         Ok(pack.to_str().unwrap().to_string())
     }
 }
 
 pub async fn run_local_hc_services() -> Result<(), AnyError> {
-    let ops = holochain_cli_run_local_services::HcRunLocalServices::new(None, String::from("127.0.0.1"), 0, false, None, String::from("127.0.0.1"), 0, false);
+    let ops = holochain_cli_run_local_services::HcRunLocalServices::new(
+        None,
+        String::from("127.0.0.1"),
+        0,
+        false,
+        None,
+        String::from("127.0.0.1"),
+        0,
+        false,
+    );
     ops.run().await;
     Ok(())
 }

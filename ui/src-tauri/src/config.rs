@@ -7,7 +7,9 @@ pub fn data_path() -> PathBuf {
 }
 
 pub fn data_dev_path() -> PathBuf {
-    home_dir().expect("Could not get home dir").join(".ad4m-dev")
+    home_dir()
+        .expect("Could not get home dir")
+        .join(".ad4m-dev")
 }
 
 pub fn log_path() -> PathBuf {

@@ -4,11 +4,11 @@ extern crate anyhow;
 extern crate chrono;
 extern crate clap;
 extern crate dirs;
+extern crate kitsune_p2p_types;
 extern crate rand;
 extern crate regex;
 extern crate rustyline;
 extern crate tokio;
-extern crate kitsune_p2p_types;
 
 mod formatting;
 mod startup;
@@ -111,7 +111,7 @@ enum Domain {
         command: ExpressionFunctions,
     },
     /// Print the executor log
-    Log
+    Log,
 }
 
 async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {

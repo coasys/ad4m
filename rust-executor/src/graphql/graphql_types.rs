@@ -1,7 +1,10 @@
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::agent::signatures::verify;
 use crate::js_core::JsCoreHandle;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link, Notification, TriggeredNotification};
+use crate::types::{
+    DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link,
+    Notification, TriggeredNotification,
+};
 use coasys_juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
 };
@@ -143,7 +146,7 @@ pub enum ExceptionType {
     AgentIsUntrusted = 2,
     #[default]
     CapabilityRequested = 3,
-    InstallNotificationRequest = 4
+    InstallNotificationRequest = 4,
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -269,7 +272,6 @@ pub struct LinkExpressionInput {
     pub status: Option<LinkStatus>,
 }
 
-
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkExpressionUpdated {
@@ -314,7 +316,7 @@ impl DecoratedPerspectiveDiff {
     pub fn from_additions(additions: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
         DecoratedPerspectiveDiff {
             additions,
-            removals: vec![]
+            removals: vec![],
         }
     }
 
@@ -325,14 +327,16 @@ impl DecoratedPerspectiveDiff {
         }
     }
 
-    pub fn from(additions: Vec<DecoratedLinkExpression>, removals: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
+    pub fn from(
+        additions: Vec<DecoratedLinkExpression>,
+        removals: Vec<DecoratedLinkExpression>,
+    ) -> DecoratedPerspectiveDiff {
         DecoratedPerspectiveDiff {
             additions,
             removals,
         }
     }
 }
-
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -373,7 +377,8 @@ impl Perspective {
 
 impl From<PerspectiveInput> for Perspective {
     fn from(input: PerspectiveInput) -> Self {
-        let links = input.links
+        let links = input
+            .links
             .into_iter()
             .map(|link: LinkExpressionInput| DecoratedLinkExpression::try_from(link))
             .filter_map(Result::ok)
@@ -404,7 +409,6 @@ impl TryFrom<LinkExpressionInput> for DecoratedLinkExpression {
         })
     }
 }
-
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -476,7 +480,6 @@ pub struct PerspectiveHandle {
     pub state: PerspectiveState,
 }
 
-
 impl PerspectiveHandle {
     pub fn new(
         uuid: String,
@@ -517,7 +520,6 @@ pub struct PerspectiveUnsignedInput {
     pub links: Vec<LinkInput>,
 }
 
-
 #[derive(GraphQLInputObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationInput {
@@ -530,7 +532,6 @@ pub struct NotificationInput {
     pub webhook_url: String,
     pub webhook_auth: String,
 }
-
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]

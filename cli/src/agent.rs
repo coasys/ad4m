@@ -91,7 +91,10 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
                 println!("Agent locked");
             }
         }
-        AgentFunctions::Unlock { passphrase, holochain } => {
+        AgentFunctions::Unlock {
+            passphrase,
+            holochain,
+        } => {
             let pp = if passphrase.is_some() {
                 passphrase.unwrap()
             } else {

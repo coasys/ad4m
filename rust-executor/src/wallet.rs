@@ -187,7 +187,7 @@ impl Wallet {
             .insert(name, Key::from(key));
     }
 
-    pub fn initialize_keys(&mut self, name: String, did: String) -> Option<did_key::Document>{
+    pub fn initialize_keys(&mut self, name: String, did: String) -> Option<did_key::Document> {
         if self.keys.is_none() {
             self.keys = Some(Keys::new());
             let key = did_key::resolve(did.as_str()).expect("Failed to get key pair");

@@ -221,12 +221,15 @@ pub async fn unlock(
     executor_url: String,
     cap_token: String,
     passphrase: String,
-    holochain: bool
+    holochain: bool,
 ) -> Result<unlock::UnlockAgentUnlock> {
     let response_data: unlock::ResponseData = query(
         executor_url,
         cap_token,
-        Unlock::build_query(unlock::Variables { passphrase, holochain }),
+        Unlock::build_query(unlock::Variables {
+            passphrase,
+            holochain,
+        }),
     )
     .await
     .with_context(|| "Failed to run agent->unlock")?;
@@ -472,12 +475,16 @@ impl AgentClient {
         .await
     }
 
-    pub async fn unlock(&self, passphrase: String, holochain: bool) -> Result<unlock::UnlockAgentUnlock> {
+    pub async fn unlock(
+        &self,
+        passphrase: String,
+        holochain: bool,
+    ) -> Result<unlock::UnlockAgentUnlock> {
         unlock(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
             passphrase,
-            holochain
+            holochain,
         )
         .await
     }
