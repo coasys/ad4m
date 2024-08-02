@@ -1,8 +1,8 @@
 use crate::agent::signatures::{verify, verify_string_signed_by_did};
 use crate::types::Expression;
-use deno_core::{error::AnyError, include_js_files, op2, Extension, Op};
+use deno_core::{error::AnyError, op2};
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
+
 
 use super::utils::sort_json_value;
 

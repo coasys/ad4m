@@ -73,7 +73,7 @@ fn encrypt(payload: String, passphrase: String) -> String {
 
     // Encrypt
     let encrypted_data = crypto_box
-        .encrypt(&nonce.into(), payload.as_bytes())
+        .encrypt(&nonce, payload.as_bytes())
         .unwrap();
 
     base64::engine::general_purpose::STANDARD_NO_PAD.encode(encrypted_data)
@@ -111,7 +111,7 @@ fn decrypt(payload: String, passphrase: String) -> Result<String, crypto_box::ae
 
     // Decrypt
     let decrypted_data = crypto_box
-        .decrypt(&nonce.into(), payload_bytes.as_slice())
+        .decrypt(&nonce, payload_bytes.as_slice())
         .map(|data| String::from_utf8(data).expect("decrypted array to be a string"));
 
     decrypted_data

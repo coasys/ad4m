@@ -1,6 +1,6 @@
-use std::borrow::Cow;
 
-use deno_core::{anyhow::bail, error::AnyError, include_js_files, op2, Extension, Op};
+
+use deno_core::{anyhow::bail, error::AnyError, op2};
 use scryer_prolog::machine::parsed_results::{QueryMatch, QueryResolution, Value};
 
 use super::get_prolog_service;
@@ -29,10 +29,10 @@ pub fn prolog_value_to_json_tring(value: Value) -> String {
                 //escape double quotes
                 format!(
                     "\"{}\"",
-                    s.replace("\"", "\\\"")
-                        .replace("\n", "\\n")
-                        .replace("\t", "\\t")
-                        .replace("\r", "\\r")
+                    s.replace('"', "\\\"")
+                        .replace('\n', "\\n")
+                        .replace('\t', "\\t")
+                        .replace('\r', "\\r")
                 )
             } else {
                 //return valid json string
@@ -47,7 +47,7 @@ pub fn prolog_value_to_json_tring(value: Value) -> String {
                 }
                 string_result.push_str(&prolog_value_to_json_tring(v.clone()));
             }
-            string_result.push_str("]");
+            string_result.push(']');
             string_result
         }
         Value::Structure(s, l) => {
@@ -58,7 +58,7 @@ pub fn prolog_value_to_json_tring(value: Value) -> String {
                 }
                 string_result.push_str(&prolog_value_to_json_tring(v.clone()));
             }
-            string_result.push_str("]");
+            string_result.push(']');
             string_result
         }
         _ => "null".to_string(),
@@ -77,7 +77,7 @@ fn prolog_match_to_json_string(query_match: &QueryMatch) -> String {
             prolog_value_to_json_tring(v.clone())
         ));
     }
-    string_result.push_str("}");
+    string_result.push('}');
     string_result
 }
 
@@ -100,7 +100,7 @@ async fn run_query(
         QueryResolution::Matches(matches) => {
             let matches_json: Vec<String> = matches
                 .iter()
-                .map(|m| prolog_match_to_json_string(m))
+                .map(prolog_match_to_json_string)
                 .collect();
             Ok(format!("[{}]", matches_json.join(", ")))
         }

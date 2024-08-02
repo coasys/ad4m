@@ -1,7 +1,7 @@
-use std::borrow::Cow;
+
 
 use base64::{engine::general_purpose as base64engine, Engine as _};
-use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op2, Extension, Op};
+use deno_core::{anyhow::anyhow, error::AnyError, op2};
 use serde::{Deserialize, Serialize};
 
 use crate::wallet::Wallet;
@@ -70,7 +70,7 @@ fn wallet_unlock(#[string] passphrase: String) -> Result<(), AnyError> {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
-    wallet_ref.unlock(passphrase).map_err(|e| e.into())
+    wallet_ref.unlock(passphrase)
 }
 
 #[op2]
@@ -79,7 +79,8 @@ fn wallet_lock(#[string] passphrase: String) -> Result<(), AnyError> {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
-    Ok(wallet_ref.lock(passphrase))
+    wallet_ref.lock(passphrase);
+    Ok(())
 }
 
 #[op2]
@@ -97,7 +98,8 @@ fn wallet_load(#[string] data: String) -> Result<(), AnyError> {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
-    Ok(wallet_ref.load(data))
+    wallet_ref.load(data);
+    Ok(())
 }
 
 #[op2]

@@ -29,10 +29,10 @@ pub fn prolog_value_to_json_string(value: Value) -> String {
                             //escape double quotes
                             format!(
                                 "\"{}\"",
-                                s.replace("\"", "\\\"")
-                                    .replace("\n", "\\n")
-                                    .replace("\t", "\\t")
-                                    .replace("\r", "\\r")
+                                s.replace('"', "\\\"")
+                                    .replace('\n', "\\n")
+                                    .replace('\t', "\\t")
+                                    .replace('\r', "\\r")
                             )
                         }
                     }
@@ -47,7 +47,7 @@ pub fn prolog_value_to_json_string(value: Value) -> String {
                 }
                 string_result.push_str(&prolog_value_to_json_string(v.clone()));
             }
-            string_result.push_str("]");
+            string_result.push(']');
             string_result
         }
         Value::Structure(s, l) => {
@@ -58,7 +58,7 @@ pub fn prolog_value_to_json_string(value: Value) -> String {
                 }
                 string_result.push_str(&prolog_value_to_json_string(v.clone()));
             }
-            string_result.push_str("]");
+            string_result.push(']');
             string_result
         }
         _ => "null".to_string(),
@@ -77,7 +77,7 @@ fn prolog_match_to_json_string(query_match: &QueryMatch) -> String {
             prolog_value_to_json_string(v.clone())
         ));
     }
-    string_result.push_str("}");
+    string_result.push('}');
     string_result
 }
 
@@ -88,7 +88,7 @@ pub fn prolog_resolution_to_string(resultion: QueryResolution) -> String {
         QueryResolution::Matches(matches) => {
             let matches_json: Vec<String> = matches
                 .iter()
-                .map(|m| prolog_match_to_json_string(m))
+                .map(prolog_match_to_json_string)
                 .collect();
             format!("[{}]", matches_json.join(", "))
         }

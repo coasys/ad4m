@@ -44,10 +44,7 @@ pub struct DecoratedExpressionProof {
 
 impl<T: GraphQLValue + Serialize> From<Expression<T>> for VerifiedExpression<T> {
     fn from(expr: Expression<T>) -> Self {
-        let valid = match verify(&expr) {
-            Ok(valid) => valid,
-            Err(_) => false,
-        };
+        let valid = verify(&expr).unwrap_or(false);
         let invalid = !valid;
         VerifiedExpression {
             author: expr.author,
@@ -83,7 +80,7 @@ impl From<LinkInput> for Link {
 
 impl Link {
     pub fn normalize(&self) -> Link {
-        let predicate = match self.predicate.as_ref().map(String::as_str) {
+        let predicate = match self.predicate.as_deref() {
             Some("") => None,
             _ => self.predicate.clone(),
         };
@@ -117,7 +114,7 @@ impl TryFrom<LinkExpressionInput> for LinkExpression {
         Ok(LinkExpression {
             author: input.author,
             timestamp: input.timestamp,
-            data: data,
+            data,
             proof: ExpressionProof {
                 key: input.proof.key.ok_or(anyhow!("Key is required"))?,
                 signature: input.proof.signature.ok_or(anyhow!("Key is required"))?,
@@ -140,7 +137,7 @@ impl LinkExpression {
             timestamp: input.timestamp,
             data,
             proof: ExpressionProof::default(),
-            status: input.status.into(),
+            status: input.status,
         }
     }
 }
@@ -189,10 +186,7 @@ impl DecoratedLinkExpression {
                 signature: self.proof.signature.clone(),
             },
         };
-        let valid = match verify(&link_expr) {
-            Ok(valid) => valid,
-            Err(_) => false,
-        };
+        let valid = verify(&link_expr).unwrap_or(false);
         self.proof.valid = Some(valid);
         self.proof.invalid = Some(!valid);
     }
@@ -238,7 +232,7 @@ impl From<PerspectiveInput> for Perspective {
         let links = input
             .links
             .into_iter()
-            .map(|link| LinkExpression::try_from(link))
+            .map(LinkExpression::try_from)
             .filter_map(Result::ok)
             .collect();
         Perspective { links }
@@ -385,7 +379,7 @@ pub struct Notification {
 impl Notification {
     pub fn from_input_and_id(id: String, input: NotificationInput) -> Self {
         Notification {
-            id: id,
+            id,
             granted: false,
             description: input.description,
             app_name: input.app_name,

@@ -84,9 +84,9 @@ pub struct CapabilityInput {
 // The javascript `Date` as string. pub struct represents date and time as the ISO Date string.
 pub struct DateTime(chrono::DateTime<chrono::Utc>);
 
-impl Into<chrono::DateTime<chrono::Utc>> for DateTime {
-    fn into(self) -> chrono::DateTime<chrono::Utc> {
-        self.0
+impl From<DateTime> for chrono::DateTime<chrono::Utc> {
+    fn from(val: DateTime) -> Self {
+        val.0
     }
 }
 
@@ -398,7 +398,7 @@ impl TryFrom<LinkExpressionInput> for DecoratedLinkExpression {
         Ok(DecoratedLinkExpression {
             author: input.author,
             timestamp: input.timestamp,
-            data: data,
+            data,
             proof: DecoratedExpressionProof {
                 key: input.proof.key.ok_or(anyhow!("Key is required"))?,
                 signature: input.proof.signature.ok_or(anyhow!("Key is required"))?,
@@ -449,10 +449,7 @@ impl PerspectiveExpression {
             timestamp: self.timestamp.clone(),
         };
 
-        let valid = match verify(&perspective_expression) {
-            Ok(valid) => valid,
-            Err(_) => false,
-        };
+        let valid = verify(&perspective_expression).unwrap_or(false);
 
         self.proof.valid = Some(valid);
         self.proof.invalid = Some(!valid);

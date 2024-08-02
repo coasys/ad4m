@@ -11,13 +11,13 @@ use crate::{
 };
 use crate::{
     db::Ad4mDb,
-    perspectives::perspective_instance::{Command, Parameter, SubjectClass, SubjectClassOption},
-    runtime_service::{self, RuntimeService},
+    perspectives::perspective_instance::{Command, Parameter, SubjectClassOption},
+    runtime_service::{RuntimeService},
     types::Notification,
 };
-use ad4m_client::literal::Literal;
+
 use coasys_juniper::{graphql_object, graphql_value, FieldError, FieldResult};
-use std::collections::HashMap;
+
 
 use super::graphql_types::*;
 use crate::{
@@ -42,7 +42,7 @@ fn get_perspective_with_uuid_field_error(uuid: &String) -> FieldResult<Perspecti
 }
 
 fn link_status_from_input(status: Option<String>) -> Result<LinkStatus, FieldError> {
-    match status.as_ref().map(|s| s.as_str()) {
+    match status.as_deref() {
         Some("shared") => Ok(LinkStatus::Shared),
         Some("local") => Ok(LinkStatus::Local),
         None => Ok(LinkStatus::Shared),
@@ -177,9 +177,9 @@ impl Mutation {
         let agent = AgentService::with_global_instance(|agent_service| {
             agent_service.lock(passphrase.clone());
 
-            let agent = agent_service.dump().clone();
+            
 
-            agent
+            agent_service.dump().clone()
         });
 
         get_global_pubsub()
@@ -211,7 +211,7 @@ impl Mutation {
         check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
         let auth_info: AuthInfo = auth_info.into();
         let request_id = agent::capabilities::request_capability(auth_info.clone()).await;
-        if true == context.auto_permit_cap_requests {
+        if context.auto_permit_cap_requests {
             println!("======================================");
             println!("Got capability request: \n{:?}", auth_info);
             let random_number_challenge =
@@ -576,10 +576,10 @@ impl Mutation {
             links: payload
                 .links
                 .into_iter()
-                .map(|l| Link::from(l))
-                .map(|l| create_signed_expression(l))
+                .map(Link::from)
+                .map(create_signed_expression)
                 .filter_map(Result::ok)
-                .map(|l| LinkExpression::from(l))
+                .map(LinkExpression::from)
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
@@ -630,10 +630,10 @@ impl Mutation {
             links: payload
                 .links
                 .into_iter()
-                .map(|l| Link::from(l))
-                .map(|l| create_signed_expression(l))
+                .map(Link::from)
+                .map(create_signed_expression)
                 .filter_map(Result::ok)
-                .map(|l| LinkExpression::from(l))
+                .map(LinkExpression::from)
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
@@ -683,9 +683,9 @@ impl Mutation {
                 .links
                 .into_iter()
                 .map(|l| Link::from(l).normalize())
-                .map(|l| create_signed_expression(l))
+                .map(create_signed_expression)
                 .filter_map(Result::ok)
-                .map(|l| LinkExpression::from(l))
+                .map(LinkExpression::from)
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
@@ -821,7 +821,7 @@ impl Mutation {
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         let link = crate::types::LinkExpression::try_from(link)?;
-        perspective.remove_link(link.into()).await?;
+        perspective.remove_link(link).await?;
         Ok(true)
     }
 
@@ -839,7 +839,7 @@ impl Mutation {
         let mut removed_links = Vec::new();
         for link in links.into_iter() {
             let link = crate::types::LinkExpression::try_from(link)?;
-            removed_links.push(perspective.remove_link(link.into()).await?);
+            removed_links.push(perspective.remove_link(link).await?);
         }
 
         Ok(removed_links)

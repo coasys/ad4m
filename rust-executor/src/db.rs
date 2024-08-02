@@ -444,8 +444,7 @@ impl Ad4mDb {
                 perspective
                     .neighbourhood
                     .as_ref()
-                    .map(|n| serde_json::to_string(n).ok())
-                    .flatten(),
+                    .and_then(|n| serde_json::to_string(n).ok()),
                 perspective.shared_url,
                 serde_json::to_string(&perspective.state)?,
             ],
@@ -465,8 +464,7 @@ impl Ad4mDb {
                     uuid: row.get(1)?,
                     neighbourhood: row
                         .get::<usize, Option<String>>(3)?
-                        .map(|n| serde_json::from_str(&n).ok())
-                        .flatten(),
+                        .and_then(|n| serde_json::from_str(&n).ok()),
                     shared_url: row.get(4)?,
                     state: serde_json::from_str(row.get::<usize, String>(5)?.as_str())
                         .expect("Could not deserialize perspective state from DB"),
@@ -490,8 +488,7 @@ impl Ad4mDb {
                 uuid: row.get(1)?,
                 neighbourhood: row
                     .get::<usize, Option<String>>(2)?
-                    .map(|n| serde_json::from_str(&n).ok())
-                    .flatten(),
+                    .and_then(|n| serde_json::from_str(&n).ok()),
                 shared_url: row.get(3)?,
                 state: serde_json::from_str(row.get::<usize, String>(4)?.as_str())
                     .expect("Could not deserialize perspective state from DB"),
@@ -511,7 +508,7 @@ impl Ad4mDb {
             "UPDATE perspective_handle SET name = ?1, neighbourhood = ?2, shared_url = ?3, state = ?4 WHERE uuid = ?5",
             params![
                 perspective.name,
-                perspective.neighbourhood.as_ref().map(|n| serde_json::to_string(n).ok()).flatten(),
+                perspective.neighbourhood.as_ref().and_then(|n| serde_json::to_string(n).ok()),
                 perspective.shared_url,
                 serde_json::to_string(&perspective.state)?,
                 perspective.uuid,
@@ -651,7 +648,7 @@ impl Ad4mDb {
                         data: Link {
                             source: row.get(1)?,
                             predicate: row.get(2).map(|p: Option<String>| {
-                                match p.as_ref().map(|p| p.as_str()) {
+                                match p.as_deref() {
                                     Some("") => None,
                                     _ => p,
                                 }

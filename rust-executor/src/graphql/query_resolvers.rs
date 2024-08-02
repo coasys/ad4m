@@ -58,8 +58,7 @@ impl Query {
                         )
                     )"#,
                         did,
-                    )
-                    .into(),
+                    ),
                 )
                 .await?;
             let result: JsResultType<Option<Agent>> = serde_json::from_str(&result)?;
@@ -242,7 +241,7 @@ impl Query {
         context: &RequestContext,
         filter: Option<String>,
     ) -> FieldResult<Vec<LanguageHandle>> {
-        let filter_string = filter.map_or("null".to_string(), |f| format!("{}", f));
+        let filter_string = filter.map_or("null".to_string(), |f| f.to_string());
         check_capability(&context.capabilities, &LANGUAGE_READ_CAPABILITY)?;
         let mut js = context.js_handle.clone();
         let result = js

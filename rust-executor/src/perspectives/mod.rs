@@ -115,7 +115,7 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
         instance.update_from_handle(handle.clone()).await;
 
         Ad4mDb::with_global_instance(|db| {
-            db.update_perspective(&handle).map_err(|e| e.to_string())
+            db.update_perspective(handle).map_err(|e| e.to_string())
         })?;
     }
 

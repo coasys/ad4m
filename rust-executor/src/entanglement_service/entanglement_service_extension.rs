@@ -1,6 +1,6 @@
-use std::borrow::Cow;
 
-use deno_core::{error::AnyError, include_js_files, op2, Extension, Op};
+
+use deno_core::{error::AnyError, op2};
 
 use crate::graphql::graphql_types::EntanglementProof;
 
@@ -33,13 +33,15 @@ pub fn generate_entanglement_proof(
 #[op2]
 #[serde]
 pub fn add_entanglement_proofs(#[serde] proofs: Vec<EntanglementProof>) -> Result<(), AnyError> {
-    Ok(add_entanglement_proofs_service(proofs))
+    add_entanglement_proofs_service(proofs);
+    Ok(())
 }
 
 #[op2]
 #[serde]
 pub fn delete_entanglement_proofs(#[serde] proofs: Vec<EntanglementProof>) -> Result<(), AnyError> {
-    Ok(delete_entanglement_proof_service(proofs))
+    delete_entanglement_proof_service(proofs);
+    Ok(())
 }
 
 #[op2]

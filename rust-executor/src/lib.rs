@@ -27,7 +27,7 @@ pub mod types;
 use std::{env, thread::JoinHandle};
 
 use log::{error, info, warn};
-use tokio;
+
 
 use js_core::JsCore;
 

@@ -48,5 +48,5 @@ pub fn delete_entanglement_proof(proofs: Vec<EntanglementProof>) {
 pub fn get_entanglement_proofs() -> Vec<EntanglementProof> {
     Ad4mDb::with_global_instance(|db| db.get_all_entanglement_proofs())
         .map_err(|e| e.to_string())
-        .unwrap_or(vec![])
+        .unwrap_or_default()
 }

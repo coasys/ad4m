@@ -397,7 +397,7 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
 
                 let entry = seen_subject_classes
                     .entry(name.clone())
-                    .or_insert_with(|| HashMap::new());
+                    .or_insert_with(HashMap::new);
                 entry.insert(
                     "type".to_string(),
                     link.predicate
@@ -419,7 +419,7 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
 
                 let subject_class = seen_subject_classes
                     .entry(name.clone())
-                    .or_insert_with(|| HashMap::new());
+                    .or_insert_with(HashMap::new);
                 let existing_timestamp = subject_class
                     .get("timestamp")
                     .and_then(|t| t.parse::<i64>().ok());

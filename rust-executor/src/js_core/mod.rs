@@ -129,7 +129,7 @@ impl std::fmt::Display for ExternWrapper {
                 bytes_str.push_str(", ");
             }
         }
-        bytes_str.push_str("]");
+        bytes_str.push(']');
         write!(f, "{}", bytes_str).unwrap();
         Ok(())
     }
@@ -175,8 +175,8 @@ impl JsCore {
     }
 
     fn event_loop(&self) -> EventLoopFuture {
-        let event_loop = EventLoopFuture::new(self.worker.clone());
-        event_loop
+        
+        EventLoopFuture::new(self.worker.clone())
     }
 
     async fn execute_async_smart(
@@ -198,7 +198,7 @@ impl JsCore {
         let resolve_fut = {
             let mut worker = self.worker.lock().await;
             let execute_async = worker.execute_script("js_core", wrapped_script.into());
-            worker.js_runtime.resolve(execute_async.unwrap().into())
+            worker.js_runtime.resolve(execute_async.unwrap())
         };
 
         Ok(SmartGlobalVariableFuture::new(
@@ -278,7 +278,7 @@ impl JsCore {
                 info!("AD4M JS engine init completed, with result: {:?}", result);
 
                 let result = js_core
-                    .execute_async_smart(format!("initCore({})", config.get_json()).into())
+                    .execute_async_smart(format!("initCore({})", config.get_json()))
                     .await
                     .expect("to be able to create js execution future")
                     .await ;

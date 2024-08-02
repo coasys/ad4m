@@ -90,11 +90,10 @@ impl PrologEngine {
                             ) => {
                                 let program = program_lines
                                     .iter()
-                                    .map(|l| l.replace("\n", "").replace("\r", ""))
+                                    .map(|l| l.replace(['\n', '\r'], ""))
                                     .collect::<Vec<String>>()
                                     .join("\n");
-                                let _result =
-                                    machine.consult_module_string(module_name.as_str(), program);
+                                machine.consult_module_string(module_name.as_str(), program);
                                 let _ =
                                     response.send(PrologServiceResponse::LoadModuleResult(Ok(())));
                             }

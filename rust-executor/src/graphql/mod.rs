@@ -77,7 +77,7 @@ pub async fn start_server(
             RequestContext {
                 capabilities,
                 js_handle: js_core_handle_cloned1.clone(),
-                auto_permit_cap_requests: config.auto_permit_cap_requests.clone().unwrap_or(false),
+                auto_permit_cap_requests: config.auto_permit_cap_requests.unwrap_or(false),
             }
         });
     let qm_graphql_filter = coasys_juniper_warp::make_graphql_filter(qm_schema, qm_state.boxed());
@@ -91,7 +91,7 @@ pub async fn start_server(
             let root_node = root_node.clone();
             let js_core_handle = js_core_handle.clone();
             let admin_credential_arc = admin_credential_arc.clone();
-            let auto_permit_cap_requests = config.auto_permit_cap_requests.clone().unwrap_or(false);
+            let auto_permit_cap_requests = config.auto_permit_cap_requests.unwrap_or(false);
             ws.on_upgrade(move |websocket| async move {
                 serve_graphql_transport_ws(
                     websocket,
@@ -117,7 +117,7 @@ pub async fn start_server(
                         let context = RequestContext {
                             capabilities,
                             js_handle: js_core_handle.clone(),
-                            auto_permit_cap_requests: auto_permit_cap_requests,
+                            auto_permit_cap_requests,
                         };
                         Ok(ConnectionConfig::new(context))
                             as Result<ConnectionConfig<_>, Infallible>

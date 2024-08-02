@@ -27,7 +27,7 @@ use json5;
 use scryer_prolog::machine::parsed_results::{QueryMatch, QueryResolution};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{self, BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
@@ -176,7 +176,7 @@ impl PerspectiveInstance {
 
     async fn ensure_link_language(&self) {
         let mut interval = time::interval(Duration::from_secs(5));
-        while !self.is_teardown.lock().await.clone() {
+        while !*self.is_teardown.lock().await {
             if self.link_language.lock().await.is_none()
                 && self.persisted.lock().await.neighbourhood.is_some()
             {
@@ -231,7 +231,7 @@ impl PerspectiveInstance {
 
     async fn nh_sync_loop(&self) {
         let mut interval = time::interval(Duration::from_secs(3));
-        while !self.is_teardown.lock().await.clone() {
+        while !*self.is_teardown.lock().await {
             let mut link_language_guard = self.link_language.lock().await;
             if let Some(link_language) = link_language_guard.as_mut() {
                 match link_language.sync().await {
@@ -253,8 +253,8 @@ impl PerspectiveInstance {
     async fn pending_diffs_loop(&self) {
         let mut interval = time::interval(Duration::from_secs(10));
         let uuid = self.persisted.lock().await.uuid.clone();
-        while !self.is_teardown.lock().await.clone() {
-            if let Err(e) = (|| async {
+        while !*self.is_teardown.lock().await {
+            if let Err(e) = async {
                 let mut link_language_guard = self.link_language.lock().await;
                 if let Some(link_language) = link_language_guard.as_mut() {
                     // We have a link language.
@@ -290,7 +290,7 @@ impl PerspectiveInstance {
                     }
                 }
                 Ok(())
-            })()
+            }
             .await
             {
                 log::error!("Error in pending_diffs_loop: {:?}", e);
@@ -392,17 +392,15 @@ impl PerspectiveInstance {
         let mut can_commit = false;
         if !self.created_from_join {
             can_commit = true;
-        } else {
-            if let Some(link_language) = self.link_language.lock().await.as_mut() {
-                if link_language.current_revision().await?.is_some() {
-                    can_commit = true;
-                }
+        } else if let Some(link_language) = self.link_language.lock().await.as_mut() {
+            if link_language.current_revision().await?.is_some() {
+                can_commit = true;
             }
         };
 
         if can_commit {
             if let Some(link_language) = self.link_language.lock().await.as_mut() {
-                return Ok(link_language.commit(diff.clone()).await?);
+                return link_language.commit(diff.clone()).await;
             }
         }
 
@@ -483,10 +481,10 @@ impl PerspectiveInstance {
         status: LinkStatus,
     ) -> Result<DecoratedLinkExpression, AnyError> {
         let link_expression = create_signed_expression(link)?;
-        let link = self
+        
+        self
             .add_link_expression(link_expression.into(), status)
-            .await;
-        link
+            .await
     }
 
     async fn pubsub_publish_diff(&self, decorated_diff: DecoratedPerspectiveDiff) {
@@ -560,7 +558,7 @@ impl PerspectiveInstance {
         let uuid = handle.uuid.clone();
         let link_expressions = links
             .into_iter()
-            .map(|l| create_signed_expression(l).map(|l| LinkExpression::from(l)))
+            .map(|l| create_signed_expression(l).map(LinkExpression::from))
             .collect::<Result<Vec<LinkExpression>, AnyError>>();
 
         let link_expressions = link_expressions?;
@@ -845,7 +843,7 @@ impl PerspectiveInstance {
 
         Ok(links
             .into_iter()
-            .map(|(link, status)| DecoratedLinkExpression::from((link.clone(), status)).into())
+            .map(|(link, status)| DecoratedLinkExpression::from((link.clone(), status)))
             .collect())
     }
 
@@ -914,10 +912,10 @@ impl PerspectiveInstance {
 
         let mut rebuild_flag = self.prolog_needs_rebuild.lock().await;
 
-        if !has_prolog_engine || *rebuild_flag == true {
+        if !has_prolog_engine || *rebuild_flag {
             let _update_lock = self.prolog_update_mutex.write().await;
             let mut maybe_prolog_engine = self.prolog_engine.lock().await;
-            if *rebuild_flag == true && maybe_prolog_engine.is_some() {
+            if *rebuild_flag && maybe_prolog_engine.is_some() {
                 let old_engine = maybe_prolog_engine.as_ref().unwrap();
                 let _ = old_engine.drop();
                 *rebuild_flag = false;
@@ -959,7 +957,7 @@ impl PerspectiveInstance {
             .as_ref()
             .expect("Must be some since we initialized the engine above");
 
-        let query = if !query.ends_with(".") {
+        let query = if !query.ends_with('.') {
             query + "."
         } else {
             query
@@ -991,12 +989,11 @@ impl PerspectiveInstance {
                 log::error!("Error spawning Prolog engine: {:?}", e)
             };
 
-            let fact_rebuild_needed = !(&diff.removals.is_empty()).clone()
+            let fact_rebuild_needed = !diff.removals.is_empty()
                 || diff
                     .additions
                     .iter()
-                    .find(|link| is_sdna_link(&link.data))
-                    .is_some();
+                    .any(|link| is_sdna_link(&link.data));
 
             let did_update = if !fact_rebuild_needed {
                 let mut assertions: Vec<String> = Vec::new();
@@ -1078,10 +1075,7 @@ impl PerspectiveInstance {
             .into_iter()
             .map(|(notification, mut matches)| {
                 if let Some(old_matches) = before.get(&notification) {
-                    matches = matches
-                        .into_iter()
-                        .filter(|m| !old_matches.contains(m))
-                        .collect();
+                    matches.retain(|m| !old_matches.contains(m));
                 }
                 (notification, matches)
             })
@@ -1093,7 +1087,7 @@ impl PerspectiveInstance {
         match_map: BTreeMap<Notification, Vec<QueryMatch>>,
     ) {
         for (notification, matches) in match_map {
-            if (matches.len() > 0) {
+            if !matches.is_empty() {
                 let payload = TriggeredNotification {
                     notification: notification.clone(),
                     perspective_id: uuid.clone(),
@@ -1102,7 +1096,7 @@ impl PerspectiveInstance {
 
                 let message = serde_json::to_string(&payload).unwrap();
 
-                if let Ok(_) = url::Url::parse(&notification.webhook_url) {
+                if url::Url::parse(&notification.webhook_url).is_ok() {
                     log::info!(
                         "Notification webhook - posting to {:?}",
                         notification.webhook_url
@@ -1370,12 +1364,11 @@ impl PerspectiveInstance {
             let query = subject_class.query.ok_or(anyhow!(
                 "SubjectClassOption needs to either have `name` or `query` set"
             ))?;
-            let result = self.prolog_query(format!("{}", query)).await.map_err(|e| {
+            let result = self.prolog_query(query.to_string()).await.map_err(|e| {
                 log::error!("Error creating subject: {:?}", e);
                 e
             })?;
             prolog_get_first_string_binding(&result, "Class")
-                .map(|value| value.clone())
                 .ok_or(anyhow!("No matching subject class found!"))?
         })
     }

@@ -42,7 +42,7 @@ impl RuntimeService {
     }
 
     fn new(mainnet_seed_file_path: String) -> RuntimeService {
-        let mut file = File::open(&mainnet_seed_file_path).unwrap();
+        let mut file = File::open(mainnet_seed_file_path).unwrap();
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
         let seed: BootstrapSeed = serde_json::from_str(&contents).unwrap();
@@ -69,7 +69,7 @@ impl RuntimeService {
         let mut trusted_agents: Vec<String> = self.seed.trusted_agents.clone();
         let mut stored_agents = Ad4mDb::with_global_instance(|db| db.get_all_trusted_agents())
             .map_err(|e| e.to_string())
-            .unwrap_or(vec![]);
+            .unwrap_or_default();
         trusted_agents.push(did());
         trusted_agents.append(&mut stored_agents);
         trusted_agents.sort();
@@ -92,7 +92,7 @@ impl RuntimeService {
         let mut stored_languages =
             Ad4mDb::with_global_instance(|db| db.get_all_known_link_languages())
                 .map_err(|e| e.to_string())
-                .unwrap_or(vec![]);
+                .unwrap_or_default();
         languages.append(&mut stored_languages);
         languages.sort();
         languages.dedup();
@@ -111,11 +111,11 @@ impl RuntimeService {
     }
 
     pub fn get_friends(&self) -> Vec<String> {
-        let friends = Ad4mDb::with_global_instance(|db| db.get_all_friends())
-            .map_err(|e| e.to_string())
-            .unwrap_or(vec![]);
+        
 
-        friends
+        Ad4mDb::with_global_instance(|db| db.get_all_friends())
+            .map_err(|e| e.to_string())
+            .unwrap_or_default()
     }
 
     pub fn add_friend(&self, friends: Vec<String>) {
@@ -129,11 +129,11 @@ impl RuntimeService {
     }
 
     pub fn get_outbox(&self) -> Vec<SentMessage> {
-        let outbox = Ad4mDb::with_global_instance(|db| db.get_all_from_outbox())
-            .map_err(|e| e.to_string())
-            .unwrap_or(vec![]);
+        
 
-        outbox
+        Ad4mDb::with_global_instance(|db| db.get_all_from_outbox())
+            .map_err(|e| e.to_string())
+            .unwrap_or_default()
     }
 
     pub fn add_message_to_outbox(&self, message: SentMessage) {

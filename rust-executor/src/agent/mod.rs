@@ -46,7 +46,7 @@ pub fn did() -> String {
 pub fn check_keys_and_create(did: String) -> did_key::Document {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
-    let mut wallet_ref = wallet.as_mut().expect("wallet instance");
+    let wallet_ref = wallet.as_mut().expect("wallet instance");
     let name = "main".to_string();
     if wallet_ref.get_did_document(&name).is_none() {
         wallet_ref.initialize_keys(name, did).unwrap()
@@ -105,11 +105,11 @@ impl AgentSignature {
     }
 }
 
-impl Into<crate::graphql::graphql_types::AgentSignature> for AgentSignature {
-    fn into(self) -> crate::graphql::graphql_types::AgentSignature {
+impl From<AgentSignature> for crate::graphql::graphql_types::AgentSignature {
+    fn from(val: AgentSignature) -> Self {
         crate::graphql::graphql_types::AgentSignature {
-            signature: self.signature,
-            public_key: self.public_key,
+            signature: val.signature,
+            public_key: val.public_key,
         }
     }
 }
@@ -194,7 +194,7 @@ impl AgentService {
         if !self.is_unlocked() {
             return Err(anyhow!("Agent not unlocked"));
         }
-        if !self.signing_key_id.is_some() {
+        if self.signing_key_id.is_none() {
             return Err(anyhow!("Agent signing key not found"));
         }
         Ok(())

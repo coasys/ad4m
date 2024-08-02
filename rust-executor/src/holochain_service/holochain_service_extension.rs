@@ -1,6 +1,6 @@
-use std::borrow::Cow;
 
-use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op2, Extension, Op};
+
+use deno_core::{anyhow::anyhow, error::AnyError, op2};
 use holochain::{
     conductor::api::AppInfo,
     prelude::{

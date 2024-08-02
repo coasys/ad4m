@@ -83,7 +83,7 @@ pub fn capabilities_from_token(
         }
     }
 
-    if token == "" {
+    if token.is_empty() {
         return Ok(vec![AGENT_AUTH_CAPABILITY.clone()]);
     }
 
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn gen_random_digits_returns_a_6_digit_string() {
         let rand = gen_random_digits();
-        assert!(rand.len() == 6 && rand.chars().all(|c| c.is_digit(10)));
+        assert!(rand.len() == 6 && rand.chars().all(|c| c.is_ascii_digit()));
     }
 
     #[test]

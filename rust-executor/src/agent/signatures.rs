@@ -50,8 +50,7 @@ pub(super) fn hash_data_and_timestamp<T: Serialize>(
     hasher
         .finalize()
         .as_slice()
-        .try_into()
-        .expect("Hash should be 32 bytes")
+        .into()
 }
 
 pub(super) fn hash_message(message: &String) -> Vec<u8> {
@@ -60,8 +59,7 @@ pub(super) fn hash_message(message: &String) -> Vec<u8> {
     hasher
         .finalize()
         .as_slice()
-        .try_into()
-        .expect("Hash should be 32 bytes")
+        .into()
 }
 
 fn inner_verify(did: &str, message: &[u8], signature: &[u8]) -> bool {
