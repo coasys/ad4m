@@ -226,7 +226,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             let perspective = ad4m_client.perspectives.get(id).await?;
             let classes = perspective.get_subject_classes(&base).await?;
             for class in &classes {
-                match perspective.get_subject(&class, &base).await {
+                match perspective.get_subject(class, &base).await {
                     Ok(subject) => {
                         let props = subject.get_property_values().await?;
                         if let Some(value) = props.get(&property) {
@@ -253,7 +253,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             let perspective = ad4m_client.perspectives.get(id).await?;
             let classes = perspective.get_subject_classes(&base).await?;
             for class in &classes {
-                match perspective.get_subject(&class, &base).await {
+                match perspective.get_subject(class, &base).await {
                     Ok(subject) => {
                         if subject.set_property(&property, &value).await.is_ok() {
                             return Ok(());
@@ -278,7 +278,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             let perspective = ad4m_client.perspectives.get(id).await?;
             let classes = perspective.get_subject_classes(&base).await?;
             for class in &classes {
-                match perspective.get_subject(&class, &base).await {
+                match perspective.get_subject(class, &base).await {
                     Ok(subject) => {
                         if subject.add_collection(&collection, &value).await.is_ok() {
                             return Ok(());

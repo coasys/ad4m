@@ -31,7 +31,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
             let ad4m_test_dir: String = ad4m_test_dir.to_string_lossy().to_string();
             let ad4m_test_dir_clone = ad4m_test_dir.clone();
 
-            let _init = rust_executor::init::init(Some(ad4m_test_dir.clone()), None)
+            rust_executor::init::init(Some(ad4m_test_dir.clone()), None)
                 .map_err(|err| anyhow::anyhow!("Error in init: {:?}", err))?;
 
             let run_handle = tokio::task::spawn(async move {

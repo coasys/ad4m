@@ -15,7 +15,7 @@ async fn add_link(perspective: &PerspectiveProxy, line: &String) -> bool {
         r"add_link\((?P<source>\S+),\s*(?P<predicate>\S+),\s*(?P<status>\S+),\s*(?P<target>\S+)\)",
     )
     .expect("Error parsing add_link regex");
-    let caps = add_link.captures(&line);
+    let caps = add_link.captures(line);
     if let Some(caps) = caps {
         let source = caps.name("source").unwrap().as_str().to_string();
         let predicate = caps.name("predicate").unwrap().as_str().to_string();
@@ -48,7 +48,7 @@ async fn link_query(perspective: &PerspectiveProxy, line: &String) -> bool {
         Regex::new(r"query\(\s*(?P<source>\S+)?(,\s*(?P<predicate>\S+))?(,\s*(?P<target>\S+))?\)")
             .expect("Error parsing link_query regex");
 
-    let caps = link_query.captures(&line);
+    let caps = link_query.captures(line);
     if let Some(caps) = caps {
         let source = caps
             .name("source")
@@ -126,7 +126,7 @@ async fn subject_new(perspective: &PerspectiveProxy, line: &String) -> bool {
     // new <class>(<base>)
     let subject_new = Regex::new(r"new\s+(?P<class>\S+)\(\s*(?P<base>\S+)\s*\)")
         .expect("Error parsing subject_new regex");
-    let caps = subject_new.captures(&line);
+    let caps = subject_new.captures(line);
     if let Some(caps) = caps {
         let class = caps.name("class").unwrap().as_str().to_string();
         let base = caps.name("base").unwrap().as_str().to_string();
@@ -154,7 +154,7 @@ async fn subject_set_prop(perspective: &PerspectiveProxy, line: &String) -> Resu
     let subject_set_prop =
         Regex::new(r"subject\(\s*(?P<base>\S+)\s*\)\[(?P<name>\S+)\][\s--<]*=\s*(?P<value>\S+)")
             .expect("Error parsing subject_set_prop regex");
-    let caps = subject_set_prop.captures(&line);
+    let caps = subject_set_prop.captures(line);
 
     if let Some(caps) = caps {
         let base = caps.name("base").unwrap().as_str().to_string();
@@ -207,7 +207,7 @@ async fn subject_add_collection(perspective: &PerspectiveProxy, line: &String) -
     let subject_add_collection =
         Regex::new(r"subject\(\s*(?P<base>\S+)\s*\)\[(?P<name>\S+)\]\s*<=\s*(?P<value>\S+)")
             .expect("Error parsing subject_add_collection regex");
-    let caps = subject_add_collection.captures(&line);
+    let caps = subject_add_collection.captures(line);
 
     if let Some(caps) = caps {
         let base = caps.name("base").unwrap().as_str().to_string();
@@ -259,7 +259,7 @@ async fn subject_print(perspective: &PerspectiveProxy, line: &String) -> Result<
     // subject(<base>)
     let subject_print = Regex::new(r"^\s*subject\(\s*(?P<base>\S+)\s*\)\s*$")
         .expect("Error parsing subject_print regex");
-    let caps = subject_print.captures(&line);
+    let caps = subject_print.captures(line);
 
     if let Some(caps) = caps {
         let base = caps.name("base").unwrap().as_str().to_string();
