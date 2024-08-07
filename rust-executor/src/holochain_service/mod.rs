@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-
+use base64::prelude::*;
 use chrono::Duration;
 use crypto_box::rand_core::OsRng;
 use deno_core::anyhow::anyhow;
@@ -52,7 +52,7 @@ pub fn agent_infos_from_str(agent_infos: &str) -> Result<Vec<AgentInfoSigned>, A
         .into_iter()
         .map(|encoded_info| {
             let info_bytes =
-                base64::decode(encoded_info).expect("Failed to decode base64 AgentInfoSigned");
+                BASE64_STANDARD.decode(encoded_info).expect("Failed to decode base64 AgentInfoSigned");
             AgentInfoSigned::decode(&info_bytes).expect("Failed to decode AgentInfoSigned")
         })
         .collect();

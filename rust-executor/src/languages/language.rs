@@ -5,6 +5,7 @@ use crate::{
     types::{Perspective, PerspectiveDiff},
 };
 use deno_core::error::AnyError;
+use base64::prelude::*;
 
 #[derive(Clone)]
 pub struct Language {
@@ -16,7 +17,7 @@ fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
     if let Ok(maybe_revision) = serde_json::from_str::<Option<ByteArray>>(&js_result) {
         Ok(maybe_revision.map(|revision| {
             let vec: Vec<u8> = revision.into();
-            base64::encode(vec)
+            BASE64_STANDARD.encode(vec)
         }))
     } else {
         Ok(serde_json::from_str::<Option<String>>(&js_result)?)

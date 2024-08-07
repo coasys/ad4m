@@ -10,7 +10,7 @@ use crate::{
 };
 use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
 use std::env;
-
+use base64::prelude::*;
 use crate::agent::{capabilities::*, signatures};
 
 pub struct Query;
@@ -449,7 +449,7 @@ impl Query {
 
         let encoded_infos: Vec<String> = infos
             .iter()
-            .map(|info| base64::encode(info.encode().expect("Failed to encode AgentInfoSigned")))
+            .map(|info| BASE64_STANDARD.encode(info.encode().expect("Failed to encode AgentInfoSigned")))
             .collect();
 
         Ok(serde_json::to_string(&encoded_infos)?)
