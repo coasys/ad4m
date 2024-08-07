@@ -176,9 +176,6 @@ impl Mutation {
     ) -> FieldResult<AgentStatus> {
         let agent = AgentService::with_global_instance(|agent_service| {
             agent_service.lock(passphrase.clone());
-
-            
-
             agent_service.dump().clone()
         });
 
@@ -282,7 +279,7 @@ impl Mutation {
             let agent_service = agent_instance.lock().expect("agent lock");
             let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
 
-            agent_ref.unlock(passphrase.clone());
+            agent_ref.unlock(passphrase.clone())?
         }
 
         if agent_instance
@@ -1011,8 +1008,9 @@ impl Mutation {
             dids_json,
         );
         let result = js.execute(script).await?;
+        // TODO: what is this for? result is not used.. should this error if it can't be parsed?
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result();
+        result.get_graphql_result()?;
 
         Ok(friends)
     }

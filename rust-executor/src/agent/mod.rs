@@ -129,10 +129,9 @@ lazy_static! {
 }
 
 impl AgentService {
-    pub fn init_global_instance(app_path: String) -> Result<(), deno_core::anyhow::Error> {
+    pub fn init_global_instance(app_path: String) {
         let mut agent_instance = AGENT_SERVICE.lock().unwrap();
         *agent_instance = Some(AgentService::new(app_path));
-        Ok(())
     }
 
     pub fn new(app_path: String) -> AgentService {
@@ -231,7 +230,7 @@ impl AgentService {
         self.store_agent_profile();
     }
 
-    pub fn create_new_keys(&mut self) -> Result<(), AnyError> {
+    pub fn create_new_keys(&mut self) {
         let wallet_instance = Wallet::instance();
         {
             let mut wallet = wallet_instance.lock().expect("wallet lock");
@@ -247,29 +246,22 @@ impl AgentService {
             direct_message_language: None,
         });
         self.signing_key_id = Some(signing_key_id());
-        Ok(())
     }
 
     pub fn unlock(&self, password: String) -> Result<(), AnyError> {
         let wallet_instance = Wallet::instance();
         let mut wallet = wallet_instance.lock().expect("wallet lock");
         let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
-        wallet_ref.unlock(password);
-
-        // TODO store agent proifle
-
-        Ok(())
+        wallet_ref.unlock(password)
     }
 
-    pub fn lock(&self, password: String) -> Result<(), AnyError> {
+    pub fn lock(&self, password: String) {
         let wallet_instance = Wallet::instance();
         {
             let mut wallet = wallet_instance.lock().expect("wallet lock");
             let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
             wallet_ref.lock(password);
         }
-
-        Ok(())
     }
 
     pub fn save(&self, password: String) {

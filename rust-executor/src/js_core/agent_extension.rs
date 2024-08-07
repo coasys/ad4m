@@ -102,9 +102,7 @@ fn agent_load() -> Result<AgentStatus, AnyError> {
 #[serde]
 async fn agent_unlock(#[string] passphrase: String) -> Result<(), AnyError> {
     AgentService::with_global_instance(|agent_service| {
-        agent_service.unlock(passphrase);
-
-        Ok(())
+        agent_service.unlock(passphrase)
     })
 }
 
@@ -113,7 +111,6 @@ async fn agent_unlock(#[string] passphrase: String) -> Result<(), AnyError> {
 async fn agent_lock(#[string] passphrase: String) -> Result<(), AnyError> {
     AgentService::with_global_instance(|agent_service| {
         agent_service.lock(passphrase);
-
         Ok(())
     })
 }
