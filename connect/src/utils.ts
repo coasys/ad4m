@@ -14,7 +14,7 @@ export async function connectWebSocket(url, timeout = 10000) {
   return Promise.race([
     new Promise((resolve, reject) => {
       try {
-        if (url.includes("proxy")) {
+        if (!url.includes("localhost")) {
           resolve(new WebSocket(url));
         }
         const websocket = new WebSocket(url);

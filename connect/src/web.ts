@@ -745,11 +745,14 @@ export class Ad4mConnectElement extends LitElement {
     this._isOpen = true;
     this.requestUpdate();
     const client = await this._client.connect();
-    const status = await client.agent.status();
-    if (status.isUnlocked && status.isInitialized) {
-      window.location.reload();
+    try {
+      const status = await client.agent.status();
+      if (status.isUnlocked && status.isInitialized) {
+        window.location.reload();
+      }
+    } catch (e) {
+      console.warn(e);
     }
-    console.log("sssss", status);
     return client;
   }
 
