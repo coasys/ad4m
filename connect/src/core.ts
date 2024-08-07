@@ -296,8 +296,6 @@ export default class Ad4mConnect {
     // Make sure the url is valid
     try {
       const websocket = new WebSocket(this.url);
-
-
     } catch (e) {
       this.notifyConnectionChange("not_connected");
       return;
