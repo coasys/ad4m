@@ -1,6 +1,5 @@
 
 use deno_core::error::AnyError;
-use deno_core::v8::Handle;
 use deno_core::{anyhow, v8, PollEventLoopOptions};
 use deno_runtime::worker::MainWorker;
 use futures::{Future};
