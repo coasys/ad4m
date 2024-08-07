@@ -34,7 +34,7 @@ pub fn generic_link_fact(predicate_name: &str, l: &DecoratedLinkExpression) -> S
     )
 }
 
-async fn node_facts(all_links: &Vec<&DecoratedLinkExpression>) -> Result<Vec<String>, AnyError> {
+async fn _node_facts(all_links: &Vec<&DecoratedLinkExpression>) -> Result<Vec<String>, AnyError> {
     let mut lang_addrs = Vec::new();
     let mut lang_names = Vec::new();
     let mut expr_addrs = Vec::new();

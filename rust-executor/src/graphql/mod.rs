@@ -34,7 +34,7 @@ fn schema() -> Schema {
     Schema::new(Query, Mutation, Subscription)
 }
 
-fn reply_with_header(
+fn _reply_with_header(
     reply: impl warp::Reply,
     name: &'static str,
     value: String,

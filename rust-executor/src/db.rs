@@ -452,7 +452,7 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn get_perspective(&self, uuid: &str) -> Ad4mDbResult<Option<PerspectiveHandle>> {
+    pub fn _get_perspective(&self, uuid: &str) -> Ad4mDbResult<Option<PerspectiveHandle>> {
         let mut stmt = self.conn.prepare(
             "SELECT name, uuid, neighbourhood, shared_url, state FROM perspective_handle WHERE uuid = ?1",
         )?;
@@ -840,7 +840,7 @@ impl Ad4mDb {
 
     // Expression Methods
 
-    pub fn add_expression<T: Serialize>(
+    pub fn _add_expression<T: Serialize>(
         &self,
         url: &str,
         expression: &Expression<T>,
@@ -853,7 +853,7 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn get_expression(&self, url: &str) -> Ad4mDbResult<Option<Expression<serde_json::Value>>> {
+    pub fn _get_expression(&self, url: &str) -> Ad4mDbResult<Option<Expression<serde_json::Value>>> {
         let mut stmt = self
             .conn
             .prepare("SELECT data FROM expression WHERE url = ?1")?;
