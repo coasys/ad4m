@@ -193,7 +193,7 @@ export default class Ad4mConnect {
           if (data.serviceId) {
             this.setPort(data.port);
             this.setUrl(data.url);
-            
+
             this.isHosting = true;
 
             setForVersion('ad4mhosting', 'true');
@@ -296,16 +296,6 @@ export default class Ad4mConnect {
     // Make sure the url is valid
     try {
       const websocket = new WebSocket(this.url);
-
-      websocket.onerror = (error) => {
-        this.notifyConnectionChange("not_connected");
-      };
-
-      setTimeout(() => {
-        if (websocket.readyState !== WebSocket.OPEN) {
-          this.notifyConnectionChange("not_connected");
-        }
-      }, 10000);
     } catch (e) {
       this.notifyConnectionChange("not_connected");
       return;
@@ -315,6 +305,8 @@ export default class Ad4mConnect {
       this.requestedRestart = true;
       this.wsClient.dispose();
       this.apolloClient.stop();
+      this.wsClient = null;
+      this.apolloClient = null;
     }
 
     this.wsClient = createClient({
@@ -413,7 +405,7 @@ export default class Ad4mConnect {
       let token = localStorage.getItem('hosting_token');
 
       const response = await fetch('https://hosting.ad4m.dev/api/service/checkStatus', {
-        method: 'GET',
+        method: 'POST',
         headers: {
             'Content-Type': 'application/json',
             'Authorization': 'Bearer ' + token

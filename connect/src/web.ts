@@ -471,10 +471,10 @@ export class Ad4mConnectElement extends LitElement {
 
   @state()
   private _hostingStep = 0;
-  
+
   @state()
   private _email = "";
-  
+
   @state()
   private _passowrd = "";
 
@@ -612,7 +612,7 @@ export class Ad4mConnectElement extends LitElement {
 
   private changeEmail(email: string) {
     this._email = email;
-  } 
+  }
 
   private changePassword(passowrd: string) {
     this._passowrd = passowrd;
@@ -631,6 +631,11 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private changeUrl(url) {
+    if (url !== this._client.url) {
+      removeForVersion("ad4mtoken")
+      this._client.setToken(null);
+    }
+
     this._client.setUrl(url);
   }
 
@@ -683,10 +688,15 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private handleConnectionChange(event: ConnectionStates) {
-   console.log(event); 
-  //  this._isOpen = true; 
+   console.log(event);
+  //  this._isOpen = true;
    if (event === "connected") {
-      this.changeUIState("requestcap");
+      if (this.authState !== "authenticated") {
+        this.changeUIState("requestcap");
+      } else {
+        this.changeUIState("connected");
+        this._isOpen = false;
+      }
     }
     if (event === "disconnected") {
       this._isOpen = true;
@@ -740,6 +750,14 @@ export class Ad4mConnectElement extends LitElement {
     this._isOpen = true;
     this.requestUpdate();
     const client = await this._client.connect();
+    try {
+      const status = await client.agent.status();
+      if (status.isUnlocked && status.isInitialized) {
+        window.location.reload();
+      }
+    } catch (e) {
+      console.warn(e);
+    }
     return client;
   }
 
@@ -749,13 +767,18 @@ export class Ad4mConnectElement extends LitElement {
 
   async connectRemote(url) {
     try {
+      this.changeUrl(url);
       const client = await this._client.connect(url);
+      const status = await client.agent.status();
+      if (status.isUnlocked && status.isInitialized) {
+        return client
+      }
+
       this.changeUIState("requestcap");
       return client;
     } catch (e) {
-      if (e.message === "Socket closed with event 4500 Invalid Compact JWS") {
         this.changeUIState("requestcap");
-      }
+        this._isOpen = true;
     }
   }
 
