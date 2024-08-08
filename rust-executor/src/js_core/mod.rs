@@ -138,6 +138,7 @@ impl std::fmt::Display for ExternWrapper {
 impl JsCore {
     pub fn new() -> Self {
         JsCore {
+            #[allow(clippy::arc_with_non_send_sync)]
             worker: Arc::new(TokioMutex::new(MainWorker::from_options(
                 main_module_url(),
                 PermissionsContainer::allow_all(),

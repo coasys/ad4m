@@ -34,7 +34,7 @@ pub fn generic_link_fact(predicate_name: &str, l: &DecoratedLinkExpression) -> S
     )
 }
 
-async fn _node_facts(all_links: &Vec<&DecoratedLinkExpression>) -> Result<Vec<String>, AnyError> {
+async fn _node_facts(all_links: &[&DecoratedLinkExpression]) -> Result<Vec<String>, AnyError> {
     let mut lang_addrs = Vec::new();
     let mut lang_names = Vec::new();
     let mut expr_addrs = Vec::new();
@@ -114,14 +114,16 @@ pub async fn init_engine_facts(
     all_links: Vec<DecoratedLinkExpression>,
     neighbourhood_author: Option<String>,
 ) -> Result<Vec<String>, AnyError> {
-    let mut lines: Vec<String> = Vec::new();
+    let mut lines: Vec<String> = vec![
+        // triple/3
+        // link/5
+        ":- discontiguous(triple/3).".to_string(),
+        ":- discontiguous(link/5).".to_string(),
+        ":- dynamic(triple/3).".to_string(),
+        ":- dynamic(link/5).".to_string(),
+    ];
 
-    // triple/3
-    // link/5
-    lines.push(":- discontiguous(triple/3).".to_string());
-    lines.push(":- discontiguous(link/5).".to_string());
-    lines.push(":- dynamic(triple/3).".to_string());
-    lines.push(":- dynamic(link/5).".to_string());
+
 
     let links_without_sdna: Vec<_> = all_links
         .iter()

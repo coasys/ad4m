@@ -12,26 +12,24 @@ use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::sync::{Arc, Mutex};
 
-fn slice_to_u8_array(slice: &[u8]) -> Option<[u8; 32]> {
+fn slice_to_u8_array(slice: &[u8]) -> [u8; 32] {
     //If length of slice is not 32 then take the first 32 bytes
-    let slice_32 = if slice.len() != 32 {
+    
+    
+    if slice.len() != 32 {
         let mut array: [u8; 32] = [0u8; 32];
-        let mut i = 0;
-        for byte in slice {
+        let _i = 0;
+        for (i, byte) in slice.iter().enumerate() {
             if i == 32 {
                 break;
             }
             array[i] = *byte;
-            i += 1;
         }
         array
     } else {
         let array: [u8; 32] = slice.try_into().expect("slice with incorrect length");
         array
-    };
-
-    let array: Result<[u8; 32], _> = slice_32.try_into();
-    array.ok()
+    }
 }
 
 fn padded(passphrase: String) -> String {
@@ -60,7 +58,7 @@ fn encrypt(payload: String, passphrase: String) -> String {
     let derived_secret_key = derived_secret_key.replace(preambel, "");
 
     let derived_secret_key_bytes = derived_secret_key.as_bytes();
-    let slice = slice_to_u8_array(derived_secret_key_bytes).expect("Could not slice to u8 array");
+    let slice = slice_to_u8_array(derived_secret_key_bytes);
     let secret_key = cSecretKey::from(slice);
     let public_key = cPublicKey::from(&secret_key);
 
@@ -93,7 +91,7 @@ fn decrypt(payload: String, passphrase: String) -> Result<String, crypto_box::ae
     let preambel = "$argon2id$v=19$m=19456,t=2,p=1$";
     let derived_secret_key = derived_secret_key.replace(preambel, "");
     let derived_secret_key_bytes = derived_secret_key.as_bytes();
-    let slice = slice_to_u8_array(derived_secret_key_bytes).expect("Could not slice to u8 array");
+    let slice = slice_to_u8_array(derived_secret_key_bytes);
     let secret_key = cSecretKey::from(slice);
     let public_key = cPublicKey::from(&secret_key);
 
@@ -286,11 +284,11 @@ mod tests {
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
             25, 26, 27, 28, 29, 30, 31, 32,
         ];
-        let result = slice_to_u8_array(slice).unwrap();
+        let result = slice_to_u8_array(slice);
         assert_eq!(slice, &result);
 
         let slice_short: &[u8] = &[1, 2, 3];
-        let result = slice_to_u8_array(slice_short).unwrap();
+        let result = slice_to_u8_array(slice_short);
         let expected: [u8; 32] = [
             1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0,

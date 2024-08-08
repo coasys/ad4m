@@ -414,7 +414,7 @@ impl PerspectiveInstance {
         let diff_clone = diff.clone();
 
         tokio::spawn(async move {
-            if let Err(_) = self_clone.commit(&diff_clone).await {
+            if (self_clone.commit(&diff_clone).await).is_err() {
                 let handle_clone = self_clone.persisted.lock().await.clone();
                 Ad4mDb::with_global_instance(|db|
                     db.add_pending_diff(&handle_clone.uuid, &diff_clone)
@@ -880,7 +880,7 @@ impl PerspectiveInstance {
 
         let mut sdna_links: Vec<Link> = Vec::new();
 
-        if let Err(_) = Literal::from_url(sdna_code.clone()) {
+        if (Literal::from_url(sdna_code.clone())).is_err() {
             sdna_code = Literal::from_string(sdna_code)
                 .to_url()
                 .expect("just initialized Literal couldn't be turned into URL");

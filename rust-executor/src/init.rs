@@ -63,7 +63,7 @@ pub fn init(
 }
 
 fn write_seed_config(
-    app_data_path: &PathBuf,
+    app_data_path: &Path,
     network_bootstrap_seed: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     let target_seed_path = app_data_path.join("mainnet_seed.seed");
@@ -81,7 +81,7 @@ fn write_seed_config(
 }
 
 fn clean_ad4m_data(
-    app_data_path: &PathBuf,
+    app_data_path: &Path,
     should_clear_state: bool,
     should_clear_everything: bool,
 ) -> Result<(), Box<dyn Error>> {

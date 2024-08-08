@@ -31,11 +31,11 @@ use crate::{
 
 pub struct Mutation;
 
-fn get_perspective_with_uuid_field_error(uuid: &String) -> FieldResult<PerspectiveInstance> {
+fn get_perspective_with_uuid_field_error(uuid: &str) -> FieldResult<PerspectiveInstance> {
     get_perspective(uuid).ok_or_else(|| {
         FieldError::new(
             "Perspective not found",
-            graphql_value!({ "uuid": uuid.clone() }),
+            graphql_value!({ "uuid": uuid.to_owned() }),
         )
     })
 }
