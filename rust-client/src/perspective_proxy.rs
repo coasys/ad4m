@@ -235,7 +235,7 @@ impl PerspectiveProxy {
         Ok(collections)
     }
 
-    pub async fn create_subject(&self, class: &String, base: &String) -> Result<()> {
+    pub async fn create_subject(&self, class: &String, base: &str) -> Result<()> {
         if let Ok(Value::Array(results)) = self
             .infer(format!(
                 "subject_class(\"{}\", C), constructor(C, Action)",
@@ -311,8 +311,8 @@ impl PerspectiveProxy {
 
     pub async fn execute_action(
         &self,
-        action: &String,
-        base: &String,
+        action: &str,
+        base: &str,
         params: Option<BTreeMap<&str, &String>>,
     ) -> Result<()> {
         let commands = parse_action(action)?;
@@ -385,7 +385,7 @@ impl Command {
     }
 }
 
-fn parse_action(action: &String) -> Result<Vec<Command>> {
+fn parse_action(action: &str) -> Result<Vec<Command>> {
     let action_regex = Regex::new(r"\[(?P<command>\{.*})*\]")?;
 
     // This parses strings like:

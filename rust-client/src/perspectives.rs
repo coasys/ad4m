@@ -165,6 +165,7 @@ pub async fn remove_link(
 )]
 pub struct QueryLinks;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn query_links(
     executor_url: String,
     cap_token: String,
@@ -386,7 +387,8 @@ impl PerspectivesClient {
         )
         .await
     }
-
+    
+    #[allow(clippy::too_many_arguments)]
     pub async fn query_links(
         &self,
         uuid: String,

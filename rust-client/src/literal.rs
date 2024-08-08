@@ -153,8 +153,8 @@ mod test {
 
     #[test]
     fn can_handle_numbers() {
-        let test_number = 3.1415;
-        let test_url = "literal://number:3.1415";
+        let test_number = 3.1;
+        let test_url = "literal://number:3.1";
 
         let literal = super::Literal::from_number(test_number);
         assert_eq!(literal.to_url().unwrap(), test_url);
