@@ -78,11 +78,12 @@ pub async fn start_publishing(
 
     green_ln!("Unlocked agent\n");
 
-    let mut languages = vec![];
-    languages.push(seed_proto.agent_language);
-    languages.push(seed_proto.direct_message_language);
-    languages.push(seed_proto.perspective_language);
-    languages.push(seed_proto.neighbourhood_language);
+    let languages = vec![
+        seed_proto.agent_language,
+        seed_proto.direct_message_language,
+        seed_proto.perspective_language,
+        seed_proto.neighbourhood_language
+    ];
 
     let mut bootstrap_seed = BootstrapSeed {
         trusted_agents: vec![agent.did.unwrap()],

@@ -9,7 +9,7 @@ use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
 
 use crate::formatting::{print_link, print_prolog_results};
 
-async fn add_link(perspective: &PerspectiveProxy, line: &String) -> bool {
+async fn add_link(perspective: &PerspectiveProxy, line: &str) -> bool {
     // add_link(source, predicate, target)
     let add_link = Regex::new(
         r"add_link\((?P<source>\S+),\s*(?P<predicate>\S+),\s*(?P<status>\S+),\s*(?P<target>\S+)\)",
@@ -42,7 +42,7 @@ async fn add_link(perspective: &PerspectiveProxy, line: &String) -> bool {
     }
 }
 
-async fn link_query(perspective: &PerspectiveProxy, line: &String) -> bool {
+async fn link_query(perspective: &PerspectiveProxy, line: &str) -> bool {
     // query(source, predicate, target)
     let link_query =
         Regex::new(r"query\(\s*(?P<source>\S+)?(,\s*(?P<predicate>\S+))?(,\s*(?P<target>\S+))?\)")
@@ -122,7 +122,7 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
     }
 }
 
-async fn subject_new(perspective: &PerspectiveProxy, line: &String) -> bool {
+async fn subject_new(perspective: &PerspectiveProxy, line: &str) -> bool {
     // new <class>(<base>)
     let subject_new = Regex::new(r"new\s+(?P<class>\S+)\(\s*(?P<base>\S+)\s*\)")
         .expect("Error parsing subject_new regex");
@@ -149,7 +149,7 @@ async fn subject_new(perspective: &PerspectiveProxy, line: &String) -> bool {
     }
 }
 
-async fn subject_set_prop(perspective: &PerspectiveProxy, line: &String) -> Result<bool> {
+async fn subject_set_prop(perspective: &PerspectiveProxy, line: &str) -> Result<bool> {
     // subject(<base>)[<name>] = <value>
     let subject_set_prop =
         Regex::new(r"subject\(\s*(?P<base>\S+)\s*\)\[(?P<name>\S+)\][\s--<]*=\s*(?P<value>\S+)")
@@ -202,7 +202,7 @@ async fn subject_set_prop(perspective: &PerspectiveProxy, line: &String) -> Resu
     }
 }
 
-async fn subject_add_collection(perspective: &PerspectiveProxy, line: &String) -> Result<bool> {
+async fn subject_add_collection(perspective: &PerspectiveProxy, line: &str) -> Result<bool> {
     // subject(<base>)[<name>] <= <value>
     let subject_add_collection =
         Regex::new(r"subject\(\s*(?P<base>\S+)\s*\)\[(?P<name>\S+)\]\s*<=\s*(?P<value>\S+)")
@@ -255,7 +255,7 @@ async fn subject_add_collection(perspective: &PerspectiveProxy, line: &String) -
     }
 }
 
-async fn subject_print(perspective: &PerspectiveProxy, line: &String) -> Result<bool> {
+async fn subject_print(perspective: &PerspectiveProxy, line: &str) -> Result<bool> {
     // subject(<base>)
     let subject_print = Regex::new(r"^\s*subject\(\s*(?P<base>\S+)\s*\)\s*$")
         .expect("Error parsing subject_print regex");

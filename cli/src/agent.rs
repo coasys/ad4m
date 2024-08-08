@@ -95,17 +95,13 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             passphrase,
             holochain,
         } => {
-            let pp = if passphrase.is_some() {
-                passphrase.unwrap()
+            let pp = if let Some(pp) = passphrase {
+                pp
             } else {
                 readline_masked("Passphrase: ")?
             };
 
-            let holo = if holochain.is_some() {
-                holochain.unwrap()
-            } else {
-                true
-            };
+            let holo = holochain.unwrap_or(true);
 
             let result = ad4m_client.agent.unlock(pp, holo).await?;
             if let Some(error) = result.error {
@@ -122,8 +118,8 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             }
         }
         AgentFunctions::Generate { passphrase } => {
-            let pp = if passphrase.is_some() {
-                passphrase.unwrap()
+            let pp = if let Some(pp) = passphrase {
+                pp
             } else {
                 let passphrase1 = readline_masked("Passphrase: ")?;
                 let passphrase2 = readline_masked("Repeat passphrase: ")?;
