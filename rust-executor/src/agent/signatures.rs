@@ -47,19 +47,13 @@ pub(super) fn hash_data_and_timestamp<T: Serialize>(
     hasher.update(timestamp_str.as_bytes());
 
     // Finalize the hash and return the result.
-    hasher
-        .finalize()
-        .as_slice()
-        .into()
+    hasher.finalize().as_slice().into()
 }
 
 pub(super) fn hash_message(message: &String) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(message.as_bytes());
-    hasher
-        .finalize()
-        .as_slice()
-        .into()
+    hasher.finalize().as_slice().into()
 }
 
 fn inner_verify(did: &str, message: &[u8], signature: &[u8]) -> bool {

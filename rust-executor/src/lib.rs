@@ -28,7 +28,6 @@ use std::{env, thread::JoinHandle};
 
 use log::{error, info, warn};
 
-
 use js_core::JsCore;
 
 pub use config::Ad4mConfig;

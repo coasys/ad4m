@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 use super::graphql_types::*;
+use crate::agent::{capabilities::*, signatures};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
 use crate::{
     db::Ad4mDb,
@@ -8,10 +9,9 @@ use crate::{
     runtime_service::RuntimeService,
     types::{DecoratedLinkExpression, Notification},
 };
+use base64::prelude::*;
 use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
 use std::env;
-use base64::prelude::*;
-use crate::agent::{capabilities::*, signatures};
 
 pub struct Query;
 
@@ -50,16 +50,14 @@ impl Query {
         if !did_match {
             let mut js = context.js_handle.clone();
             let result = js
-                .execute(
-                    format!(
-                        r#"JSON.stringify(
+                .execute(format!(
+                    r#"JSON.stringify(
                         await core.callResolver("Query", "agentByDID",
                             {{ did: "{}" }},
                         )
                     )"#,
-                        did,
-                    ),
-                )
+                    did,
+                ))
                 .await?;
             let result: JsResultType<Option<Agent>> = serde_json::from_str(&result)?;
             result.get_graphql_result()
@@ -449,7 +447,9 @@ impl Query {
 
         let encoded_infos: Vec<String> = infos
             .iter()
-            .map(|info| BASE64_STANDARD.encode(info.encode().expect("Failed to encode AgentInfoSigned")))
+            .map(|info| {
+                BASE64_STANDARD.encode(info.encode().expect("Failed to encode AgentInfoSigned"))
+            })
             .collect();
 
         Ok(serde_json::to_string(&encoded_infos)?)

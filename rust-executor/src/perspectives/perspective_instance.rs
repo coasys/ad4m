@@ -481,9 +481,8 @@ impl PerspectiveInstance {
         status: LinkStatus,
     ) -> Result<DecoratedLinkExpression, AnyError> {
         let link_expression = create_signed_expression(link)?;
-        
-        self
-            .add_link_expression(link_expression.into(), status)
+
+        self.add_link_expression(link_expression.into(), status)
             .await
     }
 
@@ -990,10 +989,7 @@ impl PerspectiveInstance {
             };
 
             let fact_rebuild_needed = !diff.removals.is_empty()
-                || diff
-                    .additions
-                    .iter()
-                    .any(|link| is_sdna_link(&link.data));
+                || diff.additions.iter().any(|link| is_sdna_link(&link.data));
 
             let did_update = if !fact_rebuild_needed {
                 let mut assertions: Vec<String> = Vec::new();

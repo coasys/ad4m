@@ -72,9 +72,7 @@ fn encrypt(payload: String, passphrase: String) -> String {
     let nonce = Nonce::default();
 
     // Encrypt
-    let encrypted_data = crypto_box
-        .encrypt(&nonce, payload.as_bytes())
-        .unwrap();
+    let encrypted_data = crypto_box.encrypt(&nonce, payload.as_bytes()).unwrap();
 
     base64::engine::general_purpose::STANDARD_NO_PAD.encode(encrypted_data)
 }

@@ -1,10 +1,10 @@
-use std::path::PathBuf;
-use std::sync::Arc;
 use base64::prelude::*;
 use chrono::Duration;
 use crypto_box::rand_core::OsRng;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo, ZomeCall};
 use holochain::conductor::config::ConductorConfig;
@@ -51,8 +51,9 @@ pub fn agent_infos_from_str(agent_infos: &str) -> Result<Vec<AgentInfoSigned>, A
     let agent_infos: Vec<AgentInfoSigned> = agent_infos
         .into_iter()
         .map(|encoded_info| {
-            let info_bytes =
-                BASE64_STANDARD.decode(encoded_info).expect("Failed to decode base64 AgentInfoSigned");
+            let info_bytes = BASE64_STANDARD
+                .decode(encoded_info)
+                .expect("Failed to decode base64 AgentInfoSigned");
             AgentInfoSigned::decode(&info_bytes).expect("Failed to decode AgentInfoSigned")
         })
         .collect();
@@ -338,7 +339,6 @@ impl HolochainService {
         let conductor_yaml_path =
             std::path::Path::new(&local_config.conductor_path).join("conductor_config.yaml");
         let config = if conductor_yaml_path.exists() {
-            
             ConductorConfig::load_yaml(&conductor_yaml_path)?
         } else {
             let mut config = ConductorConfig::default();

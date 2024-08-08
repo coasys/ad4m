@@ -3,7 +3,6 @@ use crate::types::Expression;
 use deno_core::{error::AnyError, op2};
 use serde::{Deserialize, Serialize};
 
-
 use super::utils::sort_json_value;
 
 #[derive(Serialize, Deserialize, Clone)]

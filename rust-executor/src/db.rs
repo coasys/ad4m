@@ -647,11 +647,9 @@ impl Ad4mDb {
                     let link = LinkExpression {
                         data: Link {
                             source: row.get(1)?,
-                            predicate: row.get(2).map(|p: Option<String>| {
-                                match p.as_deref() {
-                                    Some("") => None,
-                                    _ => p,
-                                }
+                            predicate: row.get(2).map(|p: Option<String>| match p.as_deref() {
+                                Some("") => None,
+                                _ => p,
                             })?,
                             target: row.get(3)?,
                         },
@@ -853,7 +851,10 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn _get_expression(&self, url: &str) -> Ad4mDbResult<Option<Expression<serde_json::Value>>> {
+    pub fn _get_expression(
+        &self,
+        url: &str,
+    ) -> Ad4mDbResult<Option<Expression<serde_json::Value>>> {
         let mut stmt = self
             .conn
             .prepare("SELECT data FROM expression WHERE url = ?1")?;

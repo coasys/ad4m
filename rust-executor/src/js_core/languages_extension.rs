@@ -1,5 +1,4 @@
-use deno_core::{op2};
-
+use deno_core::op2;
 
 use crate::{
     graphql::graphql_types::{PerspectiveExpression, PerspectiveState},

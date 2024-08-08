@@ -175,7 +175,6 @@ impl JsCore {
     }
 
     fn event_loop(&self) -> EventLoopFuture {
-        
         EventLoopFuture::new(self.worker.clone())
     }
 

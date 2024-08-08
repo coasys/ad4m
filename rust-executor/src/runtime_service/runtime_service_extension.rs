@@ -1,5 +1,3 @@
-
-
 use crate::graphql::graphql_types::{PerspectiveExpression, SentMessage};
 use deno_core::{error::AnyError, op2};
 

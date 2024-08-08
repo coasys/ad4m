@@ -1,5 +1,3 @@
-
-
 use deno_core::{anyhow::bail, error::AnyError, op2};
 use scryer_prolog::machine::parsed_results::{QueryMatch, QueryResolution, Value};
 
@@ -98,10 +96,8 @@ async fn run_query(
         QueryResolution::True => Ok("true".to_string()),
         QueryResolution::False => Ok("false".to_string()),
         QueryResolution::Matches(matches) => {
-            let matches_json: Vec<String> = matches
-                .iter()
-                .map(prolog_match_to_json_string)
-                .collect();
+            let matches_json: Vec<String> =
+                matches.iter().map(prolog_match_to_json_string).collect();
             Ok(format!("[{}]", matches_json.join(", ")))
         }
     }

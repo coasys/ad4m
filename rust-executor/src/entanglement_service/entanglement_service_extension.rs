@@ -1,5 +1,3 @@
-
-
 use deno_core::{error::AnyError, op2};
 
 use crate::graphql::graphql_types::EntanglementProof;

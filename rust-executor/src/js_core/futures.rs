@@ -1,9 +1,8 @@
-
 use deno_core::error::AnyError;
 use deno_core::{anyhow, v8, PollEventLoopOptions};
 use deno_runtime::worker::MainWorker;
-use futures::{Future};
- // Import the JsRuntime struct.
+use futures::Future;
+// Import the JsRuntime struct.
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};

@@ -111,8 +111,6 @@ impl RuntimeService {
     }
 
     pub fn get_friends(&self) -> Vec<String> {
-        
-
         Ad4mDb::with_global_instance(|db| db.get_all_friends())
             .map_err(|e| e.to_string())
             .unwrap_or_default()
@@ -129,8 +127,6 @@ impl RuntimeService {
     }
 
     pub fn get_outbox(&self) -> Vec<SentMessage> {
-        
-
         Ad4mDb::with_global_instance(|db| db.get_all_from_outbox())
             .map_err(|e| e.to_string())
             .unwrap_or_default()

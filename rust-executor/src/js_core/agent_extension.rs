@@ -8,7 +8,6 @@ use crate::{
 use coasys_juniper::{FieldError, Value};
 use deno_core::{error::AnyError, op2};
 
-
 use super::utils::sort_json_value;
 
 #[op2]
@@ -101,9 +100,7 @@ fn agent_load() -> Result<AgentStatus, AnyError> {
 #[op2(async)]
 #[serde]
 async fn agent_unlock(#[string] passphrase: String) -> Result<(), AnyError> {
-    AgentService::with_global_instance(|agent_service| {
-        agent_service.unlock(passphrase)
-    })
+    AgentService::with_global_instance(|agent_service| agent_service.unlock(passphrase))
 }
 
 #[op2(async)]
