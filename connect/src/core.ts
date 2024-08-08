@@ -405,7 +405,7 @@ export default class Ad4mConnect {
       let token = localStorage.getItem('hosting_token');
 
       const response = await fetch('https://hosting.ad4m.dev/api/service/checkStatus', {
-        method: 'GET',
+        method: 'POST',
         headers: {
             'Content-Type': 'application/json',
             'Authorization': 'Bearer ' + token
