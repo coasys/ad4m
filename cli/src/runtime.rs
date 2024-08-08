@@ -6,6 +6,7 @@ use clap::Subcommand;
 use kitsune_p2p_types::{
     agent_info::AgentInfoSigned, dependencies::lair_keystore_api::dependencies::base64,
 };
+use base64::prelude::*;
 
 #[derive(Debug, Subcommand)]
 pub enum RuntimeFunctions {
@@ -126,7 +127,7 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
             let agent_infos: Vec<(AgentInfoSigned, String)> = encoded_agent_infos
                 .into_iter()
                 .map(|encoded_info| {
-                    let info_bytes = base64::decode(encoded_info.clone())
+                    let info_bytes = BASE64_STANDARD.decode(encoded_info.clone())
                         .expect("Failed to decode base64 AgentInfoSigned");
                     (
                         AgentInfoSigned::decode(&info_bytes)
