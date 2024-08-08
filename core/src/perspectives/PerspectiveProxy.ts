@@ -455,22 +455,22 @@ export class PerspectiveProxy {
         // Collect all set functions of the object in a list
         let setFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("set") && !key.startsWith("setCollection"))
         // Add all set functions of the object's prototype to that list
-        setFunctions = setFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("set") && !key.startsWith("setCollection")))
+        setFunctions = setFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof Object.getPrototypeOf(obj)[key] === "function") && key.startsWith("set") && !key.startsWith("setCollection")))
 
         // Collect all add functions of the object in a list
-        let addFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("add"))
+        let addFunctions = Object.getOwnPropertyNames(obj).filter(key => (Object.prototype.hasOwnProperty.call(obj, key) && typeof obj[key] === "function") && key.startsWith("add"))
         // Add all add functions of the object's prototype to that list
-        addFunctions = addFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("add")))
+        addFunctions = addFunctions.concat(Object.keys(Object.getPrototypeOf(obj)).filter(key => (Object.prototype.hasOwnProperty.call(Object.getPrototypeOf(obj), key) && typeof Object.getPrototypeOf(obj)[key] === "function") && key.startsWith("add")))
 
         // Collect all remove functions of the object in a list
-        let removeFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("remove"))
+        let removeFunctions = Object.getOwnPropertyNames(obj).filter(key => (Object.prototype.hasOwnProperty.call(obj, key) && typeof obj[key] === "function") && key.startsWith("remove"))
         // Add all remove functions of the object's prototype to that list
-        removeFunctions = removeFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("remove")))
+        removeFunctions = removeFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (Object.prototype.hasOwnProperty.call(Object.getPrototypeOf(obj), key) && typeof Object.getPrototypeOf(obj)[key] === "function") && key.startsWith("remove")))
 
         // Collect all add functions of the object in a list
-        let setCollectionFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("setCollection"))
+        let setCollectionFunctions = Object.getOwnPropertyNames(obj).filter(key => (Object.prototype.hasOwnProperty.call(obj, key) && typeof obj[key] === "function") && key.startsWith("setCollection"))
         // Add all add functions of the object's prototype to that list
-        setCollectionFunctions = setCollectionFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("setCollection")))
+        setCollectionFunctions = setCollectionFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (Object.prototype.hasOwnProperty.call(Object.getPrototypeOf(obj), key) && typeof Object.getPrototypeOf(obj)[key] === "function") && key.startsWith("setCollection")))
 
         // Construct query to find all subject classes that have the given properties and collections
         let query = `subject_class(Class, C)`
