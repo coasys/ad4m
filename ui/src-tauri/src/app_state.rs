@@ -36,6 +36,7 @@ impl LauncherState {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)?;
         let mut data = String::new();
         file.read_to_string(&mut data)?;
@@ -67,7 +68,7 @@ impl LauncherState {
 
     pub fn remove_agent(&mut self, agent: AgentList) {
         self.agent_list
-            .retain(|a| a.name != agent.name && &a.path != &agent.path);
+            .retain(|a| a.name != agent.name && a.path != agent.path);
     }
 
     pub fn is_agent_taken(&self, new_name: &str, new_path: &PathBuf) -> bool {
