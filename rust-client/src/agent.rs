@@ -29,11 +29,11 @@ pub async fn request_capability(
 ) -> Result<String> {
     let query = RequestCapability::build_query(request_capability::Variables {
         auth_info: request_capability::AuthInfoInput {
-            app_name: app_name,
-            app_desc: app_desc,
-            app_domain: app_domain,
-            app_url: app_url,
-            app_icon_path: app_icon_path,
+            app_name,
+            app_desc,
+            app_domain,
+            app_url,
+            app_icon_path,
             capabilities: capabilities.map(|val| val.into_iter().map(|val| val.into()).collect()),
         },
     });

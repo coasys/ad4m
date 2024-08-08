@@ -47,7 +47,7 @@ use crate::commands::app::{
 use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
 use crate::config::log_path;
-use crate::config::{data_dev_path, data_path};
+
 use crate::menu::{handle_menu_event, open_logs_folder};
 use crate::util::find_port;
 use crate::util::{create_main_window, save_executor_port};
@@ -85,7 +85,7 @@ fn rlim_execute() {
             panic!("{}", io::Error::last_os_error());
         }
     }
-    let rlim_max = 1000 as u64;
+    let rlim_max = 1000_u64;
 
     println!(
         "Current RLIMIT_NOFILE: current: {}, max: {}",
@@ -275,7 +275,7 @@ fn main() {
                 let url = app_url();
                 info!("Executor clone on: {:?}", url);
                 let _ = splashscreen_clone.hide();
-                let main = get_main_window(&handle);
+                let main = get_main_window(handle);
                 main.emit(
                     "ready",
                     Payload {

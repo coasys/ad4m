@@ -22,7 +22,7 @@ impl LauncherState {
         let path = home_dir()
             .expect("Could not get home dir")
             .join("ad4m-state.json");
-        let mut file = File::create(&path)?;
+        let mut file = File::create(path)?;
         let data = serde_json::to_string(&self).unwrap();
         file.write_all(data.as_bytes())?;
         Ok(())
@@ -36,7 +36,7 @@ impl LauncherState {
             .read(true)
             .write(true)
             .create(true)
-            .open(&path)?;
+            .open(path)?;
         let mut data = String::new();
         file.read_to_string(&mut data)?;
 
@@ -45,8 +45,8 @@ impl LauncherState {
             Err(_) => {
                 let agent = AgentList {
                     name: "Main Net".to_string(),
-                    path: PathBuf::from(home_dir().expect("Could not get home dir"))
-                        .join(".ad4m".to_string()),
+                    path: home_dir().expect("Could not get home dir")
+                        .join(".ad4m"),
                     bootstrap: None,
                 };
 

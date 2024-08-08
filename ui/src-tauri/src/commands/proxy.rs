@@ -82,10 +82,8 @@ pub async fn setup_proxy(
     let (notify_shutdown, _) = broadcast::channel(1);
     let subdomain = format_subdomain(&subdomain);
 
-    let credential = (*proxy.0.lock().unwrap())
-        .credential
-        .as_ref()
-        .map(|s| s.clone());
+    let credential = proxy.0.lock().unwrap()
+        .credential.clone();
 
     let endpoint = open_tunnel(
         Some(PROXY_SERVER),
@@ -114,25 +112,21 @@ pub async fn setup_proxy(
 
 #[tauri::command]
 pub fn get_proxy(proxy: State<'_, ProxyState>) -> Option<String> {
-    (*proxy.0.lock().unwrap())
-        .endpoint
-        .as_ref()
-        .map(|s| s.clone())
+    proxy.0.lock().unwrap()
+        .endpoint.clone()
 }
 
 #[tauri::command]
 pub fn stop_proxy(proxy: State<'_, ProxyState>) {
-    match &(*proxy.0.lock().unwrap()).shutdown_signal {
+    match &proxy.0.lock().unwrap().shutdown_signal {
         Some(signal) => {
             let _ = signal.send(());
         }
         None => log::info!("Proxy is not set up."),
     };
 
-    let credential = (*proxy.0.lock().unwrap())
-        .credential
-        .as_ref()
-        .map(|s| s.clone());
+    let credential = proxy.0.lock().unwrap()
+        .credential.clone();
     *proxy.0.lock().unwrap() = ProxyService {
         credential,
         endpoint: None,

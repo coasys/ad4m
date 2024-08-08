@@ -96,7 +96,7 @@ impl PerspectiveProxy {
             )
             .await?;
 
-        if links.len() == 0 {
+        if links.is_empty() {
             self.set_single_target(
                 "ad4m://self".into(),
                 predicate.into(),
