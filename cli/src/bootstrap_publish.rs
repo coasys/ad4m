@@ -82,7 +82,7 @@ pub async fn start_publishing(
         seed_proto.agent_language,
         seed_proto.direct_message_language,
         seed_proto.perspective_language,
-        seed_proto.neighbourhood_language
+        seed_proto.neighbourhood_language,
     ];
 
     let mut bootstrap_seed = BootstrapSeed {

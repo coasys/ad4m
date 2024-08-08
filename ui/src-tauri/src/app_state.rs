@@ -45,8 +45,7 @@ impl LauncherState {
             Err(_) => {
                 let agent = AgentList {
                     name: "Main Net".to_string(),
-                    path: home_dir().expect("Could not get home dir")
-                        .join(".ad4m"),
+                    path: home_dir().expect("Could not get home dir").join(".ad4m"),
                     bootstrap: None,
                 };
 
