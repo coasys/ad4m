@@ -631,6 +631,11 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private changeUrl(url) {
+    if (url !== this._client.url) {
+      removeForVersion("ad4mtoken")
+      this._client.setToken(null);
+    }
+
     this._client.setUrl(url);
   }
 
@@ -762,6 +767,7 @@ export class Ad4mConnectElement extends LitElement {
 
   async connectRemote(url) {
     try {
+      this.changeUrl(url);
       const client = await this._client.connect(url);
       const status = await client.agent.status();
       if (status.isUnlocked && status.isInitialized) {
@@ -771,9 +777,8 @@ export class Ad4mConnectElement extends LitElement {
       this.changeUIState("requestcap");
       return client;
     } catch (e) {
-      if (e.message === "Socket closed with event 4500 Invalid Compact JWS") {
         this.changeUIState("requestcap");
-      }
+        this._isOpen = true;
     }
   }
 
