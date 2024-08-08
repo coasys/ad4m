@@ -33,8 +33,8 @@ export class TelepresenceAdapterImplementation implements TelepresenceAdapter {
             console.log("setOnlineStatus: success");
             console.log(res.data);
         } else {
-            console.log("setOnlineStatus: failed");
-            console.log(res.data);
+            //console.log("setOnlineStatus: failed");
+            //console.log(res.data);
         }
         return null;
     }
@@ -47,12 +47,12 @@ export class TelepresenceAdapterImplementation implements TelepresenceAdapter {
             }
         });
         if (result.status === 200) {
-            console.log("getOnlineAgents: success");
-            console.dir(result.data);
+            //("getOnlineAgents: success");
+            //console.dir(result.data);
             return result.data;
         } else {
-            console.log("getOnlineAgents: failed");
-            console.dir(result.data);
+            //console.log("getOnlineAgents: failed");
+            //console.dir(result.data);
             return [];
         }
     }
@@ -63,8 +63,8 @@ export class TelepresenceAdapterImplementation implements TelepresenceAdapter {
                 console.log("sendSignal: failed");
                 console.dir(err);
             } else {
-                console.log("sendSignal: success");
-                console.dir(signal);
+                //console.log("sendSignal: success");
+                //console.dir(signal);
             }
         });
         return {};
@@ -75,10 +75,10 @@ export class TelepresenceAdapterImplementation implements TelepresenceAdapter {
             if (err) {
                 console.log("sendBroadcast: failed");
                 console.dir(err);
-            } else {
-                console.log("sendBroadcast: success");
-                console.dir(signal);
-            }
+            }// else {
+            //    console.log("sendBroadcast: success");
+            //    console.dir(signal);
+            //}
         });
 
         return {};
