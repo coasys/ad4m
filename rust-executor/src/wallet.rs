@@ -14,8 +14,7 @@ use std::sync::{Arc, Mutex};
 
 fn slice_to_u8_array(slice: &[u8]) -> [u8; 32] {
     //If length of slice is not 32 then take the first 32 bytes
-    
-    
+
     if slice.len() != 32 {
         let mut array: [u8; 32] = [0u8; 32];
         let _i = 0;

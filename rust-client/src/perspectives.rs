@@ -387,7 +387,7 @@ impl PerspectivesClient {
         )
         .await
     }
-    
+
     #[allow(clippy::too_many_arguments)]
     pub async fn query_links(
         &self,

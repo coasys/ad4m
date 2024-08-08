@@ -271,7 +271,8 @@ impl TryFrom<String> for ExpressionRef {
     type Error = AnyError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if let Some(stripped) = value.strip_prefix("literal://") {            let language_ref = LanguageRef {
+        if let Some(stripped) = value.strip_prefix("literal://") {
+            let language_ref = LanguageRef {
                 address: "literal".to_string(),
                 name: "literal".to_string(),
             };

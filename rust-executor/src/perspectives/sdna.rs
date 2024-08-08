@@ -123,8 +123,6 @@ pub async fn init_engine_facts(
         ":- dynamic(link/5).".to_string(),
     ];
 
-
-
     let links_without_sdna: Vec<_> = all_links
         .iter()
         .filter(|l| !is_sdna_link(&l.data))

@@ -254,16 +254,16 @@ fn main() {
                 open_logs_folder();
             });
 
-            let config = rust_executor::Ad4mConfig { 
-                admin_credential: Some(req_credential.to_string()), 
-                app_data_path: Some(String::from(app_path.to_str().unwrap())), 
-                gql_port: Some(free_port), 
-                network_bootstrap_seed: None, 
-                run_dapp_server: Some(true), 
-                hc_use_bootstrap: Some(true), 
-                hc_use_mdns: Some(false), 
-                hc_use_proxy: Some(true), 
-                ..Default::default() 
+            let config = rust_executor::Ad4mConfig {
+                admin_credential: Some(req_credential.to_string()),
+                app_data_path: Some(String::from(app_path.to_str().unwrap())),
+                gql_port: Some(free_port),
+                network_bootstrap_seed: None,
+                run_dapp_server: Some(true),
+                hc_use_bootstrap: Some(true),
+                hc_use_mdns: Some(false),
+                hc_use_proxy: Some(true),
+                ..Default::default()
             };
 
             let handle = app.handle();
