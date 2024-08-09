@@ -1,12 +1,20 @@
 #![allow(non_snake_case)]
+use coasys_juniper::FieldResult;
 use futures::stream;
 use futures::stream::Stream;
-use coasys_juniper::FieldResult;
 use std::pin::Pin;
 
-use crate::{pubsub::{
-    get_global_pubsub, subscribe_and_process, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC, RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC
-}, types::{DecoratedLinkExpression, Notification, TriggeredNotification}};
+use crate::{
+    pubsub::{
+        get_global_pubsub, subscribe_and_process, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC,
+        APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC,
+        PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC,
+        PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_REMOVED_TOPIC,
+        PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
+        RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
+    },
+    types::{DecoratedLinkExpression, TriggeredNotification},
+};
 
 use super::graphql_types::*;
 use crate::agent::capabilities::*;
@@ -20,7 +28,7 @@ impl Subscription {
         context: &RequestContext,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<AgentStatus>> + Send>> {
         match check_capability(&context.capabilities, &AGENT_SUBSCRIBE_CAPABILITY) {
-            Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
+            Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &AGENT_STATUS_CHANGED_TOPIC;
@@ -34,7 +42,7 @@ impl Subscription {
         context: &RequestContext,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<Option<Apps>>> + Send>> {
         match check_capability(&context.capabilities, &AGENT_SUBSCRIBE_CAPABILITY) {
-            Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
+            Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &APPS_CHANGED;
@@ -48,7 +56,7 @@ impl Subscription {
         context: &RequestContext,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<Agent>> + Send>> {
         match check_capability(&context.capabilities, &AGENT_SUBSCRIBE_CAPABILITY) {
-            Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
+            Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &AGENT_UPDATED_TOPIC;
@@ -65,7 +73,7 @@ impl Subscription {
             &context.capabilities,
             &RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY,
         ) {
-            Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
+            Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &EXCEPTION_OCCURRED_TOPIC;
@@ -80,7 +88,7 @@ impl Subscription {
         perspectiveUUID: String,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<PerspectiveExpression>> + Send>> {
         match check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY) {
-            Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
+            Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &NEIGHBOURHOOD_SIGNAL_TOPIC;
@@ -99,7 +107,7 @@ impl Subscription {
         context: &RequestContext,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<PerspectiveHandle>> + Send>> {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
-            Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
+            Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_ADDED_TOPIC;
@@ -114,7 +122,7 @@ impl Subscription {
         uuid: String,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<DecoratedLinkExpression>> + Send>> {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
-            Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
+            Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_LINK_ADDED_TOPIC;
@@ -134,7 +142,7 @@ impl Subscription {
         uuid: String,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<DecoratedLinkExpression>> + Send>> {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
-            Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
+            Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_LINK_REMOVED_TOPIC;
@@ -154,7 +162,7 @@ impl Subscription {
         uuid: String,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<LinkUpdated>> + Send>> {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
-            Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
+            Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_LINK_UPDATED_TOPIC;
@@ -173,7 +181,7 @@ impl Subscription {
         context: &RequestContext,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<String>> + Send>> {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
-            Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
+            Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_REMOVED_TOPIC;
@@ -188,7 +196,7 @@ impl Subscription {
         uuid: String,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<String>> + Send>> {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
-            Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
+            Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC;
@@ -207,7 +215,7 @@ impl Subscription {
         context: &RequestContext,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<PerspectiveHandle>> + Send>> {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
-            Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
+            Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_UPDATED_TOPIC;
@@ -221,7 +229,7 @@ impl Subscription {
         context: &RequestContext,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<PerspectiveExpression>> + Send>> {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
-            Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
+            Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &RUNTIME_MESSAGED_RECEIVED_TOPIC;
@@ -236,7 +244,7 @@ impl Subscription {
         context: &RequestContext,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<TriggeredNotification>> + Send>> {
         match check_capability(&context.capabilities, &AGENT_READ_CAPABILITY) {
-            Err(e) => return Box::pin(stream::once(async move { Err(e.into()) })),
+            Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &RUNTIME_NOTIFICATION_TRIGGERED_TOPIC;
