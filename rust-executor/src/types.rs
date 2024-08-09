@@ -1,7 +1,7 @@
-use std::fmt::Display;
 use coasys_juniper::{GraphQLObject, GraphQLValue};
 use deno_core::{anyhow::anyhow, error::AnyError};
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 
 use crate::{
     agent::signatures::verify,
