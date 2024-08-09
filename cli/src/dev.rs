@@ -15,20 +15,23 @@ pub enum DevFunctions {
     },
     PublishAndTestExpressionLanguage {
         language_path: String,
-        data: String
-    }
+        data: String,
+    },
 }
 
 pub async fn run(command: DevFunctions) -> Result<()> {
     match command {
-        DevFunctions::PublishAndTestExpressionLanguage { language_path , data } => {
+        DevFunctions::PublishAndTestExpressionLanguage {
+            language_path,
+            data,
+        } => {
             let ad4m_test_dir = dirs::home_dir()
                 .expect("Could not get home directory")
                 .join(".ad4m-test");
             let ad4m_test_dir: String = ad4m_test_dir.to_string_lossy().to_string();
             let ad4m_test_dir_clone = ad4m_test_dir.clone();
 
-            let _init = rust_executor::init::init(Some(ad4m_test_dir.clone()), None)
+            rust_executor::init::init(Some(ad4m_test_dir.clone()), None)
                 .map_err(|err| anyhow::anyhow!("Error in init: {:?}", err))?;
 
             let run_handle = tokio::task::spawn(async move {
@@ -60,30 +63,44 @@ pub async fn run(command: DevFunctions) -> Result<()> {
 
             let test_res = tokio::task::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
-                let client = ad4m_client::Ad4mClient::new(String::from("http://127.0.0.1:4000/graphql"), String::from("*"));
+                let client = ad4m_client::Ad4mClient::new(
+                    String::from("http://127.0.0.1:4000/graphql"),
+                    String::from("*"),
+                );
                 let me = client.agent.me().await;
                 println!("Me: {:?}", me);
                 let agent_generate = client.agent.generate(String::from("test")).await;
                 println!("Agent generate: {:?}", agent_generate);
-                let publish_language = client.languages.publish(
-                    language_path, 
-                    String::from("some-test-lang"), 
-                    Some(String::from("some-desc")), 
-                    None, 
-                    None
-                ).await;
+                let publish_language = client
+                    .languages
+                    .publish(
+                        language_path,
+                        String::from("some-test-lang"),
+                        Some(String::from("some-desc")),
+                        None,
+                        None,
+                    )
+                    .await;
                 println!("Publish language: {:?}", publish_language);
                 let language_info = publish_language.unwrap();
-                let language = client.languages.by_address(language_info.address.clone()).await;
+                let language = client
+                    .languages
+                    .by_address(language_info.address.clone())
+                    .await;
                 println!("Language: {:?}", language);
-                let expression = client.expressions.expression_create(
-                    language_info.address, 
-                    serde_json::Value::from_str(&data).expect("could not cast input data to serde_json::Value"), 
-                ).await;
+                let expression = client
+                    .expressions
+                    .expression_create(
+                        language_info.address,
+                        serde_json::Value::from_str(&data)
+                            .expect("could not cast input data to serde_json::Value"),
+                    )
+                    .await;
                 println!("Expression create: {:?}", expression);
                 let expression = client.expressions.expression(expression.unwrap()).await;
                 println!("Expression get: {:?}", expression);
-            }).await;
+            })
+            .await;
             green_ln!("Test future finished with: {:?}", test_res);
 
             run_handle.abort();
@@ -91,7 +108,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
             let _ = fs::remove_dir_all(std::path::Path::new(&ad4m_test_dir));
             green_ln!("Test agent cleaned up\n");
             std::process::exit(0);
-        },
+        }
         DevFunctions::GenerateBootstrap {
             agent_path,
             passphrase,
@@ -141,7 +158,10 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 neighbourhood_language: String::from(""),
             };
             let temp_publish_bootstrap_path = data_path.join("publishing_bootstrap.json");
-            green_ln!("Writting temp publish boostrap at path: {:?}\n", temp_publish_bootstrap_path.to_str());
+            green_ln!(
+                "Writting temp publish boostrap at path: {:?}\n",
+                temp_publish_bootstrap_path.to_str()
+            );
             fs::write(
                 &temp_publish_bootstrap_path,
                 serde_json::to_string(&temp_bootstrap_seed)?,
@@ -203,7 +223,8 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     lang_lang_source.clone(),
                 )
                 .await;
-            }).await;
+            })
+            .await;
             green_ln!("Publish future finished with: {:?}", publish_fut);
 
             // tokio::select! {

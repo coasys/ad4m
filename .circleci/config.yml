@@ -50,6 +50,9 @@ jobs:
             - rust-cache-{{ checksum "Cargo.lock" }}-v2
             - rust-cache-
       - run:
+          name: cargo fmt --check
+          command: cargo fmt --check
+      - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
       - run:
@@ -73,6 +76,9 @@ jobs:
           paths:
             - ./target/release/ad4m
             - ./target/release/ad4m-executor
+      - run:
+          name: cargo clippy
+          command: cargo clippy --all --exclude ad4m-launcher
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js

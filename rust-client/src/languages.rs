@@ -152,8 +152,8 @@ pub async fn publish(
             language_meta: publish::LanguageMetaInput {
                 name,
                 description,
-                possible_template_params: possible_template_params,
-                source_code_link: source_code_link,
+                possible_template_params,
+                source_code_link,
             },
         }),
     )
@@ -216,7 +216,7 @@ impl LanguagesClient {
         by_filter(
             self.info.executor_url.clone(),
             self.info.cap_token.clone(),
-            filter.unwrap_or_else(|| "".to_string()),
+            filter.unwrap_or_default(),
         )
         .await
     }

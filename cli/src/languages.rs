@@ -21,7 +21,7 @@ pub enum LanguageFunctions {
         template_data: String,
     },
     /// Publish AD4M Language from local file path
-    Publish { 
+    Publish {
         /// Path to the language file
         path: String,
         /// Name of the language
@@ -32,7 +32,7 @@ pub enum LanguageFunctions {
         description: Option<String>,
         /// Template parameters (if any) of the language, comma separated list of strings
         #[arg(short, long)]
-        possible_template_params:  Option<String>,
+        possible_template_params: Option<String>,
         /// URL of public repository of the language source code
         #[arg(short, long)]
         source_code_link: Option<String>,
@@ -106,38 +106,46 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<LanguageFunctions>) ->
             let meta = ad4m_client.languages.meta(address).await?;
             println!("{:#?}", meta);
         }
-        LanguageFunctions::Publish { 
-            path, 
-            name, 
-            description, 
-            possible_template_params, 
-            source_code_link 
+        LanguageFunctions::Publish {
+            path,
+            name,
+            description,
+            possible_template_params,
+            source_code_link,
         } => {
             let _ = std::fs::read_to_string(path.clone())
                 .with_context(|| format!("Could not read language file `{}`!", path))?;
 
             println!("Publishing language found in file `{}`...", path);
 
-            if name.is_none() || description.is_none() || possible_template_params.is_none() || source_code_link.is_none() {
+            if name.is_none()
+                || description.is_none()
+                || possible_template_params.is_none()
+                || source_code_link.is_none()
+            {
                 println!("Please enter meta-information for this language: ");
             };
 
             let mut rl = Editor::<()>::new()?;
             let name = name.unwrap_or_else(|| {
-                rl.readline("Name (should match name in code): ").expect("Could not read name from stdin!")
+                rl.readline("Name (should match name in code): ")
+                    .expect("Could not read name from stdin!")
             });
             let description = description.unwrap_or_else(|| {
-                rl.readline("Description: ").expect("Could not read description from stdin!")
+                rl.readline("Description: ")
+                    .expect("Could not read description from stdin!")
             });
             let possible_template_params_string = possible_template_params.unwrap_or_else(|| {
-                rl.readline("Template parameters (comma spearated list): ").expect("Could not read template parameters from stdin!")
+                rl.readline("Template parameters (comma spearated list): ")
+                    .expect("Could not read template parameters from stdin!")
             });
             let possible_template_params: Vec<String> = possible_template_params_string
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .collect();
             let source_code_link = source_code_link.unwrap_or_else(|| {
-                rl.readline("Source code link: ").expect("Could not read source code link from stdin!")
+                rl.readline("Source code link: ")
+                    .expect("Could not read source code link from stdin!")
             });
 
             let description = if description.is_empty() {

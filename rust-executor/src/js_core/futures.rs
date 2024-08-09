@@ -1,10 +1,8 @@
-use deno_core::anyhow::Error;
 use deno_core::error::AnyError;
-use deno_core::v8::Handle;
-use deno_core::{anyhow, v8, JsRuntime, PollEventLoopOptions};
+use deno_core::{anyhow, v8, PollEventLoopOptions};
 use deno_runtime::worker::MainWorker;
-use log::info; // Import the JsRuntime struct.
-use futures::{Future, FutureExt};
+use futures::Future;
+// Import the JsRuntime struct.
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -28,10 +26,13 @@ impl Future for EventLoopFuture {
         sleep(std::time::Duration::from_millis(1));
         let worker = self.worker.try_lock();
         if let Ok(mut worker) = worker {
-            let res = worker.js_runtime.poll_event_loop(cx, PollEventLoopOptions {
-                pump_v8_message_loop: true,
-                wait_for_inspector: false,
-            });
+            let res = worker.js_runtime.poll_event_loop(
+                cx,
+                PollEventLoopOptions {
+                    pump_v8_message_loop: true,
+                    wait_for_inspector: false,
+                },
+            );
             cx.waker().wake_by_ref();
             res
         } else {
@@ -71,19 +72,22 @@ where
         };
 
         let mut value_pin = Pin::new(&mut self.value);
-        
+
         if let Poll::Ready(result) = value_pin.as_mut().poll(cx) {
             match result {
                 Ok(result) => {
                     let scope = &mut worker.js_runtime.handle_scope();
                     let result = result.open(scope).to_rust_string_lossy(scope);
                     return Poll::Ready(Ok(result));
-                },
+                }
                 Err(err) => return Poll::Ready(Err(err)),
             };
         }
 
-        if let Poll::Ready(event_loop_result) = &mut worker.js_runtime.poll_event_loop(cx, deno_core::PollEventLoopOptions::default()) {
+        if let Poll::Ready(event_loop_result) = &mut worker
+            .js_runtime
+            .poll_event_loop(cx, deno_core::PollEventLoopOptions::default())
+        {
             if let Err(err) = event_loop_result {
                 return Poll::Ready(Err(anyhow::anyhow!("Error polling event loop: {:?}", err)));
             }
@@ -94,12 +98,14 @@ where
                         let scope = &mut worker.js_runtime.handle_scope();
                         let result = result.open(scope).to_rust_string_lossy(scope);
                         return Poll::Ready(Ok(result));
-                    },
+                    }
                     Err(err) => return Poll::Ready(Err(err)),
                 };
             }
 
-            return Poll::Ready(Err(anyhow::anyhow!("Promise resolution is still pending but the event loop has already resolved.")));
+            return Poll::Ready(Err(anyhow::anyhow!(
+                "Promise resolution is still pending but the event loop has already resolved."
+            )));
         }
 
         Poll::Pending
