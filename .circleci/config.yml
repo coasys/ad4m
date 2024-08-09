@@ -64,6 +64,9 @@ jobs:
       - run:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
+      - run:
+          name: Build launcher
+          command: pnpm run package-ad4m
       - save_cache:
           key: rust-cache-{{ checksum "Cargo.lock" }}-v2
           paths:
