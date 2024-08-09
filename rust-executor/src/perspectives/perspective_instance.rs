@@ -817,8 +817,8 @@ impl PerspectiveInstance {
                 let chrono_until_date: chrono::DateTime<chrono::Utc> = until_date.clone().into();
                 if chrono_from_date > chrono_until_date {
                     reverse = true;
-                    query.from_date = q.until_date.clone();
-                    query.until_date = q.from_date.clone();
+                    query.from_date.clone_from(&q.until_date);
+                    query.until_date.clone_from(&q.from_date);
                 }
             }
         }
@@ -837,7 +837,7 @@ impl PerspectiveInstance {
 
         if let Some(limit) = query.limit {
             let limit = links.len().min(limit as usize);
-            links = links[..limit as usize].to_vec();
+            links = links[..limit].to_vec();
         }
 
         Ok(links

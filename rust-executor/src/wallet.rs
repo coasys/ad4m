@@ -334,7 +334,7 @@ mod tests {
         wallet.generate_keypair(name.clone());
 
         assert!(wallet.keys.is_some());
-        assert!(wallet.keys.clone().unwrap().by_name.get(&name).is_some());
+        assert!(wallet.keys.clone().unwrap().by_name.contains_key(&name));
         assert!(wallet.get_public_key(&name).is_some());
         assert!(wallet.get_secret_key(&name).is_some());
     }

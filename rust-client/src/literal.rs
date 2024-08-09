@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use anyhow::{anyhow, Result};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -7,12 +8,12 @@ pub enum LiteralValue {
     Json(serde_json::Value),
 }
 
-impl ToString for LiteralValue {
-    fn to_string(&self) -> String {
+impl Display for LiteralValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LiteralValue::String(string) => string.clone(),
-            LiteralValue::Number(number) => number.to_string(),
-            LiteralValue::Json(json) => json.to_string(),
+            LiteralValue::String(string) => write!(f, "{}", string),
+            LiteralValue::Number(number) => write!(f, "{}", number),
+            LiteralValue::Json(json) => write!(f, "{}", json),
         }
     }
 }

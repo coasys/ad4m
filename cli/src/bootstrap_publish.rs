@@ -110,10 +110,10 @@ pub async fn start_publishing(
             .expect("Could not publish language");
 
         match i {
-            0 => bootstrap_seed.agent_language = publish_result.address.clone(),
-            1 => bootstrap_seed.direct_message_language = publish_result.address.clone(),
-            2 => bootstrap_seed.perspective_language = publish_result.address.clone(),
-            3 => bootstrap_seed.neighbourhood_language = publish_result.address.clone(),
+            0 => bootstrap_seed.agent_language.clone_from(&publish_result.address),
+            1 => bootstrap_seed.direct_message_language.clone_from(&publish_result.address),
+            2 => bootstrap_seed.perspective_language.clone_from(&publish_result.address),
+            3 => bootstrap_seed.neighbourhood_language.clone_from(&publish_result.address),
             _ => (),
         }
         green_ln!(

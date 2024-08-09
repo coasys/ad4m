@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use coasys_juniper::{GraphQLObject, GraphQLValue};
 use deno_core::{anyhow::anyhow, error::AnyError};
 use serde::{Deserialize, Serialize};
@@ -323,12 +324,13 @@ impl TryFrom<String> for ExpressionRef {
     }
 }
 
-impl ToString for ExpressionRef {
-    fn to_string(&self) -> String {
+impl Display for ExpressionRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.language.address == "did" {
-            return self.expression.clone();
+            write!(f, "{}", self.expression)
+        } else {
+            write!(f, "{}://{}", self.language.address, self.expression)
         }
-        format!("{}://{}", self.language.address, self.expression)
     }
 }
 
