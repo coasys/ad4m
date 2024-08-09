@@ -1,5 +1,5 @@
-use ad4m_client::{Ad4mClient, expressions::expression};
-use anyhow::{Result, bail};
+use ad4m_client::{expressions::expression, Ad4mClient};
+use anyhow::{bail, Result};
 use clap::Subcommand;
 use serde_json::Value;
 
@@ -33,7 +33,8 @@ pub async fn run(ad4m_client: Ad4mClient, command: ExpressionFunctions) -> Resul
             println!("Expression created with url: {}", expression_url);
         }
         ExpressionFunctions::Get { url } => {
-            let maybe_content: Option<expression::ExpressionExpression> = ad4m_client.expressions.expression(url.clone()).await?;
+            let maybe_content: Option<expression::ExpressionExpression> =
+                ad4m_client.expressions.expression(url.clone()).await?;
             match maybe_content {
                 Some(content) => {
                     println!("author: {}", content.author);
@@ -50,10 +51,12 @@ pub async fn run(ad4m_client: Ad4mClient, command: ExpressionFunctions) -> Resul
         }
 
         ExpressionFunctions::GetRaw { url } => {
-            let maybe_content: Option<expression::ExpressionExpression> = ad4m_client.expressions.expression(url.clone()).await?;
+            let maybe_content: Option<expression::ExpressionExpression> =
+                ad4m_client.expressions.expression(url.clone()).await?;
             match maybe_content {
                 Some(content) => {
-                    if let Ok(Value::String(content)) = serde_json::from_str::<Value>(&content.data) {
+                    if let Ok(Value::String(content)) = serde_json::from_str::<Value>(&content.data)
+                    {
                         println!("{}", &content);
                     } else {
                         println!("{}", content.data);

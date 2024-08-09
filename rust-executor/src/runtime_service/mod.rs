@@ -1,5 +1,5 @@
+use std::io::Read;
 use std::{fs::File, sync::Mutex};
-use std::io::{Read};
 pub(crate) mod runtime_service_extension;
 use std::sync::Arc;
 
@@ -42,14 +42,12 @@ impl RuntimeService {
     }
 
     fn new(mainnet_seed_file_path: String) -> RuntimeService {
-        let mut file = File::open(&mainnet_seed_file_path).unwrap();
+        let mut file = File::open(mainnet_seed_file_path).unwrap();
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
         let seed: BootstrapSeed = serde_json::from_str(&contents).unwrap();
 
-        RuntimeService {
-            seed
-        }
+        RuntimeService { seed }
     }
 
     pub fn global_instance() -> Arc<Mutex<Option<RuntimeService>>> {
@@ -69,9 +67,9 @@ impl RuntimeService {
 
     pub fn get_trusted_agents(&self) -> Vec<String> {
         let mut trusted_agents: Vec<String> = self.seed.trusted_agents.clone();
-        let mut stored_agents = Ad4mDb::with_global_instance(|db| {
-            db.get_all_trusted_agents()
-        }).map_err(|e| e.to_string()).unwrap_or(vec![]);
+        let mut stored_agents = Ad4mDb::with_global_instance(|db| db.get_all_trusted_agents())
+            .map_err(|e| e.to_string())
+            .unwrap_or_default();
         trusted_agents.push(did());
         trusted_agents.append(&mut stored_agents);
         trusted_agents.sort();
@@ -80,22 +78,21 @@ impl RuntimeService {
     }
 
     pub fn add_trusted_agent(&self, new_agents: Vec<String>) {
-        let _ = Ad4mDb::with_global_instance(|db| {
-            db.add_trusted_agents(new_agents)
-        }).map_err(|e| e.to_string());
+        let _ = Ad4mDb::with_global_instance(|db| db.add_trusted_agents(new_agents))
+            .map_err(|e| e.to_string());
     }
 
     pub fn remove_trusted_agent(&self, agents_to_remove: Vec<String>) {
-        let _ = Ad4mDb::with_global_instance(|db| {
-            db.remove_trusted_agents(agents_to_remove)
-        }).map_err(|e| e.to_string());
+        let _ = Ad4mDb::with_global_instance(|db| db.remove_trusted_agents(agents_to_remove))
+            .map_err(|e| e.to_string());
     }
 
     pub fn get_know_link_languages(&self) -> Vec<String> {
         let mut languages: Vec<String> = self.seed.known_link_languages.clone();
-        let mut stored_languages = Ad4mDb::with_global_instance(|db| {
-            db.get_all_known_link_languages()
-        }).map_err(|e| e.to_string()).unwrap_or(vec![]);
+        let mut stored_languages =
+            Ad4mDb::with_global_instance(|db| db.get_all_known_link_languages())
+                .map_err(|e| e.to_string())
+                .unwrap_or_default();
         languages.append(&mut stored_languages);
         languages.sort();
         languages.dedup();
@@ -103,60 +100,56 @@ impl RuntimeService {
     }
 
     pub fn add_know_link_language(&self, language: Vec<String>) {
-        let _ = Ad4mDb::with_global_instance(|db| {
-            db.add_known_link_languages(language)
-        }).map_err(|e| e.to_string());
+        let _ = Ad4mDb::with_global_instance(|db| db.add_known_link_languages(language))
+            .map_err(|e| e.to_string());
     }
 
     pub fn remove_know_link_language(&self, language_to_remove: Vec<String>) {
-        let _ = Ad4mDb::with_global_instance(|db| {
-            db.remove_known_link_languages(language_to_remove)
-        }).map_err(|e| e.to_string());
+        let _ =
+            Ad4mDb::with_global_instance(|db| db.remove_known_link_languages(language_to_remove))
+                .map_err(|e| e.to_string());
     }
 
     pub fn get_friends(&self) -> Vec<String> {
-        let friends = Ad4mDb::with_global_instance(|db| {
-            db.get_all_friends()
-        }).map_err(|e| e.to_string()).unwrap_or(vec![]);
-
-        friends
+        Ad4mDb::with_global_instance(|db| db.get_all_friends())
+            .map_err(|e| e.to_string())
+            .unwrap_or_default()
     }
 
     pub fn add_friend(&self, friends: Vec<String>) {
-        let _ = Ad4mDb::with_global_instance(|db| {
-            db.add_friends(friends)
-        }).map_err(|e| e.to_string());
+        let _ =
+            Ad4mDb::with_global_instance(|db| db.add_friends(friends)).map_err(|e| e.to_string());
     }
 
     pub fn remove_friend(&self, friend_to_remove: Vec<String>) {
-        let _ = Ad4mDb::with_global_instance(|db| {
-            db.remove_friends(friend_to_remove)
-        }).map_err(|e| e.to_string());
+        let _ = Ad4mDb::with_global_instance(|db| db.remove_friends(friend_to_remove))
+            .map_err(|e| e.to_string());
     }
 
     pub fn get_outbox(&self) -> Vec<SentMessage> {
-        let outbox = Ad4mDb::with_global_instance(|db| {
-            db.get_all_from_outbox()
-        }).map_err(|e| e.to_string()).unwrap_or(vec![]);
-
-        outbox
+        Ad4mDb::with_global_instance(|db| db.get_all_from_outbox())
+            .map_err(|e| e.to_string())
+            .unwrap_or_default()
     }
 
     pub fn add_message_to_outbox(&self, message: SentMessage) {
         let _ = Ad4mDb::with_global_instance(|db| {
             db.add_to_outbox(&message.message, message.recipient)
-        }).map_err(|e| e.to_string());
+        })
+        .map_err(|e| e.to_string());
     }
 
+    pub async fn request_install_notification(
+        notification_input: NotificationInput,
+    ) -> Result<String, String> {
+        let notification_id =
+            Ad4mDb::with_global_instance(|db| db.add_notification(notification_input))
+                .map_err(|e| e.to_string())?;
 
-    pub async fn request_install_notification(notification_input: NotificationInput) -> Result<String, String>{
-        let notification_id = Ad4mDb::with_global_instance(|db| {
-            db.add_notification(notification_input)
-        }).map_err(|e| e.to_string())?;
-
-        let notification =Ad4mDb::with_global_instance(|db| {
-             db.get_notification(notification_id.clone())
-        }).map_err(|e| e.to_string())?.ok_or("Notification with given id not found")?;
+        let notification =
+            Ad4mDb::with_global_instance(|db| db.get_notification(notification_id.clone()))
+                .map_err(|e| e.to_string())?
+                .ok_or("Notification with given id not found")?;
 
         let exception_info = ExceptionInfo {
             title: "Request to install notifications for the app".to_string(),
@@ -178,7 +171,4 @@ impl RuntimeService {
 
         Ok(notification_id)
     }
-
-
-
 }

@@ -62,11 +62,10 @@ pub enum HolochainServiceResponse {
 impl HolochainServiceInterface {
     pub async fn install_app(&self, payload: InstallAppPayload) -> Result<AppInfo, AnyError> {
         let (response_sender, response_receiver) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::InstallApp(
-                payload,
-                response_sender,
-            ))?;
+        self.sender.send(HolochainServiceRequest::InstallApp(
+            payload,
+            response_sender,
+        ))?;
         match response_receiver.await.unwrap() {
             HolochainServiceResponse::InstallApp(result) => result,
             _ => unreachable!(),
@@ -119,11 +118,10 @@ impl HolochainServiceInterface {
 
     pub async fn add_agent_infos(&self, agent_infos: Vec<AgentInfoSigned>) -> Result<(), AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::AddAgentInfos(
-                agent_infos,
-                response_tx,
-            ))?;
+        self.sender.send(HolochainServiceRequest::AddAgentInfos(
+            agent_infos,
+            response_tx,
+        ))?;
         match response_rx.await.unwrap() {
             HolochainServiceResponse::AddAgentInfos(result) => result,
             _ => unreachable!(),

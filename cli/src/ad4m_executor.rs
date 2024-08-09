@@ -4,11 +4,11 @@ extern crate anyhow;
 extern crate chrono;
 extern crate clap;
 extern crate dirs;
+extern crate kitsune_p2p_types;
 extern crate rand;
 extern crate regex;
 extern crate rustyline;
 extern crate tokio;
-extern crate kitsune_p2p_types;
 
 mod formatting;
 mod startup;
@@ -128,7 +128,7 @@ enum Domain {
         #[arg(short, long, action)]
         log_holochain_metrics: Option<bool>,
     },
-    RunLocalHcServices {}
+    RunLocalHcServices {},
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -180,7 +180,7 @@ async fn main() -> Result<()> {
         let tls = if tls_cert_file.is_some() && tls_cert_file.is_some() {
             Some(TlsConfig {
                 cert_file_path: tls_cert_file.unwrap(),
-                key_file_path: tls_key_file.unwrap()
+                key_file_path: tls_key_file.unwrap(),
             })
         } else {
             if tls_cert_file.is_some() || tls_key_file.is_some() {
@@ -208,19 +208,21 @@ async fn main() -> Result<()> {
                 localhost,
                 auto_permit_cap_requests: Some(true),
                 tls,
-                log_holochain_metrics
-            }).await;
-        }).await;
-        
+                log_holochain_metrics,
+            })
+            .await;
+        })
+        .await;
+
         let _ = ctrlc::set_handler(move || {
             println!("Received CTRL-C! Exiting...");
             exit(0);
         });
 
-        use tokio::time::sleep;
-        use std::time::Duration;
-        use std::process::exit;
         use ctrlc;
+        use std::process::exit;
+        use std::time::Duration;
+        use tokio::time::sleep;
 
         loop {
             sleep(Duration::from_secs(2)).await;

@@ -1,10 +1,14 @@
+use coasys_juniper::{GraphQLObject, GraphQLValue};
 use deno_core::{anyhow::anyhow, error::AnyError};
 use serde::{Deserialize, Serialize};
-use coasys_juniper::{
-    GraphQLObject, GraphQLValue,
-};
+use std::fmt::Display;
 
-use crate::{agent::signatures::verify, graphql::graphql_types::{LinkExpressionInput, LinkInput, LinkStatus, NotificationInput, PerspectiveInput}};
+use crate::{
+    agent::signatures::verify,
+    graphql::graphql_types::{
+        LinkExpressionInput, LinkInput, LinkStatus, NotificationInput, PerspectiveInput,
+    },
+};
 use regex::Regex;
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -41,10 +45,7 @@ pub struct DecoratedExpressionProof {
 
 impl<T: GraphQLValue + Serialize> From<Expression<T>> for VerifiedExpression<T> {
     fn from(expr: Expression<T>) -> Self {
-        let valid = match verify(&expr) {
-            Ok(valid) => valid,
-            Err(_) => false,
-        };
+        let valid = verify(&expr).unwrap_or(false);
         let invalid = !valid;
         VerifiedExpression {
             author: expr.author,
@@ -59,8 +60,6 @@ impl<T: GraphQLValue + Serialize> From<Expression<T>> for VerifiedExpression<T> 
         }
     }
 }
-
-
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -82,7 +81,7 @@ impl From<LinkInput> for Link {
 
 impl Link {
     pub fn normalize(&self) -> Link {
-        let predicate = match self.predicate.as_ref().map(String::as_str) {
+        let predicate = match self.predicate.as_deref() {
             Some("") => None,
             _ => self.predicate.clone(),
         };
@@ -111,11 +110,12 @@ impl TryFrom<LinkExpressionInput> for LinkExpression {
             predicate: input.data.predicate,
             source: input.data.source,
             target: input.data.target,
-        }.normalize();
+        }
+        .normalize();
         Ok(LinkExpression {
             author: input.author,
             timestamp: input.timestamp,
-            data: data,
+            data,
             proof: ExpressionProof {
                 key: input.proof.key.ok_or(anyhow!("Key is required"))?,
                 signature: input.proof.signature.ok_or(anyhow!("Key is required"))?,
@@ -126,18 +126,19 @@ impl TryFrom<LinkExpressionInput> for LinkExpression {
 }
 
 impl LinkExpression {
-     pub fn from_input_without_proof(input: LinkExpressionInput) -> Self {
+    pub fn from_input_without_proof(input: LinkExpressionInput) -> Self {
         let data = Link {
             predicate: input.data.predicate,
             source: input.data.source,
             target: input.data.target,
-        }.normalize();
+        }
+        .normalize();
         LinkExpression {
             author: input.author,
             timestamp: input.timestamp,
             data,
             proof: ExpressionProof::default(),
-            status: input.status.into()
+            status: input.status,
         }
     }
 }
@@ -165,8 +166,6 @@ impl From<Expression<Link>> for LinkExpression {
     }
 }
 
-
-
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DecoratedLinkExpression {
@@ -188,10 +187,7 @@ impl DecoratedLinkExpression {
                 signature: self.proof.signature.clone(),
             },
         };
-        let valid = match verify(&link_expr) {
-            Ok(valid) => valid,
-            Err(_) => false,
-        };
+        let valid = verify(&link_expr).unwrap_or(false);
         self.proof.valid = Some(valid);
         self.proof.invalid = Some(!valid);
     }
@@ -227,7 +223,6 @@ impl From<DecoratedLinkExpression> for LinkExpression {
     }
 }
 
-
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct Perspective {
     pub links: Vec<LinkExpression>,
@@ -235,9 +230,10 @@ pub struct Perspective {
 
 impl From<PerspectiveInput> for Perspective {
     fn from(input: PerspectiveInput) -> Self {
-        let links = input.links
+        let links = input
+            .links
             .into_iter()
-            .map(|link| LinkExpression::try_from(link))
+            .map(LinkExpression::try_from)
             .filter_map(Result::ok)
             .collect();
         Perspective { links }
@@ -276,12 +272,12 @@ impl TryFrom<String> for ExpressionRef {
     type Error = AnyError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.starts_with("literal://") {
+        if let Some(stripped) = value.strip_prefix("literal://") {
             let language_ref = LanguageRef {
                 address: "literal".to_string(),
                 name: "literal".to_string(),
             };
-            let content = value[10..].to_string();
+            let content = stripped.to_string();
             return Ok(ExpressionRef {
                 language: language_ref,
                 expression: content,
@@ -321,16 +317,20 @@ impl TryFrom<String> for ExpressionRef {
             }
         }
 
-        Err(anyhow!("Couldn't parse string as expression URL or DID: {}", value))
+        Err(anyhow!(
+            "Couldn't parse string as expression URL or DID: {}",
+            value
+        ))
     }
 }
 
-impl ToString for ExpressionRef {
-    fn to_string(&self) -> String {
+impl Display for ExpressionRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.language.address == "did" {
-            return self.expression.clone();
+            write!(f, "{}", self.expression)
+        } else {
+            write!(f, "{}://{}", self.language.address, self.expression)
         }
-        format!("{}://{}", self.language.address, self.expression)
     }
 }
 
@@ -344,7 +344,7 @@ impl PerspectiveDiff {
     pub fn from_additions(additions: Vec<LinkExpression>) -> PerspectiveDiff {
         PerspectiveDiff {
             additions,
-            removals: vec![]
+            removals: vec![],
         }
     }
 
@@ -381,7 +381,7 @@ pub struct Notification {
 impl Notification {
     pub fn from_input_and_id(id: String, input: NotificationInput) -> Self {
         Notification {
-            id: id,
+            id,
             granted: false,
             description: input.description,
             app_name: input.app_name,

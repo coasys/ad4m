@@ -1,4 +1,3 @@
-
 use deno_runtime::worker::WorkerOptions;
 use std::{collections::HashMap, rc::Rc};
 use url::Url;
@@ -7,13 +6,13 @@ use super::agent_extension::agent_service;
 use super::languages_extension::language_service;
 use super::pubsub_extension::pubsub_service;
 use super::signature_extension::signature_service;
+use super::string_module_loader::StringModuleLoader;
 use super::utils_extension::utils_service;
 use super::wallet_extension::wallet_service;
-use super::string_module_loader::StringModuleLoader;
-use crate::entanglement_service::entanglement_service_extension::{self, entanglement_service};
-use crate::holochain_service::holochain_service_extension::{self, holochain_service};
-use crate::prolog_service::prolog_service_extension::{self, prolog_service};
-use crate::runtime_service::runtime_service_extension::{self, runtime_service};
+use crate::entanglement_service::entanglement_service_extension::entanglement_service;
+use crate::holochain_service::holochain_service_extension::holochain_service;
+use crate::prolog_service::prolog_service_extension::prolog_service;
+use crate::runtime_service::runtime_service_extension::runtime_service;
 
 pub fn main_module_url() -> Url {
     Url::parse("https://ad4m.runtime/main").unwrap()

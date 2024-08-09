@@ -1,6 +1,4 @@
-use std::borrow::Cow;
-
-use deno_core::{error::AnyError, include_js_files, op2, Extension, Op};
+use deno_core::{error::AnyError, op2};
 
 use crate::pubsub::get_global_pubsub;
 

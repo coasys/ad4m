@@ -48,7 +48,7 @@ impl PrologEngine {
                 .expect("Failed to create Tokio runtime");
             let _guard = rt.enter();
 
-            tokio::task::block_in_place(||
+            tokio::task::block_in_place(|| {
                 rt.block_on(async move {
                     let mut machine = Machine::new_lib();
 
@@ -63,22 +63,23 @@ impl PrologEngine {
                                     machine.run_query(query)
                                 })) {
                                     Ok(result) => {
-                                        let _ = response.send(PrologServiceResponse::QueryResult(result));
+                                        let _ = response
+                                            .send(PrologServiceResponse::QueryResult(result));
                                     }
                                     Err(e) => {
-                                        let error_string = if let Some(string) = e.downcast_ref::<String>() {
-                                            format!("Scryer panicked with: {:?}", string)
-                                        } else if let Some(&str) = e.downcast_ref::<&str>() {
-                                            format!("Scryer panicked with: {:?}", str)
-                                        } else {
-                                            format!("Scryer panicked with: {:?}", e)
-                                        };
+                                        let error_string =
+                                            if let Some(string) = e.downcast_ref::<String>() {
+                                                format!("Scryer panicked with: {:?}", string)
+                                            } else if let Some(&str) = e.downcast_ref::<&str>() {
+                                                format!("Scryer panicked with: {:?}", str)
+                                            } else {
+                                                format!("Scryer panicked with: {:?}", e)
+                                            };
                                         log::error!("{}", error_string);
-                                        let _ = response.send(
-                                            PrologServiceResponse::QueryResult(
-                                                Err(format!("Scryer panicked with: {:?}", error_string))
-                                            )
-                                        );
+                                        let _ =
+                                            response.send(PrologServiceResponse::QueryResult(Err(
+                                                format!("Scryer panicked with: {:?}", error_string),
+                                            )));
                                     }
                                 }
                             }
@@ -89,18 +90,18 @@ impl PrologEngine {
                             ) => {
                                 let program = program_lines
                                     .iter()
-                                    .map(|l| l.replace("\n", "").replace("\r", ""))
+                                    .map(|l| l.replace(['\n', '\r'], ""))
                                     .collect::<Vec<String>>()
                                     .join("\n");
-                                let _result =
-                                    machine.consult_module_string(module_name.as_str(), program);
-                                let _ = response.send(PrologServiceResponse::LoadModuleResult(Ok(())));
+                                machine.consult_module_string(module_name.as_str(), program);
+                                let _ =
+                                    response.send(PrologServiceResponse::LoadModuleResult(Ok(())));
                             }
-                            PrologServiceRequest::Drop => return
+                            PrologServiceRequest::Drop => return,
                         }
                     }
                 })
-            );
+            });
         });
 
         match response_receiver.await? {
@@ -115,8 +116,7 @@ impl PrologEngine {
         let (response_sender, response_receiver) = oneshot::channel();
         self.request_sender
             .send(PrologServiceRequest::RunQuery(query, response_sender))?;
-        let response = response_receiver
-            .await?;
+        let response = response_receiver.await?;
         match response {
             PrologServiceResponse::QueryResult(query_result) => Ok(query_result),
             _ => unreachable!(),
@@ -135,8 +135,7 @@ impl PrologEngine {
                 program_lines,
                 response_sender,
             ))?;
-        let response = response_receiver
-            .await?;
+        let response = response_receiver.await?;
         match response {
             PrologServiceResponse::LoadModuleResult(result) => result,
             _ => unreachable!(),
@@ -144,8 +143,7 @@ impl PrologEngine {
     }
 
     pub fn drop(&self) -> Result<(), Error> {
-        self.request_sender
-            .send(PrologServiceRequest::Drop)?;
+        self.request_sender.send(PrologServiceRequest::Drop)?;
         Ok(())
     }
 }
@@ -166,7 +164,9 @@ mod prolog_test {
         "#,
         );
 
-        let load_facts = engine.load_module_string("facts".to_string(), vec![facts]).await;
+        let load_facts = engine
+            .load_module_string("facts".to_string(), vec![facts])
+            .await;
         assert!(load_facts.is_ok());
         println!("Facts loaded");
 

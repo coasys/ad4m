@@ -10,8 +10,8 @@ use deno_core::RequestedModuleType;
 use deno_core::ResolutionKind;
 use deno_runtime::deno_core::error::AnyError;
 use log::info;
-use url::Url;
 use std::collections::HashMap;
+use url::Url;
 
 pub struct StringModuleLoader {
     modules: HashMap<String, String>,
@@ -45,7 +45,7 @@ impl ModuleLoader for StringModuleLoader {
         module_specifier: &ModuleSpecifier,
         _maybe_referrer: std::option::Option<&Url>,
         _is_dyn_import: bool,
-        _request_module_type: RequestedModuleType
+        _request_module_type: RequestedModuleType,
     ) -> ModuleLoadResponse {
         let path = module_specifier.to_file_path().map_err(|_| {
             generic_error(format!(
@@ -69,21 +69,27 @@ impl ModuleLoader for StringModuleLoader {
                     std::fs::read_to_string(path).expect("Could not read file path to string");
                 let module_specifier = module_specifier.clone();
 
-                ModuleLoadResponse::Sync(
-                    Ok(ModuleSource::new(module_type, ModuleSourceCode::String(code.into()), &module_specifier, None))
-                )
+                ModuleLoadResponse::Sync(Ok(ModuleSource::new(
+                    module_type,
+                    ModuleSourceCode::String(code.into()),
+                    &module_specifier,
+                    None,
+                )))
             }
             Err(_err) => {
                 info!("Module is not a file path, importing as raw module string");
                 let module_code = self.modules.get(module_specifier.as_str()).cloned();
                 let module_specifier = module_specifier.clone();
 
-                ModuleLoadResponse::Sync(
-                    match module_code {
-                        Some(code) => Ok(ModuleSource::new(deno_core::ModuleType::JavaScript, ModuleSourceCode::String(code.into()), &module_specifier, None)),
-                        None => Err(anyhow::anyhow!("Module not found: {}", module_specifier)),
-                    }
-                )
+                ModuleLoadResponse::Sync(match module_code {
+                    Some(code) => Ok(ModuleSource::new(
+                        deno_core::ModuleType::JavaScript,
+                        ModuleSourceCode::String(code.into()),
+                        &module_specifier,
+                        None,
+                    )),
+                    None => Err(anyhow::anyhow!("Module not found: {}", module_specifier)),
+                })
             }
         }
     }

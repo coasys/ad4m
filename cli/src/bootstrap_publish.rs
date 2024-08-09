@@ -78,11 +78,12 @@ pub async fn start_publishing(
 
     green_ln!("Unlocked agent\n");
 
-    let mut languages = vec![];
-    languages.push(seed_proto.agent_language);
-    languages.push(seed_proto.direct_message_language);
-    languages.push(seed_proto.perspective_language);
-    languages.push(seed_proto.neighbourhood_language);
+    let languages = vec![
+        seed_proto.agent_language,
+        seed_proto.direct_message_language,
+        seed_proto.perspective_language,
+        seed_proto.neighbourhood_language,
+    ];
 
     let mut bootstrap_seed = BootstrapSeed {
         trusted_agents: vec![agent.did.unwrap()],
@@ -109,10 +110,18 @@ pub async fn start_publishing(
             .expect("Could not publish language");
 
         match i {
-            0 => bootstrap_seed.agent_language = publish_result.address.clone(),
-            1 => bootstrap_seed.direct_message_language = publish_result.address.clone(),
-            2 => bootstrap_seed.perspective_language = publish_result.address.clone(),
-            3 => bootstrap_seed.neighbourhood_language = publish_result.address.clone(),
+            0 => bootstrap_seed
+                .agent_language
+                .clone_from(&publish_result.address),
+            1 => bootstrap_seed
+                .direct_message_language
+                .clone_from(&publish_result.address),
+            2 => bootstrap_seed
+                .perspective_language
+                .clone_from(&publish_result.address),
+            3 => bootstrap_seed
+                .neighbourhood_language
+                .clone_from(&publish_result.address),
             _ => (),
         }
         green_ln!(
