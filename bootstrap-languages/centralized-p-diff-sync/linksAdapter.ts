@@ -147,7 +147,7 @@ export class LinkAdapter implements LinkSyncAdapter {
       result = null;
     }
 
-    console.log("Current revision got result", result);
+    //console.log("Current revision got result", result);
 
     if (result) {
       //@ts-ignore
@@ -171,8 +171,8 @@ export class LinkAdapter implements LinkSyncAdapter {
       //const release = await this.generalMutex.acquire();
       //console.log("PerspectiveDiffSync.sync(); Got lock");
       try {
-        console.log("Sending the sync event to server");
-        console.log(this.me);
+        //console.log("Sending the sync event to server");
+        //console.log(this.me);
         this.socketClient.emit("sync", {
           linkLanguageUUID: this.languageUid,
           did: this.me,
