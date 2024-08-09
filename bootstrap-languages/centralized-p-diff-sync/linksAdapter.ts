@@ -141,7 +141,7 @@ export class LinkAdapter implements LinkSyncAdapter {
         console.error("Got status", result.status);
         result = null;
       }
-      console.log("Current revision returned with result");
+      //console.log("Current revision returned with result");
     } catch (e) {
       console.log("Error in currentRevision call", e);
       result = null;
@@ -241,8 +241,8 @@ export class LinkAdapter implements LinkSyncAdapter {
       const signal = await this.emitCommit(preppedDiff);
 
       if (signal.status === "Ok") {
-        console.log("Got some result from commit");
-        console.dir(signal);
+        //console.log("Got some result from commit");
+        //console.dir(signal);
         //Update our local timestamp to match the server
         this.myCurrentTime = signal.serverRecordTimestamp;
         this.updateServerSyncState();

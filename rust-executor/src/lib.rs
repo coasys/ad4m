@@ -42,7 +42,7 @@ use crate::{
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     env::set_var(
         "RUST_LOG",
-        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=debug,warp::server",
+        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=debug,warp=warn,warp::server=warn",
     );
     let _ = env_logger::try_init();
     config.prepare();
