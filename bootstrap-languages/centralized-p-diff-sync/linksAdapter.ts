@@ -141,7 +141,7 @@ export class LinkAdapter implements LinkSyncAdapter {
         console.error("Got status", result.status);
         result = null;
       }
-      console.log("Current revision returned with result");
+      //console.log("Current revision returned with result");
     } catch (e) {
       console.log("Error in currentRevision call", e);
       result = null;
