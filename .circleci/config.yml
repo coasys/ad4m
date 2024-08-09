@@ -50,11 +50,11 @@ jobs:
             - rust-cache-{{ checksum "Cargo.lock" }}-v2
             - rust-cache-
       - run:
-        name: cargo fmt --check
-        command: cargo fmt --check
+          name: cargo fmt --check
+          command: cargo fmt --check
       - run:
-        name: cargo clippy
-        comand: cargo clippy
+          name: cargo clippy
+          comand: cargo clippy
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
