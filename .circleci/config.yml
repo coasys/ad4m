@@ -53,9 +53,6 @@ jobs:
           name: cargo fmt --check
           command: cargo fmt --check
       - run:
-          name: cargo clippy
-          command: cargo clippy
-      - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
       - run:
@@ -79,6 +76,9 @@ jobs:
           paths:
             - ./target/release/ad4m
             - ./target/release/ad4m-executor
+      - run:
+          name: cargo clippy
+          command: cargo clippy
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
