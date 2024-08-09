@@ -54,7 +54,7 @@ jobs:
           command: cargo fmt --check
       - run:
           name: cargo clippy
-          comand: cargo clippy
+          command: cargo clippy
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
