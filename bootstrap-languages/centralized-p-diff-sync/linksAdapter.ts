@@ -241,8 +241,8 @@ export class LinkAdapter implements LinkSyncAdapter {
       const signal = await this.emitCommit(preppedDiff);
 
       if (signal.status === "Ok") {
-        console.log("Got some result from commit");
-        console.dir(signal);
+        //console.log("Got some result from commit");
+        //console.dir(signal);
         //Update our local timestamp to match the server
         this.myCurrentTime = signal.serverRecordTimestamp;
         this.updateServerSyncState();
