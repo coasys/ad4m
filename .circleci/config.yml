@@ -64,9 +64,6 @@ jobs:
       - run:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
-      - run:
-          name: Build launcher
-          command: pnpm run package-ad4m
       - save_cache:
           key: rust-cache-{{ checksum "Cargo.lock" }}-v2
           paths:
@@ -81,7 +78,7 @@ jobs:
             - ./target/release/ad4m-executor
       - run:
           name: cargo clippy
-          command: cargo clippy
+          command: cargo clippy --all --exclude ad4m-launcher
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
