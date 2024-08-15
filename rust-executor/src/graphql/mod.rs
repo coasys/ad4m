@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::{convert::Infallible, io::Write};
 
 use coasys_juniper::{InputValue, RootNode};
-use coasys_juniper_graphql_transport_ws::ConnectionConfig;
+use coasys_juniper_graphql_ws::ConnectionConfig;
 use coasys_juniper_warp::{playground_filter, subscriptions::serve_graphql_transport_ws};
 use deno_core::error::AnyError;
 use futures::FutureExt as _;
@@ -53,7 +53,7 @@ pub async fn start_server(
 
     let mut file = std::fs::File::create(Path::new(&app_data_path).join("schema.gql")).unwrap();
 
-    file.write_all(schema().as_schema_language().as_bytes())
+    file.write_all(schema().as_sdl().as_bytes())
         .unwrap();
 
     let homepage = warp::path::end().map(|| {
