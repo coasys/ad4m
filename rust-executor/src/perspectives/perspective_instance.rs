@@ -1064,7 +1064,7 @@ impl PerspectiveInstance {
             .iter()
             .map(|(notification, matches)| {
                 let new_matches: Vec<QueryMatch> =
-                    if let Some(old_matches) = before.get(&notification) {
+                    if let Some(old_matches) = before.get(notification) {
                         matches
                             .iter()
                             .filter(|m| !old_matches.contains(m))
