@@ -301,13 +301,15 @@ impl PerspectiveInstance {
     }
 
     async fn notification_check_loop(&self) {
+        let uuid = self.persisted.lock().await.uuid.clone();
         let mut interval = time::interval(Duration::from_secs(7));
         let mut before = self.notification_trigger_snapshot().await;
         while !*self.is_teardown.lock().await {
+            let after = self.notification_trigger_snapshot().await;
+            let new_matches = Self::subtract_before_notification_matches(&before, &after);
+            Self::publish_notification_matches(uuid.clone(), new_matches).await;
+            before = after;
             interval.tick().await;
-            let after = self_clone.notification_trigger_snapshot().await;
-            let new_matches = Self::subtract_before_notification_matches(before, after);
-            Self::publish_notification_matches(uuid, new_matches).await;
         }
     }
 
@@ -981,8 +983,6 @@ impl PerspectiveInstance {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
-            let uuid = self_clone.persisted.lock().await.uuid.clone();
-
             if let Err(e) = self_clone.ensure_prolog_engine().await {
                 log::error!("Error spawning Prolog engine: {:?}", e)
             };
@@ -1060,16 +1060,23 @@ impl PerspectiveInstance {
     }
 
     fn subtract_before_notification_matches(
-        before: BTreeMap<Notification, Vec<QueryMatch>>,
-        after: BTreeMap<Notification, Vec<QueryMatch>>,
+        before: &BTreeMap<Notification, Vec<QueryMatch>>,
+        after: &BTreeMap<Notification, Vec<QueryMatch>>,
     ) -> BTreeMap<Notification, Vec<QueryMatch>> {
         after
-            .into_iter()
-            .map(|(notification, mut matches)| {
-                if let Some(old_matches) = before.get(&notification) {
-                    matches.retain(|m| !old_matches.contains(m));
-                }
-                (notification, matches)
+            .iter()
+            .map(|(notification, matches)| {
+                let new_matches: Vec<QueryMatch> = if let Some(old_matches) = before.get(&notification) {
+                    matches
+                        .iter()
+                        .filter(|m| !old_matches.contains(m))
+                        .cloned()
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+                (notification.clone(), new_matches)
             })
             .collect()
     }
