@@ -143,6 +143,7 @@ pub struct PerspectiveInstance {
     sdna_change_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<Mutex<Option<Language>>>,
+    links_have_changed: Arc<Mutex<bool>>,
 }
 
 impl PerspectiveInstance {
@@ -159,6 +160,7 @@ impl PerspectiveInstance {
             sdna_change_mutex: Arc::new(Mutex::new(())),
             prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(Mutex::new(None)),
+            links_have_changed: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -302,14 +304,18 @@ impl PerspectiveInstance {
 
     async fn notification_check_loop(&self) {
         let uuid = self.persisted.lock().await.uuid.clone();
-        let mut interval = time::interval(Duration::from_secs(7));
+        let mut interval = time::interval(Duration::from_secs(1));
         let mut before = self.notification_trigger_snapshot().await;
         while !*self.is_teardown.lock().await {
-            let after = self.notification_trigger_snapshot().await;
-            let new_matches = Self::subtract_before_notification_matches(&before, &after);
-            Self::publish_notification_matches(uuid.clone(), new_matches).await;
-            before = after;
             interval.tick().await;
+            let mut changed = self.links_have_changed.lock().await;
+            if *changed {
+                let after = self.notification_trigger_snapshot().await;
+                let new_matches = Self::subtract_before_notification_matches(&before, &after);
+                Self::publish_notification_matches(uuid.clone(), new_matches).await;
+                before = after;
+                *changed = false;
+            }
         }
     }
 
@@ -470,6 +476,7 @@ impl PerspectiveInstance {
 
         self.spawn_prolog_facts_update(decorated_diff.clone());
         self.pubsub_publish_diff(decorated_diff).await;
+        *(self.links_have_changed.lock().await) = true;
     }
 
     pub async fn telepresence_signal_from_link_language(&self, mut signal: PerspectiveExpression) {
@@ -552,7 +559,7 @@ impl PerspectiveInstance {
         }
 
         self.pubsub_publish_diff(decorated_perspective_diff).await;
-
+        *(self.links_have_changed.lock().await) = true;
         Ok(decorated_link_expression)
     }
 
@@ -588,7 +595,7 @@ impl PerspectiveInstance {
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&perspective_diff);
         }
-
+        *(self.links_have_changed.lock().await) = true;
         Ok(decorated_link_expressions)
     }
 
@@ -638,7 +645,7 @@ impl PerspectiveInstance {
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
         }
-
+        *(self.links_have_changed.lock().await) = true;
         Ok(decorated_diff)
     }
 
@@ -700,7 +707,7 @@ impl PerspectiveInstance {
         if link_status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
         }
-
+        *(self.links_have_changed.lock().await) = true;
         Ok(decorated_new_link_expression)
     }
 
@@ -725,6 +732,7 @@ impl PerspectiveInstance {
                 self.spawn_commit_and_handle_error(&diff);
             }
 
+            *(self.links_have_changed.lock().await) = true;
             Ok(decorated_link)
         } else {
             Err(anyhow!("Link not found"))
