@@ -165,6 +165,7 @@ impl PerspectiveInstance {
     pub async fn start_background_tasks(self) {
         let _ = join!(
             self.ensure_link_language(),
+            self.notification_check_loop(),
             self.nh_sync_loop(),
             self.pending_diffs_loop(),
         );
@@ -299,6 +300,17 @@ impl PerspectiveInstance {
         }
     }
 
+    async fn notification_check_loop(&self) {
+        let mut interval = time::interval(Duration::from_secs(7));
+        let mut before = self.notification_trigger_snapshot().await;
+        while !*self.is_teardown.lock().await {
+            interval.tick().await;
+            let after = self_clone.notification_trigger_snapshot().await;
+            let new_matches = Self::subtract_before_notification_matches(before, after);
+            Self::publish_notification_matches(uuid, new_matches).await;
+        }
+    }
+
     async fn ensure_public_links_are_shared(&self) {
         let uuid = self.persisted.lock().await.uuid.clone();
         let mut link_language_guard = self.link_language.lock().await;
@@ -425,7 +437,6 @@ impl PerspectiveInstance {
 
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) {
         let handle = self.persisted.lock().await.clone();
-        let notification_snapshot_before = self.notification_trigger_snapshot().await;
         if !diff.additions.is_empty() {
             Ad4mDb::with_global_instance(|db| {
                 db.add_many_links(&handle.uuid, diff.additions.clone(), &LinkStatus::Shared)
@@ -455,7 +466,7 @@ impl PerspectiveInstance {
                 .collect(),
         };
 
-        self.spawn_prolog_facts_update(notification_snapshot_before, decorated_diff.clone());
+        self.spawn_prolog_facts_update(decorated_diff.clone());
         self.pubsub_publish_diff(decorated_diff).await;
     }
 
@@ -523,7 +534,6 @@ impl PerspectiveInstance {
         link_expression: LinkExpression,
         status: LinkStatus,
     ) -> Result<DecoratedLinkExpression, AnyError> {
-        let notification_snapshot_before = self.notification_trigger_snapshot().await;
         let handle = self.persisted.lock().await.clone();
         Ad4mDb::with_global_instance(|db| db.add_link(&handle.uuid, &link_expression, &status))?;
 
@@ -533,10 +543,7 @@ impl PerspectiveInstance {
         let decorated_perspective_diff =
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
-        self.spawn_prolog_facts_update(
-            notification_snapshot_before,
-            decorated_perspective_diff.clone(),
-        );
+        self.spawn_prolog_facts_update(decorated_perspective_diff.clone());
 
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
@@ -552,7 +559,6 @@ impl PerspectiveInstance {
         links: Vec<Link>,
         status: LinkStatus,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        let notification_snapshot_before = self.notification_trigger_snapshot().await;
         let handle = self.persisted.lock().await.clone();
         let uuid = handle.uuid.clone();
         let link_expressions = links
@@ -575,10 +581,7 @@ impl PerspectiveInstance {
             db.add_many_links(&uuid, link_expressions.clone(), &status)
         })?;
 
-        self.spawn_prolog_facts_update(
-            notification_snapshot_before,
-            decorated_perspective_diff.clone(),
-        );
+        self.spawn_prolog_facts_update(decorated_perspective_diff.clone());
         self.pubsub_publish_diff(decorated_perspective_diff).await;
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&perspective_diff);
@@ -592,7 +595,6 @@ impl PerspectiveInstance {
         mutations: LinkMutations,
         status: LinkStatus,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
-        let notification_snapshot_before = self.notification_trigger_snapshot().await;
         let handle = self.persisted.lock().await.clone();
         let additions = mutations
             .additions
@@ -628,7 +630,7 @@ impl PerspectiveInstance {
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
 
-        self.spawn_prolog_facts_update(notification_snapshot_before, decorated_diff.clone());
+        self.spawn_prolog_facts_update(decorated_diff.clone());
         self.pubsub_publish_diff(decorated_diff.clone()).await;
 
         if status == LinkStatus::Shared {
@@ -643,7 +645,6 @@ impl PerspectiveInstance {
         old_link: LinkExpression,
         new_link: Link,
     ) -> Result<DecoratedLinkExpression, AnyError> {
-        let notification_snapshot_before = self.notification_trigger_snapshot().await;
         let handle = self.persisted.lock().await.clone();
         let link_option = Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &old_link))?;
 
@@ -679,7 +680,7 @@ impl PerspectiveInstance {
             vec![decorated_old_link.clone()],
         );
 
-        self.spawn_prolog_facts_update(notification_snapshot_before, decorated_diff);
+        self.spawn_prolog_facts_update(decorated_diff);
 
         get_global_pubsub()
             .await
@@ -709,14 +710,13 @@ impl PerspectiveInstance {
         if let Some((link_from_db, status)) =
             Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &link_expression))?
         {
-            let notification_snapshot_before = self.notification_trigger_snapshot().await;
             Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, &link_expression))?;
             let diff = PerspectiveDiff::from_removals(vec![link_expression.clone()]);
             let decorated_link = DecoratedLinkExpression::from((link_from_db, status.clone()));
             let decorated_diff =
                 DecoratedPerspectiveDiff::from_removals(vec![decorated_link.clone()]);
 
-            self.spawn_prolog_facts_update(notification_snapshot_before, decorated_diff.clone());
+            self.spawn_prolog_facts_update(decorated_diff.clone());
             self.pubsub_publish_diff(decorated_diff.clone()).await;
 
             if status == LinkStatus::Shared {
@@ -976,7 +976,6 @@ impl PerspectiveInstance {
 
     fn spawn_prolog_facts_update(
         &self,
-        before: BTreeMap<Notification, Vec<QueryMatch>>,
         diff: DecoratedPerspectiveDiff,
     ) {
         let self_clone = self.clone();
@@ -1025,9 +1024,6 @@ impl PerspectiveInstance {
 
             if did_update {
                 self_clone.pubsub_publish_diff(diff).await;
-                let after = self_clone.notification_trigger_snapshot().await;
-                let new_matches = Self::subtract_before_notification_matches(before, after);
-                Self::publish_notification_matches(uuid, new_matches).await;
             }
         });
     }
