@@ -304,7 +304,7 @@ impl PerspectiveInstance {
 
     async fn notification_check_loop(&self) {
         let uuid = self.persisted.lock().await.uuid.clone();
-        let mut interval = time::interval(Duration::from_secs(1));
+        let mut interval = time::interval(Duration::from_secs(5));
         let mut before = self.notification_trigger_snapshot().await;
         while !*self.is_teardown.lock().await {
             interval.tick().await;
