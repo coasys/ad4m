@@ -976,10 +976,7 @@ impl PerspectiveInstance {
         }
     }
 
-    fn spawn_prolog_facts_update(
-        &self,
-        diff: DecoratedPerspectiveDiff,
-    ) {
+    fn spawn_prolog_facts_update(&self, diff: DecoratedPerspectiveDiff) {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
@@ -1066,15 +1063,16 @@ impl PerspectiveInstance {
         after
             .iter()
             .map(|(notification, matches)| {
-                let new_matches: Vec<QueryMatch> = if let Some(old_matches) = before.get(&notification) {
-                    matches
-                        .iter()
-                        .filter(|m| !old_matches.contains(m))
-                        .cloned()
-                        .collect()
-                } else {
-                    Vec::new()
-                };
+                let new_matches: Vec<QueryMatch> =
+                    if let Some(old_matches) = before.get(&notification) {
+                        matches
+                            .iter()
+                            .filter(|m| !old_matches.contains(m))
+                            .cloned()
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
 
                 (notification.clone(), new_matches)
             })
