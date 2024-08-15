@@ -1071,7 +1071,7 @@ impl PerspectiveInstance {
                             .cloned()
                             .collect()
                     } else {
-                        Vec::new()
+                        matches.clone()
                     };
 
                 (notification.clone(), new_matches)
