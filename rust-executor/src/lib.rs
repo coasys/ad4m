@@ -107,14 +107,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     LanguageController::init_global_instance(js_core_handle.clone());
     perspectives::initialize_from_db();
 
-    
-
     let app_dir = config
         .app_data_path
         .as_ref()
         .expect("App data path not set in Ad4mConfig")
         .clone();
-
 
     info!("Starting dapp server...");
 
