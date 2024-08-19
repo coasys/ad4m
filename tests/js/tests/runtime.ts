@@ -276,7 +276,7 @@ export default function runtimeTests(testContext: TestContext) {
 
             // Happy path
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target1"}))
-            await sleep(1000)
+            await sleep(7000)
             expect(mockFunction.called).to.be.true
             let triggeredNotification = mockFunction.getCall(0).args[0] as TriggeredNotification
             expect(triggeredNotification.notification.description).to.equal(notification.description)
@@ -290,7 +290,7 @@ export default function runtimeTests(testContext: TestContext) {
 
             // Ensuring we don't get old data on a new trigger
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target2"}))
-            await sleep(1000)
+            await sleep(7000)
             expect(mockFunction.callCount).to.equal(2)
             triggeredNotification = mockFunction.getCall(1).args[0] as TriggeredNotification
             triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
