@@ -1,5 +1,5 @@
 {
-  "name": "embedding-vector-language",
+  "name": "@coasys/embedding-vector-language",
   "version": "0.0.1",
   "description": "An AD4M Language for testing AD4M-executor",
   "main": "index.js",
