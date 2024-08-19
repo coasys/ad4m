@@ -100,7 +100,7 @@
                 "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/embedding-vector-language",
                 "possibleTemplateParams": []
             },
-            "resource": "../bootstrap-languages/eas/build/bundle.js"
+            "resource": "../bootstrap-languages/embedding-vector-language/build/bundle.js"
         }
     ]
 }
