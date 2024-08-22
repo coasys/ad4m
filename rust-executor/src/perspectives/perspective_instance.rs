@@ -27,11 +27,11 @@ use json5;
 use scryer_prolog::machine::parsed_results::{QueryMatch, QueryResolution};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::time::sleep;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
+use tokio::time::sleep;
 use tokio::{join, time};
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -1420,7 +1420,11 @@ impl PerspectiveInstance {
         }
 
         if instance_check_passed {
-            log::info!("Subject class \"{}\" successfully instantiated around \"{}\".", class_name, expression_address);
+            log::info!(
+                "Subject class \"{}\" successfully instantiated around \"{}\".",
+                class_name,
+                expression_address
+            );
         } else {
             log::warn!("create_subject: instance check still false after running constructor and waiting 5s. Something seems off with subject class: {}", class_name);
         }
