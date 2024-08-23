@@ -365,7 +365,16 @@ export class PerspectiveProxy {
     */
     async isSubjectInstance<T>(expression: string, subjectClass: T): Promise<boolean> {
         let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
-        return await this.infer(`subject_class("${className}", C), instance(C, "${expression}")`)
+        let isInstance = false;
+        const maxAttempts = 5;
+        let attempts = 0;
+
+        while (attempts < maxAttempts && !isInstance) {
+            isInstance = await this.infer(`subject_class("${className}", C), instance(C, "${expression}")`);
+            attempts++;
+          }
+
+        return isInstance
     }
 
 
