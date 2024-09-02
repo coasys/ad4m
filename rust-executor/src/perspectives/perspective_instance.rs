@@ -3,7 +3,7 @@ use super::update_perspective;
 use super::utils::{
     prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string,
 };
-use crate::agent::create_signed_expression;
+use crate::agent::{self, create_signed_expression};
 use crate::graphql::graphql_types::{
     DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery,
     LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle,
@@ -889,7 +889,14 @@ impl PerspectiveInstance {
             })
             .await?;
 
+        let author = agent::did();
+
         let mut sdna_links: Vec<Link> = Vec::new();
+
+        let links = links
+            .into_iter()
+            .filter(|l| l.author == author)
+            .collect::<Vec<DecoratedLinkExpression>>();
 
         if (Literal::from_url(sdna_code.clone())).is_err() {
             sdna_code = Literal::from_string(sdna_code)
@@ -905,7 +912,7 @@ impl PerspectiveInstance {
             });
 
             sdna_links.push(Link {
-                source: literal_name,
+                source: literal_name.clone(),
                 predicate: Some("ad4m://sdna".to_string()),
                 target: sdna_code,
             });
