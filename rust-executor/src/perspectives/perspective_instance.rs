@@ -31,6 +31,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
+use tokio::time::sleep;
 use tokio::{join, time};
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -1396,8 +1397,38 @@ impl PerspectiveInstance {
             .ok_or(anyhow!("No constructor found for class: {}", class_name))?;
 
         let commands: Vec<Command> = json5::from_str(&actions).unwrap();
-        self.execute_commands(commands, expression_address, vec![])
+        self.execute_commands(commands, expression_address.clone(), vec![])
             .await?;
+
+        let mut tries = 0;
+        let mut instance_check_passed = false;
+        while !instance_check_passed && tries < 50 {
+            match self
+                .prolog_query(format!(
+                    "subject_class(\"{}\", C), instance(C, \"{}\").",
+                    class_name, expression_address
+                ))
+                .await
+            {
+                Ok(QueryResolution::True) => instance_check_passed = true,
+                Ok(QueryResolution::Matches(_)) => instance_check_passed = true,
+                Err(e) => log::warn!("Error trying to check instance after create_subject: {}", e),
+                Ok(r) => log::info!("create_subject instance query returned: {:?}", r),
+            }
+            sleep(Duration::from_millis(10)).await;
+            tries += 1;
+        }
+
+        if instance_check_passed {
+            log::info!(
+                "Subject class \"{}\" successfully instantiated around \"{}\".",
+                class_name,
+                expression_address
+            );
+        } else {
+            log::warn!("create_subject: instance check still false after running constructor and waiting 5s. Something seems off with subject class: {}", class_name);
+        }
+
         Ok(())
     }
 
