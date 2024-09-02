@@ -13,6 +13,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Removed capacitor barcode scanner [PR#502](https://github.com/coasys/ad4m/pull/502)
 - Show an error when the code is wrong. [PR#502](https://github.com/coasys/ad4m/pull/502)
 - Error handling in connect when hosting is not working [PR#502](https://github.com/coasys/ad4m/pull/502)
+- Make new Rust create_subject() implementation wait for Prolog engine to be updated, reflecting the new instance to avoid race conditions [PR#520](https://github.com/coasys/ad4m/pull/520)
 
 ### Added
 - Prolog predicates needed in new Flux mention notification trigger:
