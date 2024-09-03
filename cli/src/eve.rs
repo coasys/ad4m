@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::Subcommand;
 use kalosm::language::*;
-use std::io::Write;
 
 #[derive(Debug, Subcommand)]
 pub enum EveCommands {

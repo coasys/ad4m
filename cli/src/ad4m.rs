@@ -133,12 +133,12 @@ async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
     } else {
         match &args.domain {
             Domain::Log => "".to_string(),
-            Domain::Agent { command } => match command {
-                AgentFunctions::Lock
-                | AgentFunctions::Unlock { .. }
-                | AgentFunctions::Generate { .. } => "".to_string(),
-                _ => startup::get_cap_token(executor_url.clone()).await?,
-            },
+            Domain::Agent {
+                command:
+                    AgentFunctions::Lock
+                    | AgentFunctions::Unlock { .. }
+                    | AgentFunctions::Generate { .. },
+            } => "".to_string(),
             _ => startup::get_cap_token(executor_url.clone()).await?,
         }
     };
