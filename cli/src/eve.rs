@@ -273,6 +273,9 @@ pub async fn run(command: EveCommands) -> Result<()> {
         .with_example(EXAMPLE_USER3, EXAMPLE_EVE3)
         .build();
 
+    println!("Feeding examples...");
+    task.run("Hello, let's pretend this is a new session. Who are you?", &llama).to_std_out().await.unwrap();
+
     match command {
         EveCommands::Train => {
             println!("Training Eve...");
