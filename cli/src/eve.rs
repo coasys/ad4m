@@ -1,12 +1,11 @@
-
-use std::io::Write;
-use llm::Model;
-use llm::InferenceResponse;
-use std::convert::Infallible;
-use std::fs::File;
-use llm::InferenceSession;
 use anyhow::Result;
 use clap::Subcommand;
+use llm::InferenceResponse;
+use llm::InferenceSession;
+use llm::Model;
+use std::convert::Infallible;
+use std::fs::File;
+use std::io::Write;
 
 #[derive(Debug, Subcommand)]
 pub enum EveCommands {
@@ -28,8 +27,7 @@ provide the the latest version to Perspect3ve to be written to the perspective's
 by wrapping the code to commit with "WRITE-SDNA:" and ":ANDS-ETIRW"` 
 <</SYS>>
 "##;
-        
-        
+
 const HISTORY1: &str = r##"
 Eve: Hi, I'm Eve. I'm your personal assistant AI. I'm here to help you create AD4M Subject classes.
 User: Create an ADAM Subject class called "Todo". It should have a "state" and a "title" property. The title should resolve to a string applying the literal language. It also should have a "comments" collection.` 
@@ -129,7 +127,6 @@ p3_instance_color(cjdotdng, Instance, "#00FF00") :- property_getter(c, Instance,
 Done.
 "##;
 
-        
 const REDUCED: &str = r##"
 Eve: Hi, I'm Eve. I'm your personal assistant AI. I'm here to help you create AD4M Subject classes.
 User: Create an ADAM Subject class called "Todo". It should have a "state" and a "title" property. The title should resolve to a string applying the literal language. It also should have a "comments" collection.` 
@@ -159,10 +156,8 @@ collection_setter(cjdotdng, "comments", '[{action: "collectionSetter", source: "
 What icon should it have in the toolbar? (You can choose from the "Bootstrap" icon set) 
 "##;
 
-
 pub async fn run(command: EveCommands) -> Result<()> {
     println!("Loading model...");
-
 
     // load a GGML model from disk
     let llama = llm::load::<llm::models::Llama>(
@@ -173,7 +168,6 @@ pub async fn run(command: EveCommands) -> Result<()> {
         Default::default(),
         // load progress callback
         |_| {},
-
     )
     .unwrap_or_else(|err| panic!("Failed to load model: {err}"));
 
@@ -190,54 +184,62 @@ pub async fn run(command: EveCommands) -> Result<()> {
         EveCommands::Train => {
             println!("Training Eve...");
 
-                            
             println!("Ad hoc training model for ADAM subject classes...");
 
-            
             // use the model to generate text from a prompt
             let mut session = llama.start_session(Default::default());
-            
+
             for p in vec![SYSTEM, HISTORY1, HISTORY2] {
-                session.feed_prompt(
-                    &llama,
-                    p,
-                    &mut Default::default(),
-                    llm::feed_prompt_callback(|resp| match resp {
-                        llm::InferenceResponse::PromptToken(t)
-                        | llm::InferenceResponse::InferredToken(t) => {
-                            print_token(t);
-    
-                            Ok::<llm::InferenceFeedback, Infallible>(llm::InferenceFeedback::Continue)
-                        }
-                        _ => Ok(llm::InferenceFeedback::Continue),
-                    }),
-                ).unwrap_or_else(|err| panic!("Failed to feed prompt: {err}"));
+                session
+                    .feed_prompt(
+                        &llama,
+                        p,
+                        &mut Default::default(),
+                        llm::feed_prompt_callback(|resp| match resp {
+                            llm::InferenceResponse::PromptToken(t)
+                            | llm::InferenceResponse::InferredToken(t) => {
+                                print_token(t);
+
+                                Ok::<llm::InferenceFeedback, Infallible>(
+                                    llm::InferenceFeedback::Continue,
+                                )
+                            }
+                            _ => Ok(llm::InferenceFeedback::Continue),
+                        }),
+                    )
+                    .unwrap_or_else(|err| panic!("Failed to feed prompt: {err}"));
             }
-            
 
             println!("\n\nTraining done. Ready!");
-            
+
             unsafe {
                 let snapshot: llm::InferenceSnapshotRef<'_> = session.get_snapshot();
-                let snapshot_cbor = serde_cbor::to_vec(&snapshot).expect("Failed to serialize snapshot");
-                File::create("/Users/nicolasluck/models/eve.snapshot.json").unwrap().write_all(snapshot_cbor.as_slice()).unwrap();
+                let snapshot_cbor =
+                    serde_cbor::to_vec(&snapshot).expect("Failed to serialize snapshot");
+                File::create("/Users/nicolasluck/models/eve.snapshot.json")
+                    .unwrap()
+                    .write_all(snapshot_cbor.as_slice())
+                    .unwrap();
                 println!("Snapshot saved!");
             }
         }
         EveCommands::Prompt => {
             println!("Prompting Eve...");
 
-            let mut session = if let Ok(file) = File::open("/Users/nicolasluck/models/eve.snapshot.json") {
-                let snapshot: llm::InferenceSnapshot  = serde_cbor::from_reader(file).expect("Failed to deserialize snapshot");
-                InferenceSession::from_snapshot(snapshot, &llama).unwrap_or_else(|err| panic!("Failed to load snapshot: {err}"))
-            } else {
-                llama.start_session(Default::default())
-            };
+            let mut session =
+                if let Ok(file) = File::open("/Users/nicolasluck/models/eve.snapshot.json") {
+                    let snapshot: llm::InferenceSnapshot =
+                        serde_cbor::from_reader(file).expect("Failed to deserialize snapshot");
+                    InferenceSession::from_snapshot(snapshot, &llama)
+                        .unwrap_or_else(|err| panic!("Failed to load snapshot: {err}"))
+                } else {
+                    llama.start_session(Default::default())
+                };
 
             let mut rl = rustyline::Editor::<()>::new()?;
             let line = rl.readline(">> ")?;
             println!("\n\n");
-                
+
             let res = session.infer::<std::convert::Infallible>(
                 // model to use for text generation
                 &llama,
@@ -246,9 +248,7 @@ pub async fn run(command: EveCommands) -> Result<()> {
                 // the prompt to use for text generation, as well as other
                 // inference parameters
                 &llm::InferenceRequest {
-                    prompt: format!("User: {line}\nEve:")
-                        .as_str()
-                        .into(),
+                    prompt: format!("User: {line}\nEve:").as_str().into(),
                     parameters: &inference_parameters,
                     play_back_previous_tokens: false,
                     maximum_token_count: None,
@@ -259,7 +259,9 @@ pub async fn run(command: EveCommands) -> Result<()> {
                 |t| {
                     let mut cont = true;
                     match t {
-                        InferenceResponse::PromptToken(t) | InferenceResponse::InferredToken(t) | llm::InferenceResponse::SnapshotToken(t) => {
+                        InferenceResponse::PromptToken(t)
+                        | InferenceResponse::InferredToken(t)
+                        | llm::InferenceResponse::SnapshotToken(t) => {
                             if t == "Eve:" || t == "User:" {
                                 cont = false;
                             }
@@ -274,7 +276,7 @@ pub async fn run(command: EveCommands) -> Result<()> {
                     } else {
                         Ok(llm::InferenceFeedback::Halt)
                     }
-                }
+                },
             );
 
             match res {
@@ -285,5 +287,3 @@ pub async fn run(command: EveCommands) -> Result<()> {
     }
     Ok(())
 }
-
-

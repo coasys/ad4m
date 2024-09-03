@@ -17,16 +17,16 @@ mod util;
 mod agent;
 mod bootstrap_publish;
 mod dev;
+mod eve;
 mod expression;
 mod languages;
 mod neighbourhoods;
 mod perspectives;
 mod repl;
 mod runtime;
-mod eve;
 
 use crate::{
-    agent::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*, eve::*
+    agent::*, eve::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*,
 };
 use ad4m_client::*;
 use anyhow::{Context, Result};
@@ -170,7 +170,7 @@ async fn main() -> Result<()> {
                 )
             })?;
             println!("{}", log);
-        },
+        }
         Domain::Eve { command } => eve::run(command).await?,
     }
 
