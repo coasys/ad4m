@@ -25,7 +25,7 @@ class PutAdapter implements PublicSharing {
   }
 
   async createPublic(fileData: FileData): Promise<Address> {
-    console.log("createPublic fileData", fileData)
+    //console.log("createPublic fileData", fileData)
     try {
         // Just in case...
         if(typeof fileData === "string"){

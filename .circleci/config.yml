@@ -8,13 +8,13 @@ orbs:
 jobs:
   build-and-test:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
+      - image: coasys/ad4m-ci-linux:latest@sha256:1278f700839a43daa0edd31b605c4a73e7f5c54c0d8c7dfbc26b3aa4e2e4ef66
     resource_class: xlarge
     steps:
       - checkout
       - restore_cache:
           keys:
-            - hc-0.3.0-beta-dev-27-v7
+            - hc-0.3.2-rc1
             - hc-
             - rust-cache-{{ checksum "Cargo.lock" }}
             - rust-cache-
@@ -25,7 +25,7 @@ jobs:
             if [ ! -f "$HOME/.cargo/bin/hc" ]; then
               git clone https://github.com/holochain/holochain.git
               cd holochain
-              git checkout holochain-0.3.0-beta-dev.27
+              git checkout holochain-0.3.2-rc.1
               cd crates/hc
               cargo build --release
               pwd
@@ -42,13 +42,16 @@ jobs:
             fi
             echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> $BASH_ENV
       - save_cache:
-          key: hc-0.3.0-beta-dev-27-v7
+          key: hc-0.3.2-rc1
           paths:
             - /home/circleci/.cargo/bin
       - restore_cache:
           keys:
             - rust-cache-{{ checksum "Cargo.lock" }}-v2
             - rust-cache-
+      - run:
+          name: cargo fmt --check
+          command: cargo fmt --check
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
@@ -74,6 +77,9 @@ jobs:
             - ./target/release/ad4m
             - ./target/release/ad4m-executor
       - run:
+          name: cargo clippy
+          command: cargo clippy --all --exclude ad4m-launcher
+      - run:
           name: Remove pnpm patches
           command: node removePnpm.js
       - run:
@@ -96,7 +102,7 @@ jobs:
           at: .
       - restore_cache:
           keys:
-            - hc-0.3.0-beta-dev-27-v7
+            - hc-hc-0.3.2-rc1
             - hc-
       - restore_cache:
           keys:

@@ -33,10 +33,16 @@ impl PerspectiveProxy {
         source: String,
         target: String,
         predicate: Option<String>,
-        status: Option<String>
+        status: Option<String>,
     ) -> Result<AddLinkPerspectiveAddLink> {
         self.client
-            .add_link(self.perspective_uuid.clone(), source, target, predicate, status)
+            .add_link(
+                self.perspective_uuid.clone(),
+                source,
+                target,
+                predicate,
+                status,
+            )
             .await
     }
 
@@ -79,17 +85,18 @@ impl PerspectiveProxy {
 
         let literal_name = Literal::from_string(name);
 
-        let links = self.get(
-            Some("ad4m://self".into()),
-            Some(literal_name.to_url().unwrap()),
-            Some(predicate.into()),
-            None,
-            None,
-            None,
-        )
-        .await?;
+        let links = self
+            .get(
+                Some("ad4m://self".into()),
+                Some(literal_name.to_url().unwrap()),
+                Some(predicate.into()),
+                None,
+                None,
+                None,
+            )
+            .await?;
 
-        if links.len() == 0 {
+        if links.is_empty() {
             self.set_single_target(
                 "ad4m://self".into(),
                 predicate.into(),
@@ -104,31 +111,24 @@ impl PerspectiveProxy {
             literal_name.to_url().unwrap(),
             literal.to_url().unwrap(),
             Some("ad4m://sdna".into()),
-            Some("shared".to_string())
+            Some("shared".to_string()),
         )
         .await?;
         Ok(())
     }
 
     pub async fn get_dna(&self) -> Result<Vec<String>> {
-        self.get(
-            Some("ad4m://sdna".into()),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await?
-        .into_iter()
-        .map(|link| {
-            let literal = Literal::from_url(link.data.target)?;
-            match literal.get() {
-                Ok(LiteralValue::String(string)) => Ok(string),
-                _ => Err(anyhow::anyhow!("Not a string literal")),
-            }
-        })
-        .collect()
+        self.get(Some("ad4m://sdna".into()), None, None, None, None, None)
+            .await?
+            .into_iter()
+            .map(|link| {
+                let literal = Literal::from_url(link.data.target)?;
+                match literal.get() {
+                    Ok(LiteralValue::String(string)) => Ok(string),
+                    _ => Err(anyhow::anyhow!("Not a string literal")),
+                }
+            })
+            .collect()
     }
 
     pub async fn get_single_target(&self, source: String, predicate: String) -> Result<String> {
@@ -187,7 +187,7 @@ impl PerspectiveProxy {
                 source,
                 target,
                 Some(predicate),
-                Some("shared".to_string())
+                Some("shared".to_string()),
             )
             .await?;
         Ok(())
@@ -235,7 +235,7 @@ impl PerspectiveProxy {
         Ok(collections)
     }
 
-    pub async fn create_subject(&self, class: &String, base: &String) -> Result<()> {
+    pub async fn create_subject(&self, class: &String, base: &str) -> Result<()> {
         if let Ok(Value::Array(results)) = self
             .infer(format!(
                 "subject_class(\"{}\", C), constructor(C, Action)",
@@ -311,8 +311,8 @@ impl PerspectiveProxy {
 
     pub async fn execute_action(
         &self,
-        action: &String,
-        base: &String,
+        action: &str,
+        base: &str,
         params: Option<BTreeMap<&str, &String>>,
     ) -> Result<()> {
         let commands = parse_action(action)?;
@@ -326,8 +326,13 @@ impl PerspectiveProxy {
             match command.action.as_str() {
                 "addLink" => {
                     //println!("addLink: {:?}", command);
-                    self.add_link(command.source, command.target, command.predicate, command.status)
-                        .await?;
+                    self.add_link(
+                        command.source,
+                        command.target,
+                        command.predicate,
+                        command.status,
+                    )
+                    .await?;
                 }
                 "removeLink" => {
                     unimplemented!();
@@ -359,7 +364,7 @@ struct Command {
     pub source: String,
     pub predicate: Option<String>,
     pub target: String,
-    pub status: Option<String>
+    pub status: Option<String>,
 }
 
 impl Command {
@@ -380,7 +385,7 @@ impl Command {
     }
 }
 
-fn parse_action(action: &String) -> Result<Vec<Command>> {
+fn parse_action(action: &str) -> Result<Vec<Command>> {
     let action_regex = Regex::new(r"\[(?P<command>\{.*})*\]")?;
 
     // This parses strings like:

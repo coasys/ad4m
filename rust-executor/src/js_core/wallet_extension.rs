@@ -1,7 +1,5 @@
-use std::borrow::Cow;
-
 use base64::{engine::general_purpose as base64engine, Engine as _};
-use deno_core::{anyhow::anyhow, error::AnyError, include_js_files, op2, Extension, Op};
+use deno_core::{anyhow::anyhow, error::AnyError, op2};
 use serde::{Deserialize, Serialize};
 
 use crate::wallet::Wallet;
@@ -70,7 +68,7 @@ fn wallet_unlock(#[string] passphrase: String) -> Result<(), AnyError> {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
-    wallet_ref.unlock(passphrase).map_err(|e| e.into())
+    wallet_ref.unlock(passphrase)
 }
 
 #[op2]
@@ -79,7 +77,8 @@ fn wallet_lock(#[string] passphrase: String) -> Result<(), AnyError> {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
-    Ok(wallet_ref.lock(passphrase))
+    wallet_ref.lock(passphrase);
+    Ok(())
 }
 
 #[op2]
@@ -97,7 +96,8 @@ fn wallet_load(#[string] data: String) -> Result<(), AnyError> {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
-    Ok(wallet_ref.load(data))
+    wallet_ref.load(data);
+    Ok(())
 }
 
 #[op2]
@@ -106,21 +106,9 @@ fn wallet_sign(#[buffer] payload: &[u8]) -> Result<Vec<u8>, AnyError> {
     crate::agent::sign(payload)
 }
 
-pub fn build() -> Extension {
-    Extension {
-        name: "wallet",
-        js_files: Cow::Borrowed(&include_js_files!(holochain_service "src/js_core/wallet_extension.js",)),
-        ops: Cow::Borrowed(&[
-            wallet_get_main_key::DECL,
-            wallet_get_main_key_document::DECL,
-            wallet_create_main_key::DECL,
-            wallet_is_unlocked::DECL,
-            wallet_unlock::DECL,
-            wallet_lock::DECL,
-            wallet_export::DECL,
-            wallet_load::DECL,
-            wallet_sign::DECL,
-        ]),
-        ..Default::default()
-    }
-}
+deno_core::extension!(
+    wallet_service,
+    ops = [wallet_get_main_key, wallet_get_main_key_document, wallet_create_main_key, wallet_is_unlocked, wallet_unlock, wallet_lock, wallet_export, wallet_load, wallet_sign],
+    esm_entry_point = "ext:wallet_service/wallet_extension.js",
+    esm = [dir "src/js_core", "wallet_extension.js"]
+);

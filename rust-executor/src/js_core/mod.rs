@@ -1,11 +1,14 @@
 use ::futures::Future;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
-use deno_core::resolve_url_or_path;
+use deno_core::{resolve_url_or_path, v8, PollEventLoopOptions};
 use deno_runtime::worker::MainWorker;
 use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
 use holochain::prelude::{ExternIO, Signal};
+use log::{error, info};
 use once_cell::sync::Lazy;
+use options::{main_module_url, main_worker_options};
+use std::collections::HashSet;
 use std::env::current_dir;
 use std::sync::Arc;
 use tokio::runtime::Builder;
@@ -14,21 +17,19 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::{
     broadcast::{Receiver, Sender},
     mpsc::{self, UnboundedReceiver, UnboundedSender},
-    oneshot
+    oneshot,
 };
-use log::{error, info};
-use options::{main_module_url, main_worker_options};
 
 mod agent_extension;
 mod futures;
-mod options;
 mod languages_extension;
+mod options;
 mod pubsub_extension;
 mod signature_extension;
 mod string_module_loader;
+mod utils;
 mod utils_extension;
 mod wallet_extension;
-mod utils;
 
 use self::futures::{EventLoopFuture, SmartGlobalVariableFuture};
 use crate::holochain_service::maybe_get_holochain_service;
@@ -41,7 +42,7 @@ pub struct JsCoreHandle {
     rx: Receiver<JsCoreResponse>,
     tx: UnboundedSender<JsCoreRequest>,
     tx_module_load: UnboundedSender<JsCoreRequest>,
-    broadcast_tx: Sender<JsCoreResponse>
+    broadcast_tx: Sender<JsCoreResponse>,
 }
 
 impl Clone for JsCoreHandle {
@@ -50,7 +51,7 @@ impl Clone for JsCoreHandle {
             rx: self.broadcast_tx.subscribe(),
             tx: self.tx.clone(),
             tx_module_load: self.tx_module_load.clone(),
-            broadcast_tx: self.broadcast_tx.clone()
+            broadcast_tx: self.broadcast_tx.clone(),
         }
     }
 }
@@ -74,11 +75,9 @@ impl JsCoreHandle {
 
         let response = response_rx.await?;
 
-        //info!("Got response: {:?}", response.id);
+        // info!("Got response: {:?}", response);
 
-        response
-            .result
-            .map_err(|err| anyhow!(err))
+        response.result.map_err(|err| anyhow!(err))
     }
 
     pub async fn load_module(&mut self, path: String) -> Result<String, AnyError> {
@@ -94,9 +93,7 @@ impl JsCoreHandle {
 
         let response = response_rx.await?;
 
-        response
-            .result
-            .map_err(|err| anyhow!(err))
+        response.result.map_err(|err| anyhow!(err))
     }
 }
 
@@ -105,7 +102,7 @@ struct JsCoreRequest {
     script: String,
     #[allow(dead_code)]
     id: String,
-    response_tx: oneshot::Sender<JsCoreResponse>
+    response_tx: oneshot::Sender<JsCoreResponse>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +113,7 @@ struct JsCoreResponse {
 #[derive(Clone)]
 pub struct JsCore {
     worker: Arc<TokioMutex<MainWorker>>,
+    loaded_modules: Arc<TokioMutex<HashSet<String>>>,
 }
 
 pub struct ExternWrapper(ExternIO);
@@ -131,7 +129,7 @@ impl std::fmt::Display for ExternWrapper {
                 bytes_str.push_str(", ");
             }
         }
-        bytes_str.push_str("]");
+        bytes_str.push(']');
         write!(f, "{}", bytes_str).unwrap();
         Ok(())
     }
@@ -140,28 +138,36 @@ impl std::fmt::Display for ExternWrapper {
 impl JsCore {
     pub fn new() -> Self {
         JsCore {
+            #[allow(clippy::arc_with_non_send_sync)]
             worker: Arc::new(TokioMutex::new(MainWorker::from_options(
                 main_module_url(),
                 PermissionsContainer::allow_all(),
                 main_worker_options(),
             ))),
+            loaded_modules: Arc::new(TokioMutex::new(HashSet::new())),
         }
     }
 
     async fn load_module(&self, file_path: String) -> Result<(), AnyError> {
         let mut worker = self.worker.lock().await;
+        let mut loaded_modules = self.loaded_modules.lock().await;
         let url = resolve_url_or_path(&file_path, current_dir()?.as_path())?;
-        let _module_id = worker.js_runtime.load_side_module(&url, None).await?;
-        //TODO; this likely needs to be run (although might be handled by the import in the js code when import() is called)
-        //worker.js_runtime.mod_evaluate(module_id);
+        if loaded_modules.contains(url.clone().as_str()) {
+            return Ok(());
+        }
+
+        let module_id = worker.js_runtime.load_side_es_module(&url).await?;
+        loaded_modules.insert(url.clone().to_string());
+        let evaluate_fut = worker.js_runtime.mod_evaluate(module_id);
+        worker
+            .js_runtime
+            .with_event_loop_future(evaluate_fut, PollEventLoopOptions::default())
+            .await?;
         Ok(())
     }
 
     async fn init_engine(&self) {
-        let mut worker = self
-            .worker
-            .lock()
-            .await;
+        let mut worker = self.worker.lock().await;
         worker.bootstrap(BootstrapOptions::default());
         worker
             .execute_main_module(&main_module_url())
@@ -170,25 +176,35 @@ impl JsCore {
     }
 
     fn event_loop(&self) -> EventLoopFuture {
-        let event_loop = EventLoopFuture::new(self.worker.clone());
-        event_loop
+        EventLoopFuture::new(self.worker.clone())
     }
 
     async fn execute_async_smart(
         &self,
-        script: String
-    ) -> Result<SmartGlobalVariableFuture, AnyError> {
-        let mut worker = self.worker.lock().await;
+        script: String,
+    ) -> Result<
+        SmartGlobalVariableFuture<impl Future<Output = Result<v8::Global<v8::Value>, AnyError>>>,
+        AnyError,
+    > {
         let wrapped_script = format!(
             r#"
             (async () => {{
                 return ({});
             }})();
-            "#, script
+            "#,
+            script
         );
-        //info!("Sending script: {}", wrapped_script);
-        let execute_async = worker.execute_script("js_core", wrapped_script.into())?;
-        Ok(SmartGlobalVariableFuture::new(self.worker.clone(), execute_async))
+
+        let resolve_fut = {
+            let mut worker = self.worker.lock().await;
+            let execute_async = worker.execute_script("js_core", wrapped_script.into());
+            worker.js_runtime.resolve(execute_async.unwrap())
+        };
+
+        Ok(SmartGlobalVariableFuture::new(
+            self.worker.clone(),
+            resolve_fut,
+        ))
     }
 
     fn generate_execution_slot(
@@ -199,7 +215,7 @@ impl JsCore {
             loop {
                 //info!("Execution slot loop running");
                 let mut maybe_request = rx.lock().await;
-                if let Some(request) = maybe_request.recv().await  {
+                if let Some(request) = maybe_request.recv().await {
                     //info!("Got request: {:?}", request);
                     let script = request.script.clone();
                     let js_core_cloned = js_core.clone();
@@ -210,16 +226,16 @@ impl JsCore {
                     tokio::task::spawn_local(async move {
                         // info!("Spawn local driving: {}", id);
                         //let local_variable_name = uuid_to_valid_variable_name(&id);
-                        let script_fut =
-                            js_core_cloned.execute_async_smart(script).await.unwrap();
+                        let script_fut = js_core_cloned
+                            .execute_async_smart(script)
+                            .await
+                            .expect("Couldn't create execute_async_smart future");
                         //info!("Script fut created: {}", id);
                         match script_fut.await {
                             Ok(res) => {
                                 //info!("Script execution completed Succesfully: {}", id);
                                 response_tx
-                                    .send(JsCoreResponse {
-                                        result: Ok(res),
-                                    })
+                                    .send(JsCoreResponse { result: Ok(res) })
                                     .expect("couldn't send on channel");
                             }
                             Err(err) => {
@@ -261,13 +277,15 @@ impl JsCore {
                 let result = js_core.init_engine().await;
                 info!("AD4M JS engine init completed, with result: {:?}", result);
 
-                let init_core_future = js_core
-                    .execute_async_smart(format!("initCore({})", config.get_json()).into());
-                let result = init_core_future.await.unwrap().await;
+                let result = js_core
+                    .execute_async_smart(format!("initCore({})", config.get_json()))
+                    .await
+                    .expect("to be able to create js execution future")
+                    .await ;
 
                 match result {
                     Ok(res) => {
-                        info!("AD4M coreInit() completed Succesfully: {}", res);
+                        info!("AD4M coreInit() completed Succesfully: {:?}", res);
                         tx_inside
                             .send(JsCoreResponse {
                                 result: Ok(String::from("initialized")),
@@ -285,7 +303,7 @@ impl JsCore {
                 }
 
                 loop {
-                    info!("Main loop running");
+                    //info!("Main loop running");
                     //Listener future for loading JS modules into runtime
                     let module_load_fut = async {
                         loop {
@@ -371,7 +389,7 @@ impl JsCore {
 
                         event_loop_result = js_core.event_loop() => {
                             match event_loop_result {
-                                Ok(_) => info!("AD4M event loop finished"),
+                                Ok(_) => {} //info!("AD4M event loop finished"),
                                 Err(err) => {
                                     error!("AD4M event loop closed with error: {}", err);
                                     break;
@@ -397,7 +415,7 @@ impl JsCore {
             rx: rx_outside,
             tx: tx_outside,
             tx_module_load: tx_outside_loader,
-            broadcast_tx: tx_inside_clone
+            broadcast_tx: tx_inside_clone,
         };
 
         //Set the JsCoreHandle to a global object so we can use it inside of deno op calls

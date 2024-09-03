@@ -30,7 +30,7 @@
     "change-ui-version": "powershell -ExecutionPolicy Bypass -File ./scripts/patch-prerelease-tags.ps1",
     "package-ad4m": "run-script-os",
     "package-ad4m:windows": "cargo clean && pnpm run build && pnpm tauri build --verbose",
-    "package-ad4m:macos": "pnpm run build && pnpm tauri build --verbose",
+    "package-ad4m:macos": "pnpm run build && pnpm tauri build --target universal-apple-darwin --verbose",
     "package-ad4m:linux": "pnpm run build && pnpm tauri build --verbose"
   },
   "eslintConfig": {
@@ -71,5 +71,5 @@
   "resolutions": {
     "react-error-overlay": "6.0.9"
   },
-  "version": "0.10.0-rc2"
+  "version": "0.10.0-rc7"
 }

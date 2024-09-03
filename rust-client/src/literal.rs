@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use std::fmt::Display;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LiteralValue {
@@ -7,12 +8,12 @@ pub enum LiteralValue {
     Json(serde_json::Value),
 }
 
-impl ToString for LiteralValue {
-    fn to_string(&self) -> String {
+impl Display for LiteralValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LiteralValue::String(string) => string.clone(),
-            LiteralValue::Number(number) => number.to_string(),
-            LiteralValue::Json(json) => json.to_string(),
+            LiteralValue::String(string) => write!(f, "{}", string),
+            LiteralValue::Number(number) => write!(f, "{}", number),
+            LiteralValue::Json(json) => write!(f, "{}", json),
         }
     }
 }
@@ -153,8 +154,8 @@ mod test {
 
     #[test]
     fn can_handle_numbers() {
-        let test_number = 3.1415;
-        let test_url = "literal://number:3.1415";
+        let test_number = 3.1;
+        let test_url = "literal://number:3.1";
 
         let literal = super::Literal::from_number(test_number);
         assert_eq!(literal.to_url().unwrap(), test_url);

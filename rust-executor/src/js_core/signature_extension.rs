@@ -1,8 +1,7 @@
-use deno_core::{error::AnyError, include_js_files, op2, Extension, Op};
-use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
+use crate::agent::signatures::{verify, verify_string_signed_by_did};
 use crate::types::Expression;
-use crate::agent::signatures::{verify_string_signed_by_did, verify};
+use deno_core::{error::AnyError, op2};
+use serde::{Deserialize, Serialize};
 
 use super::utils::sort_json_value;
 
@@ -34,18 +33,13 @@ fn signature_verify(
         data: sort_json_value(&expr.data),
         proof: expr.proof,
     };
-    let is_valid =  verify(&sorted_expression)?;
+    let is_valid = verify(&sorted_expression)?;
     Ok(SignatureVerificationResult { is_valid })
 }
 
-pub fn build() -> Extension {
-    Extension {
-        name: "signature",
-        js_files: Cow::Borrowed(&include_js_files!(rust_executor "src/js_core/signature_extension.js",)),
-        ops: Cow::Borrowed(&[
-            signature_verify_string_signed_by_did::DECL,
-            signature_verify::DECL,
-        ]),
-        ..Default::default()
-    }
-}
+deno_core::extension!(
+    signature_service,
+    ops = [signature_verify_string_signed_by_did, signature_verify],
+    esm_entry_point = "ext:signature_service/signature_extension.js",
+    esm = [dir "src/js_core", "signature_extension.js"]
+);

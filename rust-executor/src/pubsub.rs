@@ -1,8 +1,8 @@
 use crate::graphql::graphql_types::GetFilter;
 use crate::graphql::graphql_types::GetValue;
+use coasys_juniper::{graphql_value, FieldError, FieldResult};
 use futures::Stream;
 use futures::StreamExt;
-use coasys_juniper::{graphql_value, FieldError, FieldResult};
 use log::{debug, error, warn};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;

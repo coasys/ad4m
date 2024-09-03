@@ -6,7 +6,7 @@ import {
 import { createClient, Client as WSClient } from "graphql-ws";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { Ad4mClient, CapabilityInput } from "@coasys/ad4m";
-import { checkPort, connectWebSocket } from "./utils";
+import { checkPort, connectWebSocket, removeForVersion, setForVersion } from "./utils";
 import autoBind from "auto-bind";
 
 export type Ad4mConnectOptions = {
@@ -21,6 +21,7 @@ export type Ad4mConnectOptions = {
   token?: string;
   url?: string;
   hosting?: boolean;
+  mobile?: boolean;
 };
 
 export type AuthStates = "authenticated" | "locked" | "unauthenticated";
@@ -75,6 +76,7 @@ export default class Ad4mConnect {
     port,
     token,
     url,
+    hosting
   }: Ad4mConnectOptions) {
     autoBind(this);
     //! @fayeed - make it support node.js
@@ -87,6 +89,7 @@ export default class Ad4mConnect {
     this.port = port || this.port;
     this.url = url || `ws://localhost:${this.port}/graphql`;
     this.token = token || this.token;
+    this.isHosting = hosting || false;
     this.buildClient();
   }
 
@@ -190,8 +193,10 @@ export default class Ad4mConnect {
           if (data.serviceId) {
             this.setPort(data.port);
             this.setUrl(data.url);
-            
+
             this.isHosting = true;
+
+            setForVersion('ad4mhosting', 'true');
 
             if (!data.paused) {
               this.connect();
@@ -234,12 +239,16 @@ export default class Ad4mConnect {
       if (port) {
         const found = await checkPort(port);
         this.setPort(found);
-      } else {
-        const port = await this.findPort();
-        this.setPort(port);
-      }
 
-      return this.buildClient();
+        return this.buildClient();
+      } else {
+        if (this.url.includes("localhost")) {
+          const port = await this.findPort();
+          this.setPort(port);
+
+          return this.buildClient();
+        }
+      }
     } catch (error) {
       this.notifyConnectionChange("not_connected");
       this.notifyAuthChange("unauthenticated");
@@ -256,9 +265,12 @@ export default class Ad4mConnect {
     }
 
     try {
+      this.notifyConnectionChange("connecting");
+
       await connectWebSocket(this.url, 10000);
       return this.buildClient();
     } catch (e) {
+      this.notifyConnectionChange("not_connected");
       return this.connectToPort();
     }
   }
@@ -283,15 +295,18 @@ export default class Ad4mConnect {
 
     // Make sure the url is valid
     try {
-      new WebSocket(this.url);
+      const websocket = new WebSocket(this.url);
     } catch (e) {
       this.notifyConnectionChange("not_connected");
+      return;
     }
 
     if (this.apolloClient && this.wsClient) {
       this.requestedRestart = true;
       this.wsClient.dispose();
       this.apolloClient.stop();
+      this.wsClient = null;
+      this.apolloClient = null;
     }
 
     this.wsClient = createClient({
@@ -302,11 +317,6 @@ export default class Ad4mConnect {
         },
       }),
       on: {
-        connecting: () => {
-          if (!this.requestedRestart) {
-            this.notifyConnectionChange("connecting");
-          }
-        },
         opened: (socket: WebSocket) => {
           this.activeSocket = socket;
         },
@@ -391,6 +401,22 @@ export default class Ad4mConnect {
       this.setToken(null);
     }
 
+    if (this.isHosting) {
+      let token = localStorage.getItem('hosting_token');
+
+      const response = await fetch('https://hosting.ad4m.dev/api/service/checkStatus', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + token
+        },
+      });
+
+      if (response.status !== 200) {
+        console.error('Looks like the client is not running you might not recieve the mail with the code, please check your dashboard logs.');
+      }
+    }
+
     this.requestId = await this.ad4mClient?.agent.requestCapability({
       appName: this.appName,
       appDesc: this.appDesc,
@@ -413,5 +439,12 @@ export default class Ad4mConnect {
     } catch (error) {
       throw new Error("Invalid code");
     }
+  }
+
+  clearState() {
+    this.setToken(null);
+    this.setPort(12000);
+    this.notifyConnectionChange("not_connected");
+    this.notifyAuthChange("unauthenticated");
   }
 }

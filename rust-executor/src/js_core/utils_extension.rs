@@ -1,10 +1,8 @@
-use std::borrow::Cow;
-
 use cid::Cid;
-use deno_core::{error::AnyError, include_js_files, op2, Extension, Op};
+use deno_core::{error::AnyError, op2};
+use log::{debug, error, info, warn};
 use multibase::Base;
 use multihash::{Code, MultihashDigest};
-use log::{error, info, debug, warn};
 
 use super::JS_CORE_HANDLE;
 
@@ -70,18 +68,9 @@ async fn load_module(#[string] path: String) -> Result<String, AnyError> {
     Ok(String::from("temp"))
 }
 
-pub fn build() -> Extension {
-    Extension {
-        name: "utils",
-        js_files: Cow::Borrowed(&include_js_files!(holochain_service "src/js_core/utils_extension.js",)),
-        ops: Cow::Borrowed(&[
-            hash::DECL,
-            load_module::DECL,
-            console_log::DECL,
-            console_debug::DECL,
-            console_error::DECL,
-            console_warn::DECL,
-        ]),
-        ..Default::default()
-    }
-}
+deno_core::extension!(
+    utils_service,
+    ops = [hash, load_module, console_log, console_debug, console_error, console_warn],
+    esm_entry_point = "ext:utils_service/utils_extension.js",
+    esm = [dir "src/js_core", "utils_extension.js"]
+);
