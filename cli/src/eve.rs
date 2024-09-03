@@ -262,39 +262,59 @@ pub async fn run(command: EveCommands) -> Result<()> {
 
     println!("Model loaded");
 
-    let task = Task::builder(SYSTEM)
+    let _task = Task::builder(SYSTEM)
         .with_example(EXAMPLE_USER1, EXAMPLE_EVE1)
         .with_example(EXAMPLE_USER2, EXAMPLE_EVE2)
         .with_example(EXAMPLE_USER3, EXAMPLE_EVE3)
         .build();
 
-    println!("Feeding examples...");
-    task.run(
-        "Hello, let's pretend this is a new session. Who are you?",
-        &llama,
-    )
-    .to_std_out()
-    .await
-    .unwrap();
+    let history = vec![
+        ChatHistoryItem::new(MessageType::UserMessage, EXAMPLE_USER1),
+        ChatHistoryItem::new(MessageType::ModelAnswer, EXAMPLE_EVE1),
+        ChatHistoryItem::new(MessageType::UserMessage, EXAMPLE_USER2),
+        ChatHistoryItem::new(MessageType::ModelAnswer, EXAMPLE_EVE2),
+        ChatHistoryItem::new(MessageType::UserMessage, EXAMPLE_USER3),
+        ChatHistoryItem::new(MessageType::ModelAnswer, EXAMPLE_EVE3),
+    ];
+
+    let session_path = std::path::PathBuf::from("eve.session");
 
     match command {
         EveCommands::Train => {
             println!("Training Eve...");
-
             println!("Ad hoc training model for ADAM subject classes...");
+
+            let mut chat = Chat::builder(llama)
+                .with_system_prompt(SYSTEM)
+                .with_initial_history(history)
+                .build();
+
+            println!("\n\nTraining done.");
+
+            chat.save_session(session_path.clone())
+                .await
+                .expect("Could not save session");
+            println!("Session saved to {:?}", session_path);
         }
         EveCommands::Prompt => {
             println!("Prompting Eve...");
 
-            let mut rl = rustyline::Editor::<()>::new()?;
-            let line = rl.readline(">> ")?;
-            task.run(line, &llama).to_std_out().await.unwrap();
+            let mut chat = Chat::builder(llama)
+                .with_try_session_path(&session_path)
+                .build();
 
-            // let value: String = stream.all_text().await;
+            for _ in 0..2 {
+                let mut rl = rustyline::Editor::<()>::new()?;
+                let line = rl.readline(">> ")?;
+                println!("\n\n");
+                let mut output_stream = chat.add_message(line);
+                print!("Eve: ");
+                output_stream.to_std_out().await.unwrap();
+            }
 
-            // println!("Result: {:?}", value);
-
-            println!("\n\n");
+            //let mut rl = rustyline::Editor::<()>::new()?;
+            //let line = rl.readline(">> ")?;
+            //task.run(line, &llama).to_std_out().await.unwrap();
         }
     }
     Ok(())
