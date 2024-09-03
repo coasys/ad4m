@@ -262,18 +262,8 @@ What icon should it have in the toolbar? (You can choose from the "Bootstrap" ic
 pub async fn run(command: EveCommands) -> Result<()> {
     println!("Loading model...");
 
-    let llama = Llama::builder().with_source(LlamaSource::tiny_llama_1_1b_chat()).build_with_loading_handler(|progress| match progress {
-        ModelLoadingProgress::Downloading { source, start_time, progress } => {
-            let progress = (progress * 100.0) as u32;
-            let elapsed = start_time.elapsed().as_secs_f32();
-            println!("Downloading file {source} {progress}% ({elapsed}s)");
-        }
-        ModelLoadingProgress::Loading { progress } => {
-            let progress = (progress * 100.0) as u32;
-            println!("Loading model {progress}%");
-        }
-    })
-    .await?;
+    let llama = Llama::new_chat().await.unwrap();
+
 
     println!("Model loaded");
 
