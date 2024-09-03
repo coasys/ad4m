@@ -1,12 +1,11 @@
 
 use std::io::Write;
-use llm::Model;
-use llm::InferenceResponse;
 use std::convert::Infallible;
 use std::fs::File;
-use llm::InferenceSession;
 use anyhow::Result;
 use clap::Subcommand;
+use kalosm::language::*;
+
 
 #[derive(Debug, Subcommand)]
 pub enum EveCommands {
@@ -162,70 +161,43 @@ What icon should it have in the toolbar? (You can choose from the "Bootstrap" ic
 
 pub async fn run(command: EveCommands) -> Result<()> {
     println!("Loading model...");
-
-
-    // load a GGML model from disk
-    let llama = llm::load::<llm::models::Llama>(
-        // path to GGML file
-        std::path::Path::new("/Users/nicolasluck/models/eve.model"),
-        llm::TokenizerSource::Embedded,
-        // llm::ModelParameters
-        Default::default(),
-        // load progress callback
-        |_| {},
-
-    )
-    .unwrap_or_else(|err| panic!("Failed to load model: {err}"));
-
+    let model = Llama::new_chat().await.unwrap();
     println!("Model loaded!");
 
-    let inference_parameters = llm::InferenceParameters::default();
-
-    fn print_token(t: String) {
-        print!("{t}");
-        std::io::stdout().flush().unwrap();
-    }
+    let session_path = std::path::PathBuf::from("/Users/nicolasluck/models/eve.snapshot.json");
 
     match command {
         EveCommands::Train => {
             println!("Training Eve...");
-
-                            
             println!("Ad hoc training model for ADAM subject classes...");
 
-            
-            // use the model to generate text from a prompt
-            let mut session = llama.start_session(Default::default());
-            
-            for p in vec![SYSTEM, HISTORY1, HISTORY2] {
-                session.feed_prompt(
-                    &llama,
-                    p,
-                    &mut Default::default(),
-                    llm::feed_prompt_callback(|resp| match resp {
-                        llm::InferenceResponse::PromptToken(t)
-                        | llm::InferenceResponse::InferredToken(t) => {
-                            print_token(t);
-    
-                            Ok::<llm::InferenceFeedback, Infallible>(llm::InferenceFeedback::Continue)
-                        }
-                        _ => Ok(llm::InferenceFeedback::Continue),
-                    }),
-                ).unwrap_or_else(|err| panic!("Failed to feed prompt: {err}"));
-            }
-            
+            let mut chat = Chat::builder(model)
+                .with_system_prompt(format!("{}\n{}", SYSTEM, HISTORY1))
+                .build();
 
             println!("\n\nTraining done. Ready!");
-            
-            unsafe {
-                let snapshot: llm::InferenceSnapshotRef<'_> = session.get_snapshot();
-                let snapshot_cbor = serde_cbor::to_vec(&snapshot).expect("Failed to serialize snapshot");
-                File::create("/Users/nicolasluck/models/eve.snapshot.json").unwrap().write_all(snapshot_cbor.as_slice()).unwrap();
-                println!("Snapshot saved!");
-            }
+
+            chat.save_session(session_path);
         }
         EveCommands::Prompt => {
             println!("Prompting Eve...");
+
+            let mut chat =
+                Chat::builder(model)
+                    .with_try_session_path(&session_path)
+                    .build();
+        
+            for _ in 0..2 {
+                let mut rl = rustyline::Editor::<()>::new()?;
+                let line = rl.readline(">> ")?;
+                println!("\n\n");
+                let mut output_stream = chat.add_message(line);
+                print!("Eve: ");
+                output_stream.to_std_out().await.unwrap();
+            }
+
+            /*
+            
 
             let mut session = if let Ok(file) = File::open("/Users/nicolasluck/models/eve.snapshot.json") {
                 let snapshot: llm::InferenceSnapshot  = serde_cbor::from_reader(file).expect("Failed to deserialize snapshot");
@@ -281,6 +253,7 @@ pub async fn run(command: EveCommands) -> Result<()> {
                 Ok(result) => println!("\n\nInference stats:\n{result}"),
                 Err(err) => println!("\n{err}"),
             }
+             */
         }
     }
     Ok(())
