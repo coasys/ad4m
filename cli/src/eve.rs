@@ -34,8 +34,7 @@ provide the the latest version to Perspect3ve to be written to the perspective's
 by wrapping the code to commit with "WRITE-SDNA:" and ":ANDS-ETIRW"` 
 <</SYS>>
 "##;
-        
-        
+
 const HISTORY1: &str = r##"
 Eve: Hi, I'm Eve. I'm your personal assistant AI. I'm here to help you create AD4M Subject classes.
 User: Create an ADAM Subject class called "Todo". It should have a "state" and a "title" property. The title should resolve to a string applying the literal language. It also should have a "comments" collection.` 
@@ -260,7 +259,6 @@ collection_setter(cjdotdng, "comments", '[{action: "collectionSetter", source: "
 What icon should it have in the toolbar? (You can choose from the "Bootstrap" icon set) 
 "##;
 
-
 pub async fn run(command: EveCommands) -> Result<()> {
     println!("Loading model...");
 
@@ -289,7 +287,6 @@ pub async fn run(command: EveCommands) -> Result<()> {
         EveCommands::Train => {
             println!("Training Eve...");
 
-                            
             println!("Ad hoc training model for ADAM subject classes...");
         }
         EveCommands::Prompt => {
@@ -309,5 +306,3 @@ pub async fn run(command: EveCommands) -> Result<()> {
     }
     Ok(())
 }
-
-

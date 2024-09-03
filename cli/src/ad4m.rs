@@ -17,6 +17,7 @@ mod util;
 mod agent;
 mod bootstrap_publish;
 mod dev;
+mod eve;
 mod expression;
 mod languages;
 mod neighbourhoods;
@@ -25,7 +26,7 @@ mod repl;
 mod runtime;
 
 use crate::{
-    agent::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*,
+    agent::*, eve::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*,
 };
 use ad4m_client::*;
 use anyhow::{Context, Result};
@@ -112,6 +113,10 @@ enum Domain {
     },
     /// Print the executor log
     Log,
+    Eve {
+        #[command(subcommand)]
+        command: EveCommands,
+    },
 }
 
 async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
@@ -166,6 +171,7 @@ async fn main() -> Result<()> {
             })?;
             println!("{}", log);
         }
+        Domain::Eve { command } => eve::run(command).await?,
     }
 
     Ok(())
