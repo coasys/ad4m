@@ -1,8 +1,7 @@
-
-use std::io::Write;
 use anyhow::Result;
 use clap::Subcommand;
 use kalosm::language::*;
+use std::io::Write;
 
 #[derive(Debug, Subcommand)]
 pub enum EveCommands {
@@ -17,7 +16,7 @@ pub struct Response {
     new_subgroup_name: String,
     new_subgroup_summary: String,
     new_conversation_name: String,
-    new_conversation_summary: String
+    new_conversation_summary: String,
 }
 
 const SYSTEM: &str = r##"
@@ -134,7 +133,6 @@ p3_instance_color(cjdotdng, Instance, "#00FF00") :- property_getter(c, Instance,
 Done.
 "##;
 
-
 const EXAMPLE_USER1: &str = r##"
 Create an ADAM Subject class called "Todo". It should have a "state" and a "title" property. The title should resolve to a string applying the literal language. It also should have a "comments" collection.` 
 Eve: Sure. I have made-up a "todo" ADAM Language to use in the predicates of this Subject class definition.
@@ -229,7 +227,6 @@ p3_instance_color(cjdotdng, Instance, "#FFFF00") :- property_getter(c, Instance,
 p3_instance_color(cjdotdng, Instance, "#00FF00") :- property_getter(c, Instance, "state", "todo://done").
 "##;
 
-
 const REDUCED: &str = r##"
 Eve: Hi, I'm Eve. I'm your personal assistant AI. I'm here to help you create AD4M Subject classes.
 User: Create an ADAM Subject class called "Todo". It should have a "state" and a "title" property. The title should resolve to a string applying the literal language. It also should have a "comments" collection.` 
@@ -264,17 +261,22 @@ pub async fn run(command: EveCommands) -> Result<()> {
 
     let llama = Llama::new_chat().await.unwrap();
 
-
     println!("Model loaded");
 
-    let task  = Task::builder(SYSTEM)
+    let task = Task::builder(SYSTEM)
         .with_example(EXAMPLE_USER1, EXAMPLE_EVE1)
         .with_example(EXAMPLE_USER2, EXAMPLE_EVE2)
         .with_example(EXAMPLE_USER3, EXAMPLE_EVE3)
         .build();
 
     println!("Feeding examples...");
-    task.run("Hello, let's pretend this is a new session. Who are you?", &llama).to_std_out().await.unwrap();
+    task.run(
+        "Hello, let's pretend this is a new session. Who are you?",
+        &llama,
+    )
+    .to_std_out()
+    .await
+    .unwrap();
 
     match command {
         EveCommands::Train => {
@@ -284,7 +286,6 @@ pub async fn run(command: EveCommands) -> Result<()> {
         }
         EveCommands::Prompt => {
             println!("Prompting Eve...");
-
 
             let mut rl = rustyline::Editor::<()>::new()?;
             let line = rl.readline(">> ")?;
