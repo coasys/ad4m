@@ -1,5 +1,7 @@
 import { Query, Resolver, Mutation, Arg, InputType, Field } from "type-graphql";
 import { PromptExamplesInput, PromptOutput, Task } from "./Tasks";
+import pako from "pako";
+import base64js from "base64js";
 
 @InputType()
 export class TaskInput {
@@ -71,7 +73,15 @@ export default class AIResolver {
     embed(
         @Arg("model_id") model_id: string,
         @Arg("text") text: string
-    ): string {
-        return "output"
+    ): [number] {
+        const vec = [0, 10, 20, 30];
+        const vecString = JSON.stringify(vec);
+        const compressed = pako.deflate(vecString);
+        const compressedString = base64js.fromByteArray(compressed);
+
+        const vecString1 = base64js.toByteArray(compressedString);
+        const decompressed = pako.inflate(vecString1);
+
+        return decompressed;
     }
 }
