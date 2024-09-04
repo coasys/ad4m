@@ -1,7 +1,7 @@
 import { Field, InputType, ObjectType } from "type-graphql";
 
 @InputType()
-export class PromptExamplesInput {
+export class AIPromptExamplesInput {
     @Field()
     input: string;
 
@@ -16,7 +16,7 @@ export class PromptExamplesInput {
 
 
 @ObjectType()
-export class PromptExamples {
+export class AIPromptExamples {
     @Field()
     input: string;
 
@@ -29,8 +29,26 @@ export class PromptExamples {
     }
 }
 
+@InputType()
+export class AITaskInput {
+    @Field()
+    modelId: string;
+
+    @Field()
+    systemPrompt: string;
+
+    @Field(type => [AIPromptExamplesInput])
+    promptExamples: AIPromptExamplesInput[];
+
+    constructor(model_id: string, system_prompt: string, prompt_examples: AIPromptExamplesInput[]) {
+        this.modelId = model_id;
+        this.systemPrompt = system_prompt;
+        this.promptExamples = prompt_examples;
+    }
+}
+
 @ObjectType()
-export class Task {
+export class AITask {
     @Field()
     modelId: string;
 
@@ -40,10 +58,10 @@ export class Task {
     @Field()
     systemPrompt: string;
 
-    @Field(type => [PromptExamples])
-    promptExamples: PromptExamples[];
+    @Field(type => [AIPromptExamples])
+    promptExamples: AIPromptExamples[];
 
-    constructor(model_id: string, task_id: string, system_prompt: string, prompt_examples: PromptExamples[]) {
+    constructor(model_id: string, task_id: string, system_prompt: string, prompt_examples: AIPromptExamples[]) {
         this.modelId = model_id;
         this.taskId = task_id;
         this.systemPrompt = system_prompt;
@@ -52,7 +70,7 @@ export class Task {
 }
 
 @ObjectType()
-export class PromptOutput {
+export class AIPromptOutput {
     @Field()
     result: string;
 

@@ -1,8 +1,8 @@
 import { ApolloClient, gql } from "@apollo/client";
 import unwrapApolloResult from "../unwrapApolloResult";
-import { Task } from "./Tasks";
 import base64js from 'base64js';
 import pako from 'pako'
+import { AITask, AITaskInput } from "./Tasks";
 
 export class AIClient {
     #apolloClient: ApolloClient<any>;
@@ -12,7 +12,7 @@ export class AIClient {
         this.#apolloClient = apolloClient;
     }
 
-    async tasks(): Promise<Task[]> {
+    async tasks(): Promise<AITask[]> {
         const { tasks } = unwrapApolloResult(await this.#apolloClient.query({
             query: gql`
                 query {
@@ -32,11 +32,12 @@ export class AIClient {
         return tasks;
     }
 
-    async addTask(modelId: string, systemPrompt: string, promptExamples: { input: string, output: string }[]): Promise<Task> {
+    async addTask(modelId: string, systemPrompt: string, promptExamples: { input: string, output: string }[]): Promise<AITask> {
+        const task = new AITaskInput(modelId, systemPrompt, promptExamples);
         const { addTask } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation AiAddTask($modelId: String!, $systemPrompt: String!, $promptExamples: [PromptExamplesInput!]!) {
-                    aiAddTask(modelId: $modelId, systemPrompt: $systemPrompt, promptExamples: $promptExamples) {
+                mutation AiAddTask($task: AITaskInput!) {
+                    aiAddTask(task: $task) {
                         modelId
                         taskId
                         systemPrompt
@@ -48,16 +49,14 @@ export class AIClient {
                 }
             `,
             variables: {
-                modelId,
-                systemPrompt,
-                promptExamples
+                task
             }
         }));
 
         return addTask;
     }
 
-    async removeTask(taskId: string): Promise<Task> {
+    async removeTask(taskId: string): Promise<AITask> {
         const { removeTask } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
                 mutation AiRemoveTask($taskId: String!) {
@@ -80,10 +79,10 @@ export class AIClient {
         return removeTask;
     }
 
-    async updateTask(taskId: string, task: Task): Promise<Task> {
+    async updateTask(taskId: string, task: AITask): Promise<AITask> {
         const { updateTask } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation AiUpdateTask($taskId: String!, $task: TaskInput!) {
+                mutation AiUpdateTask($taskId: String!, $task: AITaskInput!) {
                     aiUpdateTask(taskId: $taskId, task: $task) {
                         modelId
                         taskId
@@ -123,7 +122,7 @@ export class AIClient {
     }
 
     async embed(modelId: string, text: string): Promise<Array<number>> {
-        const { embed } = unwrapApolloResult(await this.#apolloClient.mutate({
+        const { aiEmbed } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
                 mutation AiEmbed($modelId: String!, $text: String!) {
                     aiEmbed(modelId: $modelId, text: $text)
@@ -135,7 +134,7 @@ export class AIClient {
             }
         }));
 
-        const compressed = base64js.toByteArray(embed);
+        const compressed = base64js.decode(aiEmbed);
 
         const decompressed = JSON.parse(pako.inflate(compressed));
 

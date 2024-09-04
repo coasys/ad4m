@@ -1,34 +1,21 @@
 import { Query, Resolver, Mutation, Arg, InputType, Field, Subscription, Float} from "type-graphql";
-import { PromptExamplesInput, PromptOutput, Task } from "./Tasks";
+import { AIPromptOutput, AITask, AITaskInput } from "./Tasks";
 import pako from "pako";
 import base64js from "base64js";
 import { AI_TRANSCRIPTION_TEXT_TOPIC } from "../PubSub";
 
-@InputType()
-export class TaskInput {
-    @Field()
-    modelId: string
-
-    @Field()
-    systemPrompt: string
-
-    @Field(type => [PromptExamplesInput])
-    promptExamples: PromptExamplesInput[]
-}
-
-
 @Resolver()
 export default class AIResolver {
-    @Query(() => [Task])
-    aiTasks(): Task[] {
+    @Query(returns => [AITask])
+    aiTasks(): AITask[] {
         return []
     }
 
-    @Mutation(() => Task)
+    @Mutation(returns => AITask)
     aiAddTask(
-        @Arg("task") task: TaskInput,
-    ): Task {
-        return new Task(
+        @Arg("task") task: AITaskInput,
+    ): AITask {
+        return new AITask(
             task.modelId,
             "task_id",
             task.systemPrompt,
@@ -36,11 +23,11 @@ export default class AIResolver {
         )
     }
 
-    @Mutation(() => Task)
+    @Mutation(() => AITask)
     aiRemoveTask(
         @Arg("task_id") task_id: string
-    ): Task {
-        return new Task(
+    ): AITask {
+        return new AITask(
             "modelId",
             task_id,
             "systemPrompt",
@@ -48,12 +35,12 @@ export default class AIResolver {
         )
     }
 
-    @Mutation(() => Task)
+    @Mutation(() => AITask)
     aiUpdateTask(
         @Arg("task_id") task_id: string,
-        @Arg("task") task: TaskInput,
-    ): Task {
-        return new Task(
+        @Arg("task") task:AITaskInput,
+    ): AITask {
+        return new AITask(
             task.modelId,
             task_id,
             task.systemPrompt,
@@ -61,12 +48,12 @@ export default class AIResolver {
         )
     }
 
-    @Mutation(() => Task)
+    @Mutation(() => AITask)
     aiPrompt(
         @Arg("task_id") task_id: string,
         @Arg("prompt") input: string
-    ): PromptOutput {
-        return new PromptOutput(
+    ): AIPromptOutput {
+        return new AIPromptOutput(
             "output"
         )
     }
