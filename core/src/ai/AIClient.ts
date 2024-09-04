@@ -13,7 +13,7 @@ export class AIClient {
     }
 
     async tasks(): Promise<AITask[]> {
-        const { tasks } = unwrapApolloResult(await this.#apolloClient.query({
+        const { aiTasks } = unwrapApolloResult(await this.#apolloClient.query({
             query: gql`
                 query {
                     aiTasks {
@@ -29,12 +29,12 @@ export class AIClient {
             `
         }));
 
-        return tasks;
+        return aiTasks;
     }
 
     async addTask(modelId: string, systemPrompt: string, promptExamples: { input: string, output: string }[]): Promise<AITask> {
         const task = new AITaskInput(modelId, systemPrompt, promptExamples);
-        const { addTask } = unwrapApolloResult(await this.#apolloClient.mutate({
+        const { aiAddTask } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
                 mutation AiAddTask($task: AITaskInput!) {
                     aiAddTask(task: $task) {
@@ -53,11 +53,11 @@ export class AIClient {
             }
         }));
 
-        return addTask;
+        return aiAddTask;
     }
 
     async removeTask(taskId: string): Promise<AITask> {
-        const { removeTask } = unwrapApolloResult(await this.#apolloClient.mutate({
+        const { aiRemoveTask } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
                 mutation AiRemoveTask($taskId: String!) {
                     aiRemoveTask(taskId: $taskId) {
@@ -76,11 +76,11 @@ export class AIClient {
             }
         }));
 
-        return removeTask;
+        return aiRemoveTask;
     }
 
     async updateTask(taskId: string, task: AITask): Promise<AITask> {
-        const { updateTask } = unwrapApolloResult(await this.#apolloClient.mutate({
+        const { aiUpdateTask } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
                 mutation AiUpdateTask($taskId: String!, $task: AITaskInput!) {
                     aiUpdateTask(taskId: $taskId, task: $task) {
@@ -100,7 +100,7 @@ export class AIClient {
             }
         }));
 
-        return updateTask;
+        return aiUpdateTask;
     }
 
     async prompt(taskId: string, prompt: string): Promise<string> {
