@@ -168,7 +168,7 @@ impl Ad4mDb {
                 id TEXT PRIMARY KEY,
                 model_id TEXT NOT NULL,
                 system_prompt TEXT NOT NULL,
-                prompt_exmaples TEXT NOT NULL,
+                prompt_examples TEXT NOT NULL
              )",
             [],
         )?;
@@ -1214,5 +1214,44 @@ mod tests {
         assert!(notifications_after_removal
             .iter()
             .all(|n| n.id != notification_id));
+    }
+
+    #[test]
+    fn test_task_operations() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Test adding a task
+        let model_id = "test_model".to_string();
+        let system_prompt = "Test system prompt".to_string();
+        let prompt_examples = vec![
+            AIPromptExamples {
+                input: "Test human prompt".to_string(),
+                output: "Test AI response".to_string(),
+            }
+        ];
+
+        let task_id = db.add_task(model_id.clone(), system_prompt.clone(), prompt_examples.clone()).unwrap();
+
+        // Test getting the task
+        let retrieved_task = db.get_task(task_id.clone()).unwrap().unwrap();
+        assert_eq!(retrieved_task.id, task_id);
+        assert_eq!(retrieved_task.model_id, model_id);
+        assert_eq!(retrieved_task.system_prompt, system_prompt);
+        assert_eq!(retrieved_task.prompt_examples, prompt_examples);
+
+        // Test getting all tasks
+        let all_tasks = db.get_tasks().unwrap();
+        assert_eq!(all_tasks.len(), 1);
+        assert_eq!(all_tasks[0].id, task_id);
+
+        // Test removing the task
+        db.remove_task(task_id.clone()).unwrap();
+
+        // Ensure the task is removed
+        let task_after_removal = db.get_task(task_id.clone()).unwrap();
+        assert!(task_after_removal.is_none());
+
+        let all_tasks_after_removal = db.get_tasks().unwrap();
+        assert!(all_tasks_after_removal.is_empty());
     }
 }
