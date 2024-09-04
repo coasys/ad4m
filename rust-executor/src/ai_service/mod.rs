@@ -124,8 +124,8 @@ impl AIService {
 
         Ok(updated_task)
     }
-    pub fn prompt(task_id: String, prompt: String) -> Result<()> {
-        let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))
+    pub fn prompt(task_id: String, _prompt: String) -> Result<()> {
+        let _task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
             .ok_or(AIServiceError::TaskNotFound)?;
 
