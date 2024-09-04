@@ -7,7 +7,7 @@ import pako from 'pako'
 export class AIClient {
     #apolloClient: ApolloClient<any>;
 
-    constructor(apolloClient: ApolloClient<any>) {
+    constructor(apolloClient: ApolloClient<any>, subscribe: boolean = true) {
         this.#apolloClient = apolloClient;
     }
 
