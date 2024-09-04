@@ -43,7 +43,7 @@ use crate::{
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     env::set_var(
         "RUST_LOG",
-        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=debug,warp=warn,warp::server=warn",
+        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=debug,warp::server",
     );
     let _ = env_logger::try_init();
     config.prepare();
@@ -108,13 +108,13 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     LanguageController::init_global_instance(js_core_handle.clone());
     perspectives::initialize_from_db();
 
-    info!("Starting GraphQL...");
-
     let app_dir = config
         .app_data_path
         .as_ref()
         .expect("App data path not set in Ad4mConfig")
         .clone();
+
+    info!("Starting dapp server...");
 
     if let Some(true) = config.run_dapp_server {
         std::thread::spawn(|| {
@@ -128,6 +128,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             }
         });
     };
+
+    info!("Starting GraphQL...");
 
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()

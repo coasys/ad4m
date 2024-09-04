@@ -1,0 +1,16 @@
+{
+  "name": "@coasys/embedding-vector-language",
+  "version": "0.0.1",
+  "description": "An AD4M Language for testing AD4M-executor",
+  "main": "index.js",
+  "scripts": {
+    "build": "deno run --allow-all esbuild.ts"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "tslib": "^2.0.0",
+    "typescript": "^4.6.2",
+    "uint8arrays": "^3.0.0"
+  }
+}
