@@ -3,7 +3,8 @@ use crate::graphql::graphql_types::{
     SentMessage,
 };
 use crate::types::{
-    Expression, ExpressionProof, Link, LinkExpression, Notification, PerspectiveDiff,
+    AIPromptExamples, Expression, ExpressionProof, Link, LinkExpression, Notification,
+    PerspectiveDiff,
 };
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -162,8 +163,67 @@ impl Ad4mDb {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                model_id TEXT NOT NULL,
+                system_prompt TEXT NOT NULL,
+                prompt_exmaples TEXT NOT NULL,
+             )",
+            [],
+        )?;
+
         Ok(Self { conn })
     }
+
+    pub fn add_tasks(
+        &self,
+        model_id: String,
+        system_prompt: String,
+        prompt_examples: AIPromptExamples,
+    ) -> Result<String, rusqlite::Error> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.conn.execute(
+            "INSERT INTO tasks (id, model_id, system_prompt, prompt_examples) VALUES (?1, ?2, ?3, ?4)",
+            params![id, model_id, system_prompt, serde_json::to_string(&prompt_examples).unwrap()],
+        )?;
+        Ok(id)
+    }
+
+    pub fn remove_tasks(&self, id: String) -> Result<(), rusqlite::Error> {
+        self.conn.execute("DELETE FROM tasks WHERE id = ?", [id])?;
+        Ok(())
+    }
+
+    pub fn get_tasks(&self) -> Result<Vec<AIPromptExamples>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT * FROM tasks")?;
+        let task_iter = stmt.query_map([], |row| {
+            let prompt_examples: AIPromptExamples =
+                serde_json::from_str(&row.get::<_, String>(3)?).unwrap();
+            Ok(prompt_examples)
+        })?;
+
+        let mut tasks = Vec::new();
+        for task in task_iter {
+            tasks.push(task?);
+        }
+        Ok(tasks)
+    }
+
+    pub fn update_tasks(
+        &self,
+        id: String,
+        model_id: String,
+        system_prompt: String,
+        prompt_examples: AIPromptExamples,
+    ) -> Result<bool, rusqlite::Error> {
+        let result = self.conn.execute(
+            "UPDATE tasks SET model_id = ?2, system_prompt = ?3, prompt_examples = ?4 WHERE id = ?1",
+            params![id, model_id, system_prompt, serde_json::to_string(&prompt_examples).unwrap()],
+        )?;
+        Ok(result > 0)
+    }
+
     pub fn add_notification(
         &self,
         notification: NotificationInput,

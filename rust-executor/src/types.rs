@@ -378,6 +378,22 @@ pub struct Notification {
     pub webhook_auth: String,
 }
 
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub struct AIPromptExamples {
+    pub input: String,
+    pub output: String,
+}
+
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub struct AITask {
+    pub id: String,
+    pub model_id: String,
+    pub system_prompt: String,
+    pub prompt_examples: Vec<AIPromptExamples>,
+}
+
 impl Notification {
     pub fn from_input_and_id(id: String, input: NotificationInput) -> Self {
         Notification {
