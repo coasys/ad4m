@@ -1,11 +1,11 @@
-use std::error::Error;
-use tokio::sync::Mutex;
-use std::sync::Arc;
-use std::fmt;
-use deno_core::error::AnyError;
-use kalosm::language::*;
 use crate::db::Ad4mDb;
 use crate::types::AITask;
+use deno_core::error::AnyError;
+use kalosm::language::*;
+use std::error::Error;
+use std::fmt;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 #[derive(Debug)]
 pub enum AIServiceError {
@@ -14,7 +14,6 @@ pub enum AIServiceError {
     ServiceNotInitialized,
     LockError,
 }
-
 
 impl Error for AIServiceError {}
 
@@ -31,7 +30,6 @@ impl fmt::Display for AIServiceError {
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
-
 lazy_static! {
     static ref AI_SERVICE: Arc<Mutex<Option<AIService>>> = Arc::new(Mutex::new(None));
 }
@@ -45,7 +43,7 @@ impl AIService {
         Ok(AIService {
             bert: Bert::builder().build().await?,
         })
-    } 
+    }
 
     pub async fn init_global_instance() -> Result<()> {
         let mut ai_service = AI_SERVICE.lock().await;
@@ -63,7 +61,9 @@ impl AIService {
     {
         let global_instance_arc = AIService::global_instance();
         let lock_result = global_instance_arc.lock().await;
-        let ai_service_ref = lock_result.as_ref().expect("Couldn't get lock on AIService");
+        let ai_service_ref = lock_result
+            .as_ref()
+            .expect("Couldn't get lock on AIService");
         //let ai_service_ref = ai_service_lock.as_ref().expect("AIService not initialized");
         f(ai_service_ref)
     }
@@ -74,14 +74,18 @@ impl AIService {
     {
         let global_instance_arc = AIService::global_instance();
         let mut lock_result = global_instance_arc.lock().await;
-        let ai_service_mut = lock_result.as_mut().expect("Couldn't get lock on AIService");
+        let ai_service_mut = lock_result
+            .as_mut()
+            .expect("Couldn't get lock on AIService");
         //let ai_service_mut = ai_service_lock.as_mut().expect("AIService not initialized");
         f(ai_service_mut)
     }
 
     pub fn add_task(task: AITask) -> Result<AITask> {
-        let task_id = Ad4mDb::with_global_instance(|db| db.add_task(task.model_id, task.system_prompt, task.prompt_examples))
-            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
+        let task_id = Ad4mDb::with_global_instance(|db| {
+            db.add_task(task.model_id, task.system_prompt, task.prompt_examples)
+        })
+        .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
         let retrieved_task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
@@ -104,8 +108,15 @@ impl AIService {
 
     pub fn update_task(task: AITask) -> Result<AITask> {
         let task_id = task.id.clone();
-        Ad4mDb::with_global_instance(|db| db.update_task(task.id, task.model_id, task.system_prompt, task.prompt_examples))
-            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
+        Ad4mDb::with_global_instance(|db| {
+            db.update_task(
+                task.id,
+                task.model_id,
+                task.system_prompt,
+                task.prompt_examples,
+            )
+        })
+        .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
         let updated_task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
@@ -118,7 +129,6 @@ impl AIService {
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
             .ok_or(AIServiceError::TaskNotFound)?;
 
-
         // Run AI model with prompt
 
         Ok(())
@@ -127,13 +137,14 @@ impl AIService {
     pub async fn embed(text: String) -> Result<Vec<f32>> {
         let global_instance_arc = AIService::global_instance();
         let lock_result = global_instance_arc.lock().await;
-        let ai_service_ref = lock_result.as_ref().expect("Couldn't get lock on AIService");
-        
+        let ai_service_ref = lock_result
+            .as_ref()
+            .expect("Couldn't get lock on AIService");
+
         let embedding = ai_service_ref.bert.embed(text).await?;
         Ok(embedding.to_vec())
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -141,8 +152,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_embedding() {
-        AIService::init_global_instance().await.expect("initialization to work");
-        let vector = AIService::embed("Test string".into()).await.expect("embed to return a result");
+        AIService::init_global_instance()
+            .await
+            .expect("initialization to work");
+        let vector = AIService::embed("Test string".into())
+            .await
+            .expect("embed to return a result");
         assert!(vector.len() > 300)
     }
 }

@@ -12,8 +12,8 @@ mod runtime_service;
 mod utils;
 mod wallet;
 
-pub mod ai_service;
 pub mod agent;
+pub mod ai_service;
 mod dapp_server;
 mod db;
 pub mod init;
