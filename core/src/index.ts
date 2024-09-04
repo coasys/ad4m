@@ -28,3 +28,5 @@ export * from "./DID";
 export * from "./utils";
 export * from './subject/SubjectEntity'
 export * from "./agent/AgentClient";
+export * from "./ai/AIClient"
+export * from "./ai/Tasks"
