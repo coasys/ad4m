@@ -145,9 +145,12 @@ export class AIClient {
         const { openTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
                 mutation OpenTranscriptionStream {
-                    openTranscriptionStream
+                    openTranscriptionStream(modelId: $modelId)
                 }
-            `
+            `,
+            variables: {
+                modelId
+            }
         }));
 
         return openTranscriptionStream.stream_id;
