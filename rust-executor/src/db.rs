@@ -176,7 +176,7 @@ impl Ad4mDb {
         Ok(Self { conn })
     }
 
-    pub fn add_tasks(
+    pub fn add_task(
         &self,
         model_id: String,
         system_prompt: String,
@@ -190,7 +190,7 @@ impl Ad4mDb {
         Ok(id)
     }
 
-    pub fn remove_tasks(&self, id: String) -> Result<(), rusqlite::Error> {
+    pub fn remove_task(&self, id: String) -> Result<(), rusqlite::Error> {
         self.conn.execute("DELETE FROM tasks WHERE id = ?", [id])?;
         Ok(())
     }
@@ -210,7 +210,7 @@ impl Ad4mDb {
         Ok(tasks)
     }
 
-    pub fn update_tasks(
+    pub fn update_task(
         &self,
         id: String,
         model_id: String,
