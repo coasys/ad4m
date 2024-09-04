@@ -29,6 +29,7 @@ use crate::{
     holochain_service::{agent_infos_from_str, get_holochain_service},
     pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC},
 };
+use base64::prelude::*;
 
 pub struct Mutation;
 
@@ -1253,8 +1254,16 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
         let vector = AIService::embed(text).await?;
+        let json_string = serde_json::to_string(&vector)
+            .map_err(|e| FieldError::from(format!("Failed to serialize vector: {}", e)))?;
 
-        Ok(String::from(""))
+        // Compress the JSON string using zlib compression
+        let compressed_bytes = deflate::deflate_bytes_zlib(json_string.as_bytes());
+        
+        // Encode the compressed bytes to base64
+        let base64_encoded = BASE64_STANDARD.encode(&compressed_bytes);
+        
+        Ok(base64_encoded)
     }
 
     async fn ai_open_transcription_stream(

@@ -100,7 +100,7 @@ tokio-rustls = "0.26"
 rustls-pemfile = "2"
 
 kalosm = { version = "0.3.2", git = "https://github.com/coasys/floneum.git", rev = "44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75", features = ["language", "metal"] }
-
+deflate = "1.0.0"
 
 [dev-dependencies]
 maplit = "1.0.2"
