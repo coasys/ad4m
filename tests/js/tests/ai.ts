@@ -10,7 +10,7 @@ export default function aiTests(testContext: TestContext) {
                 let vector = await ad4mClient.ai.embed("Bert", "Test string");
                 expect(typeof vector).to.equal("Array")
                 expect(vector.length).to.be.greaterThan(300)
-            }),
+            })
         })
     }
 }
