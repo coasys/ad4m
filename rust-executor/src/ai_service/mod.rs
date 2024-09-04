@@ -1,5 +1,9 @@
-use std::sync::{Arc, Mutex};
+use std::error::Error;
+use tokio::sync::Mutex;
+use std::sync::Arc;
 use std::fmt;
+use deno_core::error::AnyError;
+use kalosm::language::*;
 use crate::db::Ad4mDb;
 use crate::types::AITask;
 
@@ -10,6 +14,9 @@ pub enum AIServiceError {
     ServiceNotInitialized,
     LockError,
 }
+
+
+impl Error for AIServiceError {}
 
 impl fmt::Display for AIServiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -22,48 +29,53 @@ impl fmt::Display for AIServiceError {
     }
 }
 
-pub type Result<T> = std::result::Result<T, AIServiceError>;
+pub type Result<T> = std::result::Result<T, AnyError>;
 
 
 lazy_static! {
     static ref AI_SERVICE: Arc<Mutex<Option<AIService>>> = Arc::new(Mutex::new(None));
 }
 
-pub struct AIService {}
+pub struct AIService {
+    bert: Bert,
+}
 
 impl AIService {
-    pub fn init_global_instance() {
-        let mut ai_service = AI_SERVICE.lock().unwrap();
-        *ai_service = Some(AIService::new());
-    }
+    pub async fn new() -> Result<Self> {
+        Ok(AIService {
+            bert: Bert::builder().build().await?,
+        })
+    } 
 
-    pub fn new() -> Self {
-        Self {}
+    pub async fn init_global_instance() -> Result<()> {
+        let mut ai_service = AI_SERVICE.lock().await;
+        *ai_service = Some(AIService::new().await?);
+        Ok(())
     }
 
     pub fn global_instance() -> Arc<Mutex<Option<AIService>>> {
         AI_SERVICE.clone()
     }
 
-    pub fn with_global_instance<F, R>(f: F) -> R
+    pub async fn with_global_instance<F, R>(f: F) -> R
     where
         F: FnOnce(&AIService) -> R,
     {
         let global_instance_arc = AIService::global_instance();
-        let lock_result = global_instance_arc.lock();
-        let ai_service_lock = lock_result.expect("Couldn't get lock on AIService");
-        let ai_service_ref = ai_service_lock.as_ref().expect("AIService not initialized");
+        let lock_result = global_instance_arc.lock().await;
+        let ai_service_ref = lock_result.as_ref().expect("Couldn't get lock on AIService");
+        //let ai_service_ref = ai_service_lock.as_ref().expect("AIService not initialized");
         f(ai_service_ref)
     }
 
-    pub fn with_mutable_global_instance<F>(f: F)
+    pub async fn with_mutable_global_instance<F>(f: F)
     where
         F: FnOnce(&mut AIService),
     {
         let global_instance_arc = AIService::global_instance();
-        let lock_result = global_instance_arc.lock();
-        let mut ai_service_lock = lock_result.expect("Couldn't get lock on AIService");
-        let ai_service_mut = ai_service_lock.as_mut().expect("AIService not initialized");
+        let mut lock_result = global_instance_arc.lock().await;
+        let ai_service_mut = lock_result.as_mut().expect("Couldn't get lock on AIService");
+        //let ai_service_mut = ai_service_lock.as_mut().expect("AIService not initialized");
         f(ai_service_mut)
     }
 
@@ -110,5 +122,27 @@ impl AIService {
         // Run AI model with prompt
 
         Ok(())
+    }
+
+    pub async fn embed(text: String) -> Result<Vec<f32>> {
+        let global_instance_arc = AIService::global_instance();
+        let lock_result = global_instance_arc.lock().await;
+        let ai_service_ref = lock_result.as_ref().expect("Couldn't get lock on AIService");
+        
+        let embedding = ai_service_ref.bert.embed(text).await?;
+        Ok(embedding.to_vec())
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_embedding() {
+        AIService::init_global_instance().await.expect("initialization to work");
+        let vector = AIService::embed("Test string".into()).await.expect("embed to return a result");
+        assert!(vector.len() > 300)
     }
 }
