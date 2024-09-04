@@ -1,7 +1,8 @@
-import { Query, Resolver, Mutation, Arg, InputType, Field } from "type-graphql";
+import { Query, Resolver, Mutation, Arg, InputType, Field, Subscription, Float} from "type-graphql";
 import { PromptExamplesInput, PromptOutput, Task } from "./Tasks";
 import pako from "pako";
 import base64js from "base64js";
+import { AI_TRANSCRIPTION_TEXT_TOPIC } from "../PubSub";
 
 @InputType()
 export class TaskInput {
@@ -14,6 +15,7 @@ export class TaskInput {
     @Field(type => [PromptExamplesInput])
     promptExamples: PromptExamplesInput[]
 }
+
 
 @Resolver()
 export default class AIResolver {
@@ -83,5 +85,34 @@ export default class AIResolver {
         const decompressed = pako.inflate(vecString1);
 
         return decompressed;
+    }
+
+    @Mutation(() => String)
+    openTranscriptionStream(
+        @Arg("model_id") model_id: string
+    ): string {
+        return "stream_id"
+    }
+
+    @Mutation(() => String)
+    closeTranscriptionStream(
+        @Arg("stream_id") stream_id: string
+    ): boolean {
+        return true
+    }
+
+    @Mutation(() => String)
+    feedTranscriptionStream(
+        @Arg("stream_id") stream_id: string,
+        @Arg("audio", () => [Float]) audio: number[]
+    ): boolean {
+        return true
+    }
+
+    @Subscription({ topics: AI_TRANSCRIPTION_TEXT_TOPIC, nullable: false })
+    transcriptionText(
+        @Arg("stream_id") stream_id: string
+    ): string {
+        return "transcription"
     }
 }

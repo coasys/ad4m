@@ -140,4 +140,62 @@ export class AIClient {
 
         return decompressed;
     }
+
+    async openTranscriptionStream(modelId: string): Promise<string> {
+        const { openTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`
+                mutation OpenTranscriptionStream {
+                    openTranscriptionStream
+                }
+            `
+        }));
+
+        return openTranscriptionStream.stream_id;
+    }
+
+    async closeTranscriptionStream(streamId: string): Promise<void> {
+        const { closeTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`
+                mutation CloseTranscriptionStream($streamId: String!) {
+                    closeTranscriptionStream(streamId: $streamId)
+                }
+            `,
+            variables: {
+                streamId
+            }
+        }));
+
+        return closeTranscriptionStream;
+    }
+
+    async feedTranscriptionStream(streamId: string, audio: Float32Array): Promise<void> {
+        const { feedTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`
+                mutation FeedTranscriptionStream($streamId: String!, $audio: [Float!]) {
+                    feedTranscriptionStream(streamId: $streamId, audio: $audio)
+                }
+            `,
+            variables: {
+                streamId,
+                audio: audio
+            }
+        }));
+
+        return feedTranscriptionStream;
+    }
+
+    async transcriptionText(streamId: string): Promise<string> {
+        const { transcriptionText } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`
+                subscription TranscriptionText($streamId: String!) {
+                    transcriptionText(streamId: $streamId)
+                }
+            `,
+            variables: {
+                streamId
+            }
+        }));
+
+        return transcriptionText;
+    } 
 }
