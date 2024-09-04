@@ -1223,14 +1223,18 @@ mod tests {
         // Test adding a task
         let model_id = "test_model".to_string();
         let system_prompt = "Test system prompt".to_string();
-        let prompt_examples = vec![
-            AIPromptExamples {
-                input: "Test human prompt".to_string(),
-                output: "Test AI response".to_string(),
-            }
-        ];
+        let prompt_examples = vec![AIPromptExamples {
+            input: "Test human prompt".to_string(),
+            output: "Test AI response".to_string(),
+        }];
 
-        let task_id = db.add_task(model_id.clone(), system_prompt.clone(), prompt_examples.clone()).unwrap();
+        let task_id = db
+            .add_task(
+                model_id.clone(),
+                system_prompt.clone(),
+                prompt_examples.clone(),
+            )
+            .unwrap();
 
         // Test getting the task
         let retrieved_task = db.get_task(task_id.clone()).unwrap().unwrap();
