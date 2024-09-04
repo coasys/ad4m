@@ -630,7 +630,6 @@ pub struct PromptOutput {
     pub result: String,
 }
 
-
 #[derive(Debug, Deserialize, Serialize)]
 pub enum JsResultType<T>
 where
