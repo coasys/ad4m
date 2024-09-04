@@ -16,7 +16,7 @@ export class AIClient {
         const { tasks } = unwrapApolloResult(await this.#apolloClient.query({
             query: gql`
                 query {
-                    tasks {
+                    aiTasks {
                         modelId
                         taskId
                         systemPrompt
@@ -35,8 +35,8 @@ export class AIClient {
     async addTask(modelId: string, systemPrompt: string, promptExamples: { input: string, output: string }[]): Promise<Task> {
         const { addTask } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation AddTask($modelId: String!, $systemPrompt: String!, $promptExamples: [PromptExamplesInput!]!) {
-                    addTask(modelId: $modelId, systemPrompt: $systemPrompt, promptExamples: $promptExamples) {
+                mutation AiAddTask($modelId: String!, $systemPrompt: String!, $promptExamples: [PromptExamplesInput!]!) {
+                    aiAddTask(modelId: $modelId, systemPrompt: $systemPrompt, promptExamples: $promptExamples) {
                         modelId
                         taskId
                         systemPrompt
@@ -60,8 +60,8 @@ export class AIClient {
     async removeTask(taskId: string): Promise<Task> {
         const { removeTask } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation RemoveTask($taskId: String!) {
-                    removeTask(taskId: $taskId) {
+                mutation AiRemoveTask($taskId: String!) {
+                    aiRemoveTask(taskId: $taskId) {
                         modelId
                         taskId
                         systemPrompt
@@ -83,8 +83,8 @@ export class AIClient {
     async updateTask(taskId: string, task: Task): Promise<Task> {
         const { updateTask } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation UpdateTask($taskId: String!, $task: TaskInput!) {
-                    updateTask(taskId: $taskId, task: $task) {
+                mutation AiUpdateTask($taskId: String!, $task: TaskInput!) {
+                    aiUpdateTask(taskId: $taskId, task: $task) {
                         modelId
                         taskId
                         systemPrompt
@@ -107,8 +107,8 @@ export class AIClient {
     async prompt(taskId: string, prompt: string): Promise<string> {
         const { prompt: output } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation Prompt($taskId: String!, $prompt: String!) {
-                    prompt(taskId: $taskId, prompt: $prompt) {
+                mutation AiPrompt($taskId: String!, $prompt: String!) {
+                    aiPrompt(taskId: $taskId, prompt: $prompt) {
                         result
                     }
                 }
@@ -125,8 +125,8 @@ export class AIClient {
     async embed(modelId: string, text: string): Promise<Array<number>> {
         const { embed } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation Embed($modelId: String!, $text: String!) {
-                    embed(modelId: $modelId, text: $text)
+                mutation AiEmbed($modelId: String!, $text: String!) {
+                    aiEmbed(modelId: $modelId, text: $text)
                 }
             `,
             variables: {
@@ -145,8 +145,8 @@ export class AIClient {
     async openTranscriptionStream(modelId: string, streamCallback: (text: string) => void): Promise<string> {
         const { openTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation OpenTranscriptionStream {
-                    openTranscriptionStream(modelId: $modelId)
+                mutation AiOpenTranscriptionStream {
+                    aiOpenTranscriptionStream(modelId: $modelId)
                 }
             `,
             variables: {
@@ -156,8 +156,8 @@ export class AIClient {
 
         const subscription = await this.#apolloClient.subscribe({
             query: gql`
-                subscription TranscriptionText($streamId: String!) {
-                    transcriptionText(streamId: $streamId)
+                subscription AiTranscriptionText($streamId: String!) {
+                    aiTranscriptionText(streamId: $streamId)
                 }
             `,
             variables: {
@@ -182,8 +182,8 @@ export class AIClient {
     async closeTranscriptionStream(streamId: string): Promise<void> {
         const { closeTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation CloseTranscriptionStream($streamId: String!) {
-                    closeTranscriptionStream(streamId: $streamId)
+                mutation AiCloseTranscriptionStream($streamId: String!) {
+                    aiCloseTranscriptionStream(streamId: $streamId)
                 }
             `,
             variables: {
@@ -203,8 +203,8 @@ export class AIClient {
     async feedTranscriptionStream(streamId: string, audio: Float32Array): Promise<void> {
         const { feedTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation FeedTranscriptionStream($streamId: String!, $audio: [Float!]) {
-                    feedTranscriptionStream(streamId: $streamId, audio: $audio)
+                mutation AiFeedTranscriptionStream($streamId: String!, $audio: [Float!]) {
+                    aiFeedTranscriptionStream(streamId: $streamId, audio: $audio)
                 }
             `,
             variables: {

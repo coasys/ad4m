@@ -25,7 +25,7 @@ export default class AIResolver {
     }
 
     @Mutation(() => Task)
-    addTask(
+    aiAddTask(
         @Arg("task") task: TaskInput,
     ): Task {
         return new Task(
@@ -37,7 +37,7 @@ export default class AIResolver {
     }
 
     @Mutation(() => Task)
-    removeTask(
+    aiRemoveTask(
         @Arg("task_id") task_id: string
     ): Task {
         return new Task(
@@ -49,7 +49,7 @@ export default class AIResolver {
     }
 
     @Mutation(() => Task)
-    updateTask(
+    aiUpdateTask(
         @Arg("task_id") task_id: string,
         @Arg("task") task: TaskInput,
     ): Task {
@@ -62,7 +62,7 @@ export default class AIResolver {
     }
 
     @Mutation(() => Task)
-    prompt(
+    aiPrompt(
         @Arg("task_id") task_id: string,
         @Arg("prompt") input: string
     ): PromptOutput {
@@ -72,7 +72,7 @@ export default class AIResolver {
     }
 
     @Mutation(() => String)
-    embed(
+    aiEmbed(
         @Arg("model_id") model_id: string,
         @Arg("text") text: string
     ): [number] {
@@ -88,21 +88,21 @@ export default class AIResolver {
     }
 
     @Mutation(() => String)
-    openTranscriptionStream(
+    aiOpenTranscriptionStream(
         @Arg("model_id") model_id: string
     ): string {
         return "stream_id"
     }
 
     @Mutation(() => String)
-    closeTranscriptionStream(
+    aiCloseTranscriptionStream(
         @Arg("stream_id") stream_id: string
     ): boolean {
         return true
     }
 
     @Mutation(() => String)
-    feedTranscriptionStream(
+    aiFeedTranscriptionStream(
         @Arg("stream_id") stream_id: string,
         @Arg("audio", () => [Float]) audio: number[]
     ): boolean {
@@ -110,7 +110,7 @@ export default class AIResolver {
     }
 
     @Subscription({ topics: AI_TRANSCRIPTION_TEXT_TOPIC, nullable: false })
-    transcriptionText(
+    aiTranscriptionText(
         @Arg("stream_id") stream_id: string
     ): string {
         return "transcription"
