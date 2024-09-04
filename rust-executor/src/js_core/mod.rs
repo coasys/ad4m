@@ -30,6 +30,7 @@ mod string_module_loader;
 mod utils;
 mod utils_extension;
 mod wallet_extension;
+mod ai_extension;
 
 use self::futures::{EventLoopFuture, SmartGlobalVariableFuture};
 use crate::holochain_service::maybe_get_holochain_service;
