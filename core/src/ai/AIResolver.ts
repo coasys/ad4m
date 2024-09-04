@@ -66,4 +66,12 @@ export default class AIResolver {
             "output"
         )
     }
+
+    @Mutation(() => String)
+    embed(
+        @Arg("model_id") model_id: string,
+        @Arg("text") text: string
+    ): string {
+        return "output"
+    }
 }
