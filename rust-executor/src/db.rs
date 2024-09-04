@@ -1238,7 +1238,7 @@ mod tests {
 
         // Test getting the task
         let retrieved_task = db.get_task(task_id.clone()).unwrap().unwrap();
-        assert_eq!(retrieved_task.id, task_id);
+        assert_eq!(retrieved_task.task_id, task_id);
         assert_eq!(retrieved_task.model_id, model_id);
         assert_eq!(retrieved_task.system_prompt, system_prompt);
         assert_eq!(retrieved_task.prompt_examples, prompt_examples);
@@ -1246,7 +1246,7 @@ mod tests {
         // Test getting all tasks
         let all_tasks = db.get_tasks().unwrap();
         assert_eq!(all_tasks.len(), 1);
-        assert_eq!(all_tasks[0].id, task_id);
+        assert_eq!(all_tasks[0].task_id, task_id);
 
         // Test removing the task
         db.remove_task(task_id.clone()).unwrap();
