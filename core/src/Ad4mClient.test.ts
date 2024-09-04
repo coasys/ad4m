@@ -1150,4 +1150,13 @@ describe('Ad4mClient', () => {
             })
         })
     })
+    describe('.ai', () => {
+        it('embed()', async () => {
+            const vector = await ad4mClient.ai.embed()
+            expect(vector[0]).toEqual(0)
+            expect(vector[1]).toEqual(10)
+            expect(vector[2]).toEqual(20)
+            expect(vector[3]).toEqual(30)
+        })
+    })
 })
