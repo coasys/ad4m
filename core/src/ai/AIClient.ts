@@ -188,7 +188,7 @@ export class AIClient {
     }
 
     async transcriptionText(streamId: string): Promise<string> {
-        const { transcriptionText } = unwrapApolloResult(await this.#apolloClient.query({
+        const { transcriptionText } = unwrapApolloResult(await this.#apolloClient.subscribe({
             query: gql`
                 subscription TranscriptionText($streamId: String!) {
                     transcriptionText(streamId: $streamId)
