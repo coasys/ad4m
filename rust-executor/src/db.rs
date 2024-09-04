@@ -3,8 +3,7 @@ use crate::graphql::graphql_types::{
     SentMessage,
 };
 use crate::types::{
-    AIPromptExamples, Expression, ExpressionProof, Link, LinkExpression, Notification,
-    PerspectiveDiff,
+    AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, Notification, PerspectiveDiff
 };
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -180,7 +179,7 @@ impl Ad4mDb {
         &self,
         model_id: String,
         system_prompt: String,
-        prompt_examples: AIPromptExamples,
+        prompt_examples: Vec<AIPromptExamples>,
     ) -> Result<String, rusqlite::Error> {
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
@@ -195,12 +194,36 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn get_tasks(&self) -> Result<Vec<AIPromptExamples>, rusqlite::Error> {
+    pub fn get_task(&self, id: String) -> Result<Option<AITask>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT * FROM tasks WHERE id = ?")?;
+        let mut rows = stmt.query(params![id])?;
+
+        if let Some(row) = rows.next()? {
+            let prompt_examples: Vec<AIPromptExamples> =
+                serde_json::from_str(&row.get::<_, String>(3)?).unwrap();
+            Ok(Some(AITask {
+                id: row.get(0)?,
+                model_id: row.get(1)?,
+                system_prompt: row.get(2)?,
+                prompt_examples,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_tasks(&self) -> Result<Vec<AITask>, rusqlite::Error> {
         let mut stmt = self.conn.prepare("SELECT * FROM tasks")?;
         let task_iter = stmt.query_map([], |row| {
-            let prompt_examples: AIPromptExamples =
+            let prompt_examples: Vec<AIPromptExamples> =
                 serde_json::from_str(&row.get::<_, String>(3)?).unwrap();
-            Ok(prompt_examples)
+            let task = AITask {
+                id: row.get(0)?,
+                model_id: row.get(1)?,
+                system_prompt: row.get(2)?,
+                prompt_examples,
+            };
+            Ok(task)
         })?;
 
         let mut tasks = Vec::new();
@@ -215,7 +238,7 @@ impl Ad4mDb {
         id: String,
         model_id: String,
         system_prompt: String,
-        prompt_examples: AIPromptExamples,
+        prompt_examples: Vec<AIPromptExamples>,
     ) -> Result<bool, rusqlite::Error> {
         let result = self.conn.execute(
             "UPDATE tasks SET model_id = ?2, system_prompt = ?3, prompt_examples = ?4 WHERE id = ?1",
