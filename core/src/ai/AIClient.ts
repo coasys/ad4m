@@ -6,6 +6,7 @@ import pako from 'pako'
 
 export class AIClient {
     #apolloClient: ApolloClient<any>;
+    #streams: Map<string, any> = new Map();
 
     constructor(apolloClient: ApolloClient<any>, subscribe: boolean = true) {
         this.#apolloClient = apolloClient;
@@ -141,7 +142,7 @@ export class AIClient {
         return decompressed;
     }
 
-    async openTranscriptionStream(modelId: string): Promise<string> {
+    async openTranscriptionStream(modelId: string, streamCallback: (text: string) => void): Promise<string> {
         const { openTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
                 mutation OpenTranscriptionStream {
@@ -152,6 +153,28 @@ export class AIClient {
                 modelId
             }
         }));
+
+        const callback = await this.#apolloClient.subscribe({
+            query: gql`
+                subscription TranscriptionText($streamId: String!) {
+                    transcriptionText(streamId: $streamId)
+                }
+            `,
+            variables: {
+                streamId: openTranscriptionStream.stream_id
+            }
+        }).subscribe({
+            next(data) {
+                streamCallback(data.data.transcriptionText);
+
+                return data.data.transcriptionText;
+            },
+            error(err) {
+                console.error(err);
+            }
+        });
+
+        this.#streams.set(openTranscriptionStream.stream_id, callback);
 
         return openTranscriptionStream.stream_id;
     }
@@ -186,19 +209,4 @@ export class AIClient {
 
         return feedTranscriptionStream;
     }
-
-    async transcriptionText(streamId: string): Promise<string> {
-        const { transcriptionText } = unwrapApolloResult(await this.#apolloClient.subscribe({
-            query: gql`
-                subscription TranscriptionText($streamId: String!) {
-                    transcriptionText(streamId: $streamId)
-                }
-            `,
-            variables: {
-                streamId
-            }
-        }));
-
-        return transcriptionText;
-    } 
 }
