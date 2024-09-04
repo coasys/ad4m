@@ -6,7 +6,7 @@ import pako from 'pako'
 
 export class AIClient {
     #apolloClient: ApolloClient<any>;
-    #streams: Map<string, any> = new Map();
+    #transcriptionSubscriptions: Map<string, any> = new Map();
 
     constructor(apolloClient: ApolloClient<any>, subscribe: boolean = true) {
         this.#apolloClient = apolloClient;
@@ -154,7 +154,7 @@ export class AIClient {
             }
         }));
 
-        const callback = await this.#apolloClient.subscribe({
+        const subscription = await this.#apolloClient.subscribe({
             query: gql`
                 subscription TranscriptionText($streamId: String!) {
                     transcriptionText(streamId: $streamId)
@@ -174,7 +174,7 @@ export class AIClient {
             }
         });
 
-        this.#streams.set(openTranscriptionStream.stream_id, callback);
+        this.#transcriptionSubscriptions.set(openTranscriptionStream.stream_id, () => subscription);
 
         return openTranscriptionStream.stream_id;
     }
@@ -190,6 +190,12 @@ export class AIClient {
                 streamId
             }
         }));
+
+        const subscription = this.#transcriptionSubscriptions.get(streamId);
+
+        if (!subscription.closed) {
+            subscription.unsubscribe();
+        }
 
         return closeTranscriptionStream;
     }
