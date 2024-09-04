@@ -1,13 +1,10 @@
 #![allow(non_snake_case)]
 use crate::{
-    agent::create_signed_expression,
-    neighbourhoods::{self, install_neighbourhood},
-    perspectives::{
+    agent::create_signed_expression, ai_service::AIService, neighbourhoods::{self, install_neighbourhood}, perspectives::{
         add_perspective, get_perspective,
         perspective_instance::{PerspectiveInstance, SdnaType},
         remove_perspective, update_perspective,
-    },
-    types::{DecoratedLinkExpression, Link, LinkExpression},
+    }, types::{DecoratedLinkExpression, Link, LinkExpression}
 };
 use crate::{
     db::Ad4mDb,
@@ -1208,5 +1205,48 @@ impl Mutation {
             .map_err(|e| e.to_string())?;
 
         Ok(true)
+    }
+
+    async fn ai_add_task(&self, context: &RequestContext, _task: TaskInput) -> FieldResult<Task> {
+        check_capability(&context.capabilities, &AI_CREATE_CAPABILITY)?;
+        Ok(Task::default())
+    }
+
+    async fn ai_remove_task(&self, context: &RequestContext, _task_id: String) -> FieldResult<Task> {
+        check_capability(&context.capabilities, &AI_DELETE_CAPABILITY)?;
+        Ok(Task::default())
+    }
+
+    async fn ai_update_task(&self, context: &RequestContext, _task_id: String, _task: TaskInput) -> FieldResult<Task> {
+        check_capability(&context.capabilities, &AI_UPDATE_CAPABILITY)?;
+        Ok(Task::default())
+    }
+
+    async fn ai_prompt(&self, context: &RequestContext, _task_id: String, _prompt: String) -> FieldResult<Task> {
+        check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
+        Ok(Task::default())
+    }
+
+    async fn ai_embed(&self, context: &RequestContext, _model_id: String, text: String) -> FieldResult<String> {
+        check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
+        let vector = AIService::embed(text).await?;
+
+        Ok(String::from(""))
+    }
+
+    async fn ai_open_transcription_stream(&self, context: &RequestContext, _model_id: String) -> FieldResult<String> {
+        check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
+        Ok(String::from(""))
+    }
+
+    // note: f32 does not implement IsInputType, so I'm taking f64 here
+    async fn ai_feed_transcription_stream(&self, context: &RequestContext, _stream_id: String, _audio: Vec<f64>) -> FieldResult<String> {
+        check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
+        Ok(String::from(""))
+    }
+
+    async fn ai_close_transcription_stream(&self, context: &RequestContext, _stream_id: String) -> FieldResult<String> {
+        check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
+        Ok(String::from(""))
     }
 }

@@ -593,6 +593,44 @@ pub struct PerspectiveStateFilter {
     pub perspective: PerspectiveHandle,
 }
 
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptExamplesInput {
+    pub input: String,
+    pub output: String,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptExamples {
+    pub input: String,
+    pub output: String,
+}
+
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskInput {
+    pub model_id: String,
+    pub system_prompt: String,
+    pub prompt_examples: Vec<PromptExamplesInput>,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Task {
+    pub model_id: String,
+    pub task_id: String,
+    pub system_prompt: String,
+    pub prompt_examples: Vec<PromptExamples>,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptOutput {
+    pub result: String,
+}
+
+
 #[derive(Debug, Deserialize, Serialize)]
 pub enum JsResultType<T>
 where
