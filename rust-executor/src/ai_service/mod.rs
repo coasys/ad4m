@@ -61,9 +61,7 @@ impl AIService {
     {
         let global_instance_arc = AIService::global_instance();
         let lock_result = global_instance_arc.lock().await;
-        let ai_service_ref = lock_result
-            .as_ref()
-            .expect("AI service not initialized");
+        let ai_service_ref = lock_result.as_ref().expect("AI service not initialized");
         //let ai_service_ref = ai_service_lock.as_ref().expect("AIService not initialized");
         f(ai_service_ref)
     }
@@ -74,9 +72,7 @@ impl AIService {
     {
         let global_instance_arc = AIService::global_instance();
         let mut lock_result = global_instance_arc.lock().await;
-        let ai_service_mut = lock_result
-            .as_mut()
-            .expect("AI service not initialized");
+        let ai_service_mut = lock_result.as_mut().expect("AI service not initialized");
         //let ai_service_mut = ai_service_lock.as_mut().expect("AIService not initialized");
         f(ai_service_mut)
     }
@@ -137,9 +133,7 @@ impl AIService {
     pub async fn embed(text: String) -> Result<Vec<f32>> {
         let global_instance_arc = AIService::global_instance();
         let lock_result = global_instance_arc.lock().await;
-        let ai_service_ref = lock_result
-            .as_ref()
-            .expect("AI service not initialized");
+        let ai_service_ref = lock_result.as_ref().expect("AI service not initialized");
 
         let embedding = ai_service_ref.bert.embed(text).await?;
         Ok(embedding.to_vec())

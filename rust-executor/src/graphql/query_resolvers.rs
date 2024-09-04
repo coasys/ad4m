@@ -548,7 +548,7 @@ impl Query {
 
     async fn ai_tasks(&self, context: &RequestContext) -> FieldResult<Vec<AITask>> {
         check_capability(&context.capabilities, &AI_READ_CAPABILITY)?;
-        
+
         match AIService::get_tasks() {
             Ok(tasks) => Ok(tasks),
             Err(e) => Err(FieldError::new(e.to_string(), Value::null())),

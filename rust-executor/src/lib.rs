@@ -35,7 +35,9 @@ pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
 
 use crate::{
-    agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb, languages::LanguageController, prolog_service::init_prolog_service, runtime_service::RuntimeService
+    agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb,
+    languages::LanguageController, prolog_service::init_prolog_service,
+    runtime_service::RuntimeService,
 };
 
 /// Runs the GraphQL server and the deno core runtime
@@ -65,7 +67,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     .expect("Failed to initialize Ad4mDb");
 
     info!("Initializing AI service...");
-    AIService::init_global_instance().await.expect("Couldn't initialize AI service");
+    AIService::init_global_instance()
+        .await
+        .expect("Couldn't initialize AI service");
 
     info!("Initializing Agent service...");
     AgentService::init_global_instance(config.app_data_path.clone().unwrap());

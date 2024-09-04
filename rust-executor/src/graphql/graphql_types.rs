@@ -2,7 +2,8 @@ use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::agent::signatures::verify;
 use crate::js_core::JsCoreHandle;
 use crate::types::{
-    AIPromptExamples, AITask, DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link, Notification, TriggeredNotification
+    AIPromptExamples, AITask, DecoratedExpressionProof, DecoratedLinkExpression, Expression,
+    ExpressionProof, Link, Notification, TriggeredNotification,
 };
 use coasys_juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
@@ -622,7 +623,11 @@ impl From<AITaskInput> for AITask {
             task_id: String::new(),
             model_id: input.model_id,
             system_prompt: input.system_prompt,
-            prompt_examples: input.prompt_examples.into_iter().map(|p|p.into()).collect(),
+            prompt_examples: input
+                .prompt_examples
+                .into_iter()
+                .map(|p| p.into())
+                .collect(),
         }
     }
 }

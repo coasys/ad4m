@@ -1212,7 +1212,11 @@ impl Mutation {
         Ok(true)
     }
 
-    async fn ai_add_task(&self, context: &RequestContext, task: AITaskInput) -> FieldResult<AITask> {
+    async fn ai_add_task(
+        &self,
+        context: &RequestContext,
+        task: AITaskInput,
+    ) -> FieldResult<AITask> {
         check_capability(&context.capabilities, &AI_CREATE_CAPABILITY)?;
         Ok(AIService::add_task(task.into())?)
     }
@@ -1223,7 +1227,10 @@ impl Mutation {
         task_id: String,
     ) -> FieldResult<AITask> {
         check_capability(&context.capabilities, &AI_DELETE_CAPABILITY)?;
-        if let Some(task) = AIService::get_tasks()?.into_iter().find(|t| t.task_id == task_id) {
+        if let Some(task) = AIService::get_tasks()?
+            .into_iter()
+            .find(|t| t.task_id == task_id)
+        {
             AIService::delete_task(task_id)?;
             Ok(task)
         } else {
