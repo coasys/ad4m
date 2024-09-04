@@ -8,7 +8,7 @@ use crate::{
         perspective_instance::{PerspectiveInstance, SdnaType},
         remove_perspective, update_perspective,
     },
-    types::{DecoratedLinkExpression, Link, LinkExpression},
+    types::{AITask, DecoratedLinkExpression, Link, LinkExpression},
 };
 use crate::{
     db::Ad4mDb,
@@ -1212,28 +1212,38 @@ impl Mutation {
         Ok(true)
     }
 
-    async fn ai_add_task(&self, context: &RequestContext, _task: TaskInput) -> FieldResult<Task> {
+    async fn ai_add_task(&self, context: &RequestContext, task: AITaskInput) -> FieldResult<AITask> {
         check_capability(&context.capabilities, &AI_CREATE_CAPABILITY)?;
-        Ok(Task::default())
+        Ok(AIService::add_task(task.into())?)
     }
 
     async fn ai_remove_task(
         &self,
         context: &RequestContext,
-        _task_id: String,
-    ) -> FieldResult<Task> {
+        task_id: String,
+    ) -> FieldResult<AITask> {
         check_capability(&context.capabilities, &AI_DELETE_CAPABILITY)?;
-        Ok(Task::default())
+        if let Some(task) = AIService::get_tasks()?.into_iter().find(|t| t.task_id == task_id) {
+            AIService::delete_task(task_id)?;
+            Ok(task)
+        } else {
+            Err(FieldError::new(
+                "Task not found",
+                graphql_value!({ "task_id": task_id }),
+            ))
+        }
     }
 
     async fn ai_update_task(
         &self,
         context: &RequestContext,
-        _task_id: String,
-        _task: TaskInput,
-    ) -> FieldResult<Task> {
+        task_id: String,
+        task: AITaskInput,
+    ) -> FieldResult<AITask> {
         check_capability(&context.capabilities, &AI_UPDATE_CAPABILITY)?;
-        Ok(Task::default())
+        let mut task: AITask = task.into();
+        task.task_id = task_id;
+        Ok(AIService::update_task(task)?)
     }
 
     async fn ai_prompt(
@@ -1241,9 +1251,9 @@ impl Mutation {
         context: &RequestContext,
         _task_id: String,
         _prompt: String,
-    ) -> FieldResult<Task> {
+    ) -> FieldResult<AITask> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
-        Ok(Task::default())
+        Ok(AITask::default())
     }
 
     async fn ai_embed(

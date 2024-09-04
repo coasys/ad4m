@@ -32,22 +32,22 @@ export class PromptExamples {
 @ObjectType()
 export class Task {
     @Field()
-    model_id: string;
+    modelId: string;
 
     @Field()
-    task_id: string;
+    taskId: string;
 
     @Field()
-    system_prompt: string;
+    systemPrompt: string;
 
     @Field(type => [PromptExamples])
-    prompt_examples: PromptExamples[];
+    promptExamples: PromptExamples[];
 
     constructor(model_id: string, task_id: string, system_prompt: string, prompt_examples: PromptExamples[]) {
-        this.model_id = model_id;
-        this.task_id = task_id;
-        this.system_prompt = system_prompt;
-        this.prompt_examples = prompt_examples;
+        this.modelId = model_id;
+        this.taskId = task_id;
+        this.systemPrompt = system_prompt;
+        this.promptExamples = prompt_examples;
     }
 }
 

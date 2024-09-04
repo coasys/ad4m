@@ -203,7 +203,7 @@ impl Ad4mDb {
             let prompt_examples: Vec<AIPromptExamples> =
                 serde_json::from_str(&row.get::<_, String>(3)?).unwrap();
             Ok(Some(AITask {
-                id: row.get(0)?,
+                task_id: row.get(0)?,
                 model_id: row.get(1)?,
                 system_prompt: row.get(2)?,
                 prompt_examples,
@@ -219,7 +219,7 @@ impl Ad4mDb {
             let prompt_examples: Vec<AIPromptExamples> =
                 serde_json::from_str(&row.get::<_, String>(3)?).unwrap();
             let task = AITask {
-                id: row.get(0)?,
+                task_id: row.get(0)?,
                 model_id: row.get(1)?,
                 system_prompt: row.get(2)?,
                 prompt_examples,

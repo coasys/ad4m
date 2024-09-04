@@ -385,10 +385,10 @@ pub struct AIPromptExamples {
     pub output: String,
 }
 
-#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub struct AITask {
-    pub id: String,
+    pub task_id: String,
     pub model_id: String,
     pub system_prompt: String,
     pub prompt_examples: Vec<AIPromptExamples>,

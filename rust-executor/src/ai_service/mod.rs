@@ -107,10 +107,10 @@ impl AIService {
     }
 
     pub fn update_task(task: AITask) -> Result<AITask> {
-        let task_id = task.id.clone();
+        let task_id = task.task_id.clone();
         Ad4mDb::with_global_instance(|db| {
             db.update_task(
-                task.id,
+                task.task_id,
                 task.model_id,
                 task.system_prompt,
                 task.prompt_examples,

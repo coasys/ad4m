@@ -20,7 +20,7 @@ export class TaskInput {
 @Resolver()
 export default class AIResolver {
     @Query(() => [Task])
-    tasks(): Task[] {
+    aiTasks(): Task[] {
         return []
     }
 

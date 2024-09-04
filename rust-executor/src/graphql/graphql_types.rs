@@ -2,8 +2,7 @@ use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::agent::signatures::verify;
 use crate::js_core::JsCoreHandle;
 use crate::types::{
-    DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link,
-    Notification, TriggeredNotification,
+    AIPromptExamples, AITask, DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link, Notification, TriggeredNotification
 };
 use coasys_juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
@@ -595,33 +594,37 @@ pub struct PerspectiveStateFilter {
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct PromptExamplesInput {
+pub struct AIPromptExamplesInput {
     pub input: String,
     pub output: String,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct PromptExamples {
-    pub input: String,
-    pub output: String,
+impl From<AIPromptExamplesInput> for AIPromptExamples {
+    fn from(input: AIPromptExamplesInput) -> AIPromptExamples {
+        AIPromptExamples {
+            input: input.input,
+            output: input.output,
+        }
+    }
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct TaskInput {
+pub struct AITaskInput {
     pub model_id: String,
     pub system_prompt: String,
-    pub prompt_examples: Vec<PromptExamplesInput>,
+    pub prompt_examples: Vec<AIPromptExamplesInput>,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct Task {
-    pub model_id: String,
-    pub task_id: String,
-    pub system_prompt: String,
-    pub prompt_examples: Vec<PromptExamples>,
+impl From<AITaskInput> for AITask {
+    fn from(input: AITaskInput) -> AITask {
+        AITask {
+            task_id: String::new(),
+            model_id: input.model_id,
+            system_prompt: input.system_prompt,
+            prompt_examples: input.prompt_examples.into_iter().map(|p|p.into()).collect(),
+        }
+    }
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
