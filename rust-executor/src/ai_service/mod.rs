@@ -45,7 +45,7 @@ pub struct AIService {
 
 impl AIService {
     pub async fn new() -> Result<Self> {
-        let llama = Llama::builder().build().await?;
+        let llama = Llama::builder().with_source(LlamaSource::tiny_llama_1_1b()).build().await?;
 
         let mut mapped_tasks: HashMap<String, Task> = HashMap::new();
 
@@ -185,17 +185,16 @@ impl AIService {
         Ok(updated_task)
     }
 
-    pub async fn prompt(&self, task_id: String, prompt: String) -> Result<String> {
-        let task = self.tasks.get(&task_id);
+    pub async fn prompt(task_id: String, prompt: String) -> Result<String> {
+        let global_instance_arc = AIService::global_instance();
+        let lock_result = global_instance_arc.lock().await;
+        let ai_service_ref = lock_result.as_ref().expect("AI service not initialized");
 
-        if task.is_none() {
-            return Err(AIServiceError::TaskNotFound.into());
+        if let Some(task) = ai_service_ref.tasks.get(&task_id){
+            Ok(task.run(prompt, &ai_service_ref.llama).all_text().await)
+        } else {
+            Err(AIServiceError::TaskNotFound.into())
         }
-
-        // Run AI model with prompt
-        let result: String = task.unwrap().run(prompt, &self.llama).all_text().await;
-
-        Ok(result)
     }
 
     pub async fn embed(text: String) -> Result<Vec<f32>> {
@@ -210,7 +209,7 @@ impl AIService {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::AIPromptExamples;
+    use crate::{graphql::graphql_types::AIPromptExamplesInput};
 
     use super::*;
 
@@ -225,25 +224,29 @@ mod tests {
         assert!(vector.len() > 300)
     }
 
-    // #[tokio::test]
-    // async fn test_prompt() {
-    //     AIService::init_global_instance()
-    //         .await
-    //         .expect("initialization to work");
+    #[tokio::test]
+    async fn test_prompt() {
+        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        AIService::init_global_instance()
+            .await
+            .expect("initialization to work");
 
-    //     AIService::add_task(AITask {
-    //         task_id: "test".into(),
-    //         model_id: "gpt-3".into(),
-    //         system_prompt: "Test system prompt".into(),
-    //         prompt_examples: vec![AIPromptExamples{
-    //             prompt: "Test prompt".into(),
-    //             response: "Test response".into()
-    //         }],
-    //     });
+        let task = AIService::with_mutable_global_instance(|service| {
+            service.add_task(AITaskInput {
+                model_id: "Llama tiny 1b".into(),
+                system_prompt: "You are inside a test for tasks. Please make sure to create any non-zero length output".into(),
+                prompt_examples: vec![AIPromptExamplesInput{
+                    input: "Test string".into(),
+                    output: "Yes, I'm working!".into()
+                }],
+            })
+        }).await.expect("add_task to work without error");
 
-    //     let prompt = AIService::prompt("test".into(), "Test string".into())
-    //         .await
-    //         .expect("prompt to return a result");
-    //     assert!(prompt.len() > 0)
-    // }
+
+        let response = AIService::prompt(task.task_id, "Test string".into())
+            .await
+            .expect("prompt to return a result");
+        println!("Response: {}", response);
+        assert!(response.len() > 0)
+    }
 }
