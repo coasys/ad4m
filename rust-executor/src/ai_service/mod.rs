@@ -46,43 +46,26 @@ pub struct AIService {
 
 impl AIService {
     pub async fn new() -> Result<Self> {
+        let bert = Bert::builder().build().await?;
         let llama = Llama::builder()
             .with_source(LlamaSource::tiny_llama_1_1b())
             .build()
             .await?;
 
-        let mut mapped_tasks: HashMap<String, Task> = HashMap::new();
+        let service = AIService {
+            bert: Arc::new(Mutex::new(bert)),
+            llama: Arc::new(Mutex::new(llama)),
+            tasks: Arc::new(Mutex::new(HashMap::new())),
+        };
 
         let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
-        for task in tasks {
-            let task_id = task.task_id.clone();
-            let _model_id = task.model_id.clone();
-            let _system_prompt = task.system_prompt.clone();
-            let prompt_examples = task.prompt_examples.clone();
-            let task = Task::builder(task.system_prompt)
-                .with_examples(
-                    prompt_examples
-                        .clone()
-                        .into_iter()
-                        .map(|example| (example.input.into(), example.output.into()))
-                        .collect::<Vec<(String, String)>>(),
-                )
-                .build();
-
-            let exmaple_prompt_result = task.run("Test example prompt".to_string(), &llama);
-
-            log::info!("Example prompt result: {:?}", exmaple_prompt_result);
-
-            mapped_tasks.insert(task_id, task);
+        for task in &tasks {
+            service.spawn_task(task).await?;
         }
 
-        Ok(AIService {
-            bert: Arc::new(Mutex::new(Bert::builder().build().await?)),
-            llama: Arc::new(Mutex::new(llama)),
-            tasks: Arc::new(Mutex::new(mapped_tasks)),
-        })
+        Ok(service)
     }
 
     pub async fn init_global_instance() -> Result<()> {
@@ -113,9 +96,10 @@ impl AIService {
         })
         .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
-        self.spawn_task(&task.into()).await?;
         let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
             .expect("to get task that we just created");
+
+        self.spawn_task(&task).await?;
         Ok(task)
     }
 
