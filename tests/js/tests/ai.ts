@@ -47,7 +47,8 @@ export default function aiTests(testContext: TestContext) {
                 const ad4mClient = testContext.ad4mClient!
 
                 let vector = await ad4mClient.ai.embed("Bert", "Test string");
-                expect(typeof vector).to.equal("Array")
+                expect(typeof vector).to.equal("object")
+                expect(Array.isArray(vector)).to.be.true
                 expect(vector.length).to.be.greaterThan(300)
             })
         })
