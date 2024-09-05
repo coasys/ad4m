@@ -96,7 +96,11 @@ export class AIClient {
             `,
             variables: {
                 taskId,
-                task
+                task: {
+                    modelId: task.modelId,
+                    systemPrompt: task.systemPrompt,
+                    promptExamples: task.promptExamples
+                }
             }
         }));
 
