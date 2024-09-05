@@ -104,7 +104,7 @@ export class AIClient {
     }
 
     async prompt(taskId: string, prompt: string): Promise<string> {
-        const { prompt: output } = unwrapApolloResult(await this.#apolloClient.mutate({
+        const { aiPrompt } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
                 mutation AiPrompt($taskId: String!, $prompt: String!) {
                     aiPrompt(taskId: $taskId, prompt: $prompt) {
@@ -118,7 +118,7 @@ export class AIClient {
             }
         }));
 
-        return output.result;
+        return aiPrompt.result;
     }
 
     async embed(modelId: string, text: string): Promise<Array<number>> {
@@ -134,23 +134,17 @@ export class AIClient {
             }
         }));
 
-        console.log(aiEmbed);
-
         const compressed = base64js.toByteArray(aiEmbed);
 
-        console.log(compressed);
-
         const decompressed = JSON.parse(pako.inflate(compressed, { to: 'string' }));
-
-        console.log(decompressed);
 
         return decompressed;
     }
 
     async openTranscriptionStream(modelId: string, streamCallback: (text: string) => void): Promise<string> {
-        const { openTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
+        const { aiOpenTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation AiOpenTranscriptionStream {
+                mutation AiOpenTranscriptionStream($modelId: String!) {
                     aiOpenTranscriptionStream(modelId: $modelId)
                 }
             `,
@@ -166,7 +160,7 @@ export class AIClient {
                 }
             `,
             variables: {
-                streamId: openTranscriptionStream.stream_id
+                streamId: aiOpenTranscriptionStream
             }
         }).subscribe({
             next(data) {
@@ -179,15 +173,15 @@ export class AIClient {
             }
         });
 
-        this.#transcriptionSubscriptions.set(openTranscriptionStream.stream_id, () => subscription);
+        this.#transcriptionSubscriptions.set(aiOpenTranscriptionStream, subscription);
 
-        return openTranscriptionStream.stream_id;
+        return aiOpenTranscriptionStream;
     }
 
     async closeTranscriptionStream(streamId: string): Promise<void> {
-        const { closeTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
+        const { aiCloseTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation AiCloseTranscriptionStream($streamId: String!) {
+                mutation aiCloseTranscriptionStream($streamId: String!) {
                     aiCloseTranscriptionStream(streamId: $streamId)
                 }
             `,
@@ -202,13 +196,13 @@ export class AIClient {
             subscription.unsubscribe();
         }
 
-        return closeTranscriptionStream;
+        return aiCloseTranscriptionStream;
     }
 
     async feedTranscriptionStream(streamId: string, audio: Float32Array): Promise<void> {
         const { feedTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation AiFeedTranscriptionStream($streamId: String!, $audio: [Float!]) {
+                mutation AiFeedTranscriptionStream($streamId: String!, $audio: [Float!]!) {
                     aiFeedTranscriptionStream(streamId: $streamId, audio: $audio)
                 }
             `,

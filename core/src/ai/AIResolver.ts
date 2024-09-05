@@ -1,4 +1,4 @@
-import { Query, Resolver, Mutation, Arg, InputType, Field, Subscription, Float} from "type-graphql";
+import { Query, Resolver, Mutation, Arg, InputType, Field, Subscription, Float, PubSub} from "type-graphql";
 import { AIPromptOutput, AITask, AITaskInput } from "./Tasks";
 import pako from "pako";
 import base64js from 'base64-js';
@@ -8,7 +8,18 @@ import { AI_TRANSCRIPTION_TEXT_TOPIC } from "../PubSub";
 export default class AIResolver {
     @Query(returns => [AITask])
     aiTasks(): AITask[] {
-        return []
+        return [new AITask(
+            "modelId",
+            "task_id",
+            "systemPrompt",
+            []
+        ),
+        new AITask(
+            "modelId",
+            "task_id",
+            "systemPrompt",
+            []
+        )]
     }
 
     @Mutation(returns => AITask)
@@ -25,32 +36,32 @@ export default class AIResolver {
 
     @Mutation(() => AITask)
     aiRemoveTask(
-        @Arg("task_id") task_id: string
+        @Arg("taskId") taskId: string
     ): AITask {
         return new AITask(
-            "modelId",
-            task_id,
-            "systemPrompt",
+            "model_id",
+            taskId,
+            "system prompt",
             []
         )
     }
 
     @Mutation(() => AITask)
     aiUpdateTask(
-        @Arg("task_id") task_id: string,
+        @Arg("taskId") taskId: string,
         @Arg("task") task:AITaskInput,
     ): AITask {
         return new AITask(
             task.modelId,
-            task_id,
+            taskId,
             task.systemPrompt,
             task.promptExamples
         )
     }
 
-    @Mutation(() => AITask)
+    @Mutation(() => AIPromptOutput)
     aiPrompt(
-        @Arg("task_id") task_id: string,
+        @Arg("taskId") taskId: string,
         @Arg("prompt") input: string
     ): AIPromptOutput {
         return new AIPromptOutput(
@@ -75,27 +86,29 @@ export default class AIResolver {
     aiOpenTranscriptionStream(
         @Arg("modelId") modelId: string
     ): string {
-        return "stream_id"
+        return "streamId"
     }
 
     @Mutation(() => String)
     aiCloseTranscriptionStream(
-        @Arg("stream_id") stream_id: string
+        @Arg("streamId") streamId: string
     ): boolean {
         return true
     }
 
     @Mutation(() => String)
     aiFeedTranscriptionStream(
-        @Arg("stream_id") stream_id: string,
-        @Arg("audio", () => [Float]) audio: number[]
+        @Arg("streamId") streamId: string,
+        @Arg("audio", () => [Float]) audio: number[],
+        @PubSub() pubSub: any
     ): boolean {
+        pubSub.publish(AI_TRANSCRIPTION_TEXT_TOPIC, { streamId });
         return true
     }
 
     @Subscription({ topics: AI_TRANSCRIPTION_TEXT_TOPIC, nullable: false })
     aiTranscriptionText(
-        @Arg("stream_id") stream_id: string
+        @Arg("streamId") streamId: string
     ): string {
         return "transcription"
     }
