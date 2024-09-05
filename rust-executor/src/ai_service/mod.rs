@@ -168,7 +168,7 @@ impl AIService {
                     .prompt_examples
                     .clone()
                     .into_iter()
-                    .map(|example| (example.input.into(), example.output.into()))
+                    .map(|example| (example.input, example.output))
                     .collect::<Vec<(String, String)>>(),
             )
             .build();
