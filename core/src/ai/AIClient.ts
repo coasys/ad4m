@@ -1,6 +1,6 @@
 import { ApolloClient, gql } from "@apollo/client";
 import unwrapApolloResult from "../unwrapApolloResult";
-import base64js from 'base64js';
+import base64js from 'base64-js';
 import pako from 'pako'
 import { AITask, AITaskInput } from "./Tasks";
 
@@ -124,7 +124,7 @@ export class AIClient {
     async embed(modelId: string, text: string): Promise<Array<number>> {
         const { aiEmbed } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation AiEmbed($modelId: String!, $text: String!) {
+                mutation aiEmbed($modelId: String!, $text: String!) {
                     aiEmbed(modelId: $modelId, text: $text)
                 }
             `,
@@ -134,9 +134,15 @@ export class AIClient {
             }
         }));
 
-        const compressed = base64js.decode(aiEmbed);
+        console.log(aiEmbed);
 
-        const decompressed = JSON.parse(pako.inflate(compressed));
+        const compressed = base64js.toByteArray(aiEmbed);
+
+        console.log(compressed);
+
+        const decompressed = JSON.parse(pako.inflate(compressed, { to: 'string' }));
+
+        console.log(decompressed);
 
         return decompressed;
     }

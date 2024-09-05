@@ -24,6 +24,7 @@ import NeighbourhoodResolver from "./neighbourhood/NeighbourhoodResolver";
 import PerspectiveResolver from "./perspectives/PerspectiveResolver";
 import RuntimeResolver from "./runtime/RuntimeResolver";
 import ExpressionResolver from "./expression/ExpressionResolver";
+import AIResolver from './ai/AIResolver'
 import { AuthInfoInput, EntanglementProofInput, CapabilityInput, ResourceInput } from "./agent/Agent";
 import { LanguageMetaInput } from "./language/LanguageMeta";
 import { InteractionCall } from "./language/Language";
@@ -39,7 +40,8 @@ async function createGqlServer(port: number) {
             LanguageResolver,
             NeighbourhoodResolver,
             PerspectiveResolver,
-            RuntimeResolver
+            RuntimeResolver,
+            AIResolver
         ]
     })
 
@@ -1152,7 +1154,7 @@ describe('Ad4mClient', () => {
     })
     describe('.ai', () => {
         it('embed()', async () => {
-            const vector = await ad4mClient.ai.embed()
+            const vector = await ad4mClient.ai.embed("model", "test ets")
             expect(vector[0]).toEqual(0)
             expect(vector[1]).toEqual(10)
             expect(vector[2]).toEqual(20)

@@ -1,7 +1,7 @@
 import { Query, Resolver, Mutation, Arg, InputType, Field, Subscription, Float} from "type-graphql";
 import { AIPromptOutput, AITask, AITaskInput } from "./Tasks";
 import pako from "pako";
-import base64js from "base64js";
+import base64js from 'base64-js';
 import { AI_TRANSCRIPTION_TEXT_TOPIC } from "../PubSub";
 
 @Resolver()
@@ -60,23 +60,20 @@ export default class AIResolver {
 
     @Mutation(() => String)
     aiEmbed(
-        @Arg("model_id") model_id: string,
+        @Arg("modelId") modelId: string,
         @Arg("text") text: string
-    ): [number] {
+    ): string {
         const vec = [0, 10, 20, 30];
         const vecString = JSON.stringify(vec);
         const compressed = pako.deflate(vecString);
         const compressedString = base64js.fromByteArray(compressed);
 
-        const vecString1 = base64js.toByteArray(compressedString);
-        const decompressed = pako.inflate(vecString1);
-
-        return decompressed;
+        return compressedString;
     }
 
     @Mutation(() => String)
     aiOpenTranscriptionStream(
-        @Arg("model_id") model_id: string
+        @Arg("modelId") modelId: string
     ): string {
         return "stream_id"
     }
