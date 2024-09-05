@@ -1218,12 +1218,10 @@ impl Mutation {
         task: AITaskInput,
     ) -> FieldResult<AITask> {
         check_capability(&context.capabilities, &AI_CREATE_CAPABILITY)?;
-        let task = AIService::with_mutable_global_instance(|service| {
-            let added_task = service.add_task(task.clone());
-            added_task
-        })
-        .await?;
-        Ok(task)
+        Ok(AIService::global_instance()
+            .await?
+            .add_task(task.clone())
+            .await?)
     }
 
     async fn ai_remove_task(
@@ -1236,10 +1234,10 @@ impl Mutation {
             .into_iter()
             .find(|t| t.task_id == task_id)
         {
-            AIService::with_mutable_global_instance(|service| {
-                let _ = service.delete_task(task_id.clone());
-            })
-            .await;
+            AIService::global_instance()
+                .await?
+                .delete_task(task_id.clone())
+                .await?;
             Ok(task)
         } else {
             Err(FieldError::new(
@@ -1258,10 +1256,10 @@ impl Mutation {
         check_capability(&context.capabilities, &AI_UPDATE_CAPABILITY)?;
         let mut task: AITask = task.into();
         task.task_id = task_id;
-        let task =
-            AIService::with_mutable_global_instance(|service| service.update_task(task.clone()))
-                .await?;
-        Ok(task)
+        Ok(AIService::global_instance()
+            .await?
+            .update_task(task.clone())
+            .await?)
     }
 
     async fn ai_prompt(

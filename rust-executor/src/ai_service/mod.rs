@@ -1,6 +1,7 @@
 use crate::db::Ad4mDb;
 use crate::graphql::graphql_types::AITaskInput;
 use crate::types::AITask;
+use anyhow::anyhow;
 use deno_core::error::AnyError;
 use kalosm::language::*;
 use std::collections::HashMap;
@@ -36,10 +37,11 @@ lazy_static! {
     static ref AI_SERVICE: Arc<Mutex<Option<AIService>>> = Arc::new(Mutex::new(None));
 }
 
+#[derive(Clone)]
 pub struct AIService {
-    bert: Bert,
-    llama: Llama,
-    tasks: HashMap<String, Task>,
+    bert: Arc<Mutex<Bert>>,
+    llama: Arc<Mutex<Llama>>,
+    tasks: Arc<Mutex<HashMap<String, Task>>>,
 }
 
 impl AIService {
@@ -77,9 +79,9 @@ impl AIService {
         }
 
         Ok(AIService {
-            bert: Bert::builder().build().await?,
-            llama,
-            tasks: mapped_tasks,
+            bert: Arc::new(Mutex::new(Bert::builder().build().await?)),
+            llama: Arc::new(Mutex::new(llama)),
+            tasks: Arc::new(Mutex::new(mapped_tasks)),
         })
     }
 
@@ -90,71 +92,38 @@ impl AIService {
         Ok(())
     }
 
-    pub fn global_instance() -> Arc<Mutex<Option<AIService>>> {
-        AI_SERVICE.clone()
+    pub async fn global_instance() -> Result<AIService> {
+        AI_SERVICE
+            .lock()
+            .await
+            .clone()
+            .ok_or(anyhow!(AIServiceError::ServiceNotInitialized))
     }
 
-    pub async fn with_global_instance<F, R>(f: F) -> R
-    where
-        F: FnOnce(&AIService) -> R,
-    {
-        let global_instance_arc = AIService::global_instance();
-        let lock_result = global_instance_arc.lock().await;
-        let ai_service_ref = lock_result.as_ref().expect("AI service not initialized");
-        //let ai_service_ref = ai_service_lock.as_ref().expect("AIService not initialized");
-        f(ai_service_ref)
-    }
-
-    pub async fn with_mutable_global_instance<F, R>(f: F) -> R
-    where
-        F: FnOnce(&mut AIService) -> R,
-    {
-        let global_instance_arc = AIService::global_instance();
-        let mut lock_result = global_instance_arc.lock().await;
-        let ai_service_mut = lock_result.as_mut().expect("AI service not initialized");
-        //let ai_service_mut = ai_service_lock.as_mut().expect("AIService not initialized");
-        f(ai_service_mut)
-    }
-
-    pub fn add_task(&mut self, task: AITaskInput) -> Result<AITask> {
+    pub async fn add_task(&mut self, task: AITaskInput) -> Result<AITask> {
         let task_id = Ad4mDb::with_global_instance(|db| {
             db.add_task(
-                task.model_id,
-                task.system_prompt,
-                task.prompt_examples.into_iter().map(|p| p.into()).collect(),
+                task.model_id.clone(),
+                task.system_prompt.clone(),
+                task.prompt_examples
+                    .iter()
+                    .map(|p| p.clone().into())
+                    .collect(),
             )
         })
         .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
-        let retrieved_task = Ad4mDb::with_global_instance(|db| db.get_task(task_id.clone()))
-            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
-            .ok_or(AIServiceError::TaskNotFound)?;
-
-        let task = Task::builder(retrieved_task.system_prompt.clone())
-            .with_examples(
-                retrieved_task
-                    .prompt_examples
-                    .clone()
-                    .into_iter()
-                    .map(|example| (example.input.into(), example.output.into()))
-                    .collect::<Vec<(String, String)>>(),
-            )
-            .build();
-
-        let exmaple_prompt_result = task.run("Test example prompt".to_string(), &self.llama);
-
-        log::info!("Example prompt result: {:?}", exmaple_prompt_result);
-
-        self.tasks.insert(task_id, task);
-
-        Ok(retrieved_task)
+        self.spawn_task(&task.into()).await?;
+        let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
+            .expect("to get task that we just created");
+        Ok(task)
     }
 
-    pub fn delete_task(&mut self, task_id: String) -> Result<bool> {
+    pub async fn delete_task(&mut self, task_id: String) -> Result<bool> {
         Ad4mDb::with_global_instance(|db| db.remove_task(task_id.clone()))
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
-        self.tasks.remove(&task_id);
+        self.tasks.lock().await.remove(&task_id);
 
         Ok(true)
     }
@@ -165,7 +134,7 @@ impl AIService {
         Ok(tasks)
     }
 
-    pub fn update_task(&mut self, task: AITask) -> Result<AITask> {
+    pub async fn update_task(&mut self, task: AITask) -> Result<AITask> {
         let task_id = task.task_id.clone();
         Ad4mDb::with_global_instance(|db| {
             db.update_task(
@@ -181,9 +150,37 @@ impl AIService {
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
             .ok_or(AIServiceError::TaskNotFound)?;
 
-        let task = Task::builder(updated_task.system_prompt.clone())
+        self.spawn_task(&updated_task).await?;
+
+        Ok(updated_task)
+    }
+
+    pub async fn prompt(task_id: String, prompt: String) -> Result<String> {
+        let service = AIService::global_instance().await?;
+        let tasks = service.tasks.lock().await;
+        let llama = service.llama.lock().await;
+        if let Some(task) = tasks.get(&task_id) {
+            Ok(task.run(prompt, &*llama).all_text().await)
+        } else {
+            Err(AIServiceError::TaskNotFound.into())
+        }
+    }
+
+    pub async fn embed(text: String) -> Result<Vec<f32>> {
+        Ok(AIService::global_instance()
+            .await?
+            .bert
+            .lock()
+            .await
+            .embed(text)
+            .await?
+            .to_vec())
+    }
+
+    async fn spawn_task(&self, task_description: &AITask) -> Result<()> {
+        let task = Task::builder(task_description.system_prompt.clone())
             .with_examples(
-                updated_task
+                task_description
                     .prompt_examples
                     .clone()
                     .into_iter()
@@ -192,34 +189,20 @@ impl AIService {
             )
             .build();
 
-        let exmaple_prompt_result = task.run("Test example prompt".to_string(), &self.llama);
+        let _ = self
+            .run_task(&task, "Test example prompt".to_string())
+            .await;
+        self.tasks
+            .lock()
+            .await
+            .insert(task_description.task_id.clone(), task);
 
-        log::info!("Example prompt result: {:?}", exmaple_prompt_result);
-
-        self.tasks.insert(task_id, task);
-
-        Ok(updated_task)
+        Ok(())
     }
 
-    pub async fn prompt(task_id: String, prompt: String) -> Result<String> {
-        let global_instance_arc = AIService::global_instance();
-        let lock_result = global_instance_arc.lock().await;
-        let ai_service_ref = lock_result.as_ref().expect("AI service not initialized");
-
-        if let Some(task) = ai_service_ref.tasks.get(&task_id) {
-            Ok(task.run(prompt, &ai_service_ref.llama).all_text().await)
-        } else {
-            Err(AIServiceError::TaskNotFound.into())
-        }
-    }
-
-    pub async fn embed(text: String) -> Result<Vec<f32>> {
-        let global_instance_arc = AIService::global_instance();
-        let lock_result = global_instance_arc.lock().await;
-        let ai_service_ref = lock_result.as_ref().expect("AI service not initialized");
-
-        let embedding = ai_service_ref.bert.embed(text).await?;
-        Ok(embedding.to_vec())
+    async fn run_task(&self, task: &Task, prompt: String) -> String {
+        let llama = self.llama.lock().await;
+        task.run(prompt, &*llama).all_text().await
     }
 }
 
