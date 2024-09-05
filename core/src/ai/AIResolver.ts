@@ -1,5 +1,5 @@
 import { Query, Resolver, Mutation, Arg, InputType, Field, Subscription, Float, PubSub} from "type-graphql";
-import { AIPromptOutput, AITask, AITaskInput } from "./Tasks";
+import { AITask, AITaskInput } from "./Tasks";
 import pako from "pako";
 import base64js from 'base64-js';
 import { AI_TRANSCRIPTION_TEXT_TOPIC } from "../PubSub";
@@ -59,14 +59,12 @@ export default class AIResolver {
         )
     }
 
-    @Mutation(() => AIPromptOutput)
+    @Mutation(() => String)
     aiPrompt(
         @Arg("taskId") taskId: string,
         @Arg("prompt") input: string
-    ): AIPromptOutput {
-        return new AIPromptOutput(
-            "output"
-        )
+    ): string {
+        return "output"
     }
 
     @Mutation(() => String)

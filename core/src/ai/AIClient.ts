@@ -111,9 +111,7 @@ export class AIClient {
         const { aiPrompt } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
                 mutation AiPrompt($taskId: String!, $prompt: String!) {
-                    aiPrompt(taskId: $taskId, prompt: $prompt) {
-                        result
-                    }
+                    aiPrompt(taskId: $taskId, prompt: $prompt)
                 }
             `,
             variables: {
@@ -122,7 +120,7 @@ export class AIClient {
             }
         }));
 
-        return aiPrompt.result;
+        return aiPrompt;
     }
 
     async embed(modelId: string, text: string): Promise<Array<number>> {

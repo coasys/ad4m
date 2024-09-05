@@ -68,13 +68,3 @@ export class AITask {
         this.promptExamples = prompt_examples;
     }
 }
-
-@ObjectType()
-export class AIPromptOutput {
-    @Field()
-    result: string;
-
-    constructor(result: string) {
-        this.result = result;
-    }
-}
