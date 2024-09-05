@@ -1221,7 +1221,8 @@ impl Mutation {
         let task = AIService::with_mutable_global_instance(|service| {
             let added_task = service.add_task(task.clone());
             added_task
-        }).await?;
+        })
+        .await?;
         Ok(task)
     }
 
@@ -1237,7 +1238,8 @@ impl Mutation {
         {
             AIService::with_mutable_global_instance(|service| {
                 let _ = service.delete_task(task_id.clone());
-            }).await;
+            })
+            .await;
             Ok(task)
         } else {
             Err(FieldError::new(
@@ -1256,20 +1258,20 @@ impl Mutation {
         check_capability(&context.capabilities, &AI_UPDATE_CAPABILITY)?;
         let mut task: AITask = task.into();
         task.task_id = task_id;
-        let task = AIService::with_mutable_global_instance(|service| {
-            service.update_task(task.clone())
-        }).await?;
+        let task =
+            AIService::with_mutable_global_instance(|service| service.update_task(task.clone()))
+                .await?;
         Ok(task)
     }
 
     async fn ai_prompt(
         &self,
         context: &RequestContext,
-        _task_id: String,
-        _prompt: String,
-    ) -> FieldResult<AITask> {
+        task_id: String,
+        prompt: String,
+    ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
-        Ok(AITask::default())
+        Ok(AIService::prompt(task_id, prompt).await?)
     }
 
     async fn ai_embed(
