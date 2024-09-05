@@ -43,6 +43,36 @@ export default function aiTests(testContext: TestContext) {
                 expect(tasksAfterRemoval.find(task => task.taskId === newTask.taskId)).to.be.undefined;
             })
 
+            it('can prompt a task', async () => {
+                const ad4mClient = testContext.ad4mClient!
+
+                // Create a new task
+                const newTask = await ad4mClient.ai.addTask(
+                    "test-model",
+                    "You are a helpful assistant. Always respond with a greeting followed by your answer.",
+                    [{ input: "What's the capital of France?", output: "Hello! The capital of France is Paris." }]
+                );
+
+                expect(newTask).to.have.property('taskId');
+
+                // Prompt the task
+                const promptResult = await ad4mClient.ai.prompt(newTask.taskId, "What's the largest planet in our solar system?");
+
+                console.log("PROMPT RESULT:", promptResult)
+                // Check if the result is a non-empty string
+                expect(promptResult).to.be.a('string');
+                expect(promptResult.length).to.be.greaterThan(0);
+
+                // Check if the result contains a greeting
+                expect(promptResult.toLowerCase()).to.match(/\b(hello|hi|greetings|hey)\b/);
+
+                // Check if the result mentions Jupiter
+                expect(promptResult.toLowerCase()).to.include('jupiter');
+
+                // Clean up: remove the task
+                await ad4mClient.ai.removeTask(newTask.taskId);
+            })
+
             it('can embed text to vectors', async () => {
                 const ad4mClient = testContext.ad4mClient!
 
