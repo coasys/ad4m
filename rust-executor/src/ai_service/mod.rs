@@ -9,7 +9,6 @@ use std::fmt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-
 #[derive(Debug)]
 pub enum AIServiceError {
     DatabaseError(String),
@@ -45,7 +44,10 @@ pub struct AIService {
 
 impl AIService {
     pub async fn new() -> Result<Self> {
-        let llama = Llama::builder().with_source(LlamaSource::tiny_llama_1_1b()).build().await?;
+        let llama = Llama::builder()
+            .with_source(LlamaSource::tiny_llama_1_1b())
+            .build()
+            .await?;
 
         let mut mapped_tasks: HashMap<String, Task> = HashMap::new();
 
@@ -58,9 +60,13 @@ impl AIService {
             let _system_prompt = task.system_prompt.clone();
             let prompt_examples = task.prompt_examples.clone();
             let task = Task::builder(task.system_prompt)
-                .with_examples(prompt_examples.clone().into_iter().map(|example| {
-                    (example.input.into(), example.output.into())
-                }).collect::<Vec<(String, String)>>())
+                .with_examples(
+                    prompt_examples
+                        .clone()
+                        .into_iter()
+                        .map(|example| (example.input.into(), example.output.into()))
+                        .collect::<Vec<(String, String)>>(),
+                )
                 .build();
 
             let exmaple_prompt_result = task.run("Test example prompt".to_string(), &llama);
@@ -112,7 +118,11 @@ impl AIService {
 
     pub fn add_task(&mut self, task: AITaskInput) -> Result<AITask> {
         let task_id = Ad4mDb::with_global_instance(|db| {
-            db.add_task(task.model_id, task.system_prompt, task.prompt_examples.into_iter().map(|p|p.into()).collect())
+            db.add_task(
+                task.model_id,
+                task.system_prompt,
+                task.prompt_examples.into_iter().map(|p| p.into()).collect(),
+            )
         })
         .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
@@ -122,9 +132,12 @@ impl AIService {
 
         let task = Task::builder(retrieved_task.system_prompt.clone())
             .with_examples(
-                retrieved_task.prompt_examples.clone().into_iter().map(|example| {
-                    (example.input.into(), example.output.into())
-                }).collect::<Vec<(String, String)>>()
+                retrieved_task
+                    .prompt_examples
+                    .clone()
+                    .into_iter()
+                    .map(|example| (example.input.into(), example.output.into()))
+                    .collect::<Vec<(String, String)>>(),
             )
             .build();
 
@@ -170,9 +183,12 @@ impl AIService {
 
         let task = Task::builder(updated_task.system_prompt.clone())
             .with_examples(
-                updated_task.prompt_examples.clone().into_iter().map(|example| {
-                    (example.input.into(), example.output.into())
-                }).collect::<Vec<(String, String)>>()
+                updated_task
+                    .prompt_examples
+                    .clone()
+                    .into_iter()
+                    .map(|example| (example.input.into(), example.output.into()))
+                    .collect::<Vec<(String, String)>>(),
             )
             .build();
 
@@ -190,7 +206,7 @@ impl AIService {
         let lock_result = global_instance_arc.lock().await;
         let ai_service_ref = lock_result.as_ref().expect("AI service not initialized");
 
-        if let Some(task) = ai_service_ref.tasks.get(&task_id){
+        if let Some(task) = ai_service_ref.tasks.get(&task_id) {
             Ok(task.run(prompt, &ai_service_ref.llama).all_text().await)
         } else {
             Err(AIServiceError::TaskNotFound.into())
@@ -209,7 +225,7 @@ impl AIService {
 
 #[cfg(test)]
 mod tests {
-    use crate::{graphql::graphql_types::AIPromptExamplesInput};
+    use crate::graphql::graphql_types::AIPromptExamplesInput;
 
     use super::*;
 
@@ -241,7 +257,6 @@ mod tests {
                 }],
             })
         }).await.expect("add_task to work without error");
-
 
         let response = AIService::prompt(task.task_id, "Test string".into())
             .await
