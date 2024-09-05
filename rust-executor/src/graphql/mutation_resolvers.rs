@@ -1221,7 +1221,7 @@ impl Mutation {
         let task = AIService::with_mutable_global_instance(|service| {
             let added_task = service.add_task(task.clone());
             added_task
-        });
+        }).await?;
         Ok(task)
     }
 
@@ -1235,10 +1235,9 @@ impl Mutation {
             .into_iter()
             .find(|t| t.task_id == task_id)
         {
-            let task = AIService::with_mutable_global_instance(|service| {
-                let deleted_task = service.delete_task(task_id.clone());
-                deleted_task
-            });
+            AIService::with_mutable_global_instance(|service| {
+                let _ = service.delete_task(task_id.clone());
+            }).await;
             Ok(task)
         } else {
             Err(FieldError::new(
@@ -1258,9 +1257,8 @@ impl Mutation {
         let mut task: AITask = task.into();
         task.task_id = task_id;
         let task = AIService::with_mutable_global_instance(|service| {
-            let updated_task = service.update_task(task.clone());
-            updated_task
-        });
+            service.update_task(task.clone())
+        }).await?;
         Ok(task)
     }
 

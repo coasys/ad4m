@@ -609,6 +609,15 @@ impl From<AIPromptExamplesInput> for AIPromptExamples {
     }
 }
 
+impl From<AIPromptExamples> for AIPromptExamplesInput {
+    fn from(input: AIPromptExamples) -> AIPromptExamplesInput {
+        AIPromptExamplesInput {
+            input: input.input,
+            output: input.output,
+        }
+    }
+}
+
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AITaskInput {

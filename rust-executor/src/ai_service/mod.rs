@@ -3,11 +3,12 @@ use crate::graphql::graphql_types::AITaskInput;
 use crate::types::AITask;
 use deno_core::error::AnyError;
 use kalosm::language::*;
-use rustls::crypto::hash::Hash;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
 
 #[derive(Debug)]
 pub enum AIServiceError {
@@ -53,8 +54,8 @@ impl AIService {
 
         for task in tasks {
             let task_id = task.task_id.clone();
-            let model_id = task.model_id.clone();
-            let system_prompt = task.system_prompt.clone();
+            let _model_id = task.model_id.clone();
+            let _system_prompt = task.system_prompt.clone();
             let prompt_examples = task.prompt_examples.clone();
             let task = Task::builder(task.system_prompt)
                 .with_examples(prompt_examples.clone().into_iter().map(|example| {
@@ -76,32 +77,34 @@ impl AIService {
         })
     }
 
-    pub fn init_global_instance() {
-        let mut ai_service = AI_SERVICE.lock().unwrap();
-        *ai_service = Some(AIService::new());
+    pub async fn init_global_instance() -> Result<()> {
+        let new_service = AIService::new().await?;
+        let mut ai_service = AI_SERVICE.lock().await;
+        *ai_service = Some(new_service);
+        Ok(())
     }
 
     pub fn global_instance() -> Arc<Mutex<Option<AIService>>> {
         AI_SERVICE.clone()
     }
 
-    pub fn with_global_instance<F, R>(f: F) -> R
+    pub async fn with_global_instance<F, R>(f: F) -> R
     where
         F: FnOnce(&AIService) -> R,
     {
         let global_instance_arc = AIService::global_instance();
-        let lock_result = global_instance_arc.lock();
+        let lock_result = global_instance_arc.lock().await;
         let ai_service_ref = lock_result.as_ref().expect("AI service not initialized");
         //let ai_service_ref = ai_service_lock.as_ref().expect("AIService not initialized");
         f(ai_service_ref)
     }
 
-    pub fn with_mutable_global_instance<F>(f: F) -> R
+    pub async fn with_mutable_global_instance<F, R>(f: F) -> R
     where
         F: FnOnce(&mut AIService) -> R,
     {
         let global_instance_arc = AIService::global_instance();
-        let mut lock_result = global_instance_arc.lock();
+        let mut lock_result = global_instance_arc.lock().await;
         let ai_service_mut = lock_result.as_mut().expect("AI service not initialized");
         //let ai_service_mut = ai_service_lock.as_mut().expect("AIService not initialized");
         f(ai_service_mut)
@@ -109,7 +112,7 @@ impl AIService {
 
     pub fn add_task(&mut self, task: AITaskInput) -> Result<AITask> {
         let task_id = Ad4mDb::with_global_instance(|db| {
-            db.add_task(task.model_id, task.system_prompt, task.prompt_examples)
+            db.add_task(task.model_id, task.system_prompt, task.prompt_examples.into_iter().map(|p|p.into()).collect())
         })
         .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
@@ -190,7 +193,7 @@ impl AIService {
         }
 
         // Run AI model with prompt
-        let result: String = task.unwrap().run(prompt, &self.llama).all_text().await?;
+        let result: String = task.unwrap().run(prompt, &self.llama).all_text().await;
 
         Ok(result)
     }
