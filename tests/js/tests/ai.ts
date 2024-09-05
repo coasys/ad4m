@@ -50,7 +50,11 @@ export default function aiTests(testContext: TestContext) {
                 const newTask = await ad4mClient.ai.addTask(
                     "test-model",
                     "You are inside a test. Please ALWAYS respond with 'works', plus something else.",
-                    [{ input: "What's the capital of France?", output: "works. Also that is Paris" }]
+                    [
+                        { input: "What's the capital of France?", output: "works. Also that is Paris" },
+                        { input: "What's the largets planet in our solar system?", output: "works. That is Jupiter." }
+
+                    ]
                 );
 
                 expect(newTask).to.have.property('taskId');
