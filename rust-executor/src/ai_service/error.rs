@@ -6,6 +6,7 @@ pub enum AIServiceError {
     DatabaseError(String),
     TaskNotFound,
     ServiceNotInitialized,
+    #[allow(dead_code)]
     LockError,
 }
 
