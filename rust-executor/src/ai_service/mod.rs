@@ -5,31 +5,11 @@ use anyhow::anyhow;
 use deno_core::error::AnyError;
 use kalosm::language::*;
 use std::collections::HashMap;
-use std::error::Error;
-use std::fmt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use self::error::AIServiceError;
 
-#[derive(Debug)]
-pub enum AIServiceError {
-    DatabaseError(String),
-    TaskNotFound,
-    ServiceNotInitialized,
-    LockError,
-}
-
-impl Error for AIServiceError {}
-
-impl fmt::Display for AIServiceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AIServiceError::DatabaseError(msg) => write!(f, "Database error: {}", msg),
-            AIServiceError::TaskNotFound => write!(f, "Task not found"),
-            AIServiceError::ServiceNotInitialized => write!(f, "Service not initialized"),
-            AIServiceError::LockError => write!(f, "Lock error"),
-        }
-    }
-}
+mod error;
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
