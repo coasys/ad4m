@@ -111,7 +111,7 @@ impl AIService {
         .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
         self.tasks.lock().await.remove(&task_id);
-        
+
         let updated_task = Ad4mDb::with_global_instance(|db| db.get_task(task_id.clone()))
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
             .ok_or(AIServiceError::TaskNotFound)?;
