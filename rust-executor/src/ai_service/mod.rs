@@ -1,3 +1,4 @@
+use self::error::AIServiceError;
 use crate::db::Ad4mDb;
 use crate::graphql::graphql_types::AITaskInput;
 use crate::types::AITask;
@@ -7,7 +8,6 @@ use kalosm::language::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use self::error::AIServiceError;
 
 mod error;
 
@@ -119,12 +119,11 @@ impl AIService {
         Ok(updated_task)
     }
 
-    pub async fn prompt(task_id: String, prompt: String) -> Result<String> {
-        let service = AIService::global_instance().await?;
-        let tasks = service.tasks.lock().await;
-        let llama = service.llama.lock().await;
-        if let Some(task) = tasks.get(&task_id) {
-            Ok(task.run(prompt, &*llama).all_text().await)
+    pub async fn prompt(&self, task_id: String, prompt: String) -> Result<String> {
+        let tasks_lock = self.tasks.lock().await;
+
+        if let Some(task) = tasks_lock.get(&task_id) {
+            Ok(self.run_task(task, prompt).await)
         } else {
             Err(AIServiceError::TaskNotFound.into())
         }
@@ -156,6 +155,7 @@ impl AIService {
         let _ = self
             .run_task(&task, "Test example prompt".to_string())
             .await;
+
         self.tasks
             .lock()
             .await

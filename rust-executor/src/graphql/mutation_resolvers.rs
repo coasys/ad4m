@@ -1269,7 +1269,10 @@ impl Mutation {
         prompt: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
-        Ok(AIService::prompt(task_id, prompt).await?)
+        Ok(AIService::global_instance()
+            .await?
+            .prompt(task_id, prompt)
+            .await?)
     }
 
     async fn ai_embed(
