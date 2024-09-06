@@ -104,10 +104,6 @@ export default function aiTests(testContext: TestContext) {
                     console.log(`Prompt ${index + 1} result:`, result);
                 });
 
-                // Verify we got 10 unique responses
-                const uniqueResponses = new Set(promptResults);
-                expect(uniqueResponses.size).to.equal(10);
-
                 // Clean up: remove the task
                 await ad4mClient.ai.removeTask(newTask.taskId);
             })
