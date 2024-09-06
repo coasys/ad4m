@@ -74,6 +74,44 @@ export default function aiTests(testContext: TestContext) {
                 await ad4mClient.ai.removeTask(newTask.taskId);
             })
 
+            it('can prompt several task in a row fast', async () => {
+                const ad4mClient = testContext.ad4mClient!
+
+                // Create a new task
+                const newTask = await ad4mClient.ai.addTask(
+                    "test-model",
+                    "You are inside a test. Please respond with a short, unique message each time.",
+                    [
+                        { input: "Test 1", output: "Short response 1" },
+                        { input: "Test 2", output: "Short response 2" }
+                    ]
+                );
+
+                expect(newTask).to.have.property('taskId');
+
+                // Create an array of 10 prompts
+                const prompts = Array.from({ length: 10 }, (_, i) => `Test prompt ${i + 1}`);
+
+                // Run 10 prompts simultaneously
+                const promptResults = await Promise.all(
+                    prompts.map(prompt => ad4mClient.ai.prompt(newTask.taskId, prompt))
+                );
+
+                // Check results
+                promptResults.forEach((result, index) => {
+                    expect(result).to.be.a('string');
+                    expect(result.length).to.be.greaterThan(0);
+                    console.log(`Prompt ${index + 1} result:`, result);
+                });
+
+                // Verify we got 10 unique responses
+                const uniqueResponses = new Set(promptResults);
+                expect(uniqueResponses.size).to.equal(10);
+
+                // Clean up: remove the task
+                await ad4mClient.ai.removeTask(newTask.taskId);
+            })
+
             it('can embed text to vectors', async () => {
                 const ad4mClient = testContext.ad4mClient!
 
