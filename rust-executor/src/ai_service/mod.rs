@@ -6,8 +6,10 @@ use anyhow::anyhow;
 use deno_core::error::AnyError;
 use kalosm::language::*;
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, mpsc};
+use std::thread;
+use tokio::sync::{Mutex, oneshot};
+use std::panic::catch_unwind;
 
 mod error;
 
@@ -19,22 +21,38 @@ lazy_static! {
 
 #[derive(Clone)]
 pub struct AIService {
-    bert: Arc<Mutex<Bert>>,
-    llama: Arc<Mutex<Llama>>,
+    bert: mpsc::Sender<(String, oneshot::Sender<Result<String>>)>,
+    llama: mpsc::Sender<(String, oneshot::Sender<Result<String>>)>,
     tasks: Arc<Mutex<HashMap<String, Task>>>,
 }
 
 impl AIService {
     pub async fn new() -> Result<Self> {
-        let bert = Bert::builder().build().await?;
-        let llama = Llama::builder()
-            .with_source(LlamaSource::tiny_llama_1_1b())
-            .build()
-            .await?;
+        let (bert_tx, bert_rx) = mpsc::channel();
+        let (llama_tx, llama_rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let bert = Bert::builder().build().unwrap();
+            for (prompt, response_tx) in bert_rx {
+                let result = catch_unwind(|| bert.embed(prompt)).map_err(|_| "Panic occurred".into());
+                let _ = response_tx.send(result);
+            }
+        });
+
+        thread::spawn(move || {
+            let llama = Llama::builder()
+                .with_source(LlamaSource::tiny_llama_1_1b())
+                .build()
+                .unwrap();
+            for (prompt, response_tx) in llama_rx {
+                let result = catch_unwind(|| llama.run(prompt)).map_err(|_| "Panic occurred".into());
+                let _ = response_tx.send(result);
+            }
+        });
 
         let service = AIService {
-            bert: Arc::new(Mutex::new(bert)),
-            llama: Arc::new(Mutex::new(llama)),
+            bert: bert_tx,
+            llama: llama_tx,
             tasks: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -122,13 +140,9 @@ impl AIService {
     }
 
     pub async fn prompt(&self, task_id: String, prompt: String) -> Result<String> {
-        let tasks_lock = self.tasks.lock().await;
-
-        if let Some(task) = tasks_lock.get(&task_id) {
-            Ok(self.run_task(task, prompt).await)
-        } else {
-            Err(AIServiceError::TaskNotFound.into())
-        }
+        let (response_tx, response_rx) = oneshot::channel();
+        self.llama.send((prompt, response_tx)).unwrap();
+        response_rx.await.unwrap_or_else(|_| Err("Failed to receive response".into()))
     }
 
     pub async fn embed(text: String) -> Result<Vec<f32>> {
