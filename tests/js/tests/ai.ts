@@ -83,7 +83,14 @@ export default function aiTests(testContext: TestContext) {
                     "You are inside a test. Please respond with a short, unique message each time.",
                     [
                         { input: "Test 1", output: "Short response 1" },
-                        { input: "Test 2", output: "Short response 2" }
+                        { input: "Test 2", output: "Short response 2" },
+                        { input: "Test 3", output: "Short response 3" },
+                        { input: "Test long 1", output: "This is a much longer response that includes various details. It talks about the weather being sunny, the importance of staying hydrated, and even mentions a recipe for chocolate chip cookies. The response goes on to discuss the benefits of regular exercise, the plot of a popular novel, and concludes with a fun fact about the migration patterns of monarch butterflies." },
+                        { input: "Test long 2", output: "This is another much longer response that delves into various topics. It begins by discussing the intricate process of photosynthesis in plants, then transitions to the history of ancient civilizations, touching on the rise and fall of the Roman Empire. The response continues with an explanation of quantum mechanics and its implications for our understanding of the universe. It then explores the evolution of human language, the impact of climate change on global ecosystems, and the potential for artificial intelligence to revolutionize healthcare. The response concludes with a brief overview of the cultural significance of tea ceremonies in different parts of the world." },
+                        { input: "Test long 3", output: "This extensive response covers a wide range of subjects, starting with an in-depth analysis of sustainable urban planning and its impact on modern cities. It then shifts to discuss the evolution of musical instruments throughout history, touching on the development of the piano, guitar, and electronic synthesizers. The text continues with an exploration of the human immune system, detailing how it fights off pathogens and the importance of vaccinations. Next, it delves into the world of astronomy, describing the life cycle of stars and the formation of galaxies. The response also includes a section on the history of cryptography, from ancient ciphers to modern encryption algorithms used in digital security. It concludes with a discussion on the philosophy of ethics, examining various moral frameworks and their applications in contemporary society." },
+                        { input: "Test a", output: "Short response" },
+                        { input: "Test b", output: "Short response" },
+                        { input: "Test c", output: "Short response" },
                     ]
                 );
 
