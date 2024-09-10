@@ -92,7 +92,6 @@ impl AIService {
             let mut tasks = HashMap::<String, Task>::new();
 
             while let Some(task_request) = rt.block_on(llama_rx.recv()) {
-                println!("Llama message received: {:?}", task_request);
                 match task_request {
                     LLMTaskRequest::Spawn(spawn_request) => {
                         let task_description = spawn_request.task;
@@ -133,13 +132,11 @@ impl AIService {
                     }
 
                     LLMTaskRequest::Prompt(prompt_request) => {
-                        println!("Got prompt request {:?}", prompt_request);
                         if let Some(task) = tasks.get(&prompt_request.task_id) {
                             let mut maybe_result: Option<String> = None;
                             let mut tries = 0;
                             while maybe_result.is_none() && tries < 20 {
                                 tries += 1;
-                                println!("Try: {}", tries);
                                 match catch_unwind(|| {
                                     rt.block_on(
                                         task.run(prompt_request.prompt.clone(), &llama).all_text(),
@@ -152,7 +149,6 @@ impl AIService {
                                 }
                             }
 
-                            println!("maybe_result: {:?}", maybe_result);
                             if let Some(result) = maybe_result {
                                 let _ = prompt_request.result_sender.send(Ok(result));
                             } else {
@@ -172,8 +168,6 @@ impl AIService {
                     }
                 }
             }
-
-            println!("Llama thread exiting");
         });
 
         let service = AIService {
