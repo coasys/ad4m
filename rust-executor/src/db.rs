@@ -1255,7 +1255,7 @@ mod tests {
                 model_id.clone(),
                 system_prompt.clone(),
                 prompt_examples.clone(),
-                None
+                None,
             )
             .unwrap();
 

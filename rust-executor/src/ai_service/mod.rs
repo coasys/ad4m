@@ -73,7 +73,7 @@ impl AIService {
                     .iter()
                     .map(|p| p.clone().into())
                     .collect(),
-                task.meta_data.clone()
+                task.meta_data.clone(),
             )
         })
         .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
@@ -109,7 +109,7 @@ impl AIService {
                 task.model_id,
                 task.system_prompt,
                 task.prompt_examples,
-                task.meta_data
+                task.meta_data,
             )
         })
         .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
