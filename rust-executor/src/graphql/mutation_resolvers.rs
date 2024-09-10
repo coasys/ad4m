@@ -1282,7 +1282,7 @@ impl Mutation {
         text: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
-        let vector = AIService::embed(text).await?;
+        let vector = AIService::global_instance().await?.embed(text).await?;
         let json_string = serde_json::to_string(&vector)
             .map_err(|e| FieldError::from(format!("Failed to serialize vector: {}", e)))?;
 

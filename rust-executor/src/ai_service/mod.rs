@@ -273,16 +273,13 @@ impl AIService {
         rx.await?
     }
 
-    pub async fn embed(text: String) -> Result<Vec<f32>> {
+    pub async fn embed(&self, text: String) -> Result<Vec<f32>> {
         let (result_sender, rx) = oneshot::channel();
 
-        AIService::global_instance()
-            .await?
-            .bert
-            .send(EmbeddingRequest {
-                prompt: text,
-                result_sender,
-            })?;
+        self.bert.send(EmbeddingRequest {
+            prompt: text,
+            result_sender,
+        })?;
 
         rx.await?
     }
@@ -317,10 +314,9 @@ mod tests {
     #[tokio::test]
     async fn test_embedding() {
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        AIService::init_global_instance()
-            .await
-            .expect("initialization to work");
-        let vector = AIService::embed("Test string".into())
+        let service = AIService::new().await.expect("initialization to work");
+        let vector = service
+            .embed("Test string".into())
             .await
             .expect("embed to return a result");
         assert!(vector.len() > 300)
