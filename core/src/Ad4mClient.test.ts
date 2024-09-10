@@ -1169,7 +1169,8 @@ describe('Ad4mClient', () => {
         })
 
         it('addTask()', async () => {
-            const task = await ad4mClient.ai.addTask("model_id", "system prompt", []);
+            const task = await ad4mClient.ai.addTask("task_name", "model_id", "system prompt", []);
+            expect(task.name).toBe("task_name")
             expect(task.taskId).toBe("task_id")
             expect(task.modelId).toBe("model_id")
             expect(task.systemPrompt).toBe("system prompt")
@@ -1184,10 +1185,12 @@ describe('Ad4mClient', () => {
 
         it('updateTask()', async () => {
             const task = await ad4mClient.ai.updateTask("task_id", {
+                name: "task_name",
                 modelId: "model_id",
                 systemPrompt: "system prompt",
                 promptExamples: []
             });
+            expect(task.name).toBe("task_name")
             expect(task.taskId).toBe("task_id")
             expect(task.modelId).toBe("model_id")
             expect(task.systemPrompt).toBe("system prompt")

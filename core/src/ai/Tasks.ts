@@ -32,6 +32,9 @@ export class AIPromptExamples {
 @InputType()
 export class AITaskInput {
     @Field()
+    name: string;
+
+    @Field()
     modelId: string;
 
     @Field()
@@ -40,15 +43,23 @@ export class AITaskInput {
     @Field(type => [AIPromptExamplesInput])
     promptExamples: AIPromptExamplesInput[];
 
-    constructor(model_id: string, system_prompt: string, prompt_examples: AIPromptExamplesInput[]) {
+    @Field(type => String, { nullable: true })
+    metadata: string;
+
+    constructor(name: string, model_id: string, system_prompt: string, prompt_examples: AIPromptExamplesInput[], metadata?: string) {
+        this.name = name;
         this.modelId = model_id;
         this.systemPrompt = system_prompt;
         this.promptExamples = prompt_examples;
+        this.metadata = metadata;
     }
 }
 
 @ObjectType()
 export class AITask {
+    @Field()
+    name: string;
+
     @Field()
     modelId: string;
 
@@ -61,10 +72,23 @@ export class AITask {
     @Field(type => [AIPromptExamples])
     promptExamples: AIPromptExamples[];
 
-    constructor(model_id: string, task_id: string, system_prompt: string, prompt_examples: AIPromptExamples[]) {
+    @Field(type => String, { nullable: true })
+    metadata?: string;
+
+    @Field(type => Date)
+    createdAt: Date;
+
+    @Field(type => Date)
+    updatedAt: Date;
+
+    constructor(name: string, model_id: string, task_id: string, system_prompt: string, prompt_examples: AIPromptExamples[], metaData?: string, created_at?: Date, updated_at?: Date) {
+        this.name = name;
         this.modelId = model_id;
         this.taskId = task_id;
         this.systemPrompt = system_prompt;
         this.promptExamples = prompt_examples;
+        this.metadata = metaData;
+        this.createdAt = created_at;
+        this.updatedAt = updated_at;
     }
 }

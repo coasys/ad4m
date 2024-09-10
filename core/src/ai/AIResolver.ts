@@ -9,12 +9,14 @@ export default class AIResolver {
     @Query(returns => [AITask])
     aiTasks(): AITask[] {
         return [new AITask(
+            "task1",
             "modelId",
             "task_id",
             "systemPrompt",
             []
         ),
         new AITask(
+            "task2",
             "modelId",
             "task_id",
             "systemPrompt",
@@ -27,6 +29,7 @@ export default class AIResolver {
         @Arg("task") task: AITaskInput,
     ): AITask {
         return new AITask(
+            "task_name",
             task.modelId,
             "task_id",
             task.systemPrompt,
@@ -39,6 +42,7 @@ export default class AIResolver {
         @Arg("taskId") taskId: string
     ): AITask {
         return new AITask(
+            "task_name",
             "model_id",
             taskId,
             "system prompt",
@@ -52,6 +56,7 @@ export default class AIResolver {
         @Arg("task") task:AITaskInput,
     ): AITask {
         return new AITask(
+            task.name,
             task.modelId,
             taskId,
             task.systemPrompt,

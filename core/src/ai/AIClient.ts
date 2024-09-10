@@ -32,12 +32,13 @@ export class AIClient {
         return aiTasks;
     }
 
-    async addTask(modelId: string, systemPrompt: string, promptExamples: { input: string, output: string }[]): Promise<AITask> {
-        const task = new AITaskInput(modelId, systemPrompt, promptExamples);
+    async addTask(name: string, modelId: string, systemPrompt: string, promptExamples: { input: string, output: string }[], metaData: string): Promise<AITask> {
+        const task = new AITaskInput(name, modelId, systemPrompt, promptExamples, metaData);
         const { aiAddTask } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
                 mutation AiAddTask($task: AITaskInput!) {
                     aiAddTask(task: $task) {
+                        name
                         modelId
                         taskId
                         systemPrompt
@@ -61,6 +62,7 @@ export class AIClient {
             mutation: gql`
                 mutation AiRemoveTask($taskId: String!) {
                     aiRemoveTask(taskId: $taskId) {
+                        name
                         modelId
                         taskId
                         systemPrompt
@@ -84,6 +86,7 @@ export class AIClient {
             mutation: gql`
                 mutation AiUpdateTask($taskId: String!, $task: AITaskInput!) {
                     aiUpdateTask(taskId: $taskId, task: $task) {
+                        name
                         modelId
                         taskId
                         systemPrompt
@@ -97,6 +100,7 @@ export class AIClient {
             variables: {
                 taskId,
                 task: {
+                    name: task.name,
                     modelId: task.modelId,
                     systemPrompt: task.systemPrompt,
                     promptExamples: task.promptExamples
