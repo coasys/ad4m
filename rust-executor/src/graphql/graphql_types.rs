@@ -621,14 +621,20 @@ impl From<AIPromptExamples> for AIPromptExamplesInput {
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AITaskInput {
+    pub name: String,
     pub model_id: String,
     pub system_prompt: String,
     pub prompt_examples: Vec<AIPromptExamplesInput>,
+    pub meta_data: Option<String>,
 }
 
 impl From<AITaskInput> for AITask {
     fn from(input: AITaskInput) -> AITask {
+        let created_at = chrono::Utc::now().to_string();
+        let updated_at = created_at.clone();
+
         AITask {
+            name: input.name,
             task_id: String::new(),
             model_id: input.model_id,
             system_prompt: input.system_prompt,
@@ -637,6 +643,9 @@ impl From<AITaskInput> for AITask {
                 .into_iter()
                 .map(|p| p.into())
                 .collect(),
+            meta_data: input.meta_data,
+            created_at,
+            updated_at,
         }
     }
 }
