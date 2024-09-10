@@ -1290,7 +1290,7 @@ impl Mutation {
         let compressed_bytes = deflate::deflate_bytes_zlib(json_string.as_bytes());
 
         // Encode the compressed bytes to base64
-        let base64_encoded = BASE64_STANDARD.encode(&compressed_bytes);
+        let base64_encoded = BASE64_STANDARD.encode(compressed_bytes);
 
         Ok(base64_encoded)
     }

@@ -1,4 +1,5 @@
 import { Field, InputType, ObjectType } from "type-graphql";
+import { string } from "yargs";
 
 @InputType()
 export class AIPromptExamplesInput {
@@ -32,6 +33,9 @@ export class AIPromptExamples {
 @InputType()
 export class AITaskInput {
     @Field()
+    name: string;
+
+    @Field()
     modelId: string;
 
     @Field()
@@ -40,15 +44,23 @@ export class AITaskInput {
     @Field(type => [AIPromptExamplesInput])
     promptExamples: AIPromptExamplesInput[];
 
-    constructor(model_id: string, system_prompt: string, prompt_examples: AIPromptExamplesInput[]) {
+    @Field(type => String, { nullable: true })
+    metaData: string;
+
+    constructor(name: string, model_id: string, system_prompt: string, prompt_examples: AIPromptExamplesInput[], metaData?: string) {
+        this.name = name;
         this.modelId = model_id;
         this.systemPrompt = system_prompt;
         this.promptExamples = prompt_examples;
+        this.metaData = metaData;
     }
 }
 
 @ObjectType()
 export class AITask {
+    @Field()
+    name: string;
+
     @Field()
     modelId: string;
 
@@ -61,10 +73,23 @@ export class AITask {
     @Field(type => [AIPromptExamples])
     promptExamples: AIPromptExamples[];
 
-    constructor(model_id: string, task_id: string, system_prompt: string, prompt_examples: AIPromptExamples[]) {
+    @Field(type => String, { nullable: true })
+    metaData?: string;
+
+    @Field()
+    createdAt: string;
+
+    @Field()
+    updatedAt: string;
+
+    constructor(name: string, model_id: string, task_id: string, system_prompt: string, prompt_examples: AIPromptExamples[], metaData?: string, created_at?: string, updated_at?: string) {
+        this.name = name;
         this.modelId = model_id;
         this.taskId = task_id;
         this.systemPrompt = system_prompt;
         this.promptExamples = prompt_examples;
+        this.metaData = metaData;
+        this.createdAt = created_at;
+        this.updatedAt = updated_at;
     }
 }

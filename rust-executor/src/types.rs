@@ -390,10 +390,14 @@ pub struct AIPromptExamples {
 )]
 #[serde(rename_all = "camelCase")]
 pub struct AITask {
+    pub name: String,
     pub task_id: String,
     pub model_id: String,
     pub system_prompt: String,
     pub prompt_examples: Vec<AIPromptExamples>,
+    pub meta_data: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 impl Notification {

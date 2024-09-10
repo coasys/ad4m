@@ -209,12 +209,14 @@ impl AIService {
     pub async fn add_task(&self, task: AITaskInput) -> Result<AITask> {
         let task_id = Ad4mDb::with_global_instance(|db| {
             db.add_task(
+                task.name.clone(),
                 task.model_id.clone(),
                 task.system_prompt.clone(),
                 task.prompt_examples
                     .iter()
                     .map(|p| p.clone().into())
                     .collect(),
+                task.meta_data.clone(),
             )
         })
         .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
@@ -246,9 +248,11 @@ impl AIService {
         Ad4mDb::with_global_instance(|db| {
             db.update_task(
                 task.task_id,
+                task.name,
                 task.model_id,
                 task.system_prompt,
                 task.prompt_examples,
+                task.meta_data,
             )
         })
         .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
@@ -334,13 +338,15 @@ mod tests {
         let service = AIService::new().await.expect("initialization to work");
 
         let task = service.add_task(AITaskInput {
+                name: "Test task".into(),
                 model_id: "Llama tiny 1b".into(),
                 system_prompt: "You are inside a test for tasks. Please make sure to create any non-zero length output".into(),
                 prompt_examples: vec![AIPromptExamplesInput{
                     input: "Test string".into(),
                     output: "Yes, I'm working!".into()
                 }],
-        }).await.expect("add_task to work without error");
+                meta_data: None
+            }).await.expect("add_task to work without error");
 
         let response = service
             .prompt(task.task_id, "Test string".into())
@@ -357,8 +363,10 @@ mod tests {
         let service = AIService::new().await.expect("initialization to work");
 
         let task = service.add_task(AITaskInput {
+                name: "Test task".into(),
                 model_id: "Llama tiny 1b".into(),
                 system_prompt: "You are inside a test for tasks. Please make sure to create any non-zero length output".into(),
+                meta_data: None,
                 prompt_examples: vec![AIPromptExamplesInput{
                     input: "Test string".into(),
                     output: "Yes, I'm working!".into()

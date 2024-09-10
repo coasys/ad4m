@@ -166,9 +166,13 @@ impl Ad4mDb {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
                 model_id TEXT NOT NULL,
                 system_prompt TEXT NOT NULL,
-                prompt_examples TEXT NOT NULL
+                prompt_examples TEXT NOT NULL,
+                metadata TEXT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
              )",
             [],
         )?;
@@ -178,14 +182,18 @@ impl Ad4mDb {
 
     pub fn add_task(
         &self,
+        name: String,
         model_id: String,
         system_prompt: String,
         prompt_examples: Vec<AIPromptExamples>,
+        metadata: Option<String>,
     ) -> Result<String, rusqlite::Error> {
+        let created_at = chrono::Utc::now().to_string();
+        let updated_at = created_at.clone();
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO tasks (id, model_id, system_prompt, prompt_examples) VALUES (?1, ?2, ?3, ?4)",
-            params![id, model_id, system_prompt, serde_json::to_string(&prompt_examples).unwrap()],
+            "INSERT INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, name, model_id, system_prompt, serde_json::to_string(&prompt_examples).unwrap(), metadata, created_at, updated_at],
         )?;
         Ok(id)
     }
@@ -201,12 +209,16 @@ impl Ad4mDb {
 
         if let Some(row) = rows.next()? {
             let prompt_examples: Vec<AIPromptExamples> =
-                serde_json::from_str(&row.get::<_, String>(3)?).unwrap();
+                serde_json::from_str(&row.get::<_, String>(4)?).unwrap();
             Ok(Some(AITask {
                 task_id: row.get(0)?,
-                model_id: row.get(1)?,
-                system_prompt: row.get(2)?,
+                name: row.get(1)?,
+                model_id: row.get(2)?,
+                system_prompt: row.get(3)?,
                 prompt_examples,
+                meta_data: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
             }))
         } else {
             Ok(None)
@@ -217,12 +229,16 @@ impl Ad4mDb {
         let mut stmt = self.conn.prepare("SELECT * FROM tasks")?;
         let task_iter = stmt.query_map([], |row| {
             let prompt_examples: Vec<AIPromptExamples> =
-                serde_json::from_str(&row.get::<_, String>(3)?).unwrap();
+                serde_json::from_str(&row.get::<_, String>(4)?).unwrap();
             let task = AITask {
                 task_id: row.get(0)?,
-                model_id: row.get(1)?,
-                system_prompt: row.get(2)?,
+                name: row.get(1)?,
+                model_id: row.get(2)?,
+                system_prompt: row.get(3)?,
                 prompt_examples,
+                meta_data: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
             };
             Ok(task)
         })?;
@@ -237,13 +253,17 @@ impl Ad4mDb {
     pub fn update_task(
         &self,
         id: String,
+        name: String,
         model_id: String,
         system_prompt: String,
         prompt_examples: Vec<AIPromptExamples>,
+        metadata: Option<String>,
     ) -> Result<bool, rusqlite::Error> {
+        let updated_at = chrono::Utc::now().to_string();
+
         let result = self.conn.execute(
-            "UPDATE tasks SET model_id = ?2, system_prompt = ?3, prompt_examples = ?4 WHERE id = ?1",
-            params![id, model_id, system_prompt, serde_json::to_string(&prompt_examples).unwrap()],
+            "UPDATE tasks SET name = ?2, model_id = ?3, system_prompt = ?4, prompt_examples = ?5, metadata = ?6, updated_at = ?7 WHERE id = ?1",
+            params![id, name, model_id, system_prompt, serde_json::to_string(&prompt_examples).unwrap(), metadata, updated_at],
         )?;
         Ok(result > 0)
     }
@@ -1221,6 +1241,7 @@ mod tests {
         let db = Ad4mDb::new(":memory:").unwrap();
 
         // Test adding a task
+        let name = "Test Task".to_string();
         let model_id = "test_model".to_string();
         let system_prompt = "Test system prompt".to_string();
         let prompt_examples = vec![AIPromptExamples {
@@ -1230,9 +1251,11 @@ mod tests {
 
         let task_id = db
             .add_task(
+                name.clone(),
                 model_id.clone(),
                 system_prompt.clone(),
                 prompt_examples.clone(),
+                None,
             )
             .unwrap();
 

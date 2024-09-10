@@ -9,11 +9,13 @@ export default function aiTests(testContext: TestContext) {
 
                 // Add a task
                 const newTask = await ad4mClient.ai.addTask(
+                    "test-name",
                     "test-model",
                     "This is a test system prompt",
                     [{ input: "Test input", output: "Test output" }]
                 );
                 expect(newTask).to.have.property('taskId');
+                expect(newTask.name).to.equal('test-name');
                 expect(newTask.modelId).to.equal("test-model");
                 expect(newTask.systemPrompt).to.equal("This is a test system prompt");
                 expect(newTask.promptExamples).to.deep.equal([{ input: "Test input", output: "Test output" }]);
@@ -48,6 +50,7 @@ export default function aiTests(testContext: TestContext) {
 
                 // Create a new task
                 const newTask = await ad4mClient.ai.addTask(
+                    "test-name",
                     "test-model",
                     "You are inside a test. Please ALWAYS respond with 'works', plus something else.",
                     [
@@ -79,6 +82,7 @@ export default function aiTests(testContext: TestContext) {
 
                 // Create a new task
                 const newTask = await ad4mClient.ai.addTask(
+                    "test-name",
                     "test-model",
                     "You are inside a test. Please respond with a short, unique message each time.",
                     [
