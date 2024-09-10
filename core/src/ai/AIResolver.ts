@@ -4,6 +4,9 @@ import pako from "pako";
 import base64js from 'base64-js';
 import { AI_TRANSCRIPTION_TEXT_TOPIC } from "../PubSub";
 
+let createdAt = Date.now().toString();
+let updatedAt = Date.now().toString();
+
 @Resolver()
 export default class AIResolver {
     @Query(returns => [AITask])
@@ -13,14 +16,20 @@ export default class AIResolver {
             "modelId",
             "task_id",
             "systemPrompt",
-            []
+            [],
+            undefined,
+            createdAt,
+            updatedAt
         ),
         new AITask(
             "task2",
             "modelId",
             "task_id",
             "systemPrompt",
-            []
+            [],
+            undefined,
+            createdAt,
+            updatedAt
         )]
     }
 
@@ -33,7 +42,10 @@ export default class AIResolver {
             task.modelId,
             "task_id",
             task.systemPrompt,
-            task.promptExamples
+            task.promptExamples,
+            undefined,
+            createdAt,
+            updatedAt
         )
     }
 
@@ -46,7 +58,10 @@ export default class AIResolver {
             "model_id",
             taskId,
             "system prompt",
-            []
+            [],
+            undefined,
+            createdAt,
+            updatedAt
         )
     }
 
@@ -60,7 +75,10 @@ export default class AIResolver {
             task.modelId,
             taskId,
             task.systemPrompt,
-            task.promptExamples
+            task.promptExamples,
+            undefined,
+            createdAt,
+            updatedAt
         )
     }
 

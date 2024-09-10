@@ -17,6 +17,7 @@ export class AIClient {
             query: gql`
                 query {
                     aiTasks {
+                        name
                         modelId
                         taskId
                         systemPrompt
@@ -24,6 +25,9 @@ export class AIClient {
                             input
                             output
                         }
+                        metaData
+                        createdAt
+                        updatedAt
                     }
                 }
             `
@@ -46,6 +50,9 @@ export class AIClient {
                             input
                             output
                         }
+                        metaData
+                        createdAt
+                        updatedAt
                     }
                 }
             `,
@@ -70,6 +77,9 @@ export class AIClient {
                             input
                             output
                         }
+                        metaData
+                        createdAt
+                        updatedAt
                     }
                 }
             `,
@@ -94,6 +104,9 @@ export class AIClient {
                             input
                             output
                         }
+                        metaData
+                        createdAt
+                        updatedAt
                     }
                 }
             `,
