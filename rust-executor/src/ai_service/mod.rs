@@ -32,22 +32,29 @@ impl AIService {
         let (llama_tx, llama_rx) = mpsc::channel();
 
         thread::spawn(move || {
-            let bert = Bert::builder().build().unwrap();
-            for (prompt, response_tx) in bert_rx {
-                let result = catch_unwind(|| bert.embed(prompt)).map_err(|_| "Panic occurred".into());
-                let _ = response_tx.send(result);
-            }
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let bert = Bert::builder().build().await.unwrap();
+                for (prompt, response_tx) in bert_rx {
+                    let result = catch_unwind(|| bert.embed(prompt)).map_err(|_| "Panic occurred".into());
+                    let _ = response_tx.send(result);
+                }
+            });
         });
 
         thread::spawn(move || {
-            let llama = Llama::builder()
-                .with_source(LlamaSource::tiny_llama_1_1b())
-                .build()
-                .unwrap();
-            for (prompt, response_tx) in llama_rx {
-                let result = catch_unwind(|| llama.run(prompt)).map_err(|_| "Panic occurred".into());
-                let _ = response_tx.send(result);
-            }
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let llama = Llama::builder()
+                    .with_source(LlamaSource::tiny_llama_1_1b())
+                    .build()
+                    .await
+                    .unwrap();
+                for (prompt, response_tx) in llama_rx {
+                    let result = catch_unwind(|| llama.run(prompt)).map_err(|_| "Panic occurred".into());
+                    let _ = response_tx.send(result);
+                }
+            });
         });
 
         let service = AIService {
