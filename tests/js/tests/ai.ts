@@ -97,7 +97,7 @@ export default function aiTests(testContext: TestContext) {
                 expect(newTask).to.have.property('taskId');
 
                 // Create an array of 10 prompts
-                const prompts = Array.from({ length: 10 }, (_, i) => `Test prompt ${i + 1}`);
+                const prompts = Array.from({ length: 10 }, (_, i) => `This is a much longer test prompt number ${i + 1}. It includes various details to make it more substantial. For instance, it mentions that the sky is blue, grass is green, and water is essential for life. It also touches on the fact that technology is rapidly advancing, climate change is a global concern, and education is crucial for personal growth. Additionally, it notes that music can evoke powerful emotions, reading broadens the mind, and exercise is important for maintaining good health. Lastly, it states that kindness can make a significant difference in someone's day.`);
 
                 // Run 10 prompts simultaneously
                 const promptResults = await Promise.all(
