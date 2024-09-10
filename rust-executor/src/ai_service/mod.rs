@@ -36,7 +36,7 @@ impl AIService {
             rt.block_on(async {
                 let bert = Bert::builder().build().await.unwrap();
                 for (prompt, response_tx) in bert_rx {
-                    let result = catch_unwind(|| bert.embed(prompt)).map_err(|_| "Panic occurred".into());
+                    let result = catch_unwind(|| rt.block_on(bert.embed(prompt))).map_err(|_| "Panic occurred".into());
                     let _ = response_tx.send(result);
                 }
             });
@@ -51,7 +51,7 @@ impl AIService {
                     .await
                     .unwrap();
                 for (prompt, response_tx) in llama_rx {
-                    let result = catch_unwind(|| llama.run(prompt)).map_err(|_| "Panic occurred".into());
+                    let result = catch_unwind(|| rt.block_on(llama.run(prompt))).map_err(|_| "Panic occurred".into());
                     let _ = response_tx.send(result);
                 }
             });
