@@ -32,7 +32,7 @@ export class AIClient {
         return aiTasks;
     }
 
-    async addTask(name: string, modelId: string, systemPrompt: string, promptExamples: { input: string, output: string }[], metaData: string): Promise<AITask> {
+    async addTask(name: string, modelId: string, systemPrompt: string, promptExamples: { input: string, output: string }[], metaData?: string): Promise<AITask> {
         const task = new AITaskInput(name, modelId, systemPrompt, promptExamples, metaData);
         const { aiAddTask } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
