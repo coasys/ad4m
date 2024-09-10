@@ -349,4 +349,50 @@ mod tests {
         println!("Response: {}", response);
         assert!(response.len() > 0)
     }
+
+    #[ignore]
+    #[tokio::test]
+    async fn test_prompt_stress() {
+        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        let service = AIService::new().await.expect("initialization to work");
+
+        let task = service.add_task(AITaskInput {
+                model_id: "Llama tiny 1b".into(),
+                system_prompt: "You are inside a test for tasks. Please make sure to create any non-zero length output".into(),
+                prompt_examples: vec![AIPromptExamplesInput{
+                    input: "Test string".into(),
+                    output: "Yes, I'm working!".into()
+                },
+                AIPromptExamplesInput{
+                    input: "What's up?".into(),
+                    output: "Nothing, I'm working!".into()
+                },
+                AIPromptExamplesInput{
+                    input: "Is this a test".into(),
+                    output: "Yes, it's working!".into()
+                },
+                AIPromptExamplesInput{
+                    input: "Test string loong".into(),
+                    output: "Yes, I'm working! This is a longer response to test the system's ability to handle more extensive outputs. It's important to ensure that the AI can generate and process longer strings of text, as real-world applications often require more detailed and nuanced responses. By including this extended output, we're stress-testing the system's capacity and verifying its robustness in handling varied lengths of text.".into()
+                },
+                AIPromptExamplesInput{
+                    input: "Test string super loong".into(),
+                    output: "Yes, I'm working! This is an extremely long response to thoroughly test the system's capacity for handling extensive outputs. In real-world scenarios, AI models often need to generate lengthy and detailed responses to complex queries. This test string is designed to push the limits of our system, ensuring it can process and store large amounts of text without issues. It's crucial to verify that our AI service can maintain coherence and relevance even in prolonged responses. By including various sentence structures, punctuation, and a mix of short and long phrases, we're also testing the linguistic versatility of our model. Furthermore, this extended output allows us to assess the performance impact of processing large text blocks, which is essential for optimizing our system's efficiency. It's worth noting that in practical applications, responses of this length might be common in scenarios such as content generation, detailed explanations, or comprehensive analyses. Therefore, ensuring our system can handle such verbose outputs is paramount for its real-world applicability and robustness.".into()
+                }],
+        }).await.expect("add_task to work without error");
+
+        let futures = (0..10)
+            .map(|_| service.prompt(task.task_id.clone(), "Test string".into()))
+            .collect::<Vec<_>>();
+
+        let responses = futures::future::join_all(futures)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+            .expect("all prompts to return results");
+
+        let response = responses.join("\n");
+        println!("Responses: {}", response);
+        assert!(response.len() > 0)
+    }
 }
