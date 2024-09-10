@@ -74,7 +74,7 @@ impl AIService {
 
                 let result: Result<Vec<f32>> = rt
                     .block_on(bert.embed(request.prompt))
-                    .and_then(|tensor| Ok(tensor.to_vec()));
+                    .map(|tensor| tensor.to_vec());
                 let _ = request.result_sender.send(result);
             }
         });
@@ -303,7 +303,7 @@ impl AIService {
                 task_id,
                 result_sender: tx,
             }))?;
-        let _ = rx.await?;
+        rx.await?;
         Ok(())
     }
 }
