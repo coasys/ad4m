@@ -1,7 +1,7 @@
 use std::pin::Pin;
 
 use futures::StreamExt;
-use kalosm::sound::{rodio::buffer::SamplesBuffer, AsyncSource};
+use kalosm::sound::AsyncSource;
 use tokio_stream::Stream;
 
 pub struct AudioStream {
@@ -34,28 +34,28 @@ impl Stream for AudioStream {
     }
 }
 
-impl AudioStream {
-    /// Read any pending data from the stream into a vector
-    fn read_sync(&mut self) -> Vec<f32> {
-        let mut cx = std::task::Context::from_waker(futures_util::task::noop_waker_ref());
-        while let std::task::Poll::Ready(Some(data_chunk)) = self.receiver.poll_next_unpin(&mut cx)
-        {
-            self.read_data.push(data_chunk);
-        }
-        self.read_data.clone()
-    }
+// impl AudioStream {
+//     /// Read any pending data from the stream into a vector
+//     fn read_sync(&mut self) -> Vec<f32> {
+//         let mut cx = std::task::Context::from_waker(futures_util::task::noop_waker_ref());
+//         while let std::task::Poll::Ready(Some(data_chunk)) = self.receiver.poll_next_unpin(&mut cx)
+//         {
+//             self.read_data.push(data_chunk);
+//         }
+//         self.read_data.clone()
+//     }
 
-    /// Grab all current data in the stream
-    fn read_all_samples(&mut self) -> Vec<f32> {
-        self.read_sync()
-    }
+//     /// Grab all current data in the stream
+//     fn read_all_samples(&mut self) -> Vec<f32> {
+//         self.read_sync()
+//     }
 
-    fn read_all(&mut self) -> SamplesBuffer<f32> {
-        let channels = 1;
-        let sample_rate = 160000;
-        SamplesBuffer::new(channels, sample_rate, self.read_all_samples())
-    }
-}
+//     fn read_all(&mut self) -> SamplesBuffer<f32> {
+//         let channels = 1;
+//         let sample_rate = 160000;
+//         SamplesBuffer::new(channels, sample_rate, self.read_all_samples())
+//     }
+// }
 
 impl AsyncSource for AudioStream {
     fn as_stream(&mut self) -> impl Stream<Item = f32> + '_ {

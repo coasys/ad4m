@@ -321,7 +321,8 @@ impl AIService {
         let stream_id = uuid::Uuid::new_v4().to_string();
         let stream_id_clone = stream_id.clone();
         let (samples_tx, sampels_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
-        let (drop_tx, drop_rx) = oneshot::channel();
+        //TODO: use drop_rx to exit thread
+        let (drop_tx, _drop_rx) = oneshot::channel();
         let (done_tx, done_rx) = oneshot::channel();
 
         thread::spawn(move || {
@@ -440,7 +441,7 @@ mod tests {
             .await
             .expect("prompt to return a result");
         println!("Response: {}", response);
-        assert!(response.len() > 0)
+        assert!(!response.is_empty())
     }
 
     #[ignore]
@@ -488,6 +489,6 @@ mod tests {
 
         let response = responses.join("\n");
         println!("Responses: {}", response);
-        assert!(response.len() > 0)
+        assert!(!response.is_empty())
     }
 }
