@@ -1298,29 +1298,32 @@ impl Mutation {
     async fn ai_open_transcription_stream(
         &self,
         context: &RequestContext,
-        _model_id: String,
+        model_id: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
-        Ok(String::from(""))
+        Ok(AIService::global_instance().await?.open_transcription_stream(model_id).await?)
     }
 
     // note: f32 does not implement IsInputType, so I'm taking f64 here
     async fn ai_feed_transcription_stream(
         &self,
         context: &RequestContext,
-        _stream_id: String,
-        _audio: Vec<f64>,
+        stream_id: String,
+        audio: Vec<f64>,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
-        Ok(String::from(""))
+        let audio_f32: Vec<f32> = audio.into_iter().map(|x| x as f32).collect();
+        AIService::global_instance().await?.feed_transcription_stream(&stream_id, audio_f32).await?;
+        Ok(String::from("true"))
     }
 
     async fn ai_close_transcription_stream(
         &self,
         context: &RequestContext,
-        _stream_id: String,
+        stream_id: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
-        Ok(String::from(""))
+        AIService::global_instance().await?.close_transcription_stream(&stream_id).await?;
+        Ok(String::from("true"))
     }
 }
