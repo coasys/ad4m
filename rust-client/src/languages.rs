@@ -190,7 +190,7 @@ pub async fn source(executor_url: String, cap_token: String, address: String) ->
 pub struct Remove;
 
 pub async fn remove(executor_url: String, cap_token: String, address: String) -> Result<()> {
-    query::<_,()>(
+    query::<_, ()>(
         executor_url,
         cap_token,
         Remove::build_query(remove::Variables { address }),

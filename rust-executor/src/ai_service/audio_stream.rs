@@ -1,8 +1,8 @@
 use std::pin::Pin;
 
+use futures::StreamExt;
 use kalosm::sound::{rodio::buffer::SamplesBuffer, AsyncSource};
 use tokio_stream::Stream;
-use futures::StreamExt;
 
 pub struct AudioStream {
     //pub drop_tx: std::sync::mpsc::Sender<()>,

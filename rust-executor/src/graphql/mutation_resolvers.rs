@@ -1301,7 +1301,10 @@ impl Mutation {
         model_id: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
-        Ok(AIService::global_instance().await?.open_transcription_stream(model_id).await?)
+        Ok(AIService::global_instance()
+            .await?
+            .open_transcription_stream(model_id)
+            .await?)
     }
 
     // note: f32 does not implement IsInputType, so I'm taking f64 here
@@ -1313,7 +1316,10 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
         let audio_f32: Vec<f32> = audio.into_iter().map(|x| x as f32).collect();
-        AIService::global_instance().await?.feed_transcription_stream(&stream_id, audio_f32).await?;
+        AIService::global_instance()
+            .await?
+            .feed_transcription_stream(&stream_id, audio_f32)
+            .await?;
         Ok(String::from("true"))
     }
 
@@ -1323,7 +1329,10 @@ impl Mutation {
         stream_id: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
-        AIService::global_instance().await?.close_transcription_stream(&stream_id).await?;
+        AIService::global_instance()
+            .await?
+            .close_transcription_stream(&stream_id)
+            .await?;
         Ok(String::from("true"))
     }
 }

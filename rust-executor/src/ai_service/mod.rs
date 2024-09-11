@@ -1,17 +1,20 @@
 use self::{audio_stream::AudioStream, error::AIServiceError};
-use crate::pubsub::{AI_TRANSCRIPTION_TEXT_TOPIC};
-use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use crate::graphql::graphql_types::{AITaskInput, TranscriptionTextFilter};
+use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
 use crate::types::AITask;
+use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use deno_core::error::AnyError;
 use futures::SinkExt;
-use kalosm::{language::*, sound::{AsyncSourceTranscribeExt, Whisper}};
-use std::{collections::HashMap};
+use kalosm::{
+    language::*,
+    sound::{AsyncSourceTranscribeExt, Whisper},
+};
+use std::collections::HashMap;
 use std::panic::catch_unwind;
 use std::sync::Arc;
 use std::thread;
-use tokio::{sync::{mpsc, oneshot, Mutex}};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 mod audio_stream;
 mod error;
@@ -25,8 +28,7 @@ lazy_static! {
 struct TranscriptionSession {
     samples_tx: futures_channel::mpsc::UnboundedSender<Vec<f32>>,
     drop_tx: oneshot::Sender<()>,
-} 
-
+}
 
 #[derive(Clone)]
 pub struct AIService {
@@ -329,23 +331,27 @@ impl AIService {
                 let audio_stream = AudioStream {
                     //drop_tx,
                     read_data: Vec::new(),
-                    receiver: Box::pin(sampels_rx.map(futures_util::stream::iter).flatten())
+                    receiver: Box::pin(sampels_rx.map(futures_util::stream::iter).flatten()),
                 };
-    
-                let mut word_stream = audio_stream
-                    .transcribe(whisper)
-                    .words();
+
+                let mut word_stream = audio_stream.transcribe(whisper).words();
 
                 let pubsub = rt.block_on(get_global_pubsub());
-    
+
                 let _ = done_tx.send(Ok(()));
 
                 while let Some(word) = rt.block_on(word_stream.next()) {
                     println!("{}", word);
-                    rt.block_on(pubsub.publish(&AI_TRANSCRIPTION_TEXT_TOPIC, &serde_json::to_string(&TranscriptionTextFilter{
-                        stream_id: stream_id_clone.clone(),
-                        text: word,
-                    }).expect("TranscriptionTextFilter must be serializable")));
+                    rt.block_on(
+                        pubsub.publish(
+                            &AI_TRANSCRIPTION_TEXT_TOPIC,
+                            &serde_json::to_string(&TranscriptionTextFilter {
+                                stream_id: stream_id_clone.clone(),
+                                text: word,
+                            })
+                            .expect("TranscriptionTextFilter must be serializable"),
+                        ),
+                    );
                 }
             } else {
                 let _ = done_tx.send(Err(maybe_model.err().unwrap()));
@@ -354,15 +360,22 @@ impl AIService {
 
         done_rx.await??;
 
-
-        self.transcription_streams.lock().await.insert(stream_id.clone(), TranscriptionSession{
-            samples_tx, drop_tx
-        });
+        self.transcription_streams.lock().await.insert(
+            stream_id.clone(),
+            TranscriptionSession {
+                samples_tx,
+                drop_tx,
+            },
+        );
 
         Ok(stream_id)
     }
 
-    pub async fn feed_transcription_stream(&self, stream_id: &String, audio_samples: Vec<f32>) -> Result<()> {
+    pub async fn feed_transcription_stream(
+        &self,
+        stream_id: &String,
+        audio_samples: Vec<f32>,
+    ) -> Result<()> {
         let mut map_lock = self.transcription_streams.lock().await;
         let maybe_stream = map_lock.get_mut(stream_id);
         if let Some(stream) = maybe_stream {
@@ -375,17 +388,18 @@ impl AIService {
 
     pub async fn close_transcription_stream(&self, stream_id: &String) -> Result<()> {
         let mut map_lock = self.transcription_streams.lock().await;
-    
+
         if let Some(stream) = map_lock.remove(stream_id) {
-            stream.drop_tx.send(()).map_err(|_| 
-                anyhow!(AIServiceError::CrazyError(format!("Failed to close stream {}: Whisper thread may have crashed", stream_id)))
-            )
+            stream.drop_tx.send(()).map_err(|_| {
+                anyhow!(AIServiceError::CrazyError(format!(
+                    "Failed to close stream {}: Whisper thread may have crashed",
+                    stream_id
+                )))
+            })
         } else {
             Err(AIServiceError::StreamNotFound.into())
         }
     }
-
-
 }
 
 #[cfg(test)]

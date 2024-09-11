@@ -709,7 +709,6 @@ impl GetFilter for TranscriptionTextFilter {
     }
 }
 
-
 impl GetValue for Option<Apps> {
     type Value = Option<Apps>;
 
