@@ -315,7 +315,7 @@ impl AIService {
         Ok(())
     }
 
-    pub async fn open_transcription_stream(&self, model_id: String) -> Result<String> {
+    pub async fn open_transcription_stream(&self, _model_id: String) -> Result<String> {
         let stream_id = uuid::Uuid::new_v4().to_string();
         let stream_id_clone = stream_id.clone();
         let (samples_tx, sampels_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
@@ -338,21 +338,21 @@ impl AIService {
 
                 let pubsub = rt.block_on(get_global_pubsub());
     
-                done_tx.send(Ok(()));
+                let _ = done_tx.send(Ok(()));
 
                 while let Some(word) = rt.block_on(word_stream.next()) {
                     println!("{}", word);
-                    pubsub.publish(&AI_TRANSCRIPTION_TEXT_TOPIC, &serde_json::to_string(&TranscriptionTextFilter{
+                    rt.block_on(pubsub.publish(&AI_TRANSCRIPTION_TEXT_TOPIC, &serde_json::to_string(&TranscriptionTextFilter{
                         stream_id: stream_id_clone.clone(),
                         text: word,
-                    }).expect("TranscriptionTextFilter must be serializable"));
+                    }).expect("TranscriptionTextFilter must be serializable")));
                 }
             } else {
-                done_tx.send(Err(maybe_model.err()));
+                let _ = done_tx.send(Err(maybe_model.err().unwrap()));
             }
         });
 
-        done_rx.await?;
+        done_rx.await??;
 
 
         self.transcription_streams.lock().await.insert(stream_id.clone(), TranscriptionSession{
