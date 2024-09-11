@@ -5,9 +5,11 @@ use std::fmt;
 pub enum AIServiceError {
     DatabaseError(String),
     TaskNotFound,
+    StreamNotFound,
     ServiceNotInitialized,
     #[allow(dead_code)]
     LockError,
+    CrazyError(String),
 }
 
 impl Error for AIServiceError {}
@@ -19,6 +21,8 @@ impl fmt::Display for AIServiceError {
             AIServiceError::TaskNotFound => write!(f, "Task not found"),
             AIServiceError::ServiceNotInitialized => write!(f, "Service not initialized"),
             AIServiceError::LockError => write!(f, "Lock error"),
+            AIServiceError::StreamNotFound => write!(f, "Transcription stream not found"),
+            AIServiceError::CrazyError(msg) => write!(f, "Something crazy happened: {}", msg),
         }
     }
 }

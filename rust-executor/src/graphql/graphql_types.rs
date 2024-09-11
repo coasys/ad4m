@@ -656,6 +656,12 @@ pub struct PromptOutput {
     pub result: String,
 }
 
+#[derive(Default, Debug, Deserialize, Serialize)]
+pub struct TranscriptionTextFilter {
+    pub stream_id: String,
+    pub text: String,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub enum JsResultType<T>
 where
@@ -686,6 +692,23 @@ pub trait GetValue {
 pub trait GetFilter {
     fn get_filter(&self) -> Option<String>;
 }
+
+// Implement the trait for the `TranscriptionTextFilter` struct
+impl GetValue for TranscriptionTextFilter {
+    type Value = String;
+
+    fn get_value(&self) -> Self::Value {
+        self.text.clone()
+    }
+}
+
+// Implement the trait for the `TranscriptionTextFilter` struct
+impl GetFilter for TranscriptionTextFilter {
+    fn get_filter(&self) -> Option<String> {
+        Some(self.stream_id.clone())
+    }
+}
+
 
 impl GetValue for Option<Apps> {
     type Value = Option<Apps>;

@@ -132,6 +132,7 @@ lazy_static::lazy_static! {
     pub static ref PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC: String = "perspective-sync-state-change-topic".to_owned();
     pub static ref RUNTIME_MESSAGED_RECEIVED_TOPIC: String = "runtime-messaged-received-topic".to_owned();
     pub static ref RUNTIME_NOTIFICATION_TRIGGERED_TOPIC: String = "runtime-notification-triggered-topic".to_owned();
+    pub static ref AI_TRANSCRIPTION_TEXT_TOPIC: String = "ai-transcription-text-topic".to_owned();
 }
 
 pub async fn get_global_pubsub() -> Arc<PubSub> {
