@@ -127,6 +127,69 @@ export default function aiTests(testContext: TestContext) {
                 expect(Array.isArray(vector)).to.be.true
                 expect(vector.length).to.be.greaterThan(300)
             })
+
+            it('can do audio to text transcription', async() => {
+                const ad4mClient = testContext.ad4mClient!;
+                const fs = require('fs');
+                const ffmpeg = require('fluent-ffmpeg');
+                const { Readable } = require('stream');
+
+                // Load the m4a file
+                const audioBuffer = fs.readFileSync('../transcription_test.m4a');
+
+                // Convert m4a to raw PCM data
+                const pcmData = await new Promise((resolve, reject) => {
+                    const command = ffmpeg()
+                        .input(Readable.from(audioBuffer))
+                        .inputFormat('m4a')
+                        .outputFormat('s16le')
+                        .audioFrequency(16000)
+                        .audioChannels(1)
+                        .on('error', reject)
+                        .pipe();
+
+                    //@ts-ignore
+                    const chunks = [];
+                    //@ts-ignore
+                    command.on('data', chunk => chunks.push(chunk));
+                    //@ts-ignore
+                    command.on('end', () => resolve(Buffer.concat(chunks)));
+                });
+
+                // Convert PCM buffer to Float32Array
+                //@ts-ignore
+                const result = new Float32Array(pcmData.buffer, pcmData.byteOffset, pcmData.length / 4);
+                //@ts-ignore
+                const audioData = result.channelData[0]; // Assuming mono audio
+
+                // Open the transcription stream
+                let transcribedText = '';
+                const streamId = await ad4mClient.ai.openTranscriptionStream("Whisper", (text) => {
+                    console.log("Received transcription:", text);
+                    transcribedText += text;
+                });
+
+                // Define chunk size (e.g., 0.5 seconds of audio at 16000 Hz sample rate)
+                const chunkSize = 8000; // 16000 * 0.5
+
+                // Stream the audio data in chunks
+                for (let i = 0; i < audioData.length; i += chunkSize) {
+                    const chunk = audioData.slice(i, i + chunkSize);
+                    //@ts-ignore
+                    await ad4mClient.ai.feedTranscriptionStream(streamId, Array.from(chunk));
+                    
+                    // Simulate real-time processing by adding a small delay
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+
+                // Close the transcription stream
+                await ad4mClient.ai.closeTranscriptionStream(streamId);
+
+                // Assertions
+                expect(transcribedText).to.be.a('string');
+                expect(transcribedText.length).to.be.greaterThan(0);
+                console.log("Final transcription:", transcribedText);
+            })
         })
     }
 }
