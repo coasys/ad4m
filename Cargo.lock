@@ -31,9 +31,7 @@ dependencies = [
  "ctrlc",
  "dirs 4.0.0",
  "futures",
- "kalosm",
  "kitsune_p2p_types",
- "llm",
  "rand 0.8.5",
  "regex",
  "rustyline 10.1.1",
@@ -285,15 +283,6 @@ dependencies = [
  "once_cell",
  "version_check",
  "zerocopy",
-]
-
-[[package]]
-name = "aho-corasick"
-version = "0.7.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc936419f96fa211c1b9166887b38e5e40b19958e5b895be7c1f93adec7071ac"
-dependencies = [
- "memchr",
 ]
 
 [[package]]
@@ -1681,28 +1670,6 @@ name = "cache_control"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1bf2a5fb3207c12b5d208ebc145f967fea5cac41a021c37417ccc31ba40f39ee"
-
-[[package]]
-name = "cached-path"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "097968e38f1319207f057d0f4d76452e4f4f847a5de61c5215379f297fa034f3"
-dependencies = [
- "flate2",
- "fs2",
- "glob",
- "indicatif 0.16.2",
- "log",
- "rand 0.8.5",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.8",
- "tar",
- "tempfile",
- "thiserror",
- "zip 0.6.6",
-]
 
 [[package]]
 name = "cairo-rs"
@@ -5530,16 +5497,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs2"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
-dependencies = [
- "libc",
- "winapi 0.3.9",
-]
-
-[[package]]
 name = "fs3"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6063,25 +6020,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ggml"
-version = "0.2.0-dev"
-source = "git+https://github.com/lucksus/llm?branch=gguf#4d642db72f55cc8c813df817a2b778bbb8729b56"
-dependencies = [
- "ggml-sys",
- "indexmap 2.5.0",
- "memmap2 0.5.10",
- "thiserror",
-]
-
-[[package]]
-name = "ggml-sys"
-version = "0.2.0-dev"
-source = "git+https://github.com/lucksus/llm?branch=gguf#4d642db72f55cc8c813df817a2b778bbb8729b56"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "ghash"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6273,7 +6211,7 @@ version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57da3b9b5b85bd66f31093f8c408b90a74431672542466497dcbdfdc02034be1"
 dependencies = [
- "aho-corasick 1.1.3",
+ "aho-corasick",
  "bstr 1.10.0",
  "log",
  "regex-automata 0.4.7",
@@ -6975,7 +6913,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b780635574b3d92f036890d8373433d6f9fc7abb320ee42a5c25897fc8ed732"
 dependencies = [
  "dirs 5.0.1",
- "indicatif 0.17.8",
+ "indicatif",
  "log",
  "native-tls",
  "rand 0.8.5",
@@ -8187,18 +8125,6 @@ dependencies = [
 
 [[package]]
 name = "indicatif"
-version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d207dc617c7a380ab07ff572a6e52fa202a2a8f355860ac9c38e23f8196be1b"
-dependencies = [
- "console",
- "lazy_static",
- "number_prefix",
- "regex",
-]
-
-[[package]]
-name = "indicatif"
 version = "0.17.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "763a5a8f45087d6bcea4222e7b72c291a054edf80e4ef6efd2a4979878c7bea3"
@@ -8502,15 +8428,6 @@ dependencies = [
 
 [[package]]
 name = "itertools"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "284f18f85651fe11e8a991b2adb42cb078325c996ed026d994719efcfca1d54b"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
@@ -8743,7 +8660,7 @@ dependencies = [
  "kalosm-sound",
  "kalosm-streams",
  "kalosm-vision",
- "llm-samplers 0.0.7",
+ "llm-samplers",
  "num-traits",
  "once_cell",
  "rand 0.8.5",
@@ -8763,7 +8680,7 @@ dependencies = [
  "dirs 5.0.1",
  "hf-hub",
  "httpdate",
- "indicatif 0.17.8",
+ "indicatif",
  "metal 0.29.0",
  "once_cell",
  "reqwest",
@@ -8796,7 +8713,7 @@ dependencies = [
  "kalosm-llama",
  "kalosm-sample",
  "kalosm-streams",
- "llm-samplers 0.0.7",
+ "llm-samplers",
  "log",
  "meval",
  "once_cell",
@@ -8817,7 +8734,7 @@ dependencies = [
  "srx",
  "tempfile",
  "texting_robots",
- "tokenizers 0.19.1",
+ "tokenizers",
  "tokio",
  "tokio-util",
  "tracing",
@@ -8837,7 +8754,7 @@ dependencies = [
  "kalosm-common",
  "kalosm-sample",
  "kalosm-streams",
- "llm-samplers 0.0.7",
+ "llm-samplers",
  "log",
  "lru",
  "once_cell",
@@ -8847,7 +8764,7 @@ dependencies = [
  "safetensors",
  "serde",
  "thiserror",
- "tokenizers 0.19.1",
+ "tokenizers",
  "tokio",
  "tracing",
 ]
@@ -8867,10 +8784,10 @@ dependencies = [
  "kalosm-language-model",
  "kalosm-sample",
  "kalosm-streams",
- "llm-samplers 0.0.7",
+ "llm-samplers",
  "once_cell",
  "rand 0.8.5",
- "tokenizers 0.19.1",
+ "tokenizers",
  "tokio",
  "tracing",
 ]
@@ -8889,7 +8806,7 @@ dependencies = [
  "kalosm-common",
  "serde",
  "serde_json",
- "tokenizers 0.19.1",
+ "tokenizers",
  "tokio",
  "tracing",
 ]
@@ -8939,7 +8856,7 @@ dependencies = [
  "rodio",
  "rwhisper",
  "serde_json",
- "tokenizers 0.19.1",
+ "tokenizers",
  "tokio",
  "tracing",
  "voice_activity_detector",
@@ -9758,69 +9675,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ce301924b7887e9d637144fdade93f9dfff9b60981d4ac161db09720d39aa5"
 
 [[package]]
-name = "llm"
-version = "0.2.0-dev"
-source = "git+https://github.com/lucksus/llm?branch=gguf#4d642db72f55cc8c813df817a2b778bbb8729b56"
-dependencies = [
- "llm-base",
- "llm-gptneox",
- "llm-llama",
- "serde",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "llm-base"
-version = "0.2.0-dev"
-source = "git+https://github.com/lucksus/llm?branch=gguf#4d642db72f55cc8c813df817a2b778bbb8729b56"
-dependencies = [
- "bytemuck",
- "ggml",
- "half 2.4.1",
- "indexmap 2.5.0",
- "llm-samplers 0.0.6",
- "memmap2 0.5.10",
- "partial_sort",
- "rand 0.8.5",
- "regex",
- "serde",
- "serde_bytes",
- "thiserror",
- "tokenizers 0.13.4",
- "tracing",
-]
-
-[[package]]
-name = "llm-gptneox"
-version = "0.2.0-dev"
-source = "git+https://github.com/lucksus/llm?branch=gguf#4d642db72f55cc8c813df817a2b778bbb8729b56"
-dependencies = [
- "llm-base",
-]
-
-[[package]]
-name = "llm-llama"
-version = "0.2.0-dev"
-source = "git+https://github.com/lucksus/llm?branch=gguf#4d642db72f55cc8c813df817a2b778bbb8729b56"
-dependencies = [
- "llm-base",
- "tracing",
-]
-
-[[package]]
-name = "llm-samplers"
-version = "0.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7553f60d113c9cdc6a5402456a31cd9a273bef79f6f16d8a4f7b4bedf5f754b2"
-dependencies = [
- "anyhow",
- "num-traits",
- "rand 0.8.5",
- "thiserror",
-]
-
-[[package]]
 name = "llm-samplers"
 version = "0.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9988,29 +9842,13 @@ dependencies = [
 
 [[package]]
 name = "macro_rules_attribute"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf0c9b980bf4f3a37fd7b1c066941dd1b1d0152ce6ee6e8fe8c49b9f6810d862"
-dependencies = [
- "macro_rules_attribute-proc_macro 0.1.3",
- "paste",
-]
-
-[[package]]
-name = "macro_rules_attribute"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a82271f7bc033d84bbca59a3ce3e4159938cb08a9c3aebbe54d215131518a13"
 dependencies = [
- "macro_rules_attribute-proc_macro 0.2.0",
+ "macro_rules_attribute-proc_macro",
  "paste",
 ]
-
-[[package]]
-name = "macro_rules_attribute-proc_macro"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58093314a45e00c77d5c508f76e77c3396afbbc0d01506e7fae47b018bac2b1d"
 
 [[package]]
 name = "macro_rules_attribute-proc_macro"
@@ -11799,12 +11637,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "partial_sort"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7924d1d0ad836f665c9065e26d016c673ece3993f30d340068b16f282afc1156"
-
-[[package]]
 name = "password-hash"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13375,17 +13207,6 @@ dependencies = [
 
 [[package]]
 name = "rayon-cond"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd1259362c9065e5ea39a789ef40b1e3fd934c94beb7b5ab3ac6629d3b5e7cb7"
-dependencies = [
- "either",
- "itertools 0.8.2",
- "rayon",
-]
-
-[[package]]
-name = "rayon-cond"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "059f538b55efd2309c9794130bc149c6a553db90e9d99c2030785c82f0bd7df9"
@@ -13420,7 +13241,7 @@ dependencies = [
  "metal 0.27.0",
  "serde",
  "serde_json",
- "tokenizers 0.19.1",
+ "tokenizers",
  "tokio",
  "tracing",
 ]
@@ -13548,7 +13369,7 @@ version = "1.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4219d74c6b67a3654a9fbebc4b419e22126d13d2f3c4a07ee0cb61ff79a79619"
 dependencies = [
- "aho-corasick 1.1.3",
+ "aho-corasick",
  "memchr",
  "regex-automata 0.4.7",
  "regex-syntax 0.8.4",
@@ -13569,7 +13390,7 @@ version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38caf58cc5ef2fed281f89292ef23f6365465ed9a41b7a7754eb4e26496c92df"
 dependencies = [
- "aho-corasick 1.1.3",
+ "aho-corasick",
  "memchr",
  "regex-syntax 0.8.4",
 ]
@@ -13579,12 +13400,6 @@ name = "regex-syntax"
 version = "0.6.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f162c6dd7b008981e4d40210aca20b4bd0f9b60ca9271061b07f78537722f2e1"
-
-[[package]]
-name = "regex-syntax"
-version = "0.7.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbb5fb1acd8a1a18b3dd5be62d25485eb770e05afb408a9627d14d451bae12da"
 
 [[package]]
 name = "regex-syntax"
@@ -14006,10 +13821,10 @@ dependencies = [
  "kalosm-language-model",
  "kalosm-sample",
  "kalosm-streams",
- "llm-samplers 0.0.7",
+ "llm-samplers",
  "rand 0.8.5",
  "serde_json",
- "tokenizers 0.19.1",
+ "tokenizers",
  "tokio",
  "tracing",
 ]
@@ -14422,7 +14237,7 @@ dependencies = [
  "rand 0.8.5",
  "rodio",
  "serde_json",
- "tokenizers 0.19.1",
+ "tokenizers",
  "tokio",
  "tracing",
 ]
@@ -14443,7 +14258,7 @@ dependencies = [
  "kalosm-common",
  "kalosm-language-model",
  "kalosm-streams",
- "tokenizers 0.19.1",
+ "tokenizers",
  "tokio",
  "tracing",
 ]
@@ -17143,59 +16958,25 @@ dependencies = [
 
 [[package]]
 name = "tokenizers"
-version = "0.13.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aea68938177975ab09da68552b720eac941779ff386baceaf77e0f5f9cea645f"
-dependencies = [
- "aho-corasick 0.7.20",
- "cached-path",
- "derive_builder 0.12.0",
- "dirs 4.0.0",
- "esaxx-rs",
- "getrandom 0.2.15",
- "itertools 0.9.0",
- "lazy_static",
- "log",
- "macro_rules_attribute 0.1.3",
- "monostate",
- "onig",
- "paste",
- "rand 0.8.5",
- "rayon",
- "rayon-cond 0.1.0",
- "regex",
- "regex-syntax 0.7.5",
- "reqwest",
- "serde",
- "serde_json",
- "spm_precompiled",
- "thiserror",
- "unicode-normalization-alignments",
- "unicode-segmentation",
- "unicode_categories",
-]
-
-[[package]]
-name = "tokenizers"
 version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e500fad1dd3af3d626327e6a3fe5050e664a6eaa4708b8ca92f1794aaf73e6fd"
 dependencies = [
- "aho-corasick 1.1.3",
+ "aho-corasick",
  "derive_builder 0.20.1",
  "esaxx-rs",
  "getrandom 0.2.15",
- "indicatif 0.17.8",
+ "indicatif",
  "itertools 0.12.1",
  "lazy_static",
  "log",
- "macro_rules_attribute 0.2.0",
+ "macro_rules_attribute",
  "monostate",
  "onig",
  "paste",
  "rand 0.8.5",
  "rayon",
- "rayon-cond 0.3.0",
+ "rayon-cond",
  "regex",
  "regex-syntax 0.8.4",
  "serde",
