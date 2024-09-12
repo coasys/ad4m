@@ -1,14 +1,19 @@
+#[allow(unused_imports)]
 use self::{audio_stream::AudioStream, error::AIServiceError};
+#[allow(unused_imports)]
 use crate::graphql::graphql_types::{AITaskInput, TranscriptionTextFilter};
+#[allow(unused_imports)]
 use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
+#[allow(unused_imports)]
 use crate::types::AITask;
+#[allow(unused_imports)]
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use deno_core::error::AnyError;
 use futures::SinkExt;
 use kalosm::{
     language::*,
-    sound::{AsyncSourceTranscribeExt, Whisper},
+    //sound::{AsyncSourceTranscribeExt, Whisper},
 };
 use std::collections::HashMap;
 use std::panic::catch_unwind;
@@ -319,14 +324,16 @@ impl AIService {
 
     pub async fn open_transcription_stream(&self, _model_id: String) -> Result<String> {
         let stream_id = uuid::Uuid::new_v4().to_string();
-        let stream_id_clone = stream_id.clone();
-        let (samples_tx, sampels_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
+        let _stream_id_clone = stream_id.clone();
+        let (samples_tx, _sampels_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
         //TODO: use drop_rx to exit thread
         let (drop_tx, _drop_rx) = oneshot::channel();
         let (done_tx, done_rx) = oneshot::channel();
 
         thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
+            let _rt = tokio::runtime::Runtime::new().unwrap();
+            let _ = done_tx.send(Err(anyhow!("not implemented")));
+            /*
             let maybe_model = rt.block_on(Whisper::new());
             if let Ok(whisper) = maybe_model {
                 let audio_stream = AudioStream {
@@ -357,6 +364,7 @@ impl AIService {
             } else {
                 let _ = done_tx.send(Err(maybe_model.err().unwrap()));
             }
+            */
         });
 
         done_rx.await??;

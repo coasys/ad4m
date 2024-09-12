@@ -1,7 +1,7 @@
 use std::pin::Pin;
 
 use futures::StreamExt;
-use kalosm::sound::AsyncSource;
+//use kalosm::sound::AsyncSource;
 use tokio_stream::Stream;
 
 pub struct AudioStream {
@@ -57,12 +57,12 @@ impl Stream for AudioStream {
 //     }
 // }
 
-impl AsyncSource for AudioStream {
-    fn as_stream(&mut self) -> impl Stream<Item = f32> + '_ {
-        self
-    }
+// impl AsyncSource for AudioStream {
+//     fn as_stream(&mut self) -> impl Stream<Item = f32> + '_ {
+//         self
+//     }
 
-    fn sample_rate(&self) -> u32 {
-        160000
-    }
-}
+//     fn sample_rate(&self) -> u32 {
+//         160000
+//     }
+// }
