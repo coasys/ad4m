@@ -3,7 +3,7 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use deno_core::{resolve_url_or_path, v8, PollEventLoopOptions};
 use deno_runtime::worker::MainWorker;
-use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
+use deno_runtime::{deno_permissions::PermissionsContainer, BootstrapOptions};
 use holochain::prelude::{ExternIO, Signal};
 use log::{error, info};
 use once_cell::sync::Lazy;

@@ -2,10 +2,11 @@ use deno_core::{anyhow::anyhow, error::AnyError, op2};
 use holochain::{
     conductor::api::AppInfo,
     prelude::{
-        agent_store::AgentInfoSigned, hash_type::Agent, ExternIO, HoloHash, InstallAppPayload,
+        hash_type::Agent, ExternIO, HoloHash, InstallAppPayload,
         Signature, ZomeCallResponse,
     },
 };
+use kitsune_p2p::agent_store::AgentInfoSigned;
 use log::error;
 use std::time::Duration;
 use tokio::time::timeout;

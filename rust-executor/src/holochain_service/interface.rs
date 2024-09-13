@@ -1,6 +1,6 @@
 use deno_core::error::AnyError;
 use holochain::conductor::api::AppInfo;
-use holochain::prelude::agent_store::AgentInfoSigned;
+use kitsune_p2p::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
 use holochain::prelude::{
     ExternIO, HoloHash, InstallAppPayload, Signal, Signature, ZomeCallResponse,

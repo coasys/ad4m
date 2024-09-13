@@ -10,7 +10,6 @@ use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo, ZomeCall};
 use holochain::conductor::config::ConductorConfig;
 use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
-use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
 use holochain::prelude::{
     ExternIO, HoloHash, InstallAppPayload, Signal, Signature, Timestamp, ZomeCallResponse,
@@ -24,6 +23,7 @@ use kitsune_p2p_types::config::{
     KitsuneP2pConfig, KitsuneP2pTuningParams, NetworkType, TransportConfig,
 };
 use kitsune_p2p_types::dependencies::url2::Url2;
+use kitsune_p2p::agent_store::AgentInfoSigned;
 use log::{error, info};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -381,12 +381,14 @@ impl HolochainService {
                     // dev - wss://signal.holotest.net
                     // our - ws://207.148.16.17:42697
                     signal_url: local_config.proxy_url,
+                    webrtc_config: None,
                 }];
             } else {
                 kitsune_config.transport_pool = vec![
                     TransportConfig::Mem {},
                     TransportConfig::WebRTC {
                         signal_url: local_config.proxy_url,
+                        webrtc_config: None
                     },
                 ];
             }
@@ -558,7 +560,7 @@ impl HolochainService {
 
         self.conductor
             .clone()
-            .uninstall_app(&app_id)
+            .uninstall_app(&app_id, false)
             .await
             .map_err(|e| anyhow!("Could not remove app: {:?}", e))?;
 
