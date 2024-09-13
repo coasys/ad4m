@@ -1,8 +1,21 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
 deleted file mode 100644
 index 9c60a4643dd2611430b464c462fcc292ae400a63..0000000000000000000000000000000000000000
+diff --git a/lib/index.js b/lib/index.js
+index d80955438c6fb4abb30c7b93dfd165b7a4d42916..adbbb492488eca66951accf0faef380a292e23df 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -13,6 +13,8 @@
+ 
+ const { BBS_SIGNATURES_MODES, FAILED_TO_LOAD_NODE_MODULE } = require("./util");
+ 
++import process from 'node:process';
++
+ const nodejs = process && process.versions && process.versions.node;
+ 
+ let useWasm = !(
 diff --git a/lib/wasm_wasm.js b/lib/wasm_wasm.js
-index f71603df733aec1190ef555885f686a7c7af8d0a..9944683bb8512c9bc5d700fb75122e3e60f939df 100644
+index f71603df733aec1190ef555885f686a7c7af8d0a..9145eb8ddb120b865610abae436123b3394ec0e1 100644
 --- a/lib/wasm_wasm.js
 +++ b/lib/wasm_wasm.js
 @@ -1,2 +1,2 @@
