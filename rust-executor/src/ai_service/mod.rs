@@ -37,18 +37,22 @@ struct TranscriptionSession {
 
 #[derive(Clone)]
 pub struct AIService {
-    bert: mpsc::UnboundedSender<EmbeddingRequest>,
-    llama: mpsc::UnboundedSender<LLMTaskRequest>,
+    embedding_models: Arc<Mutex<HashMap<String, Bert>>>,
+    embedding_channel: mpsc::UnboundedSender<EmbeddingRequest>,
+    llm_channel: mpsc::UnboundedSender<LLMTaskRequest>,
+    llm_models: Arc<Mutex<HashMap<String, Llama>>>,
     transcription_streams: Arc<Mutex<HashMap<String, TranscriptionSession>>>,
 }
 
 struct EmbeddingRequest {
+    model_id: String,
     pub prompt: String,
     pub result_sender: oneshot::Sender<Result<Vec<f32>>>,
 }
 
 #[derive(Debug)]
 struct LLMTaskSpawnRequest {
+    model_id: String,
     pub task: AITask,
     pub result_sender: oneshot::Sender<Result<()>>,
 }
@@ -78,11 +82,24 @@ impl AIService {
         let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
         let (llama_tx, mut llama_rx) = mpsc::unbounded_channel::<LLMTaskRequest>();
 
+        let embedding_models = Arc::new(Mutex::new(HashMap::<String, Bert>::new()));
+        let embedding_models_clone = Arc::clone(&embedding_models);
+
+        let llm_models = Arc::new(Mutex::new(HashMap::<String, Llama>::new()));
+        let llm_models_clone = Arc::clone(&llm_models);
+
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
+
             let bert = rt
                 .block_on(Bert::builder().build())
                 .expect("couldn't build Bert model");
+
+            rt.block_on(async {
+                let mut models = embedding_models_clone.lock().await;
+                models.insert("bert".to_string(), bert.clone());
+            });
+
             while let Some(request) = rt.block_on(bert_rx.recv()) {
                 // let result: Result<Vec<f32>> = match catch_unwind(|| rt.block_on(bert.embed(request.prompt))) {
                 //     Err(e) => Err(anyhow!("Bert panicked: {:?}", e)),
@@ -105,6 +122,11 @@ impl AIService {
                         .build(),
                 )
                 .expect("couldn't build Llama model");
+
+            rt.block_on(async {
+                let mut models = llm_models_clone.lock().await;
+                models.insert("llama".to_string(), llama.clone());
+            });
 
             let mut tasks = HashMap::<String, Task>::new();
 
@@ -188,8 +210,10 @@ impl AIService {
         });
 
         let service = AIService {
-            bert: bert_tx,
-            llama: llama_tx,
+            embedding_channel: bert_tx,
+            llm_channel: llama_tx,
+            embedding_models,
+            llm_models,
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -282,7 +306,7 @@ impl AIService {
 
     pub async fn prompt(&self, task_id: String, prompt: String) -> Result<String> {
         let (result_sender, rx) = oneshot::channel();
-        self.llama
+        self.llm_channel
             .send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
                 task_id,
                 prompt,
@@ -294,7 +318,8 @@ impl AIService {
     pub async fn embed(&self, text: String) -> Result<Vec<f32>> {
         let (result_sender, rx) = oneshot::channel();
 
-        self.bert.send(EmbeddingRequest {
+        self.embedding_channel.send(EmbeddingRequest {
+            model_id: "bert".into(),
             prompt: text,
             result_sender,
         })?;
@@ -304,16 +329,18 @@ impl AIService {
 
     async fn spawn_task(&self, task: AITask) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.llama.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
-            task,
-            result_sender: tx,
-        }))?;
+        self.llm_channel
+            .send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
+                model_id: task.model_id.clone(),
+                task,
+                result_sender: tx,
+            }))?;
         rx.await?
     }
 
     async fn remove_task(&self, task_id: String) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.llama
+        self.llm_channel
             .send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
                 task_id,
                 result_sender: tx,
