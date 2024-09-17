@@ -97,7 +97,7 @@ impl AIService {
                             let mut models = embedding_models_clone.lock().await;
                             models.insert("bert".to_string(), bert.clone());
                             Ok(bert)
-                        },
+                        }
                         Err(e) => Err(anyhow!("Bert failed to build: {:?}", e)),
                     }
                 })
@@ -127,22 +127,21 @@ impl AIService {
 
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            rt
-                .block_on(
-                    async {
-                        match Llama::builder()
-                        .with_source(LlamaSource::tiny_llama_1_1b())
-                        .build().await {
-                            Ok(llama) => {
-                                let mut models = llm_models_clone.lock().await;
-                                models.insert("llama".to_string(), llama.clone());
-                                Ok(llama)
-                            },
-                            Err(e) => Err(anyhow!("Llama failed to build: {:?}", e)),
-                        }
+            rt.block_on(async {
+                match Llama::builder()
+                    .with_source(LlamaSource::tiny_llama_1_1b())
+                    .build()
+                    .await
+                {
+                    Ok(llama) => {
+                        let mut models = llm_models_clone.lock().await;
+                        models.insert("llama".to_string(), llama.clone());
+                        Ok(llama)
                     }
-                )
-                .expect("couldn't build Llama model");
+                    Err(e) => Err(anyhow!("Llama failed to build: {:?}", e)),
+                }
+            })
+            .expect("couldn't build Llama model");
 
             let mut tasks = HashMap::<String, Task>::new();
 
@@ -166,13 +165,15 @@ impl AIService {
                         while !task_run && tries < 20 {
                             tries += 1;
 
-                            let model = rt.block_on(async {
-                                let models = llm_models_clone.lock().await;
-                                match models.get(&spawn_request.model_id) {
-                                    Some(model) => Ok(model.clone()),
-                                    None => Err(anyhow::anyhow!("Llama model not found")),
-                                }
-                            }).unwrap();
+                            let model = rt
+                                .block_on(async {
+                                    let models = llm_models_clone.lock().await;
+                                    match models.get(&spawn_request.model_id) {
+                                        Some(model) => Ok(model.clone()),
+                                        None => Err(anyhow::anyhow!("Llama model not found")),
+                                    }
+                                })
+                                .unwrap();
 
                             match catch_unwind(|| {
                                 rt.block_on(task.run("Test example prompt", &model).all_text())
@@ -202,20 +203,22 @@ impl AIService {
                             while maybe_result.is_none() && tries < 20 {
                                 tries += 1;
 
-                                let model = rt.block_on(async {
-                                    let models = llm_models_clone.lock().await;
-                                    match models.get(&prompt_request.model_id) {
-                                        Some(model) => Ok(model.clone()),
-                                        None => Err(anyhow::anyhow!("Llama model not found")),
-                                    }
-                                }).unwrap();
+                                let model = rt
+                                    .block_on(async {
+                                        let models = llm_models_clone.lock().await;
+                                        match models.get(&prompt_request.model_id) {
+                                            Some(model) => Ok(model.clone()),
+                                            None => Err(anyhow::anyhow!("Llama model not found")),
+                                        }
+                                    })
+                                    .unwrap();
 
                                 match catch_unwind(|| {
-                                    rt.block_on(
-                                        async {
-                                            task.run(prompt_request.prompt.clone(), &model).all_text().await
-                                        },
-                                    )
+                                    rt.block_on(async {
+                                        task.run(prompt_request.prompt.clone(), &model)
+                                            .all_text()
+                                            .await
+                                    })
                                 }) {
                                     Err(e) => {
                                         log::error!("Llama panicked with: {:?}. Trying again..", e)
