@@ -45,14 +45,14 @@ pub struct AIService {
 }
 
 struct EmbeddingRequest {
-    model_id: String,
+    pub model_id: String,
     pub prompt: String,
     pub result_sender: oneshot::Sender<Result<Vec<f32>>>,
 }
 
 #[derive(Debug)]
 struct LLMTaskSpawnRequest {
-    model_id: String,
+    pub model_id: String,
     pub task: AITask,
     pub result_sender: oneshot::Sender<Result<()>>,
 }
@@ -107,7 +107,11 @@ impl AIService {
                 // };
 
                 let result: Result<Vec<f32>> = rt
-                    .block_on(bert.embed(request.prompt))
+                    .block_on(async {
+                        let bred = embedding_models_clone.lock().await;
+                        let bert = bred.get(&request.model_id).expect("Bert model not found");
+                        bert.embed(request.prompt).await
+                    })
                     .map(|tensor| tensor.to_vec());
                 let _ = request.result_sender.send(result);
             }
