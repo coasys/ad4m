@@ -37,10 +37,8 @@ struct TranscriptionSession {
 
 #[derive(Clone)]
 pub struct AIService {
-    embedding_models: Arc<Mutex<HashMap<String, Bert>>>,
     embedding_channel: mpsc::UnboundedSender<EmbeddingRequest>,
     llm_channel: mpsc::UnboundedSender<LLMTaskRequest>,
-    llm_models: Arc<Mutex<HashMap<String, Llama>>>,
     transcription_streams: Arc<Mutex<HashMap<String, TranscriptionSession>>>,
 }
 
@@ -59,6 +57,7 @@ struct LLMTaskSpawnRequest {
 
 #[derive(Debug)]
 struct LLMTaskPromptRequest {
+    pub model_id: String,
     pub task_id: String,
     pub prompt: String,
     pub result_sender: oneshot::Sender<Result<String>>,
@@ -92,7 +91,16 @@ impl AIService {
             let rt = tokio::runtime::Runtime::new().unwrap();
 
             let bert = rt
-                .block_on(Bert::builder().build())
+                .block_on(async {
+                    match Bert::builder().build().await {
+                        Ok(bert) => {
+                            let mut models = embedding_models_clone.lock().await;
+                            models.insert("bert".to_string(), bert.clone());
+                            Ok(bert)
+                        },
+                        Err(e) => Err(anyhow!("Bert failed to build: {:?}", e)),
+                    }
+                })
                 .expect("couldn't build Bert model");
 
             rt.block_on(async {
@@ -119,18 +127,22 @@ impl AIService {
 
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            let llama = rt
+            rt
                 .block_on(
-                    Llama::builder()
+                    async {
+                        match Llama::builder()
                         .with_source(LlamaSource::tiny_llama_1_1b())
-                        .build(),
+                        .build().await {
+                            Ok(llama) => {
+                                let mut models = llm_models_clone.lock().await;
+                                models.insert("llama".to_string(), llama.clone());
+                                Ok(llama)
+                            },
+                            Err(e) => Err(anyhow!("Llama failed to build: {:?}", e)),
+                        }
+                    }
                 )
                 .expect("couldn't build Llama model");
-
-            rt.block_on(async {
-                let mut models = llm_models_clone.lock().await;
-                models.insert("llama".to_string(), llama.clone());
-            });
 
             let mut tasks = HashMap::<String, Task>::new();
 
@@ -153,8 +165,17 @@ impl AIService {
                         let mut tries = 0;
                         while !task_run && tries < 20 {
                             tries += 1;
+
+                            let model = rt.block_on(async {
+                                let models = llm_models_clone.lock().await;
+                                match models.get(&spawn_request.model_id) {
+                                    Some(model) => Ok(model.clone()),
+                                    None => Err(anyhow::anyhow!("Llama model not found")),
+                                }
+                            }).unwrap();
+
                             match catch_unwind(|| {
-                                rt.block_on(task.run("Test example prompt", &llama).all_text())
+                                rt.block_on(task.run("Test example prompt", &model).all_text())
                             }) {
                                 Err(e) => log::error!(
                                     "Llama panicked during task spawn with: {:?}. Trying again..",
@@ -180,9 +201,20 @@ impl AIService {
                             let mut tries = 0;
                             while maybe_result.is_none() && tries < 20 {
                                 tries += 1;
+
+                                let model = rt.block_on(async {
+                                    let models = llm_models_clone.lock().await;
+                                    match models.get(&prompt_request.model_id) {
+                                        Some(model) => Ok(model.clone()),
+                                        None => Err(anyhow::anyhow!("Llama model not found")),
+                                    }
+                                }).unwrap();
+
                                 match catch_unwind(|| {
                                     rt.block_on(
-                                        task.run(prompt_request.prompt.clone(), &llama).all_text(),
+                                        async {
+                                            task.run(prompt_request.prompt.clone(), &model).all_text().await
+                                        },
                                     )
                                 }) {
                                     Err(e) => {
@@ -216,8 +248,6 @@ impl AIService {
         let service = AIService {
             embedding_channel: bert_tx,
             llm_channel: llama_tx,
-            embedding_models,
-            llm_models,
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -312,6 +342,7 @@ impl AIService {
         let (result_sender, rx) = oneshot::channel();
         self.llm_channel
             .send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
+                model_id: "llama".into(),
                 task_id,
                 prompt,
                 result_sender,
