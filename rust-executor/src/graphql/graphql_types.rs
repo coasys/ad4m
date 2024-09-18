@@ -917,3 +917,29 @@ impl GetFilter for TriggeredNotification {
         None
     }
 }
+
+#[derive(GraphQLObject, Serialize, Deserialize, Default, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AIModelLoadingStatus {
+    pub model: String,
+    pub progress: f64,
+    pub status: String,
+    pub downloaded: bool,
+    pub loaded: bool,
+}
+
+//Implement the trait for `AIModelLoadingStatus` struct
+impl GetValue for AIModelLoadingStatus {
+    type Value = AIModelLoadingStatus;
+
+    fn get_value(&self) -> Self::Value {
+        self.clone()
+    }
+}
+
+//Implement the trait for `AIModelLoadingStatus` struct
+impl GetFilter for AIModelLoadingStatus {
+    fn get_filter(&self) -> Option<String> {
+        None
+    }
+}

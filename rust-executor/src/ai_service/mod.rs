@@ -1,7 +1,8 @@
 #[allow(unused_imports)]
 use self::{audio_stream::AudioStream, error::AIServiceError};
 #[allow(unused_imports)]
-use crate::graphql::graphql_types::{AITaskInput, TranscriptionTextFilter};
+use crate::graphql::graphql_types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
+use crate::pubsub::AI_MODEL_LOADING_STATUS;
 #[allow(unused_imports)]
 use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
 #[allow(unused_imports)]
@@ -76,6 +77,61 @@ enum LLMTaskRequest {
     Remove(LLMTaskRemoveRequest),
 }
 
+async fn handle_progress(model_name: String, progress: ModelLoadingProgress) {
+    match progress {
+        ModelLoadingProgress::Downloading {
+            source: _,
+            start_time,
+            progress,
+        } => {
+            let progress = progress * 100.0;
+            let _elapsed = start_time.elapsed().as_secs_f32();
+
+            get_global_pubsub()
+                .await
+                .publish(
+                    &AI_MODEL_LOADING_STATUS,
+                    &serde_json::to_string(&AIModelLoadingStatus {
+                        model: model_name,
+                        progress: progress as f64,
+                        status: if progress < 100.0 {
+                            "Downloading".to_string()
+                        } else {
+                            "Downloaded".to_string()
+                        },
+                        downloaded: progress == 100.0,
+                        loaded: false,
+                    })
+                    .expect("AIModelLoading must be serializable"),
+                )
+                .await;
+        }
+        ModelLoadingProgress::Loading { progress } => {
+            let progress = progress * 100.0;
+            println!("Loading model {progress}%");
+
+            get_global_pubsub()
+                .await
+                .publish(
+                    &AI_MODEL_LOADING_STATUS,
+                    &serde_json::to_string(&AIModelLoadingStatus {
+                        model: model_name,
+                        progress: progress as f64,
+                        status: if progress < 100.0 {
+                            "Loading".to_string()
+                        } else {
+                            "Loaded".to_string()
+                        },
+                        downloaded: true,
+                        loaded: progress == 100.0,
+                    })
+                    .expect("AIModelLoading must be serializable"),
+                )
+                .await;
+        }
+    }
+}
+
 impl AIService {
     pub async fn new() -> Result<Self> {
         let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
@@ -92,7 +148,12 @@ impl AIService {
 
             let bert = rt
                 .block_on(async {
-                    match Bert::builder().build().await {
+                    match Bert::builder()
+                        .build_with_loading_handler(|progress| {
+                            tokio::spawn(handle_progress("bert".to_string(), progress));
+                        })
+                        .await
+                    {
                         Ok(bert) => {
                             let mut models = embedding_models_clone.lock().await;
                             models.insert("bert".to_string(), bert.clone());
@@ -130,7 +191,9 @@ impl AIService {
             rt.block_on(async {
                 match Llama::builder()
                     .with_source(LlamaSource::tiny_llama_1_1b())
-                    .build()
+                    .build_with_loading_handler(|progress| {
+                        tokio::spawn(handle_progress("llama".to_string(), progress));
+                    })
                     .await
                 {
                     Ok(llama) => {
