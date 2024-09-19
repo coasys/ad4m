@@ -1,5 +1,5 @@
 import { Query, Resolver, Mutation, Arg, InputType, Field, Subscription, Float, PubSub} from "type-graphql";
-import { AITask, AITaskInput } from "./Tasks";
+import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
 import pako from "pako";
 import base64js from 'base64-js';
 import { AI_TRANSCRIPTION_TEXT_TOPIC } from "../PubSub";
@@ -79,6 +79,17 @@ export default class AIResolver {
             undefined,
             createdAt,
             updatedAt
+        )
+    }
+
+    @Query(() => AIModelLoadingStatus)
+    aiModelLoadingStatus(@Arg("model") model: string): AIModelLoadingStatus {
+        return new AIModelLoadingStatus(
+            model,
+            "loaded",
+            100.0,
+            true,
+            true
         )
     }
 
