@@ -1,5 +1,6 @@
 use crate::graphql::graphql_types::{
-    AIModelLoadingStatus, EntanglementProof, LinkStatus, NotificationInput, PerspectiveExpression, PerspectiveHandle, SentMessage
+    AIModelLoadingStatus, EntanglementProof, LinkStatus, NotificationInput, PerspectiveExpression,
+    PerspectiveHandle, SentMessage,
 };
 use crate::types::{
     AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, Notification,
@@ -184,7 +185,8 @@ impl Ad4mDb {
                 downloaded BOOLEAN NOT NULL,
                 loaded BOOLEAN NOT NULL
             )",
-        [])?;
+            [],
+        )?;
 
         Ok(Self { conn })
     }
@@ -211,18 +213,14 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn remove_model_status(&self, model: &str) -> Result<(), rusqlite::Error> {
+    pub fn get_model_status(
+        &self,
+        model: &str,
+    ) -> Result<Option<AIModelLoadingStatus>, rusqlite::Error> {
         let conn = &self.conn;
-        conn.execute(
-            "DELETE FROM model_status WHERE model = ?1",
-            params![model],
+        let mut stmt = conn.prepare(
+            "SELECT model, progress, status, downloaded, loaded FROM model_status WHERE model = ?1",
         )?;
-        Ok(())
-    }
-
-    pub fn get_model_status(&self, model: &str) -> Result<Option<AIModelLoadingStatus>, rusqlite::Error> {
-        let conn = &self.conn;
-        let mut stmt = conn.prepare("SELECT model, progress, status, downloaded, loaded FROM model_status WHERE model = ?1")?;
         let mut rows = stmt.query(params![model])?;
 
         if let Some(row) = rows.next()? {
