@@ -79,7 +79,7 @@ async fn publish_model_status(model_name: String, progress: f32, status: &str, d
         model: model_name.clone(),
         progress: progress as f64,
         status: status.to_string(),
-        downloaded: if downlaoded { progress == 100.0 } else { true },
+        downloaded: if downloaded { progress == 100.0 } else { true },
         loaded: if !downloaded { progress == 100.0 } else { true },
     };
 
