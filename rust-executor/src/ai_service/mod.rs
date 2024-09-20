@@ -40,26 +40,22 @@ struct TranscriptionSession {
 pub struct AIService {
     embedding_channel: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<EmbeddingRequest>>>>,
     llm_channel: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<LLMTaskRequest>>>>,
-    models: Arc<Mutex<HashMap<String, Bert>>>,
     transcription_streams: Arc<Mutex<HashMap<String, TranscriptionSession>>>,
 }
 
 struct EmbeddingRequest {
-    pub model_id: String,
     pub prompt: String,
     pub result_sender: oneshot::Sender<Result<Vec<f32>>>,
 }
 
 #[derive(Debug)]
 struct LLMTaskSpawnRequest {
-    pub model_id: String,
     pub task: AITask,
     pub result_sender: oneshot::Sender<Result<()>>,
 }
 
 #[derive(Debug)]
 struct LLMTaskPromptRequest {
-    pub model_id: String,
     pub task_id: String,
     pub prompt: String,
     pub result_sender: oneshot::Sender<Result<String>>,
@@ -78,6 +74,35 @@ enum LLMTaskRequest {
     Remove(LLMTaskRemoveRequest),
 }
 
+async fn publish_model_status(model_name: String, progress: f32, status: &str) {
+    let model = AIModelLoadingStatus {
+        model: model_name.clone(),
+        progress: progress as f64,
+        status: status.to_string(),
+        downloaded: progress == 100.0,
+        loaded: false,
+    };
+
+    let _ = Ad4mDb::with_global_instance(|db| {
+        let model = model.clone();
+        db.create_or_update_model_status(
+            &model.model,
+            model.progress,
+            &model.status,
+            model.downloaded,
+            model.loaded,
+        )
+    });
+
+    get_global_pubsub()
+        .await
+        .publish(
+            &AI_MODEL_LOADING_STATUS,
+            &serde_json::to_string(&model).expect("AIModelLoading must be serializable"),
+        )
+        .await;
+}
+
 async fn handle_progress(model_name: String, progress: ModelLoadingProgress) {
     match progress {
         ModelLoadingProgress::Downloading {
@@ -88,47 +113,24 @@ async fn handle_progress(model_name: String, progress: ModelLoadingProgress) {
             let progress = progress * 100.0;
             let _elapsed = start_time.elapsed().as_secs_f32();
 
-            get_global_pubsub()
-                .await
-                .publish(
-                    &AI_MODEL_LOADING_STATUS,
-                    &serde_json::to_string(&AIModelLoadingStatus {
-                        model: model_name,
-                        progress: progress as f64,
-                        status: if progress < 100.0 {
-                            "Downloading".to_string()
-                        } else {
-                            "Downloaded".to_string()
-                        },
-                        downloaded: progress == 100.0,
-                        loaded: false,
-                    })
-                    .expect("AIModelLoading must be serializable"),
-                )
-                .await;
+            let status = if progress < 100.0 {
+                "Downloading".to_string()
+            } else {
+                "Downloaded".to_string()
+            };
+
+            publish_model_status(model_name.clone(), progress, &status).await;
         }
         ModelLoadingProgress::Loading { progress } => {
             let progress = progress * 100.0;
-            println!("Loading model {progress}%");
 
-            get_global_pubsub()
-                .await
-                .publish(
-                    &AI_MODEL_LOADING_STATUS,
-                    &serde_json::to_string(&AIModelLoadingStatus {
-                        model: model_name,
-                        progress: progress as f64,
-                        status: if progress < 100.0 {
-                            "Loading".to_string()
-                        } else {
-                            "Loaded".to_string()
-                        },
-                        downloaded: true,
-                        loaded: progress == 100.0,
-                    })
-                    .expect("AIModelLoading must be serializable"),
-                )
-                .await;
+            let status = if progress < 100.0 {
+                "Loading".to_string()
+            } else {
+                "Loaded".to_string()
+            };
+
+            publish_model_status(model_name.clone(), progress, &status).await;
         }
     }
 }
@@ -138,11 +140,10 @@ impl AIService {
         let service = AIService {
             embedding_channel: Arc::new(Mutex::new(HashMap::new())),
             llm_channel: Arc::new(Mutex::new(HashMap::new())),
-            models: Arc::new(Mutex::new(HashMap::new())),
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
         };
 
-        service.load().await;
+        let _ = service.load().await;
 
         Ok(service)
     }
@@ -162,6 +163,14 @@ impl AIService {
         }
 
         Ok(())
+    }
+
+    pub async fn model_status(model_id: String) -> Result<AIModelLoadingStatus> {
+        let status = Ad4mDb::with_global_instance(|db| db.get_model_status(&model_id))
+            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
+            .ok_or(AIServiceError::ModelNotFound)?;
+
+        Ok(status)
     }
 
     pub async fn init_global_instance() -> Result<()> {
@@ -226,14 +235,18 @@ impl AIService {
 
                 let model = rt
                     .block_on(async {
-                        Bert::builder()
+                        let berd = Bert::builder()
                             .build_with_loading_handler({
                                 let model_id = model_id.clone();
                                 move |progress| {
                                     tokio::spawn(handle_progress(model_id.clone(), progress));
                                 }
                             })
-                            .await
+                            .await;
+
+                        publish_model_status(model_id.clone(), 100.0, "Loaded").await;
+
+                        berd
                     })
                     .expect("couldn't build Bert model");
 
@@ -261,7 +274,7 @@ impl AIService {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let llama = rt
                     .block_on(async {
-                        Llama::builder()
+                        let llama = Llama::builder()
                             .with_source(LlamaSource::tiny_llama_1_1b())
                             .build_with_loading_handler({
                                 let model_id = model_id.clone();
@@ -269,7 +282,11 @@ impl AIService {
                                     tokio::spawn(handle_progress(model_id.clone(), progress));
                                 }
                             })
-                            .await
+                            .await;
+
+                        publish_model_status(model_id.clone(), 100.0, "Loaded").await;
+
+                        llama
                     })
                     .expect("couldn't build Llama model");
 
@@ -396,7 +413,6 @@ impl AIService {
         let llm_channel = self.llm_channel.lock().await;
         if let Some(sender) = llm_channel.get("llama") {
             sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
-                model_id: "llama".into(),
                 task_id,
                 prompt,
                 result_sender,
@@ -414,7 +430,6 @@ impl AIService {
         let embedding_channel = self.embedding_channel.lock().await;
         if let Some(sender) = embedding_channel.get("bert") {
             sender.send(EmbeddingRequest {
-                model_id: "bert".into(),
                 prompt: text,
                 result_sender,
             })?;
@@ -433,7 +448,6 @@ impl AIService {
         let llm_channel = self.llm_channel.lock().await;
         if let Some(sender) = llm_channel.get(&task.model_id) {
             sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
-                model_id: task.model_id.clone(),
                 task: task.clone(),
                 result_sender: tx,
             }))?;
