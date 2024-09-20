@@ -74,13 +74,13 @@ enum LLMTaskRequest {
     Remove(LLMTaskRemoveRequest),
 }
 
-async fn publish_model_status(model_name: String, progress: f32, status: &str) {
+async fn publish_model_status(model_name: String, progress: f32, status: &str, downloaded: bool) {
     let model = AIModelLoadingStatus {
         model: model_name.clone(),
         progress: progress as f64,
         status: status.to_string(),
-        downloaded: progress == 100.0,
-        loaded: false,
+        downloaded: if downlaoded { progress == 100.0 } else { true },
+        loaded: if !downloaded { progress == 100.0 } else { true },
     };
 
     let _ = Ad4mDb::with_global_instance(|db| {
@@ -119,7 +119,7 @@ async fn handle_progress(model_name: String, progress: ModelLoadingProgress) {
                 "Downloaded".to_string()
             };
 
-            publish_model_status(model_name.clone(), progress, &status).await;
+            publish_model_status(model_name.clone(), progress, &status, true).await;
         }
         ModelLoadingProgress::Loading { progress } => {
             let progress = progress * 100.0;
@@ -130,7 +130,7 @@ async fn handle_progress(model_name: String, progress: ModelLoadingProgress) {
                 "Loaded".to_string()
             };
 
-            publish_model_status(model_name.clone(), progress, &status).await;
+            publish_model_status(model_name.clone(), progress, &status, false).await;
         }
     }
 }
@@ -235,6 +235,8 @@ impl AIService {
 
                 let model = rt
                     .block_on(async {
+                        publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
+
                         let berd = Bert::builder()
                             .build_with_loading_handler({
                                 let model_id = model_id.clone();
@@ -244,7 +246,7 @@ impl AIService {
                             })
                             .await;
 
-                        publish_model_status(model_id.clone(), 100.0, "Loaded").await;
+                        publish_model_status(model_id.clone(), 100.0, "Loaded", false).await;
 
                         berd
                     })
@@ -274,6 +276,8 @@ impl AIService {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let llama = rt
                     .block_on(async {
+                        publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
+
                         let llama = Llama::builder()
                             .with_source(LlamaSource::tiny_llama_1_1b())
                             .build_with_loading_handler({
@@ -284,7 +288,7 @@ impl AIService {
                             })
                             .await;
 
-                        publish_model_status(model_id.clone(), 100.0, "Loaded").await;
+                        publish_model_status(model_id.clone(), 100.0, "Loaded", false).await;
 
                         llama
                     })
