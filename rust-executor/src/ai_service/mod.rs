@@ -80,7 +80,7 @@ async fn publish_model_status(model_name: String, progress: f32, status: &str, d
         progress: progress as f64,
         status: status.to_string(),
         downloaded: if downloaded { progress == 100.0 } else { true },
-        loaded: if !downloaded { progress == 100.0 } else { true },
+        loaded: if !downloaded { progress == 100.0 } else { false },
     };
 
     let _ = Ad4mDb::with_global_instance(|db| {
@@ -279,10 +279,11 @@ impl AIService {
                         publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
 
                         let llama = Llama::builder()
-                            .with_source(LlamaSource::tiny_llama_1_1b())
+                            .with_source(LlamaSource::llama_13b())
                             .build_with_loading_handler({
                                 let model_id = model_id.clone();
                                 move |progress| {
+                                    println!("downloading llma model");
                                     tokio::spawn(handle_progress(model_id.clone(), progress));
                                 }
                             })

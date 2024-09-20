@@ -128,7 +128,7 @@ const Tasks = (props: {}) => {
                     <j-text variant="heading-sm">{model?.name}</j-text>
                   </j-box>
                   <j-box pb="300">
-                    {!model?.downloaded ? <j-text>Downloading: {model?.progress}</j-text> : null}
+                    {!model?.downloaded ? <j-text>Downloading: {model?.progress.toFixed(2)}%</j-text> : null}
                     {(model?.downloaded && !model?.loaded) ? <j-text>Loading: {model?.progress}</j-text> : null}
                     <j-text>Model {model.status}</j-text>
                   </j-box>
