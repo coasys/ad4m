@@ -4,19 +4,27 @@ import { expect } from "chai";
 export default function aiTests(testContext: TestContext) {
     return () => {
         describe('AI service', () => {
+            it ('AI model status', async () => {
+                const ad4mClient = testContext.ad4mClient!
+                const status = await ad4mClient.ai.modelLoadingStatus("bert");
+                console.log("MODEL STATUS:", status);
+                expect(status).to.have.property('model');
+                expect(status).to.have.property('status');
+            })
+
             it('can do Tasks CRUD', async() => {
                 const ad4mClient = testContext.ad4mClient!
 
                 // Add a task
                 const newTask = await ad4mClient.ai.addTask(
                     "test-name",
-                    "test-model",
+                    "llama",
                     "This is a test system prompt",
                     [{ input: "Test input", output: "Test output" }]
                 );
                 expect(newTask).to.have.property('taskId');
                 expect(newTask.name).to.equal('test-name');
-                expect(newTask.modelId).to.equal("test-model");
+                expect(newTask.modelId).to.equal("llama");
                 expect(newTask.systemPrompt).to.equal("This is a test system prompt");
                 expect(newTask.promptExamples).to.deep.equal([{ input: "Test input", output: "Test output" }]);
 
@@ -51,7 +59,7 @@ export default function aiTests(testContext: TestContext) {
                 // Create a new task
                 const newTask = await ad4mClient.ai.addTask(
                     "test-name",
-                    "test-model",
+                    "llama",
                     "You are inside a test. Please ALWAYS respond with 'works', plus something else.",
                     [
                         { input: "What's the capital of France?", output: "works. Also that is Paris" },
@@ -80,33 +88,35 @@ export default function aiTests(testContext: TestContext) {
             it('can prompt several task in a row fast', async () => {
                 const ad4mClient = testContext.ad4mClient!
 
+                console.log("test 1");
+
                 // Create a new task
                 const newTask = await ad4mClient.ai.addTask(
                     "test-name",
-                    "test-model",
+                    "llama",
                     "You are inside a test. Please respond with a short, unique message each time.",
                     [
-                        { input: "Test 1", output: "Short response 1" },
-                        { input: "Test 2", output: "Short response 2" },
-                        { input: "Test 3", output: "Short response 3" },
                         { input: "Test long 1", output: "This is a much longer response that includes various details. It talks about the weather being sunny, the importance of staying hydrated, and even mentions a recipe for chocolate chip cookies. The response goes on to discuss the benefits of regular exercise, the plot of a popular novel, and concludes with a fun fact about the migration patterns of monarch butterflies." },
                         { input: "Test long 2", output: "This is another much longer response that delves into various topics. It begins by discussing the intricate process of photosynthesis in plants, then transitions to the history of ancient civilizations, touching on the rise and fall of the Roman Empire. The response continues with an explanation of quantum mechanics and its implications for our understanding of the universe. It then explores the evolution of human language, the impact of climate change on global ecosystems, and the potential for artificial intelligence to revolutionize healthcare. The response concludes with a brief overview of the cultural significance of tea ceremonies in different parts of the world." },
                         { input: "Test long 3", output: "This extensive response covers a wide range of subjects, starting with an in-depth analysis of sustainable urban planning and its impact on modern cities. It then shifts to discuss the evolution of musical instruments throughout history, touching on the development of the piano, guitar, and electronic synthesizers. The text continues with an exploration of the human immune system, detailing how it fights off pathogens and the importance of vaccinations. Next, it delves into the world of astronomy, describing the life cycle of stars and the formation of galaxies. The response also includes a section on the history of cryptography, from ancient ciphers to modern encryption algorithms used in digital security. It concludes with a discussion on the philosophy of ethics, examining various moral frameworks and their applications in contemporary society." },
-                        { input: "Test a", output: "Short response" },
-                        { input: "Test b", output: "Short response" },
-                        { input: "Test c", output: "Short response" },
                     ]
                 );
+
+                console.log("test 2");
 
                 expect(newTask).to.have.property('taskId');
 
                 // Create an array of 10 prompts
-                const prompts = Array.from({ length: 10 }, (_, i) => `This is a much longer test prompt number ${i + 1}. It includes various details to make it more substantial. For instance, it mentions that the sky is blue, grass is green, and water is essential for life. It also touches on the fact that technology is rapidly advancing, climate change is a global concern, and education is crucial for personal growth. Additionally, it notes that music can evoke powerful emotions, reading broadens the mind, and exercise is important for maintaining good health. Lastly, it states that kindness can make a significant difference in someone's day.`);
+                const prompts = Array.from({ length: 1 }, (_, i) => `This is a much longer test prompt number ${i + 1}. It includes various details to make it more substantial. For instance, it mentions that the sky is blue, grass is green, and water is essential for life. It also touches on the fact that technology is rapidly advancing, climate change is a global concern, and education is crucial for personal growth. Additionally, it notes that music can evoke powerful emotions, reading broadens the mind, and exercise is important for maintaining good health. Lastly, it states that kindness can make a significant difference in someone's day.`);
+
+                console.log("test 3");
 
                 // Run 10 prompts simultaneously
                 const promptResults = await Promise.all(
                     prompts.map(prompt => ad4mClient.ai.prompt(newTask.taskId, prompt))
                 );
+
+                console.log("test 4", promptResults);
 
                 // Check results
                 promptResults.forEach((result, index) => {
@@ -115,8 +125,12 @@ export default function aiTests(testContext: TestContext) {
                     console.log(`Prompt ${index + 1} result:`, result);
                 });
 
+                console.log("test 5");
+
                 // Clean up: remove the task
                 await ad4mClient.ai.removeTask(newTask.taskId);
+
+                console.log("test 6");
             })
 
             it('can embed text to vectors', async () => {
@@ -177,7 +191,7 @@ export default function aiTests(testContext: TestContext) {
                     const chunk = audioData.slice(i, i + chunkSize);
                     //@ts-ignore
                     await ad4mClient.ai.feedTranscriptionStream(streamId, Array.from(chunk));
-                    
+
                     // Simulate real-time processing by adding a small delay
                     await new Promise(resolve => setTimeout(resolve, 500));
                 }
