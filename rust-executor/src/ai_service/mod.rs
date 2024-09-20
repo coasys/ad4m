@@ -80,7 +80,11 @@ async fn publish_model_status(model_name: String, progress: f32, status: &str, d
         progress: progress as f64,
         status: status.to_string(),
         downloaded: if downloaded { progress == 100.0 } else { true },
-        loaded: if !downloaded { progress == 100.0 } else { false },
+        loaded: if !downloaded {
+            progress == 100.0
+        } else {
+            false
+        },
     };
 
     let _ = Ad4mDb::with_global_instance(|db| {
