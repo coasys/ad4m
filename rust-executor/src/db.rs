@@ -180,8 +180,8 @@ impl Ad4mDb {
             "CREATE TABLE IF NOT EXISTS model_status (
                 model TEXT PRIMARY KEY,
                 progress DOUBLE NOT NULL,
-                status TEXT NOT NULL
-                downloaded BOOLEAN NOT NULL
+                status TEXT NOT NULL,
+                downloaded BOOLEAN NOT NULL,
                 loaded BOOLEAN NOT NULL
             )",
         [])?;
