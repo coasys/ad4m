@@ -1196,6 +1196,11 @@ describe('Ad4mClient', () => {
             expect(task.systemPrompt).toBe("system prompt")
         });
 
+        it('modelLoadingStatus()', async () => {
+            const status = await ad4mClient.ai.modelLoadingStatus("model_id");
+            expect(status.status).toBe("loaded")
+        });
+
         it('prompt()', async () => {
             const prompt = await ad4mClient.ai.prompt("task_id", "Do something");
             console.log(prompt)

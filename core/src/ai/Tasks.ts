@@ -93,3 +93,29 @@ export class AITask {
         this.updatedAt = updated_at;
     }
 }
+
+@ObjectType()
+export class AIModelLoadingStatus {
+    @Field()
+    model: string;
+
+    @Field()
+    status: string;
+
+    @Field()
+    progress: number;
+
+    @Field()
+    downloaded: boolean;
+
+    @Field()
+    loaded : boolean;
+
+    constructor(model: string, status: string, progress: number, downloaded: boolean, loaded: boolean) {
+        this.model = model;
+        this.status = status;
+        this.progress = progress;
+        this.downloaded = downloaded;
+        this.loaded = loaded;
+    }
+}

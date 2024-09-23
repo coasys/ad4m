@@ -1,6 +1,6 @@
 use crate::graphql::graphql_types::{
-    EntanglementProof, LinkStatus, NotificationInput, PerspectiveExpression, PerspectiveHandle,
-    SentMessage,
+    AIModelLoadingStatus, EntanglementProof, LinkStatus, NotificationInput, PerspectiveExpression,
+    PerspectiveHandle, SentMessage,
 };
 use crate::types::{
     AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, Notification,
@@ -177,7 +177,64 @@ impl Ad4mDb {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS model_status (
+                model TEXT PRIMARY KEY,
+                progress DOUBLE NOT NULL,
+                status TEXT NOT NULL,
+                downloaded BOOLEAN NOT NULL,
+                loaded BOOLEAN NOT NULL
+            )",
+            [],
+        )?;
+
         Ok(Self { conn })
+    }
+
+    pub fn create_or_update_model_status(
+        &self,
+        model: &str,
+        progress: f64,
+        status: &str,
+        downloaded: bool,
+        loaded: bool,
+    ) -> Result<(), rusqlite::Error> {
+        let conn = &self.conn;
+        conn.execute(
+            "INSERT INTO model_status (model, progress, status, downloaded, loaded)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(model) DO UPDATE SET
+             progress = excluded.progress,
+             status = excluded.status,
+             downloaded = excluded.downloaded,
+             loaded = excluded.loaded",
+            params![model, progress, status, downloaded, loaded],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_model_status(
+        &self,
+        model: &str,
+    ) -> Result<Option<AIModelLoadingStatus>, rusqlite::Error> {
+        let conn = &self.conn;
+        let mut stmt = conn.prepare(
+            "SELECT model, progress, status, downloaded, loaded FROM model_status WHERE model = ?1",
+        )?;
+        let mut rows = stmt.query(params![model])?;
+
+        if let Some(row) = rows.next()? {
+            let model = AIModelLoadingStatus {
+                model: row.get(0)?,
+                progress: row.get(1)?,
+                status: row.get(2)?,
+                downloaded: row.get(3)?,
+                loaded: row.get(4)?,
+            };
+            Ok(Some(model))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn add_task(

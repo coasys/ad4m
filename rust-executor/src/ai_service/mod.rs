@@ -1,5 +1,8 @@
 use self::{audio_stream::AudioStream, error::AIServiceError};
-use crate::graphql::graphql_types::{AITaskInput, TranscriptionTextFilter};
+#[allow(unused_imports)]
+use crate::graphql::graphql_types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
+use crate::pubsub::AI_MODEL_LOADING_STATUS;
+#[allow(unused_imports)]
 use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
 use crate::types::AITask;
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
@@ -32,8 +35,8 @@ struct TranscriptionSession {
 
 #[derive(Clone)]
 pub struct AIService {
-    bert: mpsc::UnboundedSender<EmbeddingRequest>,
-    llama: mpsc::UnboundedSender<LLMTaskRequest>,
+    embedding_channel: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<EmbeddingRequest>>>>,
+    llm_channel: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<LLMTaskRequest>>>>,
     transcription_streams: Arc<Mutex<HashMap<String, TranscriptionSession>>>,
 }
 
@@ -68,134 +71,107 @@ enum LLMTaskRequest {
     Remove(LLMTaskRemoveRequest),
 }
 
+async fn publish_model_status(model_name: String, progress: f32, status: &str, downloaded: bool) {
+    let model = AIModelLoadingStatus {
+        model: model_name.clone(),
+        progress: progress as f64,
+        status: status.to_string(),
+        downloaded: if downloaded { progress == 100.0 } else { true },
+        loaded: if !downloaded {
+            progress == 100.0
+        } else {
+            false
+        },
+    };
+
+    let _ = Ad4mDb::with_global_instance(|db| {
+        let model = model.clone();
+        db.create_or_update_model_status(
+            &model.model,
+            model.progress,
+            &model.status,
+            model.downloaded,
+            model.loaded,
+        )
+    });
+
+    get_global_pubsub()
+        .await
+        .publish(
+            &AI_MODEL_LOADING_STATUS,
+            &serde_json::to_string(&model).expect("AIModelLoading must be serializable"),
+        )
+        .await;
+}
+
+async fn handle_progress(model_name: String, progress: ModelLoadingProgress) {
+    match progress {
+        ModelLoadingProgress::Downloading {
+            source: _,
+            start_time,
+            progress,
+        } => {
+            let progress = progress * 100.0;
+            let _elapsed = start_time.elapsed().as_secs_f32();
+
+            let status = if progress < 100.0 {
+                "Downloading".to_string()
+            } else {
+                "Downloaded".to_string()
+            };
+
+            publish_model_status(model_name.clone(), progress, &status, true).await;
+        }
+        ModelLoadingProgress::Loading { progress } => {
+            let progress = progress * 100.0;
+
+            let status = if progress < 100.0 {
+                "Loading".to_string()
+            } else {
+                "Loaded".to_string()
+            };
+
+            publish_model_status(model_name.clone(), progress, &status, false).await;
+        }
+    }
+}
+
 impl AIService {
     pub async fn new() -> Result<Self> {
-        let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
-        let (llama_tx, mut llama_rx) = mpsc::unbounded_channel::<LLMTaskRequest>();
-
-        thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let bert = rt
-                .block_on(Bert::builder().build())
-                .expect("couldn't build Bert model");
-            while let Some(request) = rt.block_on(bert_rx.recv()) {
-                // let result: Result<Vec<f32>> = match catch_unwind(|| rt.block_on(bert.embed(request.prompt))) {
-                //     Err(e) => Err(anyhow!("Bert panicked: {:?}", e)),
-                //     Ok(embed_result) => embed_result.and_then(|tensor| Ok(tensor.to_vec()))
-                // };
-
-                let result: Result<Vec<f32>> = rt
-                    .block_on(bert.embed(request.prompt))
-                    .map(|tensor| tensor.to_vec());
-                let _ = request.result_sender.send(result);
-            }
-        });
-
-        thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let llama = rt
-                .block_on(
-                    Llama::builder()
-                        .with_source(LlamaSource::tiny_llama_1_1b())
-                        .build(),
-                )
-                .expect("couldn't build Llama model");
-
-            let mut tasks = HashMap::<String, Task>::new();
-
-            while let Some(task_request) = rt.block_on(llama_rx.recv()) {
-                match task_request {
-                    LLMTaskRequest::Spawn(spawn_request) => {
-                        let task_description = spawn_request.task;
-                        let task = Task::builder(task_description.system_prompt.clone())
-                            .with_examples(
-                                task_description
-                                    .prompt_examples
-                                    .clone()
-                                    .into_iter()
-                                    .map(|example| (example.input, example.output))
-                                    .collect::<Vec<(String, String)>>(),
-                            )
-                            .build();
-
-                        let mut task_run = false;
-                        let mut tries = 0;
-                        while !task_run && tries < 20 {
-                            tries += 1;
-                            match catch_unwind(|| {
-                                rt.block_on(task.run("Test example prompt", &llama).all_text())
-                            }) {
-                                Err(e) => log::error!(
-                                    "Llama panicked during task spawn with: {:?}. Trying again..",
-                                    e
-                                ),
-                                Ok(_) => task_run = true,
-                            }
-                        }
-
-                        if task_run {
-                            tasks.insert(task_description.task_id.clone(), task);
-                            let _ = spawn_request.result_sender.send(Ok(()));
-                        } else {
-                            let _ = spawn_request
-                                .result_sender
-                                .send(Err(anyhow!("Couldn't run task without panicks")));
-                        }
-                    }
-
-                    LLMTaskRequest::Prompt(prompt_request) => {
-                        if let Some(task) = tasks.get(&prompt_request.task_id) {
-                            let mut maybe_result: Option<String> = None;
-                            let mut tries = 0;
-                            while maybe_result.is_none() && tries < 20 {
-                                tries += 1;
-                                match catch_unwind(|| {
-                                    rt.block_on(
-                                        task.run(prompt_request.prompt.clone(), &llama).all_text(),
-                                    )
-                                }) {
-                                    Err(e) => {
-                                        log::error!("Llama panicked with: {:?}. Trying again..", e)
-                                    }
-                                    Ok(result) => maybe_result = Some(result),
-                                }
-                            }
-
-                            if let Some(result) = maybe_result {
-                                let _ = prompt_request.result_sender.send(Ok(result));
-                            } else {
-                                let _ = prompt_request.result_sender.send(Err(anyhow!("Unable to get response from Llama model. Giving up after 20 retries")));
-                            }
-                        } else {
-                            let _ = prompt_request.result_sender.send(Err(anyhow!(
-                                "Task with ID {} not spawned",
-                                prompt_request.task_id
-                            )));
-                        }
-                    }
-
-                    LLMTaskRequest::Remove(remove_request) => {
-                        let _ = tasks.remove(&remove_request.task_id);
-                        let _ = remove_request.result_sender.send(());
-                    }
-                }
-            }
-        });
-
         let service = AIService {
-            bert: bert_tx,
-            llama: llama_tx,
+            embedding_channel: Arc::new(Mutex::new(HashMap::new())),
+            llm_channel: Arc::new(Mutex::new(HashMap::new())),
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
         };
 
+        let _ = service.load().await;
+
+        Ok(service)
+    }
+
+    pub async fn load(&self) -> Result<()> {
+        // Get the models from the database & loop over it to spawn models
+
+        self.spawn_embedding_model("bert".to_string()).await;
+        self.spawn_llm_model("llama".to_string()).await;
+
+        // Spawn tasks from the database
         let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
         for task in tasks {
-            service.spawn_task(task).await?;
+            self.spawn_task(task).await?;
         }
 
-        Ok(service)
+        Ok(())
+    }
+
+    pub async fn model_status(model_id: String) -> Result<AIModelLoadingStatus> {
+        let status = Ad4mDb::with_global_instance(|db| db.get_model_status(&model_id))
+            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
+            .ok_or(AIServiceError::ModelNotFound)?;
+
+        Ok(status)
     }
 
     pub async fn init_global_instance() -> Result<()> {
@@ -250,6 +226,168 @@ impl AIService {
         Ok(tasks)
     }
 
+    pub async fn spawn_embedding_model(&self, model_id: String) {
+        let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
+
+        thread::spawn({
+            let model_id = model_id.clone();
+            move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+
+                let model = rt
+                    .block_on(async {
+                        publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
+
+                        let berd = Bert::builder()
+                            .build_with_loading_handler({
+                                let model_id = model_id.clone();
+                                move |progress| {
+                                    tokio::spawn(handle_progress(model_id.clone(), progress));
+                                }
+                            })
+                            .await;
+
+                        publish_model_status(model_id.clone(), 100.0, "Loaded", false).await;
+
+                        berd
+                    })
+                    .expect("couldn't build Bert model");
+
+                while let Some(request) = rt.block_on(bert_rx.recv()) {
+                    let result: Result<Vec<f32>> = rt
+                        .block_on(async { model.embed(request.prompt).await })
+                        .map(|tensor| tensor.to_vec());
+                    let _ = request.result_sender.send(result);
+                }
+            }
+        });
+
+        self.embedding_channel
+            .lock()
+            .await
+            .insert(model_id, bert_tx);
+    }
+    pub async fn spawn_llm_model(&self, model_id: String) {
+        let (llama_tx, mut llama_rx) = mpsc::unbounded_channel::<LLMTaskRequest>();
+
+        thread::spawn({
+            let model_id = model_id.clone();
+
+            move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let llama = rt
+                    .block_on(async {
+                        publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
+
+                        let llama = Llama::builder()
+                            .with_source(LlamaSource::llama_13b())
+                            .build_with_loading_handler({
+                                let model_id = model_id.clone();
+                                move |progress| {
+                                    println!("downloading llma model");
+                                    tokio::spawn(handle_progress(model_id.clone(), progress));
+                                }
+                            })
+                            .await;
+
+                        publish_model_status(model_id.clone(), 100.0, "Loaded", false).await;
+
+                        llama
+                    })
+                    .expect("couldn't build Llama model");
+
+                let mut tasks = HashMap::<String, Task>::new();
+
+                while let Some(task_request) = rt.block_on(llama_rx.recv()) {
+                    match task_request {
+                        LLMTaskRequest::Spawn(spawn_request) => {
+                            let task_description = spawn_request.task;
+                            let task = Task::builder(task_description.system_prompt.clone())
+                                .with_examples(
+                                    task_description
+                                        .prompt_examples
+                                        .clone()
+                                        .into_iter()
+                                        .map(|example| (example.input, example.output))
+                                        .collect::<Vec<(String, String)>>(),
+                                )
+                                .build();
+
+                            let mut task_run = false;
+                            let mut tries = 0;
+                            while !task_run && tries < 20 {
+                                tries += 1;
+
+                                match catch_unwind(|| {
+                                    rt.block_on(task.run("Test example prompt", &llama).all_text())
+                                }) {
+                                    Err(e) => log::error!(
+                                        "Llama panicked during task spawn with: {:?}. Trying again..",
+                                        e
+                                    ),
+                                    Ok(_) => task_run = true,
+                                }
+                            }
+
+                            if task_run {
+                                tasks.insert(task_description.task_id.clone(), task);
+                                let _ = spawn_request.result_sender.send(Ok(()));
+                            } else {
+                                let _ = spawn_request
+                                    .result_sender
+                                    .send(Err(anyhow!("Couldn't run task without panicks")));
+                            }
+                        }
+
+                        LLMTaskRequest::Prompt(prompt_request) => {
+                            if let Some(task) = tasks.get(&prompt_request.task_id) {
+                                let mut maybe_result: Option<String> = None;
+                                let mut tries = 0;
+                                while maybe_result.is_none() && tries < 20 {
+                                    tries += 1;
+
+                                    match catch_unwind(|| {
+                                        rt.block_on(async {
+                                            task.run(prompt_request.prompt.clone(), &llama)
+                                                .all_text()
+                                                .await
+                                        })
+                                    }) {
+                                        Err(e) => {
+                                            log::error!(
+                                                "Llama panicked with: {:?}. Trying again..",
+                                                e
+                                            )
+                                        }
+                                        Ok(result) => maybe_result = Some(result),
+                                    }
+                                }
+
+                                if let Some(result) = maybe_result {
+                                    let _ = prompt_request.result_sender.send(Ok(result));
+                                } else {
+                                    let _ = prompt_request.result_sender.send(Err(anyhow!("Unable to get response from Llama model. Giving up after 20 retries")));
+                                }
+                            } else {
+                                let _ = prompt_request.result_sender.send(Err(anyhow!(
+                                    "Task with ID {} not spawned",
+                                    prompt_request.task_id
+                                )));
+                            }
+                        }
+
+                        LLMTaskRequest::Remove(remove_request) => {
+                            let _ = tasks.remove(&remove_request.task_id);
+                            let _ = remove_request.result_sender.send(());
+                        }
+                    }
+                }
+            }
+        });
+
+        self.llm_channel.lock().await.insert(model_id, llama_tx);
+    }
+
     pub async fn update_task(&self, task: AITask) -> Result<AITask> {
         let task_id = task.task_id.clone();
         Ad4mDb::with_global_instance(|db| {
@@ -277,42 +415,72 @@ impl AIService {
 
     pub async fn prompt(&self, task_id: String, prompt: String) -> Result<String> {
         let (result_sender, rx) = oneshot::channel();
-        self.llama
-            .send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
+
+        let llm_channel = self.llm_channel.lock().await;
+        if let Some(sender) = llm_channel.get("llama") {
+            sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
                 task_id,
                 prompt,
                 result_sender,
             }))?;
+        } else {
+            return Err(anyhow::anyhow!("Model 'llama' not found in LLM channel"));
+        }
+
         rx.await?
     }
 
     pub async fn embed(&self, text: String) -> Result<Vec<f32>> {
         let (result_sender, rx) = oneshot::channel();
 
-        self.bert.send(EmbeddingRequest {
-            prompt: text,
-            result_sender,
-        })?;
+        let embedding_channel = self.embedding_channel.lock().await;
+        if let Some(sender) = embedding_channel.get("bert") {
+            sender.send(EmbeddingRequest {
+                prompt: text,
+                result_sender,
+            })?;
+        } else {
+            return Err(anyhow::anyhow!(
+                "Model 'bert' not found in embedding channel"
+            ));
+        }
 
         rx.await?
     }
 
     async fn spawn_task(&self, task: AITask) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.llama.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
-            task,
-            result_sender: tx,
-        }))?;
+
+        let llm_channel = self.llm_channel.lock().await;
+        if let Some(sender) = llm_channel.get(&task.model_id) {
+            sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
+                task: task.clone(),
+                result_sender: tx,
+            }))?;
+        } else {
+            return Err(anyhow::anyhow!(
+                "Model '{}' not found in LLM channel",
+                task.model_id
+            ));
+        }
+
         rx.await?
     }
 
     async fn remove_task(&self, task_id: String) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.llama
-            .send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
+
+        let llm_channel = self.llm_channel.lock().await;
+
+        if let Some(sender) = llm_channel.get("llama") {
+            sender.send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
                 task_id,
                 result_sender: tx,
             }))?;
+        } else {
+            return Err(anyhow::anyhow!("Model 'llama' not found in LLM channel"));
+        }
+
         rx.await?;
         Ok(())
     }

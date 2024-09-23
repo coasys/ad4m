@@ -2,7 +2,7 @@ import { ApolloClient, gql } from "@apollo/client";
 import unwrapApolloResult from "../unwrapApolloResult";
 import base64js from 'base64-js';
 import pako from 'pako'
-import { AITask, AITaskInput } from "./Tasks";
+import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
 
 export class AIClient {
     #apolloClient: ApolloClient<any>;
@@ -122,6 +122,27 @@ export class AIClient {
         }));
 
         return aiUpdateTask;
+    }
+
+    async modelLoadingStatus(model: string): Promise<AIModelLoadingStatus> {
+        const { aiModelLoadingStatus } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`
+                query AiModelLoadingStatus($model: String!) {
+                    aiModelLoadingStatus(model: $model) {
+                        model
+                        status
+                        progress
+                        loaded
+                        downloaded
+                    }
+                }
+            `,
+            variables: {
+                model
+            }
+        }));
+
+        return aiModelLoadingStatus
     }
 
     async prompt(taskId: string, prompt: string): Promise<string> {

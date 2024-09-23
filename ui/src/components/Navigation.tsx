@@ -54,6 +54,7 @@ const Navigation = ({ did, opened, setOpened }: Props) => {
         {expertMode && (
           <j-tab-item value="/perspective">Perspectives</j-tab-item>
         )}
+        <j-tab-item value="/tasks">Tasks</j-tab-item>
         <j-tab-item value="/settings">Settings</j-tab-item>
       </j-tabs>
 

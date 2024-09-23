@@ -554,4 +554,17 @@ impl Query {
             Err(e) => Err(FieldError::new(e.to_string(), Value::null())),
         }
     }
+
+    async fn ai_model_loading_status(
+        &self,
+        context: &RequestContext,
+        model: String,
+    ) -> FieldResult<AIModelLoadingStatus> {
+        check_capability(&context.capabilities, &AI_READ_CAPABILITY)?;
+
+        match AIService::model_status(model).await {
+            Ok(status) => Ok(status),
+            Err(e) => Err(FieldError::new(e.to_string(), Value::null())),
+        }
+    }
 }
