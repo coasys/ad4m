@@ -1011,7 +1011,8 @@ describe('Ad4mClient', () => {
                     fileName: "new-test-model.bin",
                     tokenizerSource: "new-test-tokenizer",
                     modelParameters: "{}"
-                }
+                },
+                type: "LLM"
             };
             const result = await ad4mClient.runtime.addModel(newModel);
             expect(result).toBe(true);

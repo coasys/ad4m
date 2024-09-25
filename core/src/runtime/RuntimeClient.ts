@@ -395,6 +395,7 @@ export class RuntimeClient {
                             tokenizerSource
                             modelParameters
                         }
+                        type
                     }
                 }
             `

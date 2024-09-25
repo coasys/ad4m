@@ -162,6 +162,8 @@ export class LocalModel {
     modelParameters: string;
 }
 
+type ModelType = "llm" | "embeding" | "transcription";
+
 @ObjectType()
 export class Model {
     @Field()
@@ -172,6 +174,9 @@ export class Model {
 
     @Field(type => LocalModel, { nullable: true })
     local?: LocalModel;
+
+    @Field()
+    type: ModelType;
 }
 
 @InputType()
@@ -208,6 +213,9 @@ export class ModelInput {
 
     @Field(type => LocalModelInput, { nullable: true })
     local?: LocalModelInput;
+
+    @Field()
+    type: ModelType;
 }
 
 
@@ -424,7 +432,8 @@ export default class RuntimeResolver {
                     fileName: "test-model.bin",
                     tokenizerSource: "test-tokenizer",
                     modelParameters: "{}"
-                }
+                },
+                type: "llm"
             }
         ]
     }
