@@ -1,5 +1,9 @@
 import { TestContext } from './integration.test'
 import { expect } from "chai";
+import fs from 'fs';
+//@ts-ignore
+import ffmpeg from 'fluent-ffmpeg';
+import { Readable } from 'stream';
 
 export default function aiTests(testContext: TestContext) {
     return () => {
@@ -144,15 +148,14 @@ export default function aiTests(testContext: TestContext) {
 
             it('can do audio to text transcription', async() => {
                 const ad4mClient = testContext.ad4mClient!;
-                const fs = require('fs');
-                const ffmpeg = require('fluent-ffmpeg');
-                const { Readable } = require('stream');
 
                 // Load the m4a file
                 const audioBuffer = fs.readFileSync('../transcription_test.m4a');
 
+                console.log("AUDIO BUFFER:", audioBuffer);
+
                 // Convert m4a to raw PCM data
-                const pcmData = await new Promise((resolve, reject) => {
+                const pcmData: Buffer = await new Promise((resolve, reject) => {
                     const command = ffmpeg()
                         .input(Readable.from(audioBuffer))
                         .inputFormat('m4a')
@@ -170,11 +173,15 @@ export default function aiTests(testContext: TestContext) {
                     command.on('end', () => resolve(Buffer.concat(chunks)));
                 });
 
+                console.log("PCM DATA:", pcmData);
+
                 // Convert PCM buffer to Float32Array
-                //@ts-ignore
                 const result = new Float32Array(pcmData.buffer, pcmData.byteOffset, pcmData.length / 4);
+
+                console.log("RESULT:", result);
+
                 //@ts-ignore
-                const audioData = result.channelData[0]; // Assuming mono audio
+                const audioData = result// result.channelData[0]; // Assuming mono audio
 
                 // Open the transcription stream
                 let transcribedText = '';
