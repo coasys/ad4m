@@ -54,7 +54,7 @@ jobs:
           command: cargo fmt --check
       - run:
           name: install gobjc
-          command: sudo apt-get install gobjc clang gnustep-devel libobjc4 libgnustep-base-dev libasound2-dev pkg-config
+          command: sudo apt-get install gobjc clang gnustep-devel libobjc4 libgnustep-base-dev libasound2-dev pkg-config ffmpeg
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
