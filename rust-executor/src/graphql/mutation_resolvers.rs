@@ -1167,6 +1167,7 @@ impl Mutation {
                     api_type,
                 }),
                 local: None,
+                model_type: model.model_type,
             }
         } else {
             Model {
@@ -1177,6 +1178,7 @@ impl Mutation {
                     tokenizer_source: local.tokenizer_source,
                     model_parameters: local.model_parameters,
                 }),
+                model_type: model.model_type,
             }
         };
         

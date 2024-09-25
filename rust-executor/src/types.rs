@@ -439,10 +439,20 @@ pub struct LocalModel {
     pub model_parameters: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelType {
+    Llm,
+    Embedding,
+    Transcription,
+}
+
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub name: String,
     pub api: Option<ModelApi>,
     pub local: Option<LocalModel>,
+    #[serde(rename = "type")]
+    pub model_type: ModelType,
 }

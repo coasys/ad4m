@@ -617,6 +617,8 @@ pub struct ModelInput {
     pub name: String,
     pub api: Option<ModelApiInput>,
     pub local: Option<LocalModelInput>,
+    #[serde(rename = "type")]
+    pub model_type: ModelType
 }
 
 

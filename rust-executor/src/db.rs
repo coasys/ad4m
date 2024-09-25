@@ -169,7 +169,8 @@ impl Ad4mDb {
                 api_type TEXT,
                 local_file_name TEXT,
                 local_tokenizer_source TEXT,
-                local_model_parameters TEXT
+                local_model_parameters TEXT,
+                type TEXT NOT NULL
              )",
             [],
         )?;
@@ -817,8 +818,8 @@ impl Ad4mDb {
 
     pub fn add_model(&self, model: &Model) -> Ad4mDbResult<()> {
         self.conn.execute(
-            "INSERT INTO models (name, api_base_url, api_key, api_type, local_file_name, local_tokenizer_source, local_model_parameters)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO models (name, api_base_url, api_key, api_type, local_file_name, local_tokenizer_source, local_model_parameters, type)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 model.name,
                 model.api.as_ref().map(|api| api.base_url.to_string()),
@@ -827,6 +828,7 @@ impl Ad4mDb {
                 model.local.as_ref().map(|local| local.file_name.clone()),
                 model.local.as_ref().map(|local| local.tokenizer_source.clone()),
                 model.local.as_ref().map(|local| local.model_parameters.clone()),
+                model.model_type.to_string(),
             ],
         )?;
         Ok(())
@@ -863,6 +865,7 @@ impl Ad4mDb {
                 name: row.get(1)?,
                 api,
                 local,
+                model_type: serde_json::from_str(&row.get::<_, String>(8)?)?,
             })
         })?;
 
@@ -898,7 +901,7 @@ impl Ad4mDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{db::Ad4mDb, graphql::graphql_types::NotificationInput};
+    use crate::{db::Ad4mDb, graphql::graphql_types::NotificationInput, types::ModelType};
     use url::Url;
     use uuid::Uuid;
     use fake::{Fake, Faker};
@@ -1138,6 +1141,7 @@ fn test_models_crud() {
             api_type: ModelApiType::OpenAi,
         }),
         local: None,
+        model_type: ModelType::Llm
     };
 
     // Create a test model with LocalModel
@@ -1149,6 +1153,7 @@ fn test_models_crud() {
             tokenizer_source: "test_tokenizer".to_string(),
             model_parameters: "test_parameters".to_string(),
         }),
+        model_type: ModelType::Llm
     };
 
     // Add the test models
@@ -1166,6 +1171,7 @@ fn test_models_crud() {
     assert_eq!(retrieved_model_api.api.as_ref().unwrap().base_url, Url::parse("https://api.example.com").unwrap());
     assert_eq!(retrieved_model_api.api.as_ref().unwrap().api_key, "test_api_key");
     assert_eq!(retrieved_model_api.api.as_ref().unwrap().api_type, ModelApiType::OpenAi);
+    assert_eq!(retrieved_model_api.model_type, ModelType::Llm);
 
     let retrieved_model_local = models.iter().find(|m| m.name == "Test Model Local").unwrap();
     assert_eq!(retrieved_model_local.name, "Test Model Local");
@@ -1174,6 +1180,7 @@ fn test_models_crud() {
     assert_eq!(retrieved_model_local.local.as_ref().unwrap().file_name, "test_model.bin");
     assert_eq!(retrieved_model_local.local.as_ref().unwrap().tokenizer_source, "test_tokenizer");
     assert_eq!(retrieved_model_local.local.as_ref().unwrap().model_parameters, "test_parameters");
+    assert_eq!(retrieved_model_local.model_type, ModelType::Llm);
 
     // Remove the test models
     db.remove_model("Test Model API").unwrap();
