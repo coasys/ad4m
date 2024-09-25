@@ -1032,6 +1032,9 @@ importers:
 
   tests/js:
     dependencies:
+      fluent-ffmpeg:
+        specifier: ^2.1.3
+        version: 2.1.3
       uuid:
         specifier: '*'
         version: 9.0.1
@@ -5002,6 +5005,9 @@ packages:
   async-retry@1.3.3:
     resolution: {integrity: sha512-wfr/jstw9xNi/0teMHrRW7dsz3Lt5ARhYNZ2ewpadnhaIp5mbALhOAP+EAdsC7t4Z6wqsDVv9+W6gm1Dk9mEyw==}
 
+  async@0.2.10:
+    resolution: {integrity: sha512-eAkdoKxU6/LkKDBzLpT+t6Ff5EtfSF4wx1WfJiPEEV7WNLnDaRXk0oVysiEPm262roaachGexwUv94WhSgN5TQ==}
+
   async@3.2.5:
     resolution: {integrity: sha512-baNZyqaaLhyLVKm/DlvdW051MSgO6b8eVfIezl9E5PqWxFgzLm/wQntEW4zOytVburDEr0JlALEpdOFwvErLsg==}
 
@@ -7500,6 +7506,10 @@ packages:
 
   flexsearch@0.7.43:
     resolution: {integrity: sha512-c5o/+Um8aqCSOXGcZoqZOm+NqtVwNsvVpWv6lfmSclU954O3wvQKxxK8zj74fPaSJbXpSLTs4PRhh+wnoCXnKg==}
+
+  fluent-ffmpeg@2.1.3:
+    resolution: {integrity: sha512-Be3narBNt2s6bsaqP6Jzq91heDgOEaDCJAXcE3qcma/EJBSy5FB4cvO31XBInuAuKBx8Kptf8dkhjK0IOru39Q==}
+    engines: {node: '>=18'}
 
   focus-visible@5.2.0:
     resolution: {integrity: sha512-Rwix9pBtC1Nuy5wysTmKy+UjbDJpIfg8eHjw0rjZ1mX4GNLz1Bmd16uDpI3Gk1i70Fgcs8Csg2lPm8HULFg9DQ==}
@@ -14315,7 +14325,7 @@ snapshots:
       react: 17.0.2
       react-dom: 18.2.0(react@17.0.2)
 
-  '@apollo/client@3.7.10(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)':
+  '@apollo/client@3.7.10(graphql-ws@5.14.3)(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)':
     dependencies:
       '@graphql-typed-document-node/core': 3.2.0(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))
       '@wry/context': 0.7.4
@@ -15637,7 +15647,7 @@ snapshots:
 
   '@coasys/ad4m@0.8.1(bufferutil@4.0.8)(graphql-ws@5.14.3)(react-dom@18.2.0(react@18.2.0))(react@18.2.0)(utf-8-validate@5.0.10)':
     dependencies:
-      '@apollo/client': 3.7.10(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+      '@apollo/client': 3.7.10(graphql-ws@5.14.3)(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
       '@holochain/client': 0.16.0(bufferutil@4.0.8)(utf-8-validate@5.0.10)
       '@types/jest': 26.0.24
       class-validator: 0.13.2
@@ -15675,7 +15685,7 @@ snapshots:
 
   '@coasys/ad4m@0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)':
     dependencies:
-      '@apollo/client': 3.7.10(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+      '@apollo/client': 3.7.10(graphql-ws@5.14.3)(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
       '@holochain/client': 0.16.0(bufferutil@4.0.8)(utf-8-validate@5.0.10)
       '@types/jest': 26.0.24
       class-validator: 0.13.2
@@ -19234,6 +19244,8 @@ snapshots:
     dependencies:
       retry: 0.13.1
 
+  async@0.2.10: {}
+
   async@3.2.5: {}
 
   asynciterator.prototype@1.0.0:
@@ -22396,6 +22408,11 @@ snapshots:
   flatted@3.3.1: {}
 
   flexsearch@0.7.43: {}
+
+  fluent-ffmpeg@2.1.3:
+    dependencies:
+      async: 0.2.10
+      which: 1.3.1
 
   focus-visible@5.2.0: {}
 
