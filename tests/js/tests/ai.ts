@@ -163,25 +163,28 @@ export default function aiTests(testContext: TestContext) {
                         .audioFrequency(16000)
                         .audioChannels(1)
                         .on('error', reject)
-                        .pipe();
+                        .on('end', () => {
+                            resolve(Buffer.concat(chunks));
+                        });
 
-                    //@ts-ignore
-                    const chunks = [];
-                    //@ts-ignore
-                    command.on('data', chunk => chunks.push(chunk));
-                    //@ts-ignore
-                    command.on('end', () => resolve(Buffer.concat(chunks)));
+                    const chunks: Buffer[] = [];
+                    command.pipe()
+                        .on('data', (chunk: any) => chunks.push(chunk))
+                        .on('end', () => resolve(Buffer.concat(chunks)))
+                        .on('error', reject);
                 });
 
-                console.log("PCM DATA:", pcmData);
+                console.log("PCM DATA:", pcmData.buffer, pcmData.byteOffset, pcmData.length, pcmData.length / 4);
 
                 // Convert PCM buffer to Float32Array
-                const result = new Float32Array(pcmData.buffer, pcmData.byteOffset, pcmData.length / 4);
+                const result = new Float32Array(audioBuffer.buffer, audioBuffer.byteOffset, audioBuffer.byteLength / Float32Array.BYTES_PER_ELEMENT);
 
                 console.log("RESULT:", result);
 
                 //@ts-ignore
                 const audioData = result// result.channelData[0]; // Assuming mono audio
+
+                console.log("AUDIO DATA:", audioData.length);
 
                 // Open the transcription stream
                 let transcribedText = '';
