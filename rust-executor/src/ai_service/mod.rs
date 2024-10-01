@@ -9,21 +9,19 @@ use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use deno_core::error::AnyError;
 use futures::SinkExt;
-use kalosm::sound::{
-    DenoisedExt, TranscribeChunkedAudioStreamExt, VoiceActivityDetectorExt, VoiceActivityStreamExt,
-};
+// use kalosm::sound::{DenoisedExt, VoiceActivityDetectorExt, VoiceActivityStreamExt};
 use kalosm::{
     language::*,
     sound::{AsyncSourceTranscribeExt, Whisper},
 };
-use rodio::{source::Source, Decoder, OutputStream};
+// use rodio::source::Source;
 use std::collections::HashMap;
-use std::io::Cursor;
+// use std::io::Cursor;
 use std::panic::catch_unwind;
-use std::path::PathBuf;
+// use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+// use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 mod audio_stream;
@@ -598,57 +596,57 @@ impl AIService {
     }
 }
 
-struct Float32Source {
-    samples: Vec<f32>,
-    sample_rate: u32,
-    channels: u16,
-    current_sample: usize,
-}
+// struct Float32Source {
+//     samples: Vec<f32>,
+//     sample_rate: u32,
+//     channels: u16,
+//     current_sample: usize,
+// }
 
-impl Float32Source {
-    fn new(samples: Vec<f32>, sample_rate: u32, channels: u16) -> Self {
-        Self {
-            samples,
-            sample_rate,
-            channels,
-            current_sample: 0,
-        }
-    }
-}
+// impl Float32Source {
+//     fn new(samples: Vec<f32>, sample_rate: u32, channels: u16) -> Self {
+//         Self {
+//             samples,
+//             sample_rate,
+//             channels,
+//             current_sample: 0,
+//         }
+//     }
+// }
 
-impl Iterator for Float32Source {
-    type Item = f32;
+// impl Iterator for Float32Source {
+//     type Item = f32;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.current_sample < self.samples.len() {
-            let sample = self.samples[self.current_sample];
-            self.current_sample += 1;
-            Some(sample)
-        } else {
-            None
-        }
-    }
-}
+//     fn next(&mut self) -> Option<Self::Item> {
+//         if self.current_sample < self.samples.len() {
+//             let sample = self.samples[self.current_sample];
+//             self.current_sample += 1;
+//             Some(sample)
+//         } else {
+//             None
+//         }
+//     }
+// }
 
-impl Source for Float32Source {
-    fn current_frame_len(&self) -> Option<usize> {
-        Some(self.samples.len() - self.current_sample)
-    }
+// impl Source for Float32Source {
+//     fn current_frame_len(&self) -> Option<usize> {
+//         Some(self.samples.len() - self.current_sample)
+//     }
 
-    fn channels(&self) -> u16 {
-        self.channels
-    }
+//     fn channels(&self) -> u16 {
+//         self.channels
+//     }
 
-    fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
+//     fn sample_rate(&self) -> u32 {
+//         self.sample_rate
+//     }
 
-    fn total_duration(&self) -> Option<Duration> {
-        Some(Duration::from_secs_f32(
-            self.samples.len() as f32 / self.sample_rate as f32 / self.channels as f32,
-        ))
-    }
-}
+//     fn total_duration(&self) -> Option<Duration> {
+//         Some(Duration::from_secs_f32(
+//             self.samples.len() as f32 / self.sample_rate as f32 / self.channels as f32,
+//         ))
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
