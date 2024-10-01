@@ -8,20 +8,22 @@ use crate::types::AITask;
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use deno_core::error::AnyError;
-use std::io::Cursor;
-use std::time::Duration;
 use futures::SinkExt;
-use rodio::{Decoder, OutputStream, source::Source};
-use std::path::PathBuf;
-use kalosm::sound::{DenoisedExt, VoiceActivityDetectorExt, VoiceActivityStreamExt, TranscribeChunkedAudioStreamExt};
+use kalosm::sound::{
+    DenoisedExt, TranscribeChunkedAudioStreamExt, VoiceActivityDetectorExt, VoiceActivityStreamExt,
+};
 use kalosm::{
     language::*,
     sound::{AsyncSourceTranscribeExt, Whisper},
 };
+use rodio::{source::Source, Decoder, OutputStream};
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::panic::catch_unwind;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 mod audio_stream;
@@ -502,9 +504,10 @@ impl AIService {
             let rt = tokio::runtime::Runtime::new().unwrap();
 
             rt.block_on(async {
-                let maybe_model = Whisper::builder().with_source(
-                    kalosm::sound::WhisperSource::BaseEn
-                ).build().await;
+                let maybe_model = Whisper::builder()
+                    .with_source(kalosm::sound::WhisperSource::BaseEn)
+                    .build()
+                    .await;
                 println!("Whisper thread started");
 
                 if let Ok(whisper) = maybe_model {
@@ -525,14 +528,16 @@ impl AIService {
 
                     while let Some(word) = word_stream.next().await {
                         println!("meow: {}", word);
-                        pubsub.publish(
-                            &AI_TRANSCRIPTION_TEXT_TOPIC,
-                            &serde_json::to_string(&TranscriptionTextFilter {
-                                stream_id: stream_id_clone.clone(),
-                                text: word,
-                            })
-                            .expect("TranscriptionTextFilter must be serializable"),
-                        ).await;
+                        pubsub
+                            .publish(
+                                &AI_TRANSCRIPTION_TEXT_TOPIC,
+                                &serde_json::to_string(&TranscriptionTextFilter {
+                                    stream_id: stream_id_clone.clone(),
+                                    text: word,
+                                })
+                                .expect("TranscriptionTextFilter must be serializable"),
+                            )
+                            .await;
                     }
 
                     println!("Exited the loop");
@@ -575,28 +580,6 @@ impl AIService {
         } else {
             Err(AIServiceError::StreamNotFound.into())
         }
-    }
-
-    pub async fn mic(&self) {
-        let mic_input = kalosm::sound::MicInput::default();
-        let stream = mic_input.stream().unwrap();
-
-        println!("Stream created");
-
-        let vad = stream.voice_activity_stream().rechunk_voice_activity();
-
-        println!("VAD created");
-
-        let mut text_stream = vad.transcribe(Whisper::builder().with_source(
-            kalosm::sound::WhisperSource::BaseEn
-        ).build().await.unwrap());
-
-        println!("Text stream created");
-
-        text_stream.to_std_out().await.unwrap();
-
-        println!("Text stream printed");
-
     }
 
     pub async fn close_transcription_stream(&self, stream_id: &String) -> Result<()> {
