@@ -111,6 +111,7 @@ deflate = "1.0.0"
 futures-core = "0.3.30"
 futures-util = "0.3.30"
 futures-channel = "0.3.30"
+rodio = "*"
 
 [dev-dependencies]
 maplit = "1.0.2"

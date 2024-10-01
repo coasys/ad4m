@@ -8,7 +8,12 @@ use crate::types::AITask;
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use deno_core::error::AnyError;
+use std::io::Cursor;
+use std::time::Duration;
 use futures::SinkExt;
+use rodio::{Decoder, OutputStream, source::Source};
+use std::path::PathBuf;
+use kalosm::sound::{DenoisedExt, VoiceActivityDetectorExt, VoiceActivityStreamExt, TranscribeChunkedAudioStreamExt};
 use kalosm::{
     language::*,
     sound::{AsyncSourceTranscribeExt, Whisper},
@@ -280,7 +285,7 @@ impl AIService {
                         publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
 
                         let llama = Llama::builder()
-                            .with_source(LlamaSource::llama_13b())
+                            .with_source(LlamaSource::llama_8b())
                             .build_with_loading_handler({
                                 let model_id = model_id.clone();
                                 move |progress| {
@@ -495,23 +500,31 @@ impl AIService {
 
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            let maybe_model = rt.block_on(Whisper::new());
-            if let Ok(whisper) = maybe_model {
-                let audio_stream = AudioStream {
-                    //drop_tx,
-                    read_data: Vec::new(),
-                    receiver: Box::pin(sampels_rx.map(futures_util::stream::iter).flatten()),
-                };
 
-                let mut word_stream = audio_stream.transcribe(whisper).words();
+            rt.block_on(async {
+                let maybe_model = Whisper::builder().with_source(
+                    kalosm::sound::WhisperSource::BaseEn
+                ).build().await;
+                println!("Whisper thread started");
 
-                let pubsub = rt.block_on(get_global_pubsub());
+                if let Ok(whisper) = maybe_model {
+                    println!("Whisper model loaded");
 
-                let _ = done_tx.send(Ok(()));
+                    let audio_stream = AudioStream {
+                        read_data: Vec::new(),
+                        receiver: Box::pin(sampels_rx.map(futures_util::stream::iter).flatten()),
+                    };
 
-                while let Some(word) = rt.block_on(word_stream.next()) {
-                    println!("{}", word);
-                    rt.block_on(
+                    println!("Starting transcription");
+                    let mut word_stream = audio_stream.transcribe(whisper).words();
+                    println!("Transcription started");
+
+                    let pubsub = get_global_pubsub().await;
+
+                    let _ = done_tx.send(Ok(()));
+
+                    while let Some(word) = word_stream.next().await {
+                        println!("meow: {}", word);
                         pubsub.publish(
                             &AI_TRANSCRIPTION_TEXT_TOPIC,
                             &serde_json::to_string(&TranscriptionTextFilter {
@@ -519,12 +532,14 @@ impl AIService {
                                 text: word,
                             })
                             .expect("TranscriptionTextFilter must be serializable"),
-                        ),
-                    );
+                        ).await;
+                    }
+
+                    println!("Exited the loop");
+                } else {
+                    let _ = done_tx.send(Err(maybe_model.err().unwrap()));
                 }
-            } else {
-                let _ = done_tx.send(Err(maybe_model.err().unwrap()));
-            }
+            });
         });
 
         done_rx.await??;
@@ -548,11 +563,40 @@ impl AIService {
         let mut map_lock = self.transcription_streams.lock().await;
         let maybe_stream = map_lock.get_mut(stream_id);
         if let Some(stream) = maybe_stream {
+            println!("Feeding stream");
             stream.samples_tx.send(audio_samples).await?;
+            println!("Feeding stream done");
+
+            // let (_stream, stream_handle) = OutputStream::try_default().unwrap();
+            // let source = Float32Source::new(audio_samples, 16000, 1);
+            // stream_handle.play_raw(source.convert_samples());
+            // std::thread::sleep(std::time::Duration::from_secs(1));
             Ok(())
         } else {
             Err(AIServiceError::StreamNotFound.into())
         }
+    }
+
+    pub async fn mic(&self) {
+        let mic_input = kalosm::sound::MicInput::default();
+        let stream = mic_input.stream().unwrap();
+
+        println!("Stream created");
+
+        let vad = stream.voice_activity_stream().rechunk_voice_activity();
+
+        println!("VAD created");
+
+        let mut text_stream = vad.transcribe(Whisper::builder().with_source(
+            kalosm::sound::WhisperSource::BaseEn
+        ).build().await.unwrap());
+
+        println!("Text stream created");
+
+        text_stream.to_std_out().await.unwrap();
+
+        println!("Text stream printed");
+
     }
 
     pub async fn close_transcription_stream(&self, stream_id: &String) -> Result<()> {
@@ -568,6 +612,58 @@ impl AIService {
         } else {
             Err(AIServiceError::StreamNotFound.into())
         }
+    }
+}
+
+struct Float32Source {
+    samples: Vec<f32>,
+    sample_rate: u32,
+    channels: u16,
+    current_sample: usize,
+}
+
+impl Float32Source {
+    fn new(samples: Vec<f32>, sample_rate: u32, channels: u16) -> Self {
+        Self {
+            samples,
+            sample_rate,
+            channels,
+            current_sample: 0,
+        }
+    }
+}
+
+impl Iterator for Float32Source {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_sample < self.samples.len() {
+            let sample = self.samples[self.current_sample];
+            self.current_sample += 1;
+            Some(sample)
+        } else {
+            None
+        }
+    }
+}
+
+impl Source for Float32Source {
+    fn current_frame_len(&self) -> Option<usize> {
+        Some(self.samples.len() - self.current_sample)
+    }
+
+    fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        Some(Duration::from_secs_f32(
+            self.samples.len() as f32 / self.sample_rate as f32 / self.channels as f32,
+        ))
     }
 }
 
