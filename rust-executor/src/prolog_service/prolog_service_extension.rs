@@ -1,7 +1,5 @@
-use std::borrow::Cow;
-
-use deno_core::{error::AnyError, include_js_files, op2, Extension, anyhow::bail, Op};
-use scryer_prolog::machine::parsed_results::{Value, QueryMatch, QueryResolution};
+use deno_core::{anyhow::bail, error::AnyError, op2};
+use scryer_prolog::machine::parsed_results::{QueryMatch, QueryResolution, Value};
 
 use super::get_prolog_service;
 
@@ -17,26 +15,28 @@ async fn remove_engine(#[string] engine_name: String) -> Result<(), AnyError> {
     service.remove_engine(engine_name).await
 }
 
-
 pub fn prolog_value_to_json_tring(value: Value) -> String {
     match value {
         Value::Integer(i) => format!("{}", i),
         Value::Float(f) => format!("{}", f),
         Value::Rational(r) => format!("{}", r),
         Value::Atom(a) => format!("{}", a.as_str()),
-        Value::String(s) => 
+        Value::String(s) => {
             if let Err(_e) = serde_json::from_str::<serde_json::Value>(s.as_str()) {
                 //treat as string literal
                 //escape double quotes
-                format!("\"{}\"", s
-                    .replace("\"", "\\\"")
-                    .replace("\n", "\\n")
-                    .replace("\t", "\\t")
-                    .replace("\r", "\\r"))
+                format!(
+                    "\"{}\"",
+                    s.replace('"', "\\\"")
+                        .replace('\n', "\\n")
+                        .replace('\t', "\\t")
+                        .replace('\r', "\\r")
+                )
             } else {
                 //return valid json string
                 s
-            },
+            }
+        }
         Value::List(l) => {
             let mut string_result = "[".to_string();
             for (i, v) in l.iter().enumerate() {
@@ -45,7 +45,7 @@ pub fn prolog_value_to_json_tring(value: Value) -> String {
                 }
                 string_result.push_str(&prolog_value_to_json_tring(v.clone()));
             }
-            string_result.push_str("]");
+            string_result.push(']');
             string_result
         }
         Value::Structure(s, l) => {
@@ -56,7 +56,7 @@ pub fn prolog_value_to_json_tring(value: Value) -> String {
                 }
                 string_result.push_str(&prolog_value_to_json_tring(v.clone()));
             }
-            string_result.push_str("]");
+            string_result.push(']');
             string_result
         }
         _ => "null".to_string(),
@@ -69,19 +69,24 @@ fn prolog_match_to_json_string(query_match: &QueryMatch) -> String {
         if i > 0 {
             string_result.push_str(", ");
         }
-        string_result.push_str(&format!("\"{}\": {}", k, prolog_value_to_json_tring(v.clone())));
+        string_result.push_str(&format!(
+            "\"{}\": {}",
+            k,
+            prolog_value_to_json_tring(v.clone())
+        ));
     }
-    string_result.push_str("}");
+    string_result.push('}');
     string_result
 }
 
 #[op2(async)]
 #[string]
-async fn run_query(#[string] engine_name: String, #[string] query: String) -> Result<String, AnyError> {
+async fn run_query(
+    #[string] engine_name: String,
+    #[string] query: String,
+) -> Result<String, AnyError> {
     let service = get_prolog_service().await;
-    let result = service
-        .run_query(engine_name, query)
-        .await?;
+    let result = service.run_query(engine_name, query).await?;
 
     if let Err(prolog_error) = result {
         bail!(prolog_error);
@@ -91,10 +96,8 @@ async fn run_query(#[string] engine_name: String, #[string] query: String) -> Re
         QueryResolution::True => Ok("true".to_string()),
         QueryResolution::False => Ok("false".to_string()),
         QueryResolution::Matches(matches) => {
-            let matches_json: Vec<String> = matches
-                .iter()
-                .map(|m| prolog_match_to_json_string(m))
-                .collect();
+            let matches_json: Vec<String> =
+                matches.iter().map(prolog_match_to_json_string).collect();
             Ok(format!("[{}]", matches_json.join(", ")))
         }
     }
@@ -112,16 +115,9 @@ async fn load_module_string(
         .await
 }
 
-pub fn build() -> Extension {
-    Extension {
-        name: "prolog_service",
-        js_files: Cow::Borrowed(&include_js_files!(holochain_service "src/prolog_service/prolog_service_extension.js",)),
-        ops: Cow::Borrowed(&[
-            spawn_engine::DECL,
-            remove_engine::DECL,
-            run_query::DECL,
-            load_module_string::DECL,
-        ]),
-        ..Default::default()
-    }
-}
+deno_core::extension!(
+    prolog_service,
+    ops = [spawn_engine, remove_engine, run_query, load_module_string],
+    esm_entry_point = "ext:prolog_service/prolog_service_extension.js",
+    esm = [dir "src/prolog_service", "prolog_service_extension.js"]
+);

@@ -13,6 +13,8 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Removed capacitor barcode scanner [PR#502](https://github.com/coasys/ad4m/pull/502)
 - Show an error when the code is wrong. [PR#502](https://github.com/coasys/ad4m/pull/502)
 - Error handling in connect when hosting is not working [PR#502](https://github.com/coasys/ad4m/pull/502)
+- Make new Rust create_subject() implementation wait for Prolog engine to be updated, reflecting the new instance to avoid race conditions [PR#520](https://github.com/coasys/ad4m/pull/520)
+- Fix problems with Subject Classes created by other non-progenitor agents, and make isSubjectInstance() more stable agains race conditions [PR#521](https://github.com/coasys/ad4m/pull/521)
 
 ### Added
 - Prolog predicates needed in new Flux mention notification trigger:
@@ -35,6 +37,8 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Update color, logo & brand for ad4m-connect. [PR#502](https://github.com/coasys/ad4m/pull/502)\
 - Update the verify code header to show "Check Email" if using hosting. [PR#502](https://github.com/coasys/ad4m/pull/502)
 - ad4m.expression.get() handles literal values client-side to avoid roundtrips, can be overridden with optional flag [PR#498](https://github.com/coasys/ad4m/pull/498)
+- Update to Holochain 0.3.2-rc1 [PR#506](https://github.com/coasys/ad4m/pull/506)
+- Make Prolog engine update O(1) in case of only having link additions [PR#510](https://github.com/coasys/ad4m/pull/510)
 
 ## [0.9.0] - 23/03/2024
 

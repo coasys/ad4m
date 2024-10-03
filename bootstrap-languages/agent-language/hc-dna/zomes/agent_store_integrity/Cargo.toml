@@ -1,6 +1,6 @@
 [package]
 authors = ["josh@junto.foundation"]
-edition = "2018"
+edition = "2021"
 name = "agent_store_integrity"
 version = "0.0.1"
 
@@ -10,8 +10,8 @@ name = "agent_store_integrity"
 
 [dependencies]
 derive_more = "0"
-serde = "1"
-chrono = { version = "0.4.31", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
+serde = "1.0.198"
+chrono = { version = "0.4.38", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
 
-hdi = { version = "0.4.0-beta-dev.29"}
-hdk = { version = "0.3.0-beta-dev.33"}
+hdi = { version = "0.4.2-rc.1", git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739" }
+hdk = { version = "0.3.2-rc.1", git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739"}

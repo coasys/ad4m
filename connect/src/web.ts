@@ -22,6 +22,9 @@ import Header from "./components/Header";
 import autoBind from "auto-bind";
 import { getForVersion, removeForVersion, setForVersion } from "./utils";
 import Hosting from "./components/Hosting";
+import Logo from "./components/Logo";
+import AppLogo from "./components/AppLogo";
+import MobileAppLogoButton from "./components/MobileAppLogoButton";
 
 export { getAd4mClient } from "./utils";
 
@@ -63,6 +66,14 @@ const styles = css`
     color: var(--body-color);
     height: 100vh;
     width: 100vw;
+  }
+
+  .mainlogo {
+    position: fixed;
+    bottom: 30px;
+    right: 30px;
+    height: 20px;
+    width: 20px;
   }
 
   * {
@@ -460,10 +471,10 @@ export class Ad4mConnectElement extends LitElement {
 
   @state()
   private _hostingStep = 0;
-  
+
   @state()
   private _email = "";
-  
+
   @state()
   private _passowrd = "";
 
@@ -502,11 +513,14 @@ export class Ad4mConnectElement extends LitElement {
   @property({ type: String, reflect: true })
   appIconPath = null;
 
+  @property({ type: Boolean, reflect: true })
+  mobile = null;
+
   @property({ type: String, reflect: true })
   capabilities = [];
 
   @property({ type: Boolean, reflect: true })
-  hosting = false;
+  hosting = getForVersion("ad4mhosting") === "true" || false;
 
   // TODO: localstorage doesnt work here
   @property({ type: String })
@@ -558,6 +572,7 @@ export class Ad4mConnectElement extends LitElement {
       port: this.port || parseInt(getForVersion("ad4mport")) || 12000,
       token: this.token || getForVersion("ad4mtoken"),
       url: this.url || getForVersion("ad4murl"),
+      hosting: this.hosting,
     });
 
     this._client.on("configstatechange", this.handleConfigChange);
@@ -597,7 +612,7 @@ export class Ad4mConnectElement extends LitElement {
 
   private changeEmail(email: string) {
     this._email = email;
-  } 
+  }
 
   private changePassword(passowrd: string) {
     this._passowrd = passowrd;
@@ -616,6 +631,11 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private changeUrl(url) {
+    if (url !== this._client.url) {
+      removeForVersion("ad4mtoken")
+      this._client.setToken(null);
+    }
+
     this._client.setUrl(url);
   }
 
@@ -650,6 +670,9 @@ export class Ad4mConnectElement extends LitElement {
     if (event === "locked") {
       this._isOpen = true;
     }
+    if (event === "authenticated") {
+      this._isOpen = false;
+    }
     this.dispatchEvent(customEvent);
     this.requestUpdate();
   }
@@ -665,14 +688,21 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private handleConnectionChange(event: ConnectionStates) {
-   console.log(event); 
-    if (event === "connected") {
-      this.changeUIState("requestcap");
+   console.log(event);
+  //  this._isOpen = true;
+   if (event === "connected") {
+      if (this.authState !== "authenticated") {
+        this.changeUIState("requestcap");
+      } else {
+        this.changeUIState("connected");
+        this._isOpen = false;
+      }
     }
     if (event === "disconnected") {
       this._isOpen = true;
     }
     if (event === "not_connected") {
+      this._isOpen = true;
       this.changeUIState("start");
     }
     const customEvent = new CustomEvent("connectionstatechange", {
@@ -720,6 +750,14 @@ export class Ad4mConnectElement extends LitElement {
     this._isOpen = true;
     this.requestUpdate();
     const client = await this._client.connect();
+    try {
+      const status = await client.agent.status();
+      if (status.isUnlocked && status.isInitialized) {
+        window.location.reload();
+      }
+    } catch (e) {
+      console.warn(e);
+    }
     return client;
   }
 
@@ -729,13 +767,18 @@ export class Ad4mConnectElement extends LitElement {
 
   async connectRemote(url) {
     try {
+      this.changeUrl(url);
       const client = await this._client.connect(url);
+      const status = await client.agent.status();
+      if (status.isUnlocked && status.isInitialized) {
+        return client
+      }
+
       this.changeUIState("requestcap");
       return client;
     } catch (e) {
-      if (e.message === "Socket closed with event 4500 Invalid Compact JWS") {
         this.changeUIState("requestcap");
-      }
+        this._isOpen = true;
     }
   }
 
@@ -758,6 +801,18 @@ export class Ad4mConnectElement extends LitElement {
 
   setHostingStep(step: number) {
     this._hostingStep = step;
+  }
+
+  clearState() {
+    this.handleConfigChange("port", null)
+    this.handleConfigChange("url", null)
+    this.handleConfigChange("token", null)
+    // this._isOpen = false;
+    this.handleConnectionChange("not_connected")
+    this.handleAuthChange("unauthenticated")
+    this.changeUIState("start")
+
+    this._client.clearState()
   }
 
   renderViews() {
@@ -811,6 +866,7 @@ export class Ad4mConnectElement extends LitElement {
         changeUrl: this.changeUrl,
         connectToPort: this._client.connectToPort,
         connectRemote: this.connectRemote,
+        clearState: this.clearState,
       });
     }
 
@@ -859,15 +915,35 @@ export class Ad4mConnectElement extends LitElement {
     }
   }
 
+  mobileView() {
+    if (this.mobile) {
+      return MobileAppLogoButton(({
+        openModal: () => {
+          this.changeUIState("settings");
+          this._isOpen = !this._isOpen;
+        }
+      }))
+    }
+
+    return null;
+  }
+
   render() {
     console.log(this.authState,  this.connectionState, this.uiState, this._isOpen);
-    if (this._isOpen === false) return null;
-    if (this.authState === "authenticated") return null;
+    if (this._isOpen === false) {
+      if (this.authState === "authenticated") {
+        return this.mobileView();
+      }
+
+      return null
+    };
+
     return html`
       <div class="wrapper">
         <div class="dialog">
           ${Header()}
           <main class="dialog__content">${this.renderViews()}</main>
+          ${this.mobileView()}
         </div>
         <div class="ad4mConnect__backdrop" />
       </div>

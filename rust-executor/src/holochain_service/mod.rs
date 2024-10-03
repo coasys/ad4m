@@ -1,54 +1,60 @@
-use std::path::PathBuf;
-use std::sync::Arc;
-
+use base64::prelude::*;
 use chrono::Duration;
 use crypto_box::rand_core::OsRng;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
-use holochain::conductor::api::{AppInfo, CellInfo, ZomeCall};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo, ZomeCall};
 use holochain::conductor::config::ConductorConfig;
 use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
-use kitsune_p2p_types::config::{KitsuneP2pTuningParams, KitsuneP2pConfig, NetworkType, TransportConfig};
-use kitsune_p2p_types::dependencies::url2::Url2;
 use holochain::prelude::{
-    ExternIO, HoloHash, InstallAppPayload, Signal,
-    Signature, Timestamp, ZomeCallResponse, ZomeCallUnsigned
+    ExternIO, HoloHash, InstallAppPayload, Signal, Signature, Timestamp, ZomeCallResponse,
+    ZomeCallUnsigned,
 };
 use holochain::test_utils::itertools::Either;
+
 use holochain_types::dna::ValidatedDnaManifest;
-use log::{info, error};
+use holochain_types::websocket::AllowedOrigins;
+use kitsune_p2p_types::config::{
+    KitsuneP2pConfig, KitsuneP2pTuningParams, NetworkType, TransportConfig,
+};
+use kitsune_p2p_types::dependencies::url2::Url2;
+use log::{error, info};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::select;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::yield_now;
 use tokio::time::timeout;
+
 use tokio_stream::StreamExt;
 
 pub(crate) mod holochain_service_extension;
 pub(crate) mod interface;
 
 pub(crate) use interface::{
-    get_holochain_service, HolochainServiceInterface,
-    HolochainServiceRequest, HolochainServiceResponse, maybe_get_holochain_service
+    get_holochain_service, maybe_get_holochain_service, HolochainServiceInterface,
+    HolochainServiceRequest, HolochainServiceResponse,
 };
 
 use self::interface::set_holochain_service;
 
-const COASYS_BOOTSTRAP_AGENT_INFO: &str = r#"["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"]"#;
+const _COASYS_BOOTSTRAP_AGENT_INFO: &str = r#"["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"]"#;
 
 pub fn agent_infos_from_str(agent_infos: &str) -> Result<Vec<AgentInfoSigned>, AnyError> {
-    let agent_infos: Vec<String> = serde_json::from_str(&agent_infos)?;
+    let agent_infos: Vec<String> = serde_json::from_str(agent_infos)?;
     let agent_infos: Vec<AgentInfoSigned> = agent_infos
         .into_iter()
         .map(|encoded_info| {
-            let info_bytes = base64::decode(encoded_info)
+            let info_bytes = BASE64_STANDARD
+                .decode(encoded_info)
                 .expect("Failed to decode base64 AgentInfoSigned");
-            AgentInfoSigned::decode(&info_bytes)
-                .expect("Failed to decode AgentInfoSigned")
+            AgentInfoSigned::decode(&info_bytes).expect("Failed to decode AgentInfoSigned")
         })
         .collect();
 
@@ -79,6 +85,7 @@ impl HolochainService {
     pub async fn init(local_config: LocalConductorConfig) -> Result<(), AnyError> {
         let (sender, mut receiver) = mpsc::unbounded_channel::<HolochainServiceRequest>();
         let (stream_sender, stream_receiver) = mpsc::unbounded_channel::<Signal>();
+        let (new_app_ids_sender, mut new_app_ids_receiver) = mpsc::unbounded_channel::<AppInfo>();
 
         let inteface = HolochainServiceInterface {
             sender,
@@ -102,26 +109,31 @@ impl HolochainService {
 
                     // Spawn a new task to forward items from the stream to the receiver
                     let spawned_sig = tokio::spawn(async move {
-                        let sig_broadcasters = conductor_clone.signal_broadcaster();
 
-                        let mut streams = tokio_stream::StreamMap::new();
-                        for (i, rx) in sig_broadcasters
-                            .subscribe_separately()
-                            .into_iter()
-                            .enumerate()
-                        {
-                            streams.insert(i, tokio_stream::wrappers::BroadcastStream::new(rx));
-                        }
-                        let mut stream =
-                            streams.map(|(_, signal)| signal.expect("Couldn't receive a signal"));
+                        let mut streams: tokio_stream::StreamMap<String, tokio_stream::wrappers::BroadcastStream<Signal>> = tokio_stream::StreamMap::new();
+                        conductor_clone.list_apps(Some(AppStatusFilter::Running)).await.unwrap().into_iter().for_each(|app| {
+                            let sig_broadcasters = conductor_clone.subscribe_to_app_signals(app.installed_app_id.clone());
+                            streams.insert(app.installed_app_id.clone(), tokio_stream::wrappers::BroadcastStream::new(sig_broadcasters));
+                        });
 
                         response_sender
                             .send(HolochainServiceResponse::InitComplete(Ok(())))
                             .unwrap();
 
                         loop {
-                            while let Some(item) = stream.next().await {
-                                let _ = stream_sender.send(item);
+                            tokio::select! {
+                                Some((_, maybe_signal)) = streams.next() => {
+                                    if let Ok(signal) = maybe_signal {
+                                        let _ = stream_sender.send(signal);
+                                    } else {
+                                        log::error!("Got error from Holochain through app signal stream: {:?}", maybe_signal.expect_err("to be error since we're in else case"))
+                                    }
+                                }
+                                Some(new_app_id) = new_app_ids_receiver.recv() => {
+                                    let sig_broadcasters = conductor_clone.subscribe_to_app_signals(new_app_id.installed_app_id.clone());
+                                    streams.insert(new_app_id.installed_app_id.clone(), tokio_stream::wrappers::BroadcastStream::new(sig_broadcasters));
+                                }
+                                else => break,
                             }
                             yield_now().await;
                         }
@@ -136,6 +148,9 @@ impl HolochainService {
                                         service.install_app(payload)
                                     ).await.map_err(|_| anyhow!("Timeout error; InstallApp call")) {
                                         Ok(result) => {
+                                            if let Ok(app_info) = &result {
+                                                let _ = new_app_ids_sender.send(app_info.clone());
+                                            }
                                             let _ = response.send(HolochainServiceResponse::InstallApp(result));
                                         },
                                         Err(err) => {
@@ -313,7 +328,7 @@ impl HolochainService {
             _ => unreachable!(),
         };
 
-        inteface.add_agent_infos(agent_infos_from_str(COASYS_BOOTSTRAP_AGENT_INFO).expect("Couldn't deserialize hard-wired AgentInfo")).await?;
+        // inteface.add_agent_infos(agent_infos_from_str(COASYS_BOOTSTRAP_AGENT_INFO).expect("Couldn't deserialize hard-wired AgentInfo")).await?;
 
         set_holochain_service(inteface).await;
 
@@ -324,11 +339,11 @@ impl HolochainService {
         let conductor_yaml_path =
             std::path::Path::new(&local_config.conductor_path).join("conductor_config.yaml");
         let config = if conductor_yaml_path.exists() {
-            let config = ConductorConfig::load_yaml(&conductor_yaml_path)?;
-            config
+            ConductorConfig::load_yaml(&conductor_yaml_path)?
         } else {
-        let mut config = ConductorConfig::default();
-        let data_root_path: DataRootPath = PathBuf::from(local_config.conductor_path.clone()).into();
+            let mut config = ConductorConfig::default();
+            let data_root_path: DataRootPath =
+                PathBuf::from(local_config.conductor_path.clone()).into();
             config.data_root_path = Some(data_root_path);
             config.admin_interfaces = None;
 
@@ -398,7 +413,11 @@ impl HolochainService {
 
         let interface = conductor
             .clone()
-            .add_app_interface(Either::Left(local_config.app_port))
+            .add_app_interface(
+                Either::Left(local_config.app_port),
+                AllowedOrigins::Any,
+                None,
+            )
             .await;
 
         info!("Added app interface: {:?}", interface);
@@ -429,8 +448,7 @@ impl HolochainService {
                     .await
                     .map_err(|e| anyhow!("Could not install app: {:?}", e))?;
 
-                self
-                    .conductor
+                self.conductor
                     .clone()
                     .enable_app(app_id.clone())
                     .await
@@ -476,7 +494,7 @@ impl HolochainService {
             ));
         }
 
-        if cell_entry.unwrap().len() == 0 {
+        if cell_entry.unwrap().is_empty() {
             return Err(anyhow!(
                 "No cells for cell name: {:?} in app: {:?}",
                 cell_name,
@@ -508,10 +526,10 @@ impl HolochainService {
         };
 
         let zome_call_unsigned = ZomeCallUnsigned {
-            cell_id: cell_id,
+            cell_id,
             zome_name: zome_name.into(),
             fn_name: fn_name.into(),
-            payload: payload,
+            payload,
             cap_secret: None,
             provenance: agent_pub_key,
             nonce: generate_nonce().into(),
@@ -559,7 +577,7 @@ impl HolochainService {
     pub async fn sign(&self, data: String) -> Result<Signature, AnyError> {
         let keystore = self.conductor.keystore();
         let pub_keys = keystore.list_public_keys().await?;
-        if pub_keys.len() == 0 {
+        if pub_keys.is_empty() {
             return Err(anyhow!("No public keys found"));
         }
         let agent = pub_keys.first().unwrap();
@@ -579,7 +597,7 @@ impl HolochainService {
     pub async fn get_agent_key(&self) -> Result<HoloHash<Agent>, AnyError> {
         let keystore = self.conductor.keystore();
         let pub_keys = keystore.list_public_keys().await?;
-        if pub_keys.len() == 0 {
+        if pub_keys.is_empty() {
             return Err(anyhow!("No public keys found"));
         }
         let agent = pub_keys.first().unwrap();
@@ -592,7 +610,7 @@ impl HolochainService {
 
     pub async fn log_network_metrics(&self) -> Result<(), AnyError> {
         let metrics = self.conductor.dump_network_metrics(None).await?;
-        info!("Network metrics: {}",metrics);
+        info!("Network metrics: {}", metrics);
 
         let stats = self.conductor.dump_network_stats().await?;
         info!("Network stats: {}", stats);
@@ -604,21 +622,32 @@ impl HolochainService {
         let path = PathBuf::from(path);
         let name = holochain_cli_bundle::get_dna_name(&path).await?;
         info!("Got dna name: {:?}", name);
-        let pack = holochain_cli_bundle::pack::<ValidatedDnaManifest>(&path, None, name, false).await?;
+        let pack =
+            holochain_cli_bundle::pack::<ValidatedDnaManifest>(&path, None, name, false).await?;
         info!("Packed dna at path: {:#?}", pack.0);
         Ok(pack.0.to_str().unwrap().to_string())
     }
 
     pub async fn unpack_dna(path: String) -> Result<String, AnyError> {
         let path = PathBuf::from(path);
-        let pack = holochain_cli_bundle::unpack::<ValidatedDnaManifest>("dna", &path, None, true).await?;
+        let pack =
+            holochain_cli_bundle::unpack::<ValidatedDnaManifest>("dna", &path, None, true).await?;
         info!("UnPacked dna at path: {:#?}", pack);
         Ok(pack.to_str().unwrap().to_string())
     }
 }
 
 pub async fn run_local_hc_services() -> Result<(), AnyError> {
-    let ops = holochain_cli_run_local_services::HcRunLocalServices::new(None, String::from("127.0.0.1"), 0, false, None, String::from("127.0.0.1"), 0, false);
+    let ops = holochain_cli_run_local_services::HcRunLocalServices::new(
+        None,
+        String::from("127.0.0.1"),
+        0,
+        false,
+        None,
+        String::from("127.0.0.1"),
+        0,
+        false,
+    );
     ops.run().await;
     Ok(())
 }

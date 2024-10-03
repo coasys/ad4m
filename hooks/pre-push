@@ -1,0 +1,19 @@
+#!/bin/sh
+
+echo "Running pre-push hook..."
+
+# Run cargo fmt to format the code
+if ! cargo fmt -- --check; then
+    echo "Code is not formatted. Please run 'cargo fmt' to format the code."
+    exit 1
+fi
+
+# Run cargo clippy to check for linting issues
+if ! cargo clippy -- -D warnings; then
+    echo "Clippy found warnings. Please fix them before pushing."
+    exit 1
+fi
+
+# If both checks pass, allow the push to proceed
+exit 0
+

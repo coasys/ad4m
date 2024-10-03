@@ -1,7 +1,10 @@
 use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::agent::signatures::verify;
 use crate::js_core::JsCoreHandle;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link, Notification, TriggeredNotification};
+use crate::types::{
+    DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link,
+    Notification, TriggeredNotification,
+};
 use coasys_juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
 };
@@ -81,9 +84,9 @@ pub struct CapabilityInput {
 // The javascript `Date` as string. pub struct represents date and time as the ISO Date string.
 pub struct DateTime(chrono::DateTime<chrono::Utc>);
 
-impl Into<chrono::DateTime<chrono::Utc>> for DateTime {
-    fn into(self) -> chrono::DateTime<chrono::Utc> {
-        self.0
+impl From<DateTime> for chrono::DateTime<chrono::Utc> {
+    fn from(val: DateTime) -> Self {
+        val.0
     }
 }
 
@@ -143,7 +146,7 @@ pub enum ExceptionType {
     AgentIsUntrusted = 2,
     #[default]
     CapabilityRequested = 3,
-    InstallNotificationRequest = 4
+    InstallNotificationRequest = 4,
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -269,7 +272,6 @@ pub struct LinkExpressionInput {
     pub status: Option<LinkStatus>,
 }
 
-
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkExpressionUpdated {
@@ -314,7 +316,7 @@ impl DecoratedPerspectiveDiff {
     pub fn from_additions(additions: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
         DecoratedPerspectiveDiff {
             additions,
-            removals: vec![]
+            removals: vec![],
         }
     }
 
@@ -325,14 +327,16 @@ impl DecoratedPerspectiveDiff {
         }
     }
 
-    pub fn from(additions: Vec<DecoratedLinkExpression>, removals: Vec<DecoratedLinkExpression>) -> DecoratedPerspectiveDiff {
+    pub fn from(
+        additions: Vec<DecoratedLinkExpression>,
+        removals: Vec<DecoratedLinkExpression>,
+    ) -> DecoratedPerspectiveDiff {
         DecoratedPerspectiveDiff {
             additions,
             removals,
         }
     }
 }
-
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -373,7 +377,8 @@ impl Perspective {
 
 impl From<PerspectiveInput> for Perspective {
     fn from(input: PerspectiveInput) -> Self {
-        let links = input.links
+        let links = input
+            .links
             .into_iter()
             .map(|link: LinkExpressionInput| DecoratedLinkExpression::try_from(link))
             .filter_map(Result::ok)
@@ -393,7 +398,7 @@ impl TryFrom<LinkExpressionInput> for DecoratedLinkExpression {
         Ok(DecoratedLinkExpression {
             author: input.author,
             timestamp: input.timestamp,
-            data: data,
+            data,
             proof: DecoratedExpressionProof {
                 key: input.proof.key.ok_or(anyhow!("Key is required"))?,
                 signature: input.proof.signature.ok_or(anyhow!("Key is required"))?,
@@ -404,7 +409,6 @@ impl TryFrom<LinkExpressionInput> for DecoratedLinkExpression {
         })
     }
 }
-
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -445,10 +449,7 @@ impl PerspectiveExpression {
             timestamp: self.timestamp.clone(),
         };
 
-        let valid = match verify(&perspective_expression) {
-            Ok(valid) => valid,
-            Err(_) => false,
-        };
+        let valid = verify(&perspective_expression).unwrap_or(false);
 
         self.proof.valid = Some(valid);
         self.proof.invalid = Some(!valid);
@@ -475,7 +476,6 @@ pub struct PerspectiveHandle {
     pub shared_url: Option<String>,
     pub state: PerspectiveState,
 }
-
 
 impl PerspectiveHandle {
     pub fn new(
@@ -517,7 +517,6 @@ pub struct PerspectiveUnsignedInput {
     pub links: Vec<LinkInput>,
 }
 
-
 #[derive(GraphQLInputObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationInput {
@@ -530,7 +529,6 @@ pub struct NotificationInput {
     pub webhook_url: String,
     pub webhook_auth: String,
 }
-
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -618,9 +616,8 @@ pub struct ModelInput {
     pub api: Option<ModelApiInput>,
     pub local: Option<LocalModelInput>,
     #[serde(rename = "type")]
-    pub model_type: ModelType
+    pub model_type: ModelType,
 }
-
 
 #[derive(Debug, Deserialize, Serialize)]
 pub enum JsResultType<T>

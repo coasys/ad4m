@@ -91,18 +91,17 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
                 println!("Agent locked");
             }
         }
-        AgentFunctions::Unlock { passphrase, holochain } => {
-            let pp = if passphrase.is_some() {
-                passphrase.unwrap()
+        AgentFunctions::Unlock {
+            passphrase,
+            holochain,
+        } => {
+            let pp = if let Some(pp) = passphrase {
+                pp
             } else {
                 readline_masked("Passphrase: ")?
             };
 
-            let holo = if holochain.is_some() {
-                holochain.unwrap()
-            } else {
-                true
-            };
+            let holo = holochain.unwrap_or(true);
 
             let result = ad4m_client.agent.unlock(pp, holo).await?;
             if let Some(error) = result.error {
@@ -119,8 +118,8 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             }
         }
         AgentFunctions::Generate { passphrase } => {
-            let pp = if passphrase.is_some() {
-                passphrase.unwrap()
+            let pp = if let Some(pp) = passphrase {
+                pp
             } else {
                 let passphrase1 = readline_masked("Passphrase: ")?;
                 let passphrase2 = readline_masked("Repeat passphrase: ")?;
@@ -146,12 +145,12 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             did_signing_key_id,
         } => {
             let input = EntanglementProofInput {
-                device_key: device_key,
-                device_key_signed_by_did: device_key_signed_by_did,
-                device_key_type: device_key_type,
-                did: did,
-                did_signed_by_device_key: did_signed_by_device_key,
-                did_signing_key_id: did_signing_key_id,
+                device_key,
+                device_key_signed_by_did,
+                device_key_type,
+                did,
+                did_signed_by_device_key,
+                did_signing_key_id,
             };
             ad4m_client
                 .agent
@@ -168,12 +167,12 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
             did_signing_key_id,
         } => {
             let input = ad4m_client::agent::delete_entanglement_proofs::EntanglementProofInput {
-                device_key: device_key,
-                device_key_signed_by_did: device_key_signed_by_did,
-                device_key_type: device_key_type,
-                did: did,
-                did_signed_by_device_key: did_signed_by_device_key,
-                did_signing_key_id: did_signing_key_id,
+                device_key,
+                device_key_signed_by_did,
+                device_key_type,
+                did,
+                did_signed_by_device_key,
+                did_signing_key_id,
             };
             ad4m_client
                 .agent

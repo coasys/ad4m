@@ -64,5 +64,5 @@
   "dependencies": {
     "uuid": "*"
   },
-  "version": "0.10.0-rc2"
+  "version": "0.10.0-rc7"
 }

@@ -2,7 +2,9 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use uuid::Uuid;
 
-use crate::graphql::graphql_types::{PerspectiveHandle, PerspectiveState, Neighbourhood, Perspective};
+use crate::graphql::graphql_types::{
+    Neighbourhood, Perspective, PerspectiveHandle, PerspectiveState,
+};
 use crate::languages::LanguageController;
 use crate::perspectives::{add_perspective, all_perspectives, get_perspective, update_perspective};
 use crate::types::*;
@@ -18,7 +20,7 @@ pub async fn neighbourhood_publish_from_perspective(
 
     let neighbourhood = Neighbourhood {
         link_language,
-        meta
+        meta,
     };
 
     // Create neighbourhood
@@ -34,13 +36,13 @@ pub async fn neighbourhood_publish_from_perspective(
     perspective_handle.shared_url = Some(neighbourhood_url.clone());
     perspective_handle.neighbourhood = Some(neighbourhood_exp);
     perspective_handle.state = PerspectiveState::Synced;
-    update_perspective(&perspective_handle).await.map_err(|e| anyhow!(e))?;
+    update_perspective(&perspective_handle)
+        .await
+        .map_err(|e| anyhow!(e))?;
     Ok(neighbourhood_url)
 }
 
-pub async fn install_neighbourhood(
-    url: String,
-) -> Result<PerspectiveHandle, AnyError> {
+pub async fn install_neighbourhood(url: String) -> Result<PerspectiveHandle, AnyError> {
     let perspectives = all_perspectives();
 
     for p in perspectives.iter() {
@@ -51,20 +53,32 @@ pub async fn install_neighbourhood(
     }
 
     let expression_ref = ExpressionRef::try_from(url.to_string())?;
-    let neighbourhood_exp = LanguageController::get_neighbourhood(expression_ref.expression).await?;
+    let neighbourhood_exp =
+        LanguageController::get_neighbourhood(expression_ref.expression).await?;
     if neighbourhood_exp.is_none() {
         return Err(anyhow!("Could not find neighbourhood with URL {}", url));
     }
-    log::info!("Core.install_neighbourhood(): Got neighbourhood {:?}", neighbourhood_exp);
+    log::info!(
+        "Core.install_neighbourhood(): Got neighbourhood {:?}",
+        neighbourhood_exp
+    );
     let neighbourhood = neighbourhood_exp.unwrap();
 
-    let state = if LanguageController::language_by_address(neighbourhood.data.link_language.clone()).await?.is_some() {
+    let state = if LanguageController::language_by_address(neighbourhood.data.link_language.clone())
+        .await?
+        .is_some()
+    {
         PerspectiveState::LinkLanguageInstalledButNotSynced
     } else {
         PerspectiveState::LinkLanguageFailedToInstall
     };
 
-    log::info!("Core.install_neighbourhood(): Creating perspective {}, {:?}, {:?}", url, neighbourhood, state);
+    log::info!(
+        "Core.install_neighbourhood(): Creating perspective {}, {:?}, {:?}",
+        url,
+        neighbourhood,
+        state
+    );
 
     let handle = PerspectiveHandle {
         uuid: Uuid::new_v4().to_string(),
@@ -73,7 +87,9 @@ pub async fn install_neighbourhood(
         neighbourhood: Some(neighbourhood),
         state,
     };
-    add_perspective(handle.clone(), Some(true)).await.map_err(|e| anyhow!(e))?;
+    add_perspective(handle.clone(), Some(true))
+        .await
+        .map_err(|e| anyhow!(e))?;
 
     Ok(handle)
 }

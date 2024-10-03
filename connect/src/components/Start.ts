@@ -1,4 +1,5 @@
 import { html } from "lit";
+import { getForVersion } from "../utils";
 
 export default function Start({
   connect,
@@ -9,6 +10,9 @@ export default function Start({
   scanQrcode,
   hosting
 }) {
+  const url = getForVersion('ad4murl') || "http://localhost:12000";
+  const isLocal = url.includes("localhost");
+
   function clickLink(e: Event) {
     e.preventDefault();
     const el = e.currentTarget as HTMLLinkElement;
@@ -59,10 +63,18 @@ export default function Start({
             </p>
           </div>`}
 
-      <p style="height: 60px; color: red; font-size: 14px; text-align: center; margin: 0; margin-top: -30px;">
-        Please make sure you have the ADAM Launcher running on your computer and there are no browser restrictions ("Shields") blocking your connection to ADAM on localhost.
-        (Safari users: please use a different browser for now. Safari is very strict about this and we are working on a solution.)
-      </p>
+          ${isLocal ? html`
+            <p style="height: 60px; color: red; font-size: 14px; text-align: center; margin: 0; margin-top: -30px;">
+              Please make sure you have the ADAM Launcher running on your computer and there are no browser restrictions ("Shields") blocking your connection to ADAM on localhost.
+              (Safari users: please use a different browser for now. Safari is very strict about this and we are working on a solution.)
+            </p>
+            ` : html`
+            <p style="height: 60px; color: red; font-size: 14px; text-align: center; margin: 0; margin-top: -30px;">
+              Looks like the remote executor you are trying to connect to is not reachable.
+              Please try connecting to a different remote executor or check your connection settings.
+            </p>
+            `
+          }
 
       <div class="text-center">
         <a class="button button--link" _target="blank" href="https://ad4m.dev"

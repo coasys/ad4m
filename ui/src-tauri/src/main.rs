@@ -5,62 +5,58 @@
 
 extern crate env_logger;
 use chrono::Local;
+use colored::Colorize;
+#[cfg(not(target_os = "windows"))]
+use libc::{rlimit, setrlimit, RLIMIT_NOFILE};
 use log::LevelFilter;
-use log::{info, error, debug};
+use log::{debug, error, info};
 use rust_executor::Ad4mConfig;
-use tauri::LogicalSize;
-use tauri::Size;
 use std::env;
 use std::fs;
 use std::fs::File;
-use std::sync::Mutex;
-#[cfg(not(target_os = "windows"))]
-use libc::{rlimit, RLIMIT_NOFILE, setrlimit};
 use std::io;
 use std::io::Write;
-use colored::Colorize;
-use tracing_subscriber::EnvFilter;
+use std::sync::Mutex;
+use tauri::LogicalSize;
+use tauri::Size;
 use tracing_subscriber::fmt::format;
-
-
+use tracing_subscriber::EnvFilter;
 
 extern crate remove_dir_all;
 
 use config::app_url;
 use menu::build_menu;
-use system_tray::{ build_system_tray, handle_system_tray_event };
-use tauri::{
-    AppHandle,
-    RunEvent, SystemTrayEvent,
-    Window
-};
-use tauri_plugin_positioner::{ WindowExt, Position, on_tray_event};
+use system_tray::{build_system_tray, handle_system_tray_event};
+use tauri::{AppHandle, RunEvent, SystemTrayEvent, Window};
+use tauri_plugin_positioner::{on_tray_event, Position, WindowExt};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-mod config;
-mod util;
-mod system_tray;
-mod menu;
-mod commands;
 mod app_state;
+mod commands;
+mod config;
+mod menu;
+mod system_tray;
+mod util;
 
-use tauri::Manager;
 use crate::app_state::LauncherState;
+use crate::commands::app::{
+    add_app_agent_state, clear_state, close_application, close_main_window, get_app_agent_list,
+    open_dapp, open_tray, open_tray_message, remove_app_agent_state, set_selected_agent,
+};
 use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
-use crate::commands::app::{add_app_agent_state, get_app_agent_list, remove_app_agent_state, set_selected_agent, close_application, close_main_window, clear_state, open_tray, open_tray_message, open_dapp};
-use crate::config::{data_dev_path, data_path};
 use crate::config::log_path;
-use crate::util::find_port;
-use crate::menu::{handle_menu_event, open_logs_folder};
-use crate::util::{create_main_window, save_executor_port};
 
+use crate::menu::{handle_menu_event, open_logs_folder};
+use crate::util::find_port;
+use crate::util::{create_main_window, save_executor_port};
+use tauri::Manager;
 
 // the payload type must implement `Serialize` and `Clone`.
 #[derive(Clone, serde::Serialize)]
 struct Payload {
-  message: String,
+    message: String,
 }
 
 pub struct ProxyState(Mutex<ProxyService>);
@@ -79,16 +75,22 @@ pub struct AppState {
 
 #[cfg(not(target_os = "windows"))]
 fn rlim_execute() {
-    let mut rlim: rlimit = rlimit { rlim_cur: 0, rlim_max: 0 };
+    let mut rlim: rlimit = rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
     // Get the current file limit
     unsafe {
         if libc::getrlimit(RLIMIT_NOFILE, &mut rlim) != 0 {
             panic!("{}", io::Error::last_os_error());
         }
     }
-    let rlim_max = 1000 as u64;
+    let rlim_max = 1000_u64;
 
-    println!("Current RLIMIT_NOFILE: current: {}, max: {}", rlim.rlim_cur, rlim_max);
+    println!(
+        "Current RLIMIT_NOFILE: current: {}, max: {}",
+        rlim.rlim_cur, rlim_max
+    );
 
     // Attempt to increase the limit
     rlim.rlim_cur = rlim_max;
@@ -104,12 +106,17 @@ fn rlim_execute() {
             panic!("{}", io::Error::last_os_error());
         }
     }
-    println!("Updated RLIMIT_NOFILE: current: {}, max: {}", rlim.rlim_cur, rlim_max);
-
+    println!(
+        "Updated RLIMIT_NOFILE: current: {}, max: {}",
+        rlim.rlim_cur, rlim_max
+    );
 }
 
 fn main() {
-    env::set_var("RUST_LOG", "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server");
+    env::set_var(
+        "RUST_LOG",
+        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp=warn,warp::server=warn,warp::filters=warn",
+    );
 
     let state = LauncherState::load().unwrap();
 
@@ -147,9 +154,18 @@ fn main() {
             writeln!(
                 buf,
                 "[{} {} {}:{}] {}",
-                Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string().as_str().dimmed(),
+                Local::now()
+                    .format("%Y-%m-%d %H:%M:%S%.3f")
+                    .to_string()
+                    .as_str()
+                    .dimmed(),
                 level,
-                record.file().unwrap_or("unknown").to_string().as_str().dimmed(),
+                record
+                    .file()
+                    .unwrap_or("unknown")
+                    .to_string()
+                    .as_str()
+                    .dimmed(),
                 record.line().unwrap_or(0).to_string().as_str().dimmed(),
                 record.args().to_string().as_str().bold(),
             )
@@ -157,9 +173,9 @@ fn main() {
         .init();
 
     let format = format::debug_fn(move |writer, _field, value| {
-            debug!("TRACE: {:?}", value);
-            write!(writer, "{:?}", value)
-        });
+        debug!("TRACE: {:?}", value);
+        write!(writer, "{:?}", value)
+    });
 
     let filter = EnvFilter::from_default_env();
 
@@ -168,8 +184,7 @@ fn main() {
         .fmt_fields(format)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Failed to set tracing subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 
     let free_port = find_port(12000, 13000);
 
@@ -180,10 +195,10 @@ fn main() {
     match rust_executor::init::init(
         Some(String::from(app_path.to_str().unwrap())),
         bootstrap_path.and_then(|path| path.to_str().map(|s| s.to_string())),
-        ) {
+    ) {
         Ok(()) => {
             println!("Ad4m initialized sucessfully");
-        },
+        }
         Err(e) => {
             println!("Ad4m initialization failed: {}", e);
             std::process::exit(1);
@@ -230,30 +245,46 @@ fn main() {
             let splashscreen = app.get_window("splashscreen").unwrap();
 
             let _id = splashscreen.listen("copyLogs", |event| {
-                info!("got window event-name with payload {:?} {:?}", event, event.payload());
+                info!(
+                    "got window event-name with payload {:?} {:?}",
+                    event,
+                    event.payload()
+                );
 
                 open_logs_folder();
             });
 
-            let mut config = Ad4mConfig::default();
-            config.admin_credential = Some(req_credential.to_string());
-            config.app_data_path = Some(String::from(app_path.to_str().unwrap()));
-            config.gql_port = Some(free_port);
-            config.network_bootstrap_seed = None;
-            config.run_dapp_server = Some(true);
-            config.hc_use_bootstrap = Some(true);
-            config.hc_use_mdns = Some(false);
-            config.hc_use_proxy = Some(true);
+            let config = rust_executor::Ad4mConfig {
+                admin_credential: Some(req_credential.to_string()),
+                app_data_path: Some(String::from(app_path.to_str().unwrap())),
+                gql_port: Some(free_port),
+                network_bootstrap_seed: None,
+                run_dapp_server: Some(true),
+                hc_use_bootstrap: Some(true),
+                hc_use_mdns: Some(false),
+                hc_use_proxy: Some(true),
+                ..Default::default()
+            };
 
             let handle = app.handle();
 
-            async fn spawn_executor(config: Ad4mConfig, splashscreen_clone: Window, handle: &AppHandle) {
+            async fn spawn_executor(
+                config: Ad4mConfig,
+                splashscreen_clone: Window,
+                handle: &AppHandle,
+            ) {
                 rust_executor::run(config.clone()).await;
                 let url = app_url();
                 info!("Executor clone on: {:?}", url);
                 let _ = splashscreen_clone.hide();
-                let main = get_main_window(&handle);
-                main.emit("ready", Payload { message: "ad4m-executor is ready".into() }).unwrap();
+                let main = get_main_window(handle);
+                main.emit(
+                    "ready",
+                    Payload {
+                        message: "ad4m-executor is ready".into(),
+                    },
+                )
+                .unwrap();
             }
 
             tauri::async_runtime::spawn(async move {
@@ -265,9 +296,16 @@ fn main() {
         .on_system_tray_event(move |app, event| {
             on_tray_event(app, &event);
             match event {
-                SystemTrayEvent::LeftClick { position: _, size: _, .. } => {
+                SystemTrayEvent::LeftClick {
+                    position: _,
+                    size: _,
+                    ..
+                } => {
                     let window = get_main_window(app);
-                    let _ = window.set_size(Size::Logical(LogicalSize { width: 400.0, height: 700.0 }));
+                    let _ = window.set_size(Size::Logical(LogicalSize {
+                        width: 400.0,
+                        height: 700.0,
+                    }));
                     let _ = window.set_decorations(false);
                     let _ = window.set_always_on_top(true);
                     let _ = window.move_window(Position::TrayCenter);
@@ -278,10 +316,8 @@ fn main() {
                         window.show().unwrap();
                         window.set_focus().unwrap();
                     }
-                },
-                SystemTrayEvent::MenuItemClick { id, .. } => {
-                    handle_system_tray_event(app, id)
-                },
+                }
+                SystemTrayEvent::MenuItemClick { id, .. } => handle_system_tray_event(app, id),
                 _ => {}
             }
         })

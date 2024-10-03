@@ -38,9 +38,9 @@ export async function tagExpressionSignatureStatus(expression: Expression) {
     expression.proof.invalid = true
     expression.proof.valid = false
 
-    let expressionString = JSON.stringify(expression);
-        let endingLog = expressionString.length > 50 ? "... \x1b[0m" : "\x1b[0m";
-        console.error(new Date().toISOString(),"tagExpressionSignatureStatus - BROKEN SIGNATURE FOR EXPRESSION: (object):", expressionString.substring(0, 50), endingLog)
+    //let expressionString = JSON.stringify(expression);
+    //let endingLog = expressionString.length > 50 ? "... \x1b[0m" : "\x1b[0m";
+    //console.error(new Date().toISOString(),"tagExpressionSignatureStatus - BROKEN SIGNATURE FOR EXPRESSION: (object):", expressionString.substring(0, 50), endingLog)
   }
 }
 

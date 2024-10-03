@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::graphql::graphql_types::{Agent, AgentStatus, Perspective};
 
 use crate::types::{Expression, ExpressionProof};
-use crate::wallet::{Wallet};
+use crate::wallet::Wallet;
 
 pub mod capabilities;
 pub mod signatures;
@@ -46,7 +46,7 @@ pub fn did() -> String {
 pub fn check_keys_and_create(did: String) -> did_key::Document {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
-    let mut wallet_ref = wallet.as_mut().expect("wallet instance");
+    let wallet_ref = wallet.as_mut().expect("wallet instance");
     let name = "main".to_string();
     if wallet_ref.get_did_document(&name).is_none() {
         wallet_ref.initialize_keys(name, did).unwrap()
@@ -105,11 +105,11 @@ impl AgentSignature {
     }
 }
 
-impl Into<crate::graphql::graphql_types::AgentSignature> for AgentSignature {
-    fn into(self) -> crate::graphql::graphql_types::AgentSignature {
+impl From<AgentSignature> for crate::graphql::graphql_types::AgentSignature {
+    fn from(val: AgentSignature) -> Self {
         crate::graphql::graphql_types::AgentSignature {
-            signature: self.signature,
-            public_key: self.public_key,
+            signature: val.signature,
+            public_key: val.public_key,
         }
     }
 }
@@ -129,21 +129,14 @@ lazy_static! {
 }
 
 impl AgentService {
-    pub fn init_global_instance(app_path: String) -> Result<(), deno_core::anyhow::Error> {
+    pub fn init_global_instance(app_path: String) {
         let mut agent_instance = AGENT_SERVICE.lock().unwrap();
         *agent_instance = Some(AgentService::new(app_path));
-        Ok(())
     }
 
     pub fn new(app_path: String) -> AgentService {
-        let agent_path = format!(
-            "{}/ad4m/agent.json",
-            app_path
-        );
-        let agent_profile_path = format!(
-            "{}/ad4m/agentProfile.json",
-            app_path
-        );
+        let agent_path = format!("{}/ad4m/agent.json", app_path);
+        let agent_profile_path = format!("{}/ad4m/agentProfile.json", app_path);
 
         AgentService {
             did: None,
@@ -200,7 +193,7 @@ impl AgentService {
         if !self.is_unlocked() {
             return Err(anyhow!("Agent not unlocked"));
         }
-        if !self.signing_key_id.is_some() {
+        if self.signing_key_id.is_none() {
             return Err(anyhow!("Agent signing key not found"));
         }
         Ok(())
@@ -237,7 +230,7 @@ impl AgentService {
         self.store_agent_profile();
     }
 
-    pub fn create_new_keys(&mut self) -> Result<(), AnyError> {
+    pub fn create_new_keys(&mut self) {
         let wallet_instance = Wallet::instance();
         {
             let mut wallet = wallet_instance.lock().expect("wallet lock");
@@ -253,29 +246,22 @@ impl AgentService {
             direct_message_language: None,
         });
         self.signing_key_id = Some(signing_key_id());
-        Ok(())
     }
 
     pub fn unlock(&self, password: String) -> Result<(), AnyError> {
         let wallet_instance = Wallet::instance();
         let mut wallet = wallet_instance.lock().expect("wallet lock");
         let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
-        wallet_ref.unlock(password);
-
-        // TODO store agent proifle
-
-        Ok(())
+        wallet_ref.unlock(password)
     }
 
-    pub fn lock(&self, password: String) -> Result<(), AnyError> {
+    pub fn lock(&self, password: String) {
         let wallet_instance = Wallet::instance();
         {
             let mut wallet = wallet_instance.lock().expect("wallet lock");
             let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
             wallet_ref.lock(password);
         }
-
-        Ok(())
     }
 
     pub fn save(&self, password: String) {

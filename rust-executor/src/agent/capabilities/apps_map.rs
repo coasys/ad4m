@@ -48,7 +48,7 @@ fn persist_apps_to_file(apps: &HashMap<String, App>) -> io::Result<()> {
 
 fn load_apps_from_file() -> io::Result<HashMap<String, App>> {
     let file_path = get_data_file_path();
-    let mut file = File::open(&file_path)?;
+    let mut file = File::open(file_path)?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
     let apps: HashMap<String, App> = serde_json::from_str(&contents)?;

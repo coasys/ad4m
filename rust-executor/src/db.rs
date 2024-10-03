@@ -1,11 +1,16 @@
+use crate::graphql::graphql_types::{
+    EntanglementProof, LinkStatus, NotificationInput, PerspectiveExpression, PerspectiveHandle,
+    SentMessage,
+};
+use crate::types::{
+    Expression, ExpressionProof, Link, LinkExpression, Notification, PerspectiveDiff,
+};
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use url::Url;
-use crate::types::{Expression, ExpressionProof, Link, LinkExpression, Model, ModelApi, ModelApiType, LocalModel, Notification, PerspectiveDiff};
-use crate::graphql::graphql_types::{EntanglementProof, LinkStatus, NotificationInput, PerspectiveExpression, PerspectiveHandle, SentMessage};
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -26,7 +31,6 @@ struct ExpressionSchema {
 }
 
 pub type Ad4mDbResult<T> = Result<T, AnyError>;
-
 
 use std::sync::{Arc, Mutex};
 
@@ -142,7 +146,6 @@ impl Ad4mDb {
             [],
         )?;
 
-
         // Start Generation Here
         conn.execute(
             "CREATE TABLE IF NOT EXISTS notifications (
@@ -177,7 +180,10 @@ impl Ad4mDb {
 
         Ok(Self { conn })
     }
-    pub fn add_notification(&self, notification: NotificationInput) -> Result<String, rusqlite::Error> {
+    pub fn add_notification(
+        &self,
+        notification: NotificationInput,
+    ) -> Result<String, rusqlite::Error> {
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
             "INSERT INTO notifications (id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -222,7 +228,9 @@ impl Ad4mDb {
     }
 
     pub fn get_notification(&self, id: String) -> Result<Option<Notification>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare("SELECT * FROM notifications WHERE id = ?")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM notifications WHERE id = ?")?;
         let mut rows = stmt.query(params![id])?;
 
         if let Some(row) = rows.next()? {
@@ -244,14 +252,16 @@ impl Ad4mDb {
     }
 
     pub fn remove_notification(&self, id: String) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "DELETE FROM notifications WHERE id = ?",
-            [id],
-        )?;
+        self.conn
+            .execute("DELETE FROM notifications WHERE id = ?", [id])?;
         Ok(())
     }
 
-    pub fn update_notification(&self, id: String, updated_notification: &Notification) -> Result<bool, rusqlite::Error> {
+    pub fn update_notification(
+        &self,
+        id: String,
+        updated_notification: &Notification,
+    ) -> Result<bool, rusqlite::Error> {
         let result = self.conn.execute(
             "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10 WHERE id = ?1",
             params![
@@ -270,13 +280,14 @@ impl Ad4mDb {
         Ok(result > 0)
     }
 
-    pub fn add_entanglement_proofs(&self, proofs: Vec<EntanglementProof>) -> Result<(), rusqlite::Error> {
+    pub fn add_entanglement_proofs(
+        &self,
+        proofs: Vec<EntanglementProof>,
+    ) -> Result<(), rusqlite::Error> {
         for proof in proofs {
             let proof = serde_json::to_string(&proof).unwrap();
-            self.conn.execute(
-                "INSERT INTO entanglement_proof (proof) VALUES (?)",
-                [proof],
-            )?;
+            self.conn
+                .execute("INSERT INTO entanglement_proof (proof) VALUES (?)", [proof])?;
         }
         Ok(())
     }
@@ -296,7 +307,10 @@ impl Ad4mDb {
         Ok(proofs)
     }
 
-    pub fn remove_entanglement_proofs(&self, proofs: Vec<EntanglementProof>) -> Result<(), rusqlite::Error> {
+    pub fn remove_entanglement_proofs(
+        &self,
+        proofs: Vec<EntanglementProof>,
+    ) -> Result<(), rusqlite::Error> {
         for proof in proofs {
             let proof_json = serde_json::to_string(&proof).unwrap();
             self.conn.execute(
@@ -307,7 +321,11 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn add_to_outbox(&self, message: &PerspectiveExpression, recipient: String) -> Result<(), rusqlite::Error> {
+    pub fn add_to_outbox(
+        &self,
+        message: &PerspectiveExpression,
+        recipient: String,
+    ) -> Result<(), rusqlite::Error> {
         let message_json = serde_json::to_string(message).unwrap();
         self.conn.execute(
             "INSERT INTO outbox (message, recipient) VALUES (?, ?)",
@@ -322,10 +340,7 @@ impl Ad4mDb {
             let message_json: String = row.get(0)?;
             let message: PerspectiveExpression = serde_json::from_str(&message_json).unwrap();
             let recipient: String = row.get(1)?;
-            Ok(SentMessage {
-                message,
-                recipient,
-            })
+            Ok(SentMessage { message, recipient })
         })?;
 
         let mut outbox = Vec::new();
@@ -337,20 +352,16 @@ impl Ad4mDb {
 
     pub fn add_friends(&self, friends: Vec<String>) -> Result<(), rusqlite::Error> {
         for friend in friends {
-            self.conn.execute(
-                "INSERT INTO friends (friend) VALUES (?)",
-                [friend],
-            )?;
+            self.conn
+                .execute("INSERT INTO friends (friend) VALUES (?)", [friend])?;
         }
         Ok(())
     }
 
     pub fn remove_friends(&self, friends: Vec<String>) -> Result<(), rusqlite::Error> {
         for friend in friends {
-            self.conn.execute(
-                "DELETE FROM friends WHERE friend = ?",
-                [friend],
-            )?;
+            self.conn
+                .execute("DELETE FROM friends WHERE friend = ?", [friend])?;
         }
         Ok(())
     }
@@ -381,7 +392,10 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn remove_known_link_languages(&self, languages: Vec<String>) -> Result<(), rusqlite::Error> {
+    pub fn remove_known_link_languages(
+        &self,
+        languages: Vec<String>,
+    ) -> Result<(), rusqlite::Error> {
         for language in languages {
             self.conn.execute(
                 "DELETE FROM known_link_languages WHERE language = ?",
@@ -392,7 +406,9 @@ impl Ad4mDb {
     }
 
     pub fn get_all_known_link_languages(&self) -> Result<Vec<String>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare("SELECT language FROM known_link_languages")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT language FROM known_link_languages")?;
         let language_iter = stmt.query_map([], |row| row.get(0))?;
 
         let mut languages = Vec::new();
@@ -409,10 +425,8 @@ impl Ad4mDb {
 
     pub fn add_trusted_agents(&self, agents: Vec<String>) -> Result<(), rusqlite::Error> {
         for agent in agents {
-            self.conn.execute(
-                "INSERT INTO trusted_agent (agent) VALUES (?)",
-                [agent],
-            )?;
+            self.conn
+                .execute("INSERT INTO trusted_agent (agent) VALUES (?)", [agent])?;
         }
         Ok(())
     }
@@ -430,10 +444,8 @@ impl Ad4mDb {
 
     pub fn remove_trusted_agents(&self, agents: Vec<String>) -> Result<(), rusqlite::Error> {
         for agent in agents {
-            self.conn.execute(
-                "DELETE FROM trusted_agent WHERE agent = ?",
-                [agent],
-            )?;
+            self.conn
+                .execute("DELETE FROM trusted_agent WHERE agent = ?", [agent])?;
         }
         Ok(())
     }
@@ -445,7 +457,10 @@ impl Ad4mDb {
             params![
                 perspective.name,
                 perspective.uuid,
-                perspective.neighbourhood.as_ref().map(|n| serde_json::to_string(n).ok()).flatten(),
+                perspective
+                    .neighbourhood
+                    .as_ref()
+                    .and_then(|n| serde_json::to_string(n).ok()),
                 perspective.shared_url,
                 serde_json::to_string(&perspective.state)?,
             ],
@@ -453,7 +468,7 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn get_perspective(&self, uuid: &str) -> Ad4mDbResult<Option<PerspectiveHandle>> {
+    pub fn _get_perspective(&self, uuid: &str) -> Ad4mDbResult<Option<PerspectiveHandle>> {
         let mut stmt = self.conn.prepare(
             "SELECT name, uuid, neighbourhood, shared_url, state FROM perspective_handle WHERE uuid = ?1",
         )?;
@@ -463,9 +478,12 @@ impl Ad4mDb {
                 Ok(PerspectiveHandle {
                     name: row.get(0)?,
                     uuid: row.get(1)?,
-                    neighbourhood: row.get::<usize, Option<String>>(3)?.map(|n| serde_json::from_str(&n).ok()).flatten(),
+                    neighbourhood: row
+                        .get::<usize, Option<String>>(3)?
+                        .and_then(|n| serde_json::from_str(&n).ok()),
                     shared_url: row.get(4)?,
-                    state: serde_json::from_str(row.get::<usize, String>(5)?.as_str()).expect("Could not deserialize perspective state from DB"),
+                    state: serde_json::from_str(row.get::<usize, String>(5)?.as_str())
+                        .expect("Could not deserialize perspective state from DB"),
                 })
             })?
             .map(|p| p.ok())
@@ -484,9 +502,12 @@ impl Ad4mDb {
             Ok(PerspectiveHandle {
                 name: row.get(0)?,
                 uuid: row.get(1)?,
-                neighbourhood: row.get::<usize, Option<String>>(2)?.map(|n| serde_json::from_str(&n).ok()).flatten(),
+                neighbourhood: row
+                    .get::<usize, Option<String>>(2)?
+                    .and_then(|n| serde_json::from_str(&n).ok()),
                 shared_url: row.get(3)?,
-                state: serde_json::from_str(row.get::<usize, String>(4)?.as_str()).expect("Could not deserialize perspective state from DB"),
+                state: serde_json::from_str(row.get::<usize, String>(4)?.as_str())
+                    .expect("Could not deserialize perspective state from DB"),
             })
         })?;
 
@@ -503,7 +524,7 @@ impl Ad4mDb {
             "UPDATE perspective_handle SET name = ?1, neighbourhood = ?2, shared_url = ?3, state = ?4 WHERE uuid = ?5",
             params![
                 perspective.name,
-                perspective.neighbourhood.as_ref().map(|n| serde_json::to_string(n).ok()).flatten(),
+                perspective.neighbourhood.as_ref().and_then(|n| serde_json::to_string(n).ok()),
                 perspective.shared_url,
                 serde_json::to_string(&perspective.state)?,
                 perspective.uuid,
@@ -513,14 +534,17 @@ impl Ad4mDb {
     }
 
     pub fn remove_perspective(&self, uuid: &str) -> Ad4mDbResult<()> {
-        self.conn.execute(
-            "DELETE FROM perspective_handle WHERE uuid = ?1",
-            [uuid],
-        )?;
+        self.conn
+            .execute("DELETE FROM perspective_handle WHERE uuid = ?1", [uuid])?;
         Ok(())
     }
 
-    pub fn add_link(&self, perspective_uuid: &str, link: &LinkExpression, status: &LinkStatus) -> Ad4mDbResult<()> {
+    pub fn add_link(
+        &self,
+        perspective_uuid: &str,
+        link: &LinkExpression,
+        status: &LinkStatus,
+    ) -> Ad4mDbResult<()> {
         self.conn.execute(
             "INSERT INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -539,7 +563,12 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn add_many_links(&self, perspective_uuid: &str, links: Vec<LinkExpression>, status: &LinkStatus) -> Ad4mDbResult<()> {
+    pub fn add_many_links(
+        &self,
+        perspective_uuid: &str,
+        links: Vec<LinkExpression>,
+        status: &LinkStatus,
+    ) -> Ad4mDbResult<()> {
         for link in links.iter() {
             self.conn.execute(
                 "INSERT INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status)
@@ -560,7 +589,12 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn update_link(&self, perspective_uuid: &str, old_link: &LinkExpression, new_link: &LinkExpression) -> Ad4mDbResult<()> {
+    pub fn update_link(
+        &self,
+        perspective_uuid: &str,
+        old_link: &LinkExpression,
+        new_link: &LinkExpression,
+    ) -> Ad4mDbResult<()> {
         self.conn.execute(
             "UPDATE link SET source = ?1, predicate = ?2, target = ?3, author = ?4, timestamp = ?5, signature = ?6, key = ?7
              WHERE perspective = ?8 AND source = ?9 AND predicate = ?10 AND target = ?11 AND author = ?12 AND timestamp = ?13",
@@ -598,149 +632,174 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn get_link(&self, perspective_uuid: &str, link: &LinkExpression) -> Ad4mDbResult<Option<(LinkExpression, LinkStatus)>> {
+    pub fn get_link(
+        &self,
+        perspective_uuid: &str,
+        link: &LinkExpression,
+    ) -> Ad4mDbResult<Option<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
             "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND source = ?2 AND predicate = ?3 AND target = ?4 AND author = ?5 AND timestamp = ?6",
         )?;
-        let link_expression: Option<(LinkExpression, LinkStatus)> = stmt.query_row(
-            params![perspective_uuid, link.data.source, link.data.predicate.as_ref().unwrap_or(&"".to_string()), link.data.target, link.author, link.timestamp],
-            |row| {
-                let status: LinkStatus = serde_json::from_str(&row.get::<_, String>(8)?)
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                    8,
-                    rusqlite::types::Type::Text,
-                    Box::new(e)
-                ))?;
+        let link_expression: Option<(LinkExpression, LinkStatus)> = stmt
+            .query_row(
+                params![
+                    perspective_uuid,
+                    link.data.source,
+                    link.data.predicate.as_ref().unwrap_or(&"".to_string()),
+                    link.data.target,
+                    link.author,
+                    link.timestamp
+                ],
+                |row| {
+                    let status: LinkStatus = serde_json::from_str(&row.get::<_, String>(8)?)
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                8,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?;
 
-                let link = LinkExpression {
-                    data: Link {
-                        source: row.get(1)?,
-                        predicate: row.get(2).map(|p: Option<String>| {
-                            match p.as_ref().map(|p| p.as_str()){
+                    let link = LinkExpression {
+                        data: Link {
+                            source: row.get(1)?,
+                            predicate: row.get(2).map(|p: Option<String>| match p.as_deref() {
                                 Some("") => None,
-                                _ => p
-                            }
-                        })?,
-                        target: row.get(3)?,
-                    },
-                    proof: ExpressionProof {
-                        signature: row.get(6)?,
-                        key: row.get(7)?,
-                    },
-                    author: row.get(4)?,
-                    timestamp: row.get(5)?,
-                    status: Some(status.clone())
-                };
+                                _ => p,
+                            })?,
+                            target: row.get(3)?,
+                        },
+                        proof: ExpressionProof {
+                            signature: row.get(6)?,
+                            key: row.get(7)?,
+                        },
+                        author: row.get(4)?,
+                        timestamp: row.get(5)?,
+                        status: Some(status.clone()),
+                    };
 
-                Ok((link, status))
-            }
-        ).optional()?;
+                    Ok((link, status))
+                },
+            )
+            .optional()?;
         Ok(link_expression)
     }
 
-    pub fn get_all_links(&self, perspective_uuid: &str) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
+    pub fn get_all_links(
+        &self,
+        perspective_uuid: &str,
+    ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
             "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1",
         )?;
-        let link_iter = stmt.query_map(
-            params![perspective_uuid],
-            |row| {
-                let status: LinkStatus = serde_json::from_str(&row.get::<_, String>(8)?)
-                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+        let link_iter = stmt.query_map(params![perspective_uuid], |row| {
+            let status: LinkStatus =
+                serde_json::from_str(&row.get::<_, String>(8)?).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
                         8,
                         rusqlite::types::Type::Text,
-                        Box::new(e)
-                    ))?;
-                let link_expression = LinkExpression {
-                    data: Link {
-                        source: row.get(1)?,
-                        predicate: row.get(2)?,
-                        target: row.get(3)?,
-                    },
-                    proof: ExpressionProof {
-                        signature: row.get(6)?,
-                        key: row.get(7)?,
-                    },
-                    author: row.get(4)?,
-                    timestamp: row.get(5)?,
-                    status: Some(status.clone())
-                };
-                Ok((link_expression, status))
-            }
-        )?;
+                        Box::new(e),
+                    )
+                })?;
+            let link_expression = LinkExpression {
+                data: Link {
+                    source: row.get(1)?,
+                    predicate: row.get(2)?,
+                    target: row.get(3)?,
+                },
+                proof: ExpressionProof {
+                    signature: row.get(6)?,
+                    key: row.get(7)?,
+                },
+                author: row.get(4)?,
+                timestamp: row.get(5)?,
+                status: Some(status.clone()),
+            };
+            Ok((link_expression, status))
+        })?;
         let links: Result<Vec<_>, _> = link_iter.collect();
         Ok(links?)
     }
 
-    pub fn get_links_by_source(&self, perspective_uuid: &str, source: &str) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
+    pub fn get_links_by_source(
+        &self,
+        perspective_uuid: &str,
+        source: &str,
+    ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
             "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND source = ?2",
         )?;
-        let link_iter = stmt.query_map(
-            params![perspective_uuid, source],
-            |row| {
-                let status: LinkStatus = serde_json::from_str(&row.get::<_, String>(8)?)
-                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+        let link_iter = stmt.query_map(params![perspective_uuid, source], |row| {
+            let status: LinkStatus =
+                serde_json::from_str(&row.get::<_, String>(8)?).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
                         8,
                         rusqlite::types::Type::Text,
-                        Box::new(e)
-                    ))?;
-                let link_expression = LinkExpression {
-                    data: Link {
-                        source: row.get(1)?,
-                        predicate: row.get(2)?,
-                        target: row.get(3)?,
-                    },
-                    proof: ExpressionProof {
-                        signature: row.get(6)?,
-                        key: row.get(7)?,
-                    },
-                    author: row.get(4)?,
-                    timestamp: row.get(5)?,
-                    status: Some(status.clone())
-                };
-                Ok((link_expression, status))
-            }
-        )?;
+                        Box::new(e),
+                    )
+                })?;
+            let link_expression = LinkExpression {
+                data: Link {
+                    source: row.get(1)?,
+                    predicate: row.get(2)?,
+                    target: row.get(3)?,
+                },
+                proof: ExpressionProof {
+                    signature: row.get(6)?,
+                    key: row.get(7)?,
+                },
+                author: row.get(4)?,
+                timestamp: row.get(5)?,
+                status: Some(status.clone()),
+            };
+            Ok((link_expression, status))
+        })?;
         let links: Result<Vec<_>, _> = link_iter.collect();
         Ok(links?)
     }
 
-    pub fn get_links_by_target(&self, perspective_uuid: &str, target: &str) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
+    pub fn get_links_by_target(
+        &self,
+        perspective_uuid: &str,
+        target: &str,
+    ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
             "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND target = ?2",
         )?;
-        let link_iter = stmt.query_map(
-            params![perspective_uuid, target],
-            |row| {
-                let status: LinkStatus = serde_json::from_str(&row.get::<_, String>(8)?)
-                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+        let link_iter = stmt.query_map(params![perspective_uuid, target], |row| {
+            let status: LinkStatus =
+                serde_json::from_str(&row.get::<_, String>(8)?).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
                         8,
                         rusqlite::types::Type::Text,
-                        Box::new(e)
-                    ))?;
-                let link_expression = LinkExpression {
-                    data: Link {
-                        source: row.get(1)?,
-                        predicate: row.get(2)?,
-                        target: row.get(3)?,
-                    },
-                    proof: ExpressionProof {
-                        signature: row.get(6)?,
-                        key: row.get(7)?,
-                    },
-                    author: row.get(4)?,
-                    timestamp: row.get(5)?,
-                    status: Some(status.clone())
-                };
-                Ok((link_expression, status))
-            }
-        )?;
+                        Box::new(e),
+                    )
+                })?;
+            let link_expression = LinkExpression {
+                data: Link {
+                    source: row.get(1)?,
+                    predicate: row.get(2)?,
+                    target: row.get(3)?,
+                },
+                proof: ExpressionProof {
+                    signature: row.get(6)?,
+                    key: row.get(7)?,
+                },
+                author: row.get(4)?,
+                timestamp: row.get(5)?,
+                status: Some(status.clone()),
+            };
+            Ok((link_expression, status))
+        })?;
         let links: Result<Vec<_>, _> = link_iter.collect();
         Ok(links?)
     }
 
-    pub fn add_pending_diff(&self, perspective_uuid: &str, diff: &PerspectiveDiff) -> Ad4mDbResult<()> {
+    pub fn add_pending_diff(
+        &self,
+        perspective_uuid: &str,
+        diff: &PerspectiveDiff,
+    ) -> Ad4mDbResult<()> {
         self.conn.execute(
             "INSERT INTO perspective_diff (perspective, additions, removals, is_pending)
              VALUES (?1, ?2, ?3, ?4)",
@@ -758,14 +817,16 @@ impl Ad4mDb {
         let mut stmt = self.conn.prepare(
             "SELECT additions, removals FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2",
         )?;
-        let diffs_iter = stmt.query_map(
-            params![perspective_uuid, true],
-            |row| {
-                let additions: Vec<LinkExpression> = serde_json::from_str(&row.get::<_, String>(0).unwrap()).unwrap();
-                let removals: Vec<LinkExpression> = serde_json::from_str(&row.get::<_, String>(1).unwrap()).unwrap();
-                Ok(PerspectiveDiff { additions, removals })
-            },
-        )?;
+        let diffs_iter = stmt.query_map(params![perspective_uuid, true], |row| {
+            let additions: Vec<LinkExpression> =
+                serde_json::from_str(&row.get::<_, String>(0).unwrap()).unwrap();
+            let removals: Vec<LinkExpression> =
+                serde_json::from_str(&row.get::<_, String>(1).unwrap()).unwrap();
+            Ok(PerspectiveDiff {
+                additions,
+                removals,
+            })
+        })?;
         let mut diffs = Vec::new();
         for diff in diffs_iter {
             diffs.push(diff?);
@@ -793,26 +854,28 @@ impl Ad4mDb {
 
     // Expression Methods
 
-    pub fn add_expression<T: Serialize>(&self, url: &str, expression: &Expression<T>) -> Ad4mDbResult<()> {
+    pub fn _add_expression<T: Serialize>(
+        &self,
+        url: &str,
+        expression: &Expression<T>,
+    ) -> Ad4mDbResult<()> {
         self.conn.execute(
             "INSERT INTO expression (url, data)
              VALUES (?1, ?2)",
-            params![
-                url,
-                serde_json::to_string(expression)?,
-            ],
+            params![url, serde_json::to_string(expression)?,],
         )?;
         Ok(())
     }
 
-    pub fn get_expression(&self, url: &str) -> Ad4mDbResult<Option<Expression<serde_json::Value>>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT data FROM expression WHERE url = ?1",
-        )?;
-        let expression: Option<String> = stmt.query_row(
-            params![url],
-            |row| row.get(0),
-        ).optional()?;
+    pub fn _get_expression(
+        &self,
+        url: &str,
+    ) -> Ad4mDbResult<Option<Expression<serde_json::Value>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT data FROM expression WHERE url = ?1")?;
+        let expression: Option<String> =
+            stmt.query_row(params![url], |row| row.get(0)).optional()?;
         Ok(expression.map(|e| serde_json::from_str(&e).unwrap()))
     }
 
@@ -851,7 +914,9 @@ impl Ad4mDb {
                 None
             };
 
-            let local = if let (Some(file_name), Some(tokenizer_source), Some(model_parameters)) = (row.get(5)?, row.get(6)?, row.get(7)?) {
+            let local = if let (Some(file_name), Some(tokenizer_source), Some(model_parameters)) =
+                (row.get(5)?, row.get(6)?, row.get(7)?)
+            {
                 Some(LocalModel {
                     file_name,
                     tokenizer_source,
@@ -877,10 +942,8 @@ impl Ad4mDb {
     }
 
     pub fn remove_model(&self, name: &str) -> Ad4mDbResult<()> {
-        self.conn.execute(
-            "DELETE FROM models WHERE name = ?1",
-            params![name],
-        )?;
+        self.conn
+            .execute("DELETE FROM models WHERE name = ?1", params![name])?;
         Ok(())
     }
 
@@ -896,17 +959,17 @@ impl Ad4mDb {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{ExpressionProof, Link, LinkExpression};
+    use crate::{db::Ad4mDb, graphql::graphql_types::NotificationInput};
     use crate::{db::Ad4mDb, graphql::graphql_types::NotificationInput, types::ModelType};
+    use chrono::Utc;
+    use fake::{Fake, Faker};
     use url::Url;
     use uuid::Uuid;
-    use fake::{Fake, Faker};
-    use chrono::Utc;
-    use crate::types::{LinkExpression, Link, ExpressionProof};
+    use uuid::Uuid;
 
     fn construct_dummy_link_expression(status: LinkStatus) -> LinkExpression {
         LinkExpression {
@@ -916,7 +979,7 @@ mod tests {
                 predicate: Some(Faker.fake::<String>()),
             },
             proof: ExpressionProof {
-            signature: "signature".to_string(),
+                signature: "signature".to_string(),
                 key: "key".to_string(),
             },
             author: "did:test:key".to_string(),
@@ -972,7 +1035,10 @@ mod tests {
         db.add_link(&p_uuid, &link2, &LinkStatus::Local).unwrap();
 
         let all_links = db.get_all_links(&p_uuid).unwrap();
-        assert_eq!(all_links, vec![(link1, LinkStatus::Shared), (link2, LinkStatus::Local)]);
+        assert_eq!(
+            all_links,
+            vec![(link1, LinkStatus::Shared), (link2, LinkStatus::Local)]
+        );
     }
 
     #[test]
@@ -995,7 +1061,7 @@ mod tests {
         let link1 = construct_dummy_link_expression(LinkStatus::Shared);
         db.add_link(&p_uuid, &link1, &LinkStatus::Shared).unwrap();
         let link2 = construct_dummy_link_expression(LinkStatus::Shared);
-        db.add_link(&p_uuid, &link2,  &LinkStatus::Shared).unwrap();
+        db.add_link(&p_uuid, &link2, &LinkStatus::Shared).unwrap();
 
         let result = db.get_links_by_source(&p_uuid, &link1.data.source).unwrap();
         assert_eq!(result, vec![(link1, LinkStatus::Shared)]);
@@ -1047,85 +1113,111 @@ mod tests {
         let p_uuid = Uuid::new_v4().to_string();
         let addition = construct_dummy_link_expression(LinkStatus::Shared);
         let removal = construct_dummy_link_expression(LinkStatus::Shared);
-        db.add_pending_diff(&p_uuid, &PerspectiveDiff {
-            additions: vec![addition.clone()],
-            removals: vec![removal.clone()],
-        }).unwrap();
+        db.add_pending_diff(
+            &p_uuid,
+            &PerspectiveDiff {
+                additions: vec![addition.clone()],
+                removals: vec![removal.clone()],
+            },
+        )
+        .unwrap();
 
         let get = db.get_pending_diffs(&p_uuid).unwrap();
         assert_eq!(get.additions.len(), 1);
         assert_eq!(get.removals.len(), 1);
-        assert_eq!(get, PerspectiveDiff {
-            additions: vec![addition],
-            removals: vec![removal],
-        });
+        assert_eq!(
+            get,
+            PerspectiveDiff {
+                additions: vec![addition],
+                removals: vec![removal],
+            }
+        );
 
         db.clear_pending_diffs(&p_uuid).unwrap();
         let get2 = db.get_pending_diffs(&p_uuid).unwrap();
         assert_eq!(get2.additions.len(), 0);
     }
 
+    #[test]
+    fn can_handle_notifications() {
+        let db = Ad4mDb::new(":memory:").unwrap();
 
-#[test]
-fn can_handle_notifications() {
-    let db = Ad4mDb::new(":memory:").unwrap();
+        // Create a test notification
+        let notification = NotificationInput {
+            description: "Test Description".to_string(),
+            app_name: "Test App Name".to_string(),
+            app_url: "Test App URL".to_string(),
+            app_icon_path: "Test App Icon Path".to_string(),
+            trigger: "Test Trigger".to_string(),
+            perspective_ids: vec!["Test Perspective ID".to_string()],
+            webhook_url: "Test Webhook URL".to_string(),
+            webhook_auth: "Test Webhook Auth".to_string(),
+        };
 
-    // Create a test notification
-    let notification = NotificationInput {
-        description: "Test Description".to_string(),
-        app_name: "Test App Name".to_string(),
-        app_url: "Test App URL".to_string(),
-        app_icon_path: "Test App Icon Path".to_string(),
-        trigger: "Test Trigger".to_string(),
-        perspective_ids: vec!["Test Perspective ID".to_string()],
-        webhook_url: "Test Webhook URL".to_string(),
-        webhook_auth: "Test Webhook Auth".to_string(),
-    };
+        // Add the test notification
+        let notification_id = db.add_notification(notification).unwrap();
+        // Get all notifications
+        let notifications = db.get_notifications().unwrap();
 
-    // Add the test notification
-    let notification_id = db.add_notification(notification).unwrap();
-    // Get all notifications
-    let notifications = db.get_notifications().unwrap();
+        // Ensure the test notification is in the list of notifications and has all properties set
+        let test_notification = notifications
+            .iter()
+            .find(|n| n.id == notification_id)
+            .unwrap();
+        assert_eq!(test_notification.description, "Test Description");
+        assert_eq!(test_notification.app_name, "Test App Name");
+        assert_eq!(test_notification.app_url, "Test App URL");
+        assert_eq!(
+            test_notification.app_icon_path,
+            "Test App Icon Path".to_string()
+        );
+        assert_eq!(test_notification.trigger, "Test Trigger");
+        assert_eq!(
+            test_notification.perspective_ids,
+            vec!["Test Perspective ID".to_string()]
+        );
+        assert_eq!(test_notification.webhook_url, "Test Webhook URL");
+        assert_eq!(test_notification.webhook_auth, "Test Webhook Auth");
 
-    // Ensure the test notification is in the list of notifications and has all properties set
-    let test_notification = notifications.iter().find(|n| n.id == notification_id).unwrap();
-    assert_eq!(test_notification.description, "Test Description");
-    assert_eq!(test_notification.app_name, "Test App Name");
-    assert_eq!(test_notification.app_url, "Test App URL");
-    assert_eq!(test_notification.app_icon_path, "Test App Icon Path".to_string());
-    assert_eq!(test_notification.trigger, "Test Trigger");
-    assert_eq!(test_notification.perspective_ids, vec!["Test Perspective ID".to_string()]);
-    assert_eq!(test_notification.webhook_url, "Test Webhook URL");
-    assert_eq!(test_notification.webhook_auth, "Test Webhook Auth");
+        // Modify the test notification
+        let updated_notification = Notification {
+            id: notification_id.clone(),
+            granted: true,
+            description: "Update Test Description".to_string(),
+            app_name: "Test App Name".to_string(),
+            app_url: "Test App URL".to_string(),
+            app_icon_path: "Test App Icon Path".to_string(),
+            trigger: "Test Trigger".to_string(),
+            perspective_ids: vec!["Test Perspective ID".to_string()],
+            webhook_url: "Test Webhook URL".to_string(),
+            webhook_auth: "Test Webhook Auth".to_string(),
+        };
 
-    // Modify the test notification
-    let updated_notification = Notification {
-        id: notification_id.clone(),
-        granted: true,
-        description: "Update Test Description".to_string(),
-        app_name: "Test App Name".to_string(),
-        app_url: "Test App URL".to_string(),
-        app_icon_path: "Test App Icon Path".to_string(),
-        trigger: "Test Trigger".to_string(),
-        perspective_ids: vec!["Test Perspective ID".to_string()],
-        webhook_url: "Test Webhook URL".to_string(),
-        webhook_auth: "Test Webhook Auth".to_string(),
-    };
+        // Update the test notification
+        let updated = db
+            .update_notification(notification_id.clone(), &updated_notification)
+            .unwrap();
+        assert!(updated);
 
-    // Update the test notification
-    let updated = db.update_notification(notification_id.clone(), &updated_notification).unwrap();
-    assert!(updated);
+        // Check if the notification is updated
+        let updated_notifications = db.get_notifications().unwrap();
+        let updated_test_notification = updated_notifications
+            .iter()
+            .find(|n| n.id == notification_id)
+            .unwrap();
+        assert_eq!(
+            updated_test_notification.description,
+            "Update Test Description"
+        );
 
-    // Check if the notification is updated
-    let updated_notifications = db.get_notifications().unwrap();
-    let updated_test_notification = updated_notifications.iter().find(|n| n.id == notification_id).unwrap();
-    assert_eq!(updated_test_notification.description, "Update Test Description");
-
-    // Remove the test notification
-    db.remove_notification(notification_id.clone()).unwrap();
-    // Ensure the test notification is removed
-    let notifications_after_removal = db.get_notifications().unwrap();
-    assert!(notifications_after_removal.iter().all(|n| n.id != notification_id));
+        // Remove the test notification
+        db.remove_notification(notification_id.clone()).unwrap();
+        // Ensure the test notification is removed
+        let notifications_after_removal = db.get_notifications().unwrap();
+        assert!(notifications_after_removal
+            .iter()
+            .all(|n| n.id != notification_id));
+    }
 }
 
 #[test]
@@ -1141,7 +1233,7 @@ fn test_models_crud() {
             api_type: ModelApiType::OpenAi,
         }),
         local: None,
-        model_type: ModelType::Llm
+        model_type: ModelType::Llm,
     };
 
     // Create a test model with LocalModel
@@ -1153,7 +1245,7 @@ fn test_models_crud() {
             tokenizer_source: "test_tokenizer".to_string(),
             model_parameters: "test_parameters".to_string(),
         }),
-        model_type: ModelType::Llm
+        model_type: ModelType::Llm,
     };
 
     // Add the test models
@@ -1168,18 +1260,47 @@ fn test_models_crud() {
     assert_eq!(retrieved_model_api.name, "Test Model API");
     assert!(retrieved_model_api.api.is_some());
     assert!(retrieved_model_api.local.is_none());
-    assert_eq!(retrieved_model_api.api.as_ref().unwrap().base_url, Url::parse("https://api.example.com").unwrap());
-    assert_eq!(retrieved_model_api.api.as_ref().unwrap().api_key, "test_api_key");
-    assert_eq!(retrieved_model_api.api.as_ref().unwrap().api_type, ModelApiType::OpenAi);
+    assert_eq!(
+        retrieved_model_api.api.as_ref().unwrap().base_url,
+        Url::parse("https://api.example.com").unwrap()
+    );
+    assert_eq!(
+        retrieved_model_api.api.as_ref().unwrap().api_key,
+        "test_api_key"
+    );
+    assert_eq!(
+        retrieved_model_api.api.as_ref().unwrap().api_type,
+        ModelApiType::OpenAi
+    );
     assert_eq!(retrieved_model_api.model_type, ModelType::Llm);
 
-    let retrieved_model_local = models.iter().find(|m| m.name == "Test Model Local").unwrap();
+    let retrieved_model_local = models
+        .iter()
+        .find(|m| m.name == "Test Model Local")
+        .unwrap();
     assert_eq!(retrieved_model_local.name, "Test Model Local");
     assert!(retrieved_model_local.api.is_none());
     assert!(retrieved_model_local.local.is_some());
-    assert_eq!(retrieved_model_local.local.as_ref().unwrap().file_name, "test_model.bin");
-    assert_eq!(retrieved_model_local.local.as_ref().unwrap().tokenizer_source, "test_tokenizer");
-    assert_eq!(retrieved_model_local.local.as_ref().unwrap().model_parameters, "test_parameters");
+    assert_eq!(
+        retrieved_model_local.local.as_ref().unwrap().file_name,
+        "test_model.bin"
+    );
+    assert_eq!(
+        retrieved_model_local
+            .local
+            .as_ref()
+            .unwrap()
+            .tokenizer_source,
+        "test_tokenizer"
+    );
+    assert_eq!(
+        retrieved_model_local
+            .local
+            .as_ref()
+            .unwrap()
+            .model_parameters,
+        "test_parameters"
+    );
     assert_eq!(retrieved_model_local.model_type, ModelType::Llm);
 
     // Remove the test models
@@ -1188,10 +1309,7 @@ fn test_models_crud() {
 
     // Ensure the test models are removed
     let models_after_removal = db.get_models().unwrap();
-    assert!(models_after_removal.iter().all(|m| m.name != "Test Model API" && m.name != "Test Model Local"));
+    assert!(models_after_removal
+        .iter()
+        .all(|m| m.name != "Test Model API" && m.name != "Test Model Local"));
 }
-
-
-}
-
-

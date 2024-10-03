@@ -365,7 +365,16 @@ export class PerspectiveProxy {
     */
     async isSubjectInstance<T>(expression: string, subjectClass: T): Promise<boolean> {
         let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
-        return await this.infer(`subject_class("${className}", C), instance(C, "${expression}")`)
+        let isInstance = false;
+        const maxAttempts = 5;
+        let attempts = 0;
+
+        while (attempts < maxAttempts && !isInstance) {
+            isInstance = await this.infer(`subject_class("${className}", C), instance(C, "${expression}")`);
+            attempts++;
+          }
+
+        return isInstance
     }
 
 
@@ -432,78 +441,92 @@ export class PerspectiveProxy {
 
 
     private buildQueryFromTemplate(obj: object): string {
-        // Collect all string properties of the object in a list
-        let properties = []
+        let result
+        // We need to avoid strict mode for the following intropsective code
+        (function(obj) {
+            // Collect all string properties of the object in a list
+            let properties = []
 
-        // Collect all collections of the object in a list
-        let collections = []
+            // Collect all collections of the object in a list
+            let collections = []
 
-        // Collect all string properties of the object in a list
-        if(Object.getPrototypeOf(obj).__properties) {
-            Object.keys(Object.getPrototypeOf(obj).__properties).forEach(p => properties.push(p))
-        } else {
-            properties.push(...Object.keys(obj).filter(key => !Array.isArray(obj[key])))
-        }
+            // Collect all string properties of the object in a list
+            if(Object.getPrototypeOf(obj).__properties) {
+                Object.keys(Object.getPrototypeOf(obj).__properties).forEach(p => properties.push(p))
+            } else {
+                properties.push(...Object.keys(obj).filter(key => !Array.isArray(obj[key])))
+            }
 
-        // Collect all collections of the object in a list
-        if (Object.getPrototypeOf(obj).__collections) {
-            Object.keys(Object.getPrototypeOf(obj).__collections).filter(key => key !== 'isSubjectInstance').forEach(c => !collections.includes(c) ?? collections.push(c))
-        } else {
-            collections.push(...Object.keys(obj).filter(key => Array.isArray(obj[key])).filter(key => key !== 'isSubjectInstance'))
-        }
+            // Collect all collections of the object in a list
+            if (Object.getPrototypeOf(obj).__collections) {
+                Object.keys(Object.getPrototypeOf(obj).__collections).filter(key => key !== 'isSubjectInstance').forEach(c => !collections.includes(c) ?? collections.push(c))
+            } else {
+                collections.push(...Object.keys(obj).filter(key => Array.isArray(obj[key])).filter(key => key !== 'isSubjectInstance'))
+            }
 
-        // Collect all set functions of the object in a list
-        let setFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("set") && !key.startsWith("setCollection"))
-        // Add all set functions of the object's prototype to that list
-        setFunctions = setFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("set") && !key.startsWith("setCollection")))
+            // Collect all set functions of the object in a list
+            let setFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("set") && !key.startsWith("setCollection"))
+            // Add all set functions of the object's prototype to that list
+            setFunctions = setFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => {
+                const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(obj), key);
+                return descriptor && typeof descriptor.value === "function" && key.startsWith("set") && !key.startsWith("setCollection");
+            }));
 
-        // Collect all add functions of the object in a list
-        let addFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("add"))
-        // Add all add functions of the object's prototype to that list
-        addFunctions = addFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("add")))
+            // Collect all add functions of the object in a list
+            let addFunctions = Object.getOwnPropertyNames(obj).filter(key => (Object.prototype.hasOwnProperty.call(obj, key) && typeof obj[key] === "function") && key.startsWith("add"))
+            // Add all add functions of the object's prototype to that list
+            addFunctions = addFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => {
+                const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(obj), key);
+                return descriptor && typeof descriptor.value === "function" && key.startsWith("add");
+            }));
 
-        // Collect all remove functions of the object in a list
-        let removeFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("remove"))
-        // Add all remove functions of the object's prototype to that list
-        removeFunctions = removeFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("remove")))
+            // Collect all remove functions of the object in a list
+            let removeFunctions = Object.getOwnPropertyNames(obj).filter(key => (Object.prototype.hasOwnProperty.call(obj, key) && typeof obj[key] === "function") && key.startsWith("remove"))
+            // Add all remove functions of the object's prototype to that list
+            removeFunctions = removeFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => {
+                const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(obj), key);
+                return descriptor && typeof descriptor.value === "function" && key.startsWith("remove");
+            }));
 
-        // Collect all add functions of the object in a list
-        let setCollectionFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("setCollection"))
-        // Add all add functions of the object's prototype to that list
-        setCollectionFunctions = setCollectionFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => (typeof obj[key] === "function") && key.startsWith("setCollection")))
+            // Collect all add functions of the object in a list
+            let setCollectionFunctions = Object.getOwnPropertyNames(obj).filter(key => (Object.prototype.hasOwnProperty.call(obj, key) && typeof obj[key] === "function") && key.startsWith("setCollection"))
+            // Add all add functions of the object's prototype to that list
+            setCollectionFunctions = setCollectionFunctions.concat(Object.getOwnPropertyNames(Object.getPrototypeOf(obj)).filter(key => {
+                const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(obj), key);
+                return descriptor && typeof descriptor.value === "function" && key.startsWith("setCollection");
+            }));
+            // Construct query to find all subject classes that have the given properties and collections
+            let query = `subject_class(Class, C)`
 
-        // Construct query to find all subject classes that have the given properties and collections
-        let query = `subject_class(Class, C)`
+            for(let property of properties) {
+                query += `, property(C, "${property}")`
+            }
+            for(let collection of collections) {
+                query += `, collection(C, "${collection}")`
+            }
 
-        for(let property of properties) {
-            query += `, property(C, "${property}")`
-        }
-        for(let collection of collections) {
-            query += `, collection(C, "${collection}")`
-        }
+            for(let setFunction of setFunctions) {
+                // e.g.  "setState" -> "state"
+                let property = setFunction.substring(3)
+                property = property.charAt(0).toLowerCase() + property.slice(1)
+                query += `, property_setter(C, "${property}", _)`
+            }
+            for(let addFunction of addFunctions) {
+                query += `, collection_adder(C, "${collectionAdderToName(addFunction)}", _)`
+            }
 
-        for(let setFunction of setFunctions) {
-            // e.g.  "setState" -> "state"
-            let property = setFunction.substring(3)
-            property = property.charAt(0).toLowerCase() + property.slice(1)
-            query += `, property_setter(C, "${property}", _)`
-        }
-        for(let addFunction of addFunctions) {
-            query += `, collection_adder(C, "${collectionAdderToName(addFunction)}", _)`
-        }
+            for(let removeFunction of removeFunctions) {
+                query += `, collection_remover(C, "${collectionRemoverToName(removeFunction)}", _)`
+            }
 
-        for(let removeFunction of removeFunctions) {
-            query += `, collection_remover(C, "${collectionRemoverToName(removeFunction)}", _)`
-        }
+            for(let setCollectionFunction of setCollectionFunctions) {
+                query += `, collection_setter(C, "${collectionSetterToName(setCollectionFunction)}", _)`
+            }
 
-        for(let setCollectionFunction of setCollectionFunctions) {
-            query += `, collection_setter(C, "${collectionSetterToName(setCollectionFunction)}", _)`
-        }
-
-
-        query += "."
-
-        return query;
+            query += "."
+            result = query
+        }(obj))
+        return result
     }
 
     /** Returns all subject classes that match the given template object.

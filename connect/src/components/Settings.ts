@@ -10,6 +10,7 @@ export default function Settings({
   changeState,
   changeUrl,
   changePort,
+  clearState,
 }) {
   const proxyClasses = `button ${
     isRemote ? "button--primary" : "button--secondary"
@@ -79,6 +80,15 @@ export default function Settings({
                 Connect
               </button>
             </div>`}
+            <div class="text-center">or</div>
+            <div class="buttons">
+            <button 
+              class="button button--full button--secondary"
+              @click=${clearState}
+              >
+                Clear state
+              </button>
+            </div
     </div>
   `;
 }

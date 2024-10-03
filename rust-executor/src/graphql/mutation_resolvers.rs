@@ -1,24 +1,49 @@
 #![allow(non_snake_case)]
-use crate::{db::Ad4mDb, perspectives::perspective_instance::{Command, Parameter, SubjectClass, SubjectClassOption}, runtime_service::{self, RuntimeService}, types::{LocalModel, Model, ModelApi, ModelApiType, Notification}};
+
 use std::str::FromStr;
 use url::Url;
-use crate::{agent::create_signed_expression, neighbourhoods::{self, install_neighbourhood}, perspectives::{add_perspective, get_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective}, types::{DecoratedLinkExpression, Link, LinkExpression}};
-use coasys_juniper::{graphql_object, graphql_value, FieldResult, FieldError};
+
+use crate::{
+    agent::create_signed_expression,
+    neighbourhoods::{self, install_neighbourhood},
+    perspectives::{
+        add_perspective, get_perspective,
+        perspective_instance::{PerspectiveInstance, SdnaType},
+        remove_perspective, update_perspective,
+    },
+    types::{DecoratedLinkExpression, Link, LinkExpression},
+};
+use crate::{
+    db::Ad4mDb,
+    perspectives::perspective_instance::{Command, Parameter, SubjectClassOption},
+    runtime_service::RuntimeService,
+    types::Notification,
+};
 
 use super::graphql_types::*;
-use crate::{agent::{self, capabilities::*, AgentService}, entanglement_service::{add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs, sign_device_key}, holochain_service::{agent_infos_from_str, get_holochain_service}, pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC}};
+use crate::{
+    agent::{self, capabilities::*, AgentService},
+    entanglement_service::{
+        add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs,
+        sign_device_key,
+    },
+    holochain_service::{agent_infos_from_str, get_holochain_service},
+    pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC},
+};
 
 pub struct Mutation;
 
-fn get_perspective_with_uuid_field_error(uuid: &String) -> FieldResult<PerspectiveInstance> {
-    get_perspective(uuid).ok_or_else(|| FieldError::new(
-        "Perspective not found",
-        graphql_value!({ "uuid": uuid.clone() }),
-    ))
+fn get_perspective_with_uuid_field_error(uuid: &str) -> FieldResult<PerspectiveInstance> {
+    get_perspective(uuid).ok_or_else(|| {
+        FieldError::new(
+            "Perspective not found",
+            graphql_value!({ "uuid": uuid.to_owned() }),
+        )
+    })
 }
 
 fn link_status_from_input(status: Option<String>) -> Result<LinkStatus, FieldError> {
-    match status.as_ref().map(|s| s.as_str()) {
+    match status.as_deref() {
         Some("shared") => Ok(LinkStatus::Shared),
         Some("local") => Ok(LinkStatus::Local),
         None => Ok(LinkStatus::Shared),
@@ -54,14 +79,17 @@ impl Mutation {
         proofs: Vec<EntanglementProofInput>,
     ) -> FieldResult<Vec<EntanglementProof>> {
         //TODO: capability missing for this function
-        let converted_proofs: Vec<EntanglementProof> = proofs.into_iter().map(|input| EntanglementProof {
-            did: input.did,
-            did_signing_key_id: input.did_signing_key_id,
-            device_key_type: input.device_key_type,
-            device_key: input.device_key,
-            device_key_signed_by_did: input.device_key_signed_by_did,
-            did_signed_by_device_key: Some(input.did_signed_by_device_key),
-        }).collect();
+        let converted_proofs: Vec<EntanglementProof> = proofs
+            .into_iter()
+            .map(|input| EntanglementProof {
+                did: input.did,
+                did_signing_key_id: input.did_signing_key_id,
+                device_key_type: input.device_key_type,
+                device_key: input.device_key,
+                device_key_signed_by_did: input.device_key_signed_by_did,
+                did_signed_by_device_key: Some(input.did_signed_by_device_key),
+            })
+            .collect();
 
         add_entanglement_proofs(converted_proofs);
 
@@ -76,14 +104,17 @@ impl Mutation {
         proofs: Vec<EntanglementProofInput>,
     ) -> FieldResult<Vec<EntanglementProof>> {
         //TODO: capability missing for this function
-        let converted_proofs: Vec<EntanglementProof> = proofs.into_iter().map(|input| EntanglementProof {
-            did: input.did,
-            did_signing_key_id: input.did_signing_key_id,
-            device_key_type: input.device_key_type,
-            device_key: input.device_key,
-            device_key_signed_by_did: input.device_key_signed_by_did,
-            did_signed_by_device_key: Some(input.did_signed_by_device_key),
-        }).collect();
+        let converted_proofs: Vec<EntanglementProof> = proofs
+            .into_iter()
+            .map(|input| EntanglementProof {
+                did: input.did,
+                did_signing_key_id: input.did_signing_key_id,
+                device_key_type: input.device_key_type,
+                device_key: input.device_key,
+                device_key_signed_by_did: input.device_key_signed_by_did,
+                did_signed_by_device_key: Some(input.did_signed_by_device_key),
+            })
+            .collect();
 
         delete_entanglement_proof(converted_proofs);
 
@@ -127,12 +158,12 @@ impl Mutation {
         js.execute(script).await?;
 
         get_global_pubsub()
-        .await
-        .publish(
-            &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&agent).unwrap(),
-        )
-        .await;
+            .await
+            .publish(
+                &AGENT_STATUS_CHANGED_TOPIC,
+                &serde_json::to_string(&agent).unwrap(),
+            )
+            .await;
 
         log::info!("AD4M init complete");
 
@@ -146,19 +177,16 @@ impl Mutation {
     ) -> FieldResult<AgentStatus> {
         let agent = AgentService::with_global_instance(|agent_service| {
             agent_service.lock(passphrase.clone());
-
-            let agent = agent_service.dump().clone();
-
-            agent
+            agent_service.dump().clone()
         });
 
         get_global_pubsub()
-        .await
-        .publish(
-            &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&agent).unwrap(),
-        )
-        .await;
+            .await
+            .publish(
+                &AGENT_STATUS_CHANGED_TOPIC,
+                &serde_json::to_string(&agent).unwrap(),
+            )
+            .await;
 
         Ok(agent)
     }
@@ -181,13 +209,14 @@ impl Mutation {
         check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
         let auth_info: AuthInfo = auth_info.into();
         let request_id = agent::capabilities::request_capability(auth_info.clone()).await;
-        if true == context.auto_permit_cap_requests {
+        if context.auto_permit_cap_requests {
             println!("======================================");
             println!("Got capability request: \n{:?}", auth_info);
-            let random_number_challenge = agent::capabilities::permit_capability(AuthInfoExtended {
-                request_id: request_id.clone(),
-                auth: auth_info
-            })?;
+            let random_number_challenge =
+                agent::capabilities::permit_capability(AuthInfoExtended {
+                    request_id: request_id.clone(),
+                    auth: auth_info,
+                })?;
             println!("--------------------------------------");
             println!("Random number challenge: {}", random_number_challenge);
             println!("======================================");
@@ -251,10 +280,16 @@ impl Mutation {
             let agent_service = agent_instance.lock().expect("agent lock");
             let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
 
-            agent_ref.unlock(passphrase.clone());
+            agent_ref.unlock(passphrase.clone())?
         }
 
-        if agent_instance.lock().expect("agent lock").as_ref().expect("agent instance").is_unlocked() {
+        if agent_instance
+            .lock()
+            .expect("agent lock")
+            .as_ref()
+            .expect("agent instance")
+            .is_unlocked()
+        {
             let mut js = context.js_handle.clone();
             let script = format!(
                 r#"JSON.stringify(
@@ -271,17 +306,23 @@ impl Mutation {
             agent_ref.dump().clone()
         };
 
-        if !agent_instance.lock().expect("agent lock").as_ref().expect("agent instance").is_unlocked() {
+        if !agent_instance
+            .lock()
+            .expect("agent lock")
+            .as_ref()
+            .expect("agent instance")
+            .is_unlocked()
+        {
             agent.error = Some("Failed to unlock agent".to_string());
         }
 
         get_global_pubsub()
-        .await
-        .publish(
-            &AGENT_STATUS_CHANGED_TOPIC,
-            &serde_json::to_string(&agent).unwrap(),
-        )
-        .await;
+            .await
+            .publish(
+                &AGENT_STATUS_CHANGED_TOPIC,
+                &serde_json::to_string(&agent).unwrap(),
+            )
+            .await;
 
         Ok(agent)
     }
@@ -422,8 +463,11 @@ impl Mutation {
             ))"#,
             language_meta_json, language_path
         );
+
         let result = js.execute(script).await?;
+        println!("language_publish result: {:?}", result);
         let result: JsResultType<LanguageMeta> = serde_json::from_str(&result)?;
+        println!("language_publish result 1: {:?}", result);
         result.get_graphql_result()
     }
 
@@ -484,15 +528,15 @@ impl Mutation {
         context: &RequestContext,
         link_language: String,
         meta: PerspectiveInput,
-        #[allow(non_snake_case)]
-        perspectiveUUID: String,
+        #[allow(non_snake_case)] perspectiveUUID: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_CREATE_CAPABILITY)?;
         let url = neighbourhoods::neighbourhood_publish_from_perspective(
             &perspectiveUUID,
             link_language,
-            meta.into()
-        ).await?;
+            meta.into(),
+        )
+        .await?;
 
         Ok(url)
     }
@@ -501,15 +545,17 @@ impl Mutation {
         &self,
         context: &RequestContext,
         payload: PerspectiveInput,
-        #[allow(non_snake_case)]
-        perspectiveUUID: String,
+        #[allow(non_snake_case)] perspectiveUUID: String,
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
         let perspective = Perspective::from(payload);
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
-            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .ok_or(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid
+            )))?
             .send_broadcast(perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
@@ -520,24 +566,27 @@ impl Mutation {
         &self,
         context: &RequestContext,
         payload: PerspectiveUnsignedInput,
-        #[allow(non_snake_case)]
-        perspectiveUUID: String,
+        #[allow(non_snake_case)] perspectiveUUID: String,
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
         let perspective = Perspective {
-            links: payload.links
-            .into_iter()
-            .map(|l| Link::from(l))
-            .map(|l| create_signed_expression(l))
-            .filter_map(Result::ok)
-            .map(|l| LinkExpression::from(l))
-            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
-            .collect::<Vec<DecoratedLinkExpression>>()
+            links: payload
+                .links
+                .into_iter()
+                .map(Link::from)
+                .map(create_signed_expression)
+                .filter_map(Result::ok)
+                .map(LinkExpression::from)
+                .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
+                .collect::<Vec<DecoratedLinkExpression>>(),
         };
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
-            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .ok_or(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid
+            )))?
             .send_broadcast(perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
@@ -548,8 +597,7 @@ impl Mutation {
         &self,
         context: &RequestContext,
         payload: PerspectiveInput,
-        #[allow(non_snake_case)]
-        perspectiveUUID: String,
+        #[allow(non_snake_case)] perspectiveUUID: String,
         remote_agent_did: String,
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
@@ -557,7 +605,10 @@ impl Mutation {
         let perspective = Perspective::from(payload);
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
-            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .ok_or(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid
+            )))?
             .send_signal(remote_agent_did, perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
@@ -568,25 +619,28 @@ impl Mutation {
         &self,
         context: &RequestContext,
         payload: PerspectiveUnsignedInput,
-        #[allow(non_snake_case)]
-        perspectiveUUID: String,
+        #[allow(non_snake_case)] perspectiveUUID: String,
         remote_agent_did: String,
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
         let perspective = Perspective {
-            links: payload.links
-            .into_iter()
-            .map(|l| Link::from(l))
-            .map(|l| create_signed_expression(l))
-            .filter_map(Result::ok)
-            .map(|l| LinkExpression::from(l))
-            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
-            .collect::<Vec<DecoratedLinkExpression>>()
+            links: payload
+                .links
+                .into_iter()
+                .map(Link::from)
+                .map(create_signed_expression)
+                .filter_map(Result::ok)
+                .map(LinkExpression::from)
+                .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
+                .collect::<Vec<DecoratedLinkExpression>>(),
         };
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
-            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .ok_or(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid
+            )))?
             .send_signal(remote_agent_did, perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
@@ -596,8 +650,7 @@ impl Mutation {
     async fn neighbourhood_set_online_status(
         &self,
         context: &RequestContext,
-        #[allow(non_snake_case)]
-        perspectiveUUID: String,
+        #[allow(non_snake_case)] perspectiveUUID: String,
         status: PerspectiveInput,
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
@@ -605,7 +658,10 @@ impl Mutation {
         let perspective = Perspective::from(status);
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
-            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .ok_or(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid
+            )))?
             .set_online_status(perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
@@ -615,25 +671,28 @@ impl Mutation {
     async fn neighbourhood_set_online_status_u(
         &self,
         context: &RequestContext,
-        #[allow(non_snake_case)]
-        perspectiveUUID: String,
+        #[allow(non_snake_case)] perspectiveUUID: String,
         status: PerspectiveUnsignedInput,
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
         let perspective = Perspective {
-            links: status.links
-            .into_iter()
-            .map(|l| Link::from(l).normalize())
-            .map(|l| create_signed_expression(l))
-            .filter_map(Result::ok)
-            .map(|l| LinkExpression::from(l))
-            .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
-            .collect::<Vec<DecoratedLinkExpression>>()
+            links: status
+                .links
+                .into_iter()
+                .map(|l| Link::from(l).normalize())
+                .map(create_signed_expression)
+                .filter_map(Result::ok)
+                .map(LinkExpression::from)
+                .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
+                .collect::<Vec<DecoratedLinkExpression>>(),
         };
         let perspective = create_signed_expression(perspective)?;
         get_perspective(&uuid)
-            .ok_or(FieldError::from(format!("No perspective found with uuid {}", uuid)))?
+            .ok_or(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid
+            )))?
             .set_online_status(perspective.into())
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
@@ -664,7 +723,9 @@ impl Mutation {
         )?;
 
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        Ok(perspective.add_link(link.into(), link_status_from_input(status)?).await?)
+        Ok(perspective
+            .add_link(link.into(), link_status_from_input(status)?)
+            .await?)
     }
 
     async fn perspective_add_link_expression(
@@ -680,7 +741,9 @@ impl Mutation {
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         let link = crate::types::LinkExpression::try_from(link)?;
-        Ok(perspective.add_link_expression(link, link_status_from_input(status)?).await?)
+        Ok(perspective
+            .add_link_expression(link, link_status_from_input(status)?)
+            .await?)
     }
 
     async fn perspective_add_links(
@@ -695,13 +758,12 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        Ok(perspective.add_links(
-            links
-                .into_iter()
-                .map(|l| l.into())
-                .collect(),
-            link_status_from_input(status)?
-        ).await?)
+        Ok(perspective
+            .add_links(
+                links.into_iter().map(|l| l.into()).collect(),
+                link_status_from_input(status)?,
+            )
+            .await?)
     }
 
     async fn perspective_link_mutations(
@@ -716,7 +778,9 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        Ok(perspective.link_mutations(mutations, link_status_from_input(status)?).await?)
+        Ok(perspective
+            .link_mutations(mutations, link_status_from_input(status)?)
+            .await?)
     }
 
     async fn perspective_publish_snapshot(
@@ -755,7 +819,7 @@ impl Mutation {
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         let link = crate::types::LinkExpression::try_from(link)?;
-        perspective.remove_link(link.into()).await?;
+        perspective.remove_link(link).await?;
         Ok(true)
     }
 
@@ -773,7 +837,7 @@ impl Mutation {
         let mut removed_links = Vec::new();
         for link in links.into_iter() {
             let link = crate::types::LinkExpression::try_from(link)?;
-            removed_links.push(perspective.remove_link(link.into()).await?);
+            removed_links.push(perspective.remove_link(link).await?);
         }
 
         Ok(removed_links)
@@ -808,7 +872,12 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        Ok(perspective.update_link(LinkExpression::from_input_without_proof(old_link), new_link.into()).await?)
+        Ok(perspective
+            .update_link(
+                LinkExpression::from_input_without_proof(old_link),
+                new_link.into(),
+            )
+            .await?)
     }
 
     async fn perspective_add_sdna(
@@ -825,10 +894,7 @@ impl Mutation {
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         let sdna_type = SdnaType::from_string(&sdna_type)
-            .map_err(|e| FieldError::new(
-                e,
-                graphql_value!({ "invalid_sdna_type": sdna_type })
-            ))?;
+            .map_err(|e| FieldError::new(e, graphql_value!({ "invalid_sdna_type": sdna_type })))?;
         perspective.add_sdna(name, sdna_code, sdna_type).await?;
         Ok(true)
     }
@@ -847,22 +913,18 @@ impl Mutation {
         )?;
 
         let commands: Vec<Command> = serde_json::from_str(&commands)
-            .map_err(|e| FieldError::new(
-                e,
-                graphql_value!({ "invalid_commands": commands })
-            ))?;
+            .map_err(|e| FieldError::new(e, graphql_value!({ "invalid_commands": commands })))?;
         let parameters: Vec<Parameter> = if let Some(p) = parameters {
             serde_json::from_str(&p)
-                .map_err(|e| FieldError::new(
-                    e,
-                    graphql_value!({ "invalid_parameters": p })
-                ))?
+                .map_err(|e| FieldError::new(e, graphql_value!({ "invalid_parameters": p })))?
         } else {
             Vec::new()
         };
 
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        perspective.execute_commands(commands, expression, parameters).await?;
+        perspective
+            .execute_commands(commands, expression, parameters)
+            .await?;
         Ok(true)
     }
 
@@ -878,18 +940,21 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let subject_class: SubjectClassOption = serde_json::from_str(&subject_class)
-            .map_err(|e| FieldError::new(
-                e,
-                graphql_value!({ "invalid_subject_class": subject_class })
-            ))?;
+        let subject_class: SubjectClassOption =
+            serde_json::from_str(&subject_class).map_err(|e| {
+                FieldError::new(
+                    e,
+                    graphql_value!({ "invalid_subject_class": subject_class }),
+                )
+            })?;
 
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
 
-        perspective.create_subject(subject_class, expression_address).await?;
+        perspective
+            .create_subject(subject_class, expression_address)
+            .await?;
         Ok(true)
     }
-
 
     async fn perspective_get_subject_data(
         &self,
@@ -903,15 +968,19 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let subject_class: SubjectClassOption = serde_json::from_str(&subject_class)
-        .map_err(|e| FieldError::new(
-            e,
-            graphql_value!({ "invalid_subject_class": subject_class })
-        ))?;
+        let subject_class: SubjectClassOption =
+            serde_json::from_str(&subject_class).map_err(|e| {
+                FieldError::new(
+                    e,
+                    graphql_value!({ "invalid_subject_class": subject_class }),
+                )
+            })?;
 
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
 
-        let result = perspective.get_subject_data(subject_class, expression_address).await?;
+        let result = perspective
+            .get_subject_data(subject_class, expression_address)
+            .await?;
         Ok(result)
     }
 
@@ -940,8 +1009,9 @@ impl Mutation {
             dids_json,
         );
         let result = js.execute(script).await?;
+        // TODO: what is this for? result is not used.. should this error if it can't be parsed?
         let result: JsResultType<Vec<String>> = serde_json::from_str(&result)?;
-        result.get_graphql_result();
+        result.get_graphql_result()?;
 
         Ok(friends)
     }
@@ -971,14 +1041,13 @@ impl Mutation {
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_MESSAGES_CREATE_CAPABILITY)?;
 
-        let friends = RuntimeService::with_global_instance(|runtime_service| {
-            runtime_service.get_friends()
-        });
+        let friends =
+            RuntimeService::with_global_instance(|runtime_service| runtime_service.get_friends());
 
         if !friends.contains(&did.clone()) {
             log::error!("Friend not found: {}", did);
 
-            return Ok(false)
+            return Ok(false);
         }
 
         let mut js = context.js_handle.clone();
@@ -1091,7 +1160,6 @@ impl Mutation {
         result.get_graphql_result()
     }
 
-
     async fn runtime_request_install_notification(
         &self,
         context: &RequestContext,
@@ -1111,10 +1179,8 @@ impl Mutation {
 
         let notification = Notification::from_input_and_id(id.clone(), notification);
 
-        Ad4mDb::with_global_instance(|db| {
-            db.update_notification(id, &notification)
-        })?;
-        
+        Ad4mDb::with_global_instance(|db| db.update_notification(id, &notification))?;
+
         Ok(true)
     }
 
@@ -1124,9 +1190,7 @@ impl Mutation {
         id: String,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        Ad4mDb::with_global_instance(|db| {
-            db.remove_notification(id)
-        })?;
+        Ad4mDb::with_global_instance(|db| db.remove_notification(id))?;
         Ok(true)
     }
 
@@ -1136,16 +1200,15 @@ impl Mutation {
         id: String,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        let mut notification = Ad4mDb::with_global_instance(|db| {
-            db.get_notification(id.clone())
-        }).map_err(|e| e.to_string())?.ok_or("Notification with given id not found")?;
+        let mut notification = Ad4mDb::with_global_instance(|db| db.get_notification(id.clone()))
+            .map_err(|e| e.to_string())?
+            .ok_or("Notification with given id not found")?;
 
         notification.granted = true;
 
-        Ad4mDb::with_global_instance(|db| {
-            db.update_notification(id, &notification)
-        }).map_err(|e| e.to_string())?;
-            
+        Ad4mDb::with_global_instance(|db| db.update_notification(id, &notification))
+            .map_err(|e| e.to_string())?;
+
         Ok(true)
     }
 
@@ -1181,11 +1244,8 @@ impl Mutation {
                 model_type: model.model_type,
             }
         };
-        
 
-        Ad4mDb::with_global_instance(|db| {
-            db.add_model(&model)
-        }).map_err(|e| e.to_string())?;
+        Ad4mDb::with_global_instance(|db| db.add_model(&model)).map_err(|e| e.to_string())?;
 
         Ok(true)
     }
@@ -1197,9 +1257,7 @@ impl Mutation {
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
 
-        Ad4mDb::with_global_instance(|db| {
-            db.remove_model(&name)
-        }).map_err(|e| e.to_string())?;
+        Ad4mDb::with_global_instance(|db| db.remove_model(&name)).map_err(|e| e.to_string())?;
 
         Ok(true)
     }

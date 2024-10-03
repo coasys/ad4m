@@ -86,7 +86,7 @@ pub async fn get_prolog_service() -> PrologService {
 #[cfg(test)]
 mod prolog_test {
     use maplit::btreemap;
-    use scryer_prolog::machine::parsed_results::{QueryResolution, QueryMatch, Value};
+    use scryer_prolog::machine::parsed_results::{QueryMatch, QueryResolution, Value};
 
     use super::*;
 
@@ -136,23 +136,18 @@ mod prolog_test {
             .await
             .expect("Error running query");
 
-        assert_eq!(
-            result,
-            Ok(QueryResolution::True)
-        );    
-        
+        assert_eq!(result, Ok(QueryResolution::True));
 
         let query = String::from("non_existant_predicate(\"a\",\"p1\",\"b\").");
 
         let result = service
-           .run_query(engine_name.clone(), query)
+            .run_query(engine_name.clone(), query)
             .await
             .expect("Error running query");
 
         assert_eq!(
             result,
             Err(String::from("error existence_error procedure / non_existant_predicate 3 / non_existant_predicate 3"))
-        );    
-    
+        );
     }
 }

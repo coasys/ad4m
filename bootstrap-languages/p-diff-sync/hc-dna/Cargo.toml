@@ -3,6 +3,7 @@ members = [
   "zomes/perspective_diff_sync",
   "zomes/perspective_diff_sync_integrity"
 ]
+resolver="2"
 
 [profile.dev]
 opt-level = "z"

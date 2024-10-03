@@ -6,8 +6,8 @@ use crate::{config::data_path, get_main_window};
 use remove_dir_all::*;
 
 use tauri::api::path::home_dir;
-use tauri::{LogicalSize, Manager};
 use tauri::Size;
+use tauri::{LogicalSize, Manager};
 use tauri_plugin_positioner::{Position, WindowExt};
 
 #[tauri::command]
@@ -49,7 +49,7 @@ pub fn add_app_agent_state(agent: AgentList) {
     new_agent.path = home_dir().unwrap().join(agent.path);
 
     state.add_agent(new_agent);
-    
+
     state.save().unwrap();
 }
 
@@ -58,7 +58,7 @@ pub fn remove_app_agent_state(agent: AgentList) {
     let mut state = LauncherState::load().unwrap();
 
     state.remove_agent(agent.clone());
-    
+
     state.save().unwrap();
 }
 
@@ -67,7 +67,7 @@ pub fn set_selected_agent(agent: AgentList) {
     let mut state = LauncherState::load().unwrap();
 
     state.selected_agent = Some(agent);
-    
+
     state.save().unwrap();
 }
 
@@ -88,7 +88,7 @@ pub fn open_tray_message(app_handle: tauri::AppHandle) {
             } else {
                 let _ = tray_window.show();
             }
-        },
+        }
         None => {
             create_tray_message_windows(&app_handle);
         }

@@ -63,7 +63,12 @@ pub enum PerspectiveFunctions {
     Repl { id: String },
 
     /// Set Social DNA of given perspective with SDNA code from file
-    AddDna { id: String, name: String, file: String, dna_type: String },
+    AddDna {
+        id: String,
+        name: String,
+        file: String,
+        dna_type: String,
+    },
 
     /// Get all defined Subject classes
     SubjectClasses { id: String },
@@ -196,7 +201,12 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             //let _ = perspectives::run_watch(cap_token, id);
             repl_loop(ad4m_client.perspectives.get(id).await?).await?;
         }
-        PerspectiveFunctions::AddDna { id, file, name, dna_type} => {
+        PerspectiveFunctions::AddDna {
+            id,
+            file,
+            name,
+            dna_type,
+        } => {
             let dna = std::fs::read_to_string(file.clone())
                 .with_context(|| anyhow!("Could not read provided SDNA file {}", file))?;
             let perspective = ad4m_client.perspectives.get(id).await?;
@@ -216,15 +226,12 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             let perspective = ad4m_client.perspectives.get(id).await?;
             let classes = perspective.get_subject_classes(&base).await?;
             for class in &classes {
-                match perspective.get_subject(&class, &base).await {
-                    Ok(subject) => {
-                        let props = subject.get_property_values().await?;
-                        if let Some(value) = props.get(&property) {
-                            println!("{:#?}", value);
-                            return Ok(());
-                        }
+                if let Ok(subject) = perspective.get_subject(class, &base).await {
+                    let props = subject.get_property_values().await?;
+                    if let Some(value) = props.get(&property) {
+                        println!("{:#?}", value);
+                        return Ok(());
                     }
-                    _ => {}
                 }
             }
 
@@ -243,13 +250,10 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             let perspective = ad4m_client.perspectives.get(id).await?;
             let classes = perspective.get_subject_classes(&base).await?;
             for class in &classes {
-                match perspective.get_subject(&class, &base).await {
-                    Ok(subject) => {
-                        if subject.set_property(&property, &value).await.is_ok() {
-                            return Ok(());
-                        }
+                if let Ok(subject) = perspective.get_subject(class, &base).await {
+                    if subject.set_property(&property, &value).await.is_ok() {
+                        return Ok(());
                     }
-                    _ => {}
                 }
             }
 
@@ -268,13 +272,10 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
             let perspective = ad4m_client.perspectives.get(id).await?;
             let classes = perspective.get_subject_classes(&base).await?;
             for class in &classes {
-                match perspective.get_subject(&class, &base).await {
-                    Ok(subject) => {
-                        if subject.add_collection(&collection, &value).await.is_ok() {
-                            return Ok(());
-                        }
+                if let Ok(subject) = perspective.get_subject(class, &base).await {
+                    if subject.add_collection(&collection, &value).await.is_ok() {
+                        return Ok(());
                     }
-                    _ => {}
                 }
             }
 

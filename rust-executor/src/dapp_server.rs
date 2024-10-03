@@ -1,13 +1,16 @@
 use std::net::Ipv4Addr;
 use std::path::Path;
 
+use include_dir::{include_dir, Dir};
 use rocket::fs::FileServer;
 use rocket::Config;
-use include_dir::{include_dir, Dir};
 
 const DAPP: Dir = include_dir!("dapp/dist");
 
-pub(crate) async fn serve_dapp(port: u16, app_dir: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) async fn serve_dapp(
+    port: u16,
+    app_dir: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = Config {
         port,
         address: Ipv4Addr::new(127, 0, 0, 1).into(),
@@ -21,7 +24,10 @@ pub(crate) async fn serve_dapp(port: u16, app_dir: String) -> Result<(), Box<dyn
 
     rocket::build()
         .configure(&config)
-        .mount("/", FileServer::from(dir.to_str().expect("Failed to convert path to string")))
+        .mount(
+            "/",
+            FileServer::from(dir.to_str().expect("Failed to convert path to string")),
+        )
         .launch()
         .await?;
 

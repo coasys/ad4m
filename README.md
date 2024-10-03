@@ -126,6 +126,15 @@ pnpm run package-ad4m
 
 (Note that the last step of this might/will fail if you don't have the code signing keys. You can ignore that last error and find bundles in `target/release`.)
 
+## Development
+### Setup Git Hooks
+
+After cloning the repository, run the following script to set up Git hooks:
+
+```sh
+./setup-hooks.sh
+```
+
 ## Testing 
 
 Full test run of all packages:

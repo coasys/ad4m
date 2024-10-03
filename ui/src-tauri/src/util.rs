@@ -62,7 +62,11 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
         if let WindowEvent::Focused(f) = event {
             //println!("focused: {}", f);
             if let Some(monitor) = window_clone.current_monitor().unwrap() {
-                let final_width = window_clone.inner_size().unwrap().to_logical::<f64>(monitor.scale_factor()).width;
+                let final_width = window_clone
+                    .inner_size()
+                    .unwrap()
+                    .to_logical::<f64>(monitor.scale_factor())
+                    .width;
 
                 if !f && final_width == 400.0 {
                     let _ = window_clone.hide();
@@ -71,7 +75,6 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
         }
     });
 }
-
 
 pub fn create_tray_message_windows(app: &AppHandle<Wry>) {
     let url = app_tray_message_url();

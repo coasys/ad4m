@@ -1,6 +1,11 @@
-use deno_core::error::AnyError;
-use crate::{graphql::graphql_types::{OnlineAgent, PerspectiveExpression}, js_core::JsCoreHandle, types::{Perspective, PerspectiveDiff}};
 use super::byte_array::ByteArray;
+use crate::{
+    graphql::graphql_types::{OnlineAgent, PerspectiveExpression},
+    js_core::JsCoreHandle,
+    types::{Perspective, PerspectiveDiff},
+};
+use base64::prelude::*;
+use deno_core::error::AnyError;
 
 #[derive(Clone)]
 pub struct Language {
@@ -12,7 +17,7 @@ fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
     if let Ok(maybe_revision) = serde_json::from_str::<Option<ByteArray>>(&js_result) {
         Ok(maybe_revision.map(|revision| {
             let vec: Vec<u8> = revision.into();
-            base64::encode(&vec)
+            BASE64_STANDARD.encode(vec)
         }))
     } else {
         Ok(serde_json::from_str::<Option<String>>(&js_result)?)
@@ -20,10 +25,7 @@ fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
 }
 impl Language {
     pub fn new(address: String, js_core: JsCoreHandle) -> Self {
-        Self {
-            address,
-            js_core
-        }
+        Self { address, js_core }
     }
 
     pub async fn sync(&mut self) -> Result<(), AnyError> {
@@ -37,8 +39,7 @@ impl Language {
                     null
                 )
             "#,
-            self.address,
-            self.address,
+            self.address, self.address,
         );
         let _result: String = self.js_core.execute(script).await?;
         Ok(())
@@ -74,8 +75,7 @@ impl Language {
                     null
                 )
             "#,
-            self.address,
-            self.address,
+            self.address, self.address,
         );
         let result: String = self.js_core.execute(script).await?;
         parse_revision(result)
@@ -92,8 +92,7 @@ impl Language {
                     null
                 )
             "#,
-            self.address,
-            self.address,
+            self.address, self.address,
         );
         let result: String = self.js_core.execute(script).await?;
         let maybe_value = serde_json::from_str(&result)?;
@@ -111,8 +110,7 @@ impl Language {
                     null
                 )
             "#,
-            self.address,
-            self.address,
+            self.address, self.address,
         );
         let result: String = self.js_core.execute(script).await?;
         let others_vec = serde_json::from_str(&result)?;
@@ -132,16 +130,17 @@ impl Language {
                     false
                 )
             "#,
-            self.address,
-            self.address,
+            self.address, self.address,
         );
         let result: String = self.js_core.execute(script).await?;
         let has_telepresence_adapter = serde_json::from_str(&result)?;
         Ok(has_telepresence_adapter)
     }
 
-
-    pub async fn set_online_status(&mut self, status: PerspectiveExpression) -> Result<(), AnyError> {
+    pub async fn set_online_status(
+        &mut self,
+        status: PerspectiveExpression,
+    ) -> Result<(), AnyError> {
         let script = format!(
             r#"
                 JSON.stringify(
@@ -171,18 +170,17 @@ impl Language {
                     null
                 )
             "#,
-            self.address,
-            self.address,
+            self.address, self.address,
         );
         let result: String = self.js_core.execute(script).await?;
         let online_agents = serde_json::from_str(&result)?;
         Ok(online_agents)
     }
-    
+
     pub async fn send_signal(
-        &mut self, 
-        remote_agent_did: String, 
-        payload: PerspectiveExpression
+        &mut self,
+        remote_agent_did: String,
+        payload: PerspectiveExpression,
     ) -> Result<(), AnyError> {
         let script = format!(
             r#"
@@ -203,10 +201,7 @@ impl Language {
         Ok(())
     }
 
-    pub async fn send_broadcast(
-        &mut self, 
-        payload: PerspectiveExpression
-    ) -> Result<(), AnyError> {
+    pub async fn send_broadcast(&mut self, payload: PerspectiveExpression) -> Result<(), AnyError> {
         let script = format!(
             r#"
                 JSON.stringify(
@@ -224,8 +219,4 @@ impl Language {
         let _result: String = self.js_core.execute(script).await?;
         Ok(())
     }
-    
-
-
-
 }
