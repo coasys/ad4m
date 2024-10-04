@@ -193,20 +193,15 @@ export class AIClient {
             }
         }));
 
-        const subscription = await this.#apolloClient.subscribe({
-            query: gql`
-                subscription AiTranscriptionText($streamId: String!) {
-                    aiTranscriptionText(streamId: $streamId)
-                }
-            `,
-            variables: {
-                streamId: aiOpenTranscriptionStream
-            }
+        const subscription = this.#apolloClient.subscribe({
+            query: gql` subscription {
+                aiTranscriptionText(streamId: "${aiOpenTranscriptionStream}")
+            }`
         }).subscribe({
             next(data) {
-                streamCallback(data.data.transcriptionText);
+                streamCallback(data.data.aiTranscriptionText);
 
-                return data.data.transcriptionText;
+                return data.data.aiTranscriptionText;
             },
             error(err) {
                 console.error(err);
