@@ -12,7 +12,7 @@ use futures::SinkExt;
 use kalosm::sound::TextStream;
 use kalosm::sound::*;
 // use kalosm::sound::{DenoisedExt, VoiceActivityDetectorExt, VoiceActivityStreamExt};
-use kalosm::{language::*, sound::*};
+use kalosm::{language::*, sound::Whisper};
 // use rodio::{OutputStream, Source};
 use tokio::time::sleep;
 // use rodio::source::Source;
