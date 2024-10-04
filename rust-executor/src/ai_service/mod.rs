@@ -9,11 +9,15 @@ use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use deno_core::error::AnyError;
 use futures::SinkExt;
+use kalosm::sound::TextStream;
+use kalosm::sound::*;
 // use kalosm::sound::{DenoisedExt, VoiceActivityDetectorExt, VoiceActivityStreamExt};
 use kalosm::{
     language::*,
     sound::{AsyncSourceTranscribeExt, Whisper},
 };
+use rodio::{OutputStream, Source};
+use tokio::time::sleep;
 // use rodio::source::Source;
 use std::collections::HashMap;
 // use std::io::Cursor;
@@ -21,6 +25,7 @@ use std::panic::catch_unwind;
 // use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 // use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -502,43 +507,40 @@ impl AIService {
             let rt = tokio::runtime::Runtime::new().unwrap();
 
             rt.block_on(async {
-                let maybe_model = Whisper::builder()
-                    .with_source(kalosm::sound::WhisperSource::BaseEn)
-                    .build()
-                    .await;
-                println!("Whisper thread started");
+                let maybe_model = Whisper::new().await;
 
                 if let Ok(whisper) = maybe_model {
-                    println!("Whisper model loaded");
-
-                    let audio_stream = AudioStream {
+                    let mut audio_stream = AudioStream {
                         read_data: Vec::new(),
                         receiver: Box::pin(sampels_rx.map(futures_util::stream::iter).flatten()),
                     };
 
-                    println!("Starting transcription");
-                    let mut word_stream = audio_stream.transcribe(whisper).words();
-                    println!("Transcription started");
-
-                    let pubsub = get_global_pubsub().await;
+                    let mut text_stream = audio_stream
+                        .voice_activity_stream()
+                        .rechunk_voice_activity();
+                    let mut word_stream = text_stream.transcribe(whisper).words();
 
                     let _ = done_tx.send(Ok(()));
 
                     while let Some(word) = word_stream.next().await {
-                        println!("meow: {}", word);
-                        pubsub
-                            .publish(
-                                &AI_TRANSCRIPTION_TEXT_TOPIC,
-                                &serde_json::to_string(&TranscriptionTextFilter {
-                                    stream_id: stream_id_clone.clone(),
-                                    text: word,
-                                })
-                                .expect("TranscriptionTextFilter must be serializable"),
-                            )
-                            .await;
-                    }
+                        let stream_id_clone = stream_id_clone.clone();
 
-                    println!("Exited the loop");
+                        rt.spawn(async move {
+                            let _ = get_global_pubsub()
+                                .await
+                                .publish(
+                                    &AI_TRANSCRIPTION_TEXT_TOPIC,
+                                    &serde_json::to_string(&TranscriptionTextFilter {
+                                        stream_id: stream_id_clone.clone(),
+                                        text: word.clone(),
+                                    })
+                                    .expect("TranscriptionTextFilter must be serializable"),
+                                )
+                                .await;
+                        });
+
+                        sleep(Duration::from_millis(50)).await;
+                    }
                 } else {
                     let _ = done_tx.send(Err(maybe_model.err().unwrap()));
                 }
@@ -566,14 +568,7 @@ impl AIService {
         let mut map_lock = self.transcription_streams.lock().await;
         let maybe_stream = map_lock.get_mut(stream_id);
         if let Some(stream) = maybe_stream {
-            println!("Feeding stream");
             stream.samples_tx.send(audio_samples).await?;
-            println!("Feeding stream done");
-
-            // let (_stream, stream_handle) = OutputStream::try_default().unwrap();
-            // let source = Float32Source::new(audio_samples, 16000, 1);
-            // stream_handle.play_raw(source.convert_samples());
-            // std::thread::sleep(std::time::Duration::from_secs(1));
             Ok(())
         } else {
             Err(AIServiceError::StreamNotFound.into())
@@ -595,58 +590,6 @@ impl AIService {
         }
     }
 }
-
-// struct Float32Source {
-//     samples: Vec<f32>,
-//     sample_rate: u32,
-//     channels: u16,
-//     current_sample: usize,
-// }
-
-// impl Float32Source {
-//     fn new(samples: Vec<f32>, sample_rate: u32, channels: u16) -> Self {
-//         Self {
-//             samples,
-//             sample_rate,
-//             channels,
-//             current_sample: 0,
-//         }
-//     }
-// }
-
-// impl Iterator for Float32Source {
-//     type Item = f32;
-
-//     fn next(&mut self) -> Option<Self::Item> {
-//         if self.current_sample < self.samples.len() {
-//             let sample = self.samples[self.current_sample];
-//             self.current_sample += 1;
-//             Some(sample)
-//         } else {
-//             None
-//         }
-//     }
-// }
-
-// impl Source for Float32Source {
-//     fn current_frame_len(&self) -> Option<usize> {
-//         Some(self.samples.len() - self.current_sample)
-//     }
-
-//     fn channels(&self) -> u16 {
-//         self.channels
-//     }
-
-//     fn sample_rate(&self) -> u32 {
-//         self.sample_rate
-//     }
-
-//     fn total_duration(&self) -> Option<Duration> {
-//         Some(Duration::from_secs_f32(
-//             self.samples.len() as f32 / self.sample_rate as f32 / self.channels as f32,
-//         ))
-//     }
-// }
 
 #[cfg(test)]
 mod tests {
