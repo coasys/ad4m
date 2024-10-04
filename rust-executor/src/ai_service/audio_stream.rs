@@ -29,9 +29,7 @@ impl Stream for AudioStream {
                 self.read_data.push(data_chunk);
                 std::task::Poll::Ready(Some(data_chunk))
             }
-            std::task::Poll::Ready(None) => {
-                std::task::Poll::Ready(None)
-            }
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
