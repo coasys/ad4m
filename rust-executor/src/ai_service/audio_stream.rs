@@ -25,10 +25,13 @@ impl Stream for AudioStream {
     ) -> std::task::Poll<Option<Self::Item>> {
         match self.receiver.as_mut().poll_next_unpin(cx) {
             std::task::Poll::Ready(Some(data_chunk)) => {
+                // println!("AudioStream produced item: {}", data_chunk); // Logging
                 self.read_data.push(data_chunk);
                 std::task::Poll::Ready(Some(data_chunk))
             }
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Ready(None) => {
+                std::task::Poll::Ready(None)
+            }
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
@@ -63,6 +66,6 @@ impl AsyncSource for AudioStream {
     }
 
     fn sample_rate(&self) -> u32 {
-        160000
+        16000
     }
 }
