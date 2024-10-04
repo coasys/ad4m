@@ -34,7 +34,15 @@
         "icons/icon.icns",
         "icons/icon.ico"
       ],
-      "resources": [],
+      "resources":[
+        "lib/libc++_chrome.dylib",
+        "lib/libicuuc.dylib",
+        "lib/libthird_party_abseil-cpp_absl.dylib",
+        "lib/libthird_party_icu_icui18n.dylib",
+        "lib/libv8_libbase.dylib",
+        "lib/libv8_libplatform.dylib",
+        "lib/libv8.dylib"
+      ],
       "copyright": "",
       "category": "DeveloperTool",
       "shortDescription": "",
