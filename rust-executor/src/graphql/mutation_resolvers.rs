@@ -1,8 +1,5 @@
 #![allow(non_snake_case)]
 
-use std::str::FromStr;
-use url::Url;
-use coasys_juniper::{FieldResult, FieldError, graphql_value, graphql_object};
 use crate::{
     agent::create_signed_expression,
     neighbourhoods::{self, install_neighbourhood},
@@ -17,8 +14,11 @@ use crate::{
     db::Ad4mDb,
     perspectives::perspective_instance::{Command, Parameter, SubjectClassOption},
     runtime_service::RuntimeService,
-    types::{Notification, LocalModel, Model, ModelApi, ModelApiType}
+    types::{LocalModel, Model, ModelApi, ModelApiType, Notification},
 };
+use coasys_juniper::{graphql_object, graphql_value, FieldError, FieldResult};
+use std::str::FromStr;
+use url::Url;
 
 use super::graphql_types::*;
 use crate::{

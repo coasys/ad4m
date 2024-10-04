@@ -3,7 +3,8 @@ use crate::graphql::graphql_types::{
     SentMessage,
 };
 use crate::types::{
-    Expression, ExpressionProof, Link, LinkExpression, Notification, PerspectiveDiff, Model, ModelApi, LocalModel
+    Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model, ModelApi, Notification,
+    PerspectiveDiff,
 };
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;

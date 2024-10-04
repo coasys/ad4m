@@ -7,7 +7,7 @@ use crate::{
     holochain_service::get_holochain_service,
     perspectives::{all_perspectives, get_perspective, utils::prolog_resolution_to_string},
     runtime_service::RuntimeService,
-    types::{DecoratedLinkExpression, Notification, Model},
+    types::{DecoratedLinkExpression, Model, Notification},
 };
 use base64::prelude::*;
 use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
