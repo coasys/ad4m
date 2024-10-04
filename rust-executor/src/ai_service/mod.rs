@@ -14,9 +14,9 @@ use kalosm::sound::*;
 // use kalosm::sound::{DenoisedExt, VoiceActivityDetectorExt, VoiceActivityStreamExt};
 use kalosm::{
     language::*,
-    sound::{AsyncSourceTranscribeExt, Whisper},
+    sound:: *,
 };
-use rodio::{OutputStream, Source};
+// use rodio::{OutputStream, Source};
 use tokio::time::sleep;
 // use rodio::source::Source;
 use std::collections::HashMap;
@@ -510,12 +510,12 @@ impl AIService {
                 let maybe_model = Whisper::new().await;
 
                 if let Ok(whisper) = maybe_model {
-                    let mut audio_stream = AudioStream {
+                    let audio_stream = AudioStream {
                         read_data: Vec::new(),
                         receiver: Box::pin(sampels_rx.map(futures_util::stream::iter).flatten()),
                     };
 
-                    let mut text_stream = audio_stream
+                    let text_stream = audio_stream
                         .voice_activity_stream()
                         .rechunk_voice_activity();
                     let mut word_stream = text_stream.transcribe(whisper).words();
