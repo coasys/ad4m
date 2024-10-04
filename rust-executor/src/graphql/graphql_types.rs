@@ -3,7 +3,7 @@ use crate::agent::signatures::verify;
 use crate::js_core::JsCoreHandle;
 use crate::types::{
     DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link,
-    Notification, TriggeredNotification,
+    Notification, TriggeredNotification, ModelType
 };
 use coasys_juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,

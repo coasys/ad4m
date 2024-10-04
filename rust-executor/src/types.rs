@@ -440,12 +440,28 @@ pub struct LocalModel {
     pub model_parameters: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, GraphQLEnum, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelType {
     Llm,
     Embedding,
     Transcription,
+}
+
+impl Default for ModelType {
+    fn default() -> Self {
+        ModelType::Llm
+    }
+}
+
+impl Display for ModelType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ModelType::Llm => write!(f, "llm"),
+            ModelType::Embedding => write!(f, "embedding"),
+            ModelType::Transcription => write!(f, "transcription"),
+        }
+    }
 }
 
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]

@@ -3,7 +3,7 @@ use crate::graphql::graphql_types::{
     SentMessage,
 };
 use crate::types::{
-    Expression, ExpressionProof, Link, LinkExpression, Notification, PerspectiveDiff,
+    Expression, ExpressionProof, Link, LinkExpression, Notification, PerspectiveDiff, Model, ModelApi, LocalModel
 };
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -930,7 +930,7 @@ impl Ad4mDb {
                 name: row.get(1)?,
                 api,
                 local,
-                model_type: serde_json::from_str(&row.get::<_, String>(8)?)?,
+                model_type: serde_json::from_str(&row.get::<_, String>(8)?).unwrap(),
             })
         })?;
 
