@@ -1,5 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,200..800&display=swap');
-@import url('https://fonts.googleapis.com/css2?family=Noto+Serif:ital,wght@0,100..900;1,100..900&display=swap');
+@import url("https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,200..800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Noto+Serif:ital,wght@0,100..900;1,100..900&display=swap");
 
 body {
   margin: 0;
@@ -23,10 +23,10 @@ html {
   --j-color-multiplier: -1;
   --j-border-width: 3px;
   --j-scrollbar-width: 2px;
-  --gradient: #91E3FD;
+  --gradient: #91e3fd;
   --j-color-primary-50: #131533;
   --j-tab-item-border-selected: 0px 4px 0px -2px var(--gradient);
-  /* --j-color-primary-500: var(--gradient); */
+  --j-color-primary-500: var(--gradient);
 }
 
 ::-webkit-scrollbar {
@@ -59,12 +59,14 @@ html {
 }
 
 :root j-menu::part(base) {
-  background-color: var(--j-color-primary-70);
-  border-color: var(--j-color-primary-100);
+  background-color: var(--j-color-primary-50);
+  border-color: var(--j-color-primary-500);
+  color: var(--j-color-primary-500);
 }
 
 :root j-menu-item::part(base):hover {
   background-color: var(--j-color-primary-100);
+  color: var(--j-color-primary-500);
 }
 
 :root j-avatar::part(base) {
@@ -113,7 +115,7 @@ html {
   gap: var(--j-space-400);
 }
 
-:root j-toggle[checked]::part(toggle)  {
+:root j-toggle[checked]::part(toggle) {
   background: var(--gradient);
 }
 
@@ -159,7 +161,7 @@ html {
 }
 
 :root j-tab-item[checked]::part(base) {
-    box-shadow: 0px 2px 0px 0px var(--gradient);
+  box-shadow: 0px 2px 0px 0px var(--gradient);
 }
 
 j-tabs {
@@ -184,8 +186,7 @@ j-tab-item {
 }
 
 code {
-  font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New",
-    monospace;
+  font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New", monospace;
 }
 
 .center {

@@ -16,8 +16,8 @@
     "noEmit": true,
     "jsx": "react-jsx",
     "jsxImportSource": "preact",
-    "types": ["@junto-foundation/junto-elements"]
+    "types": ["@coasys/flux-ui"],
   },
   "include": ["src"],
-  "references": [{ "path": "./tsconfig.node.json" }]
+  "references": [{ "path": "./tsconfig.node.json" }],
 }

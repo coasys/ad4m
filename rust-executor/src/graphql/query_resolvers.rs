@@ -7,7 +7,7 @@ use crate::{
     holochain_service::get_holochain_service,
     perspectives::{all_perspectives, get_perspective, utils::prolog_resolution_to_string},
     runtime_service::RuntimeService,
-    types::{DecoratedLinkExpression, Notification},
+    types::{DecoratedLinkExpression, Model, Notification},
 };
 use base64::prelude::*;
 use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
@@ -542,5 +542,14 @@ impl Query {
             return Err(FieldError::new(e.to_string(), Value::null()));
         }
         Ok(notifications_result.unwrap())
+    }
+
+    async fn runtime_get_models(&self, context: &RequestContext) -> FieldResult<Vec<Model>> {
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        let models_result = Ad4mDb::with_global_instance(|db| db.get_models());
+        match models_result {
+            Ok(models) => Ok(models),
+            Err(e) => Err(FieldError::new(e.to_string(), Value::null())),
+        }
     }
 }

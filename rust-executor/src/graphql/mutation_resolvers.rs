@@ -1,4 +1,5 @@
 #![allow(non_snake_case)]
+
 use crate::{
     agent::create_signed_expression,
     neighbourhoods::{self, install_neighbourhood},
@@ -13,10 +14,11 @@ use crate::{
     db::Ad4mDb,
     perspectives::perspective_instance::{Command, Parameter, SubjectClassOption},
     runtime_service::RuntimeService,
-    types::Notification,
+    types::{LocalModel, Model, ModelApi, ModelApiType, Notification},
 };
-
 use coasys_juniper::{graphql_object, graphql_value, FieldError, FieldResult};
+use std::str::FromStr;
+use url::Url;
 
 use super::graphql_types::*;
 use crate::{
@@ -1206,6 +1208,56 @@ impl Mutation {
 
         Ad4mDb::with_global_instance(|db| db.update_notification(id, &notification))
             .map_err(|e| e.to_string())?;
+
+        Ok(true)
+    }
+
+    async fn runtime_add_model(
+        &self,
+        context: &RequestContext,
+        model: ModelInput,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+
+        let model = if let Some(api) = model.api {
+            let base_url = Url::parse(&api.base_url)?;
+            let api_type = ModelApiType::from_str(&api.api_type).map_err(|e| e.to_string())?;
+            Model {
+                name: model.name,
+                api: Some(ModelApi {
+                    base_url,
+                    api_key: api.api_key,
+                    api_type,
+                }),
+                local: None,
+                model_type: model.model_type,
+            }
+        } else {
+            Model {
+                name: model.name,
+                api: None,
+                local: model.local.map(|local| LocalModel {
+                    file_name: local.file_name,
+                    tokenizer_source: local.tokenizer_source,
+                    model_parameters: local.model_parameters,
+                }),
+                model_type: model.model_type,
+            }
+        };
+
+        Ad4mDb::with_global_instance(|db| db.add_model(&model)).map_err(|e| e.to_string())?;
+
+        Ok(true)
+    }
+
+    async fn runtime_remove_model(
+        &self,
+        context: &RequestContext,
+        name: String,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+
+        Ad4mDb::with_global_instance(|db| db.remove_model(&name)).map_err(|e| e.to_string())?;
 
         Ok(true)
     }

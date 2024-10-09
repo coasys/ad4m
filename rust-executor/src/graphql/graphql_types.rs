@@ -3,7 +3,7 @@ use crate::agent::signatures::verify;
 use crate::js_core::JsCoreHandle;
 use crate::types::{
     DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link,
-    Notification, TriggeredNotification,
+    ModelType, Notification, TriggeredNotification,
 };
 use coasys_juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
@@ -591,6 +591,32 @@ pub struct LinkUpdated {
 pub struct PerspectiveStateFilter {
     pub state: String,
     pub perspective: PerspectiveHandle,
+}
+
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelApiInput {
+    pub base_url: String,
+    pub api_key: String,
+    pub api_type: String,
+}
+
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModelInput {
+    pub file_name: String,
+    pub tokenizer_source: String,
+    pub model_parameters: String,
+}
+
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelInput {
+    pub name: String,
+    pub api: Option<ModelApiInput>,
+    pub local: Option<LocalModelInput>,
+    #[serde(rename = "type")]
+    pub model_type: ModelType,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

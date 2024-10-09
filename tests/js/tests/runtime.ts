@@ -1,7 +1,7 @@
 import { TestContext } from './integration.test'
 import fs from "fs";
 import { expect } from "chai";
-import { Notification, NotificationInput, TriggeredNotification } from '@coasys/ad4m/lib/src/runtime/RuntimeResolver';
+import { ModelInput, Notification, NotificationInput, TriggeredNotification } from '@coasys/ad4m/lib/src/runtime/RuntimeResolver';
 import sinon from 'sinon';
 import { sleep } from '../utils/utils';
 import { ExceptionType, Link } from '@coasys/ad4m';
@@ -408,5 +408,67 @@ export default function runtimeTests(testContext: TestContext) {
             server!.close()
         })
         */
+
+        it("can perform Model CRUD operations", async () => {
+            const ad4mClient = testContext.ad4mClient!
+
+            // Test adding an API model
+            const apiModelInput: ModelInput = {
+                name: "TestApiModel",
+                api: {
+                    baseUrl: "https://api.example.com/",
+                    apiKey: "test-api-key",
+                    apiType: "OPEN_AI"
+                }
+            }
+
+            const addApiResult = await ad4mClient.runtime.addModel(apiModelInput)
+            expect(addApiResult).to.be.true
+
+            // Test adding a local model
+            const localModelInput: ModelInput = {
+                name: "TestLocalModel",
+                local: {
+                    fileName: "test_model.bin",
+                    tokenizerSource: "test_tokenizer.json",
+                    modelParameters: JSON.stringify({ param1: "value1", param2: "value2" })
+                }
+            }
+
+            const addLocalResult = await ad4mClient.runtime.addModel(localModelInput)
+            expect(addLocalResult).to.be.true
+
+            // Test getting models
+            const models = await ad4mClient.runtime.getModels()
+            expect(models).to.be.an('array')
+            expect(models.length).to.be.at.least(2)
+            
+            const addedApiModel = models.find(model => model.name === "TestApiModel")
+            expect(addedApiModel).to.exist
+            expect(addedApiModel?.api?.baseUrl).to.equal("https://api.example.com/")
+            expect(addedApiModel?.api?.apiKey).to.equal("test-api-key")
+            expect(addedApiModel?.api?.apiType).to.equal("OPEN_AI")
+
+            const addedLocalModel = models.find(model => model.name === "TestLocalModel")
+            expect(addedLocalModel).to.exist
+            expect(addedLocalModel?.local?.fileName).to.equal("test_model.bin")
+            expect(addedLocalModel?.local?.tokenizerSource).to.equal("test_tokenizer.json")
+            expect(addedLocalModel?.local?.modelParameters).to.deep.equal(JSON.stringify({ param1: "value1", param2: "value2" }))
+
+            // Test removing models
+            const removeApiResult = await ad4mClient.runtime.removeModel("TestApiModel")
+            expect(removeApiResult).to.be.true
+
+            const removeLocalResult = await ad4mClient.runtime.removeModel("TestLocalModel")
+            expect(removeLocalResult).to.be.true
+
+            // Verify the models were removed
+            const updatedModels = await ad4mClient.runtime.getModels()
+            const removedApiModel = updatedModels.find(model => model.name === "TestApiModel")
+            expect(removedApiModel).to.be.undefined
+
+            const removedLocalModel = updatedModels.find(model => model.name === "TestLocalModel")
+            expect(removedLocalModel).to.be.undefined
+        })
     }
 }

@@ -5,7 +5,7 @@
   "dependencies": {
     "@apollo/client": "3.7.10",
     "@coasys/ad4m": "link:../core",
-    "@junto-foundation/junto-elements": "^0.5.5",
+    "@coasys/flux-ui": "^0.9.0",
     "@preact/preset-vite": "^2.4.0",
     "@tauri-apps/api": "^1.5.3",
     "apollo-boost": "^0.4.9",
