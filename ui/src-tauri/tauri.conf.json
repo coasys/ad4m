@@ -34,14 +34,14 @@
         "icons/icon.icns",
         "icons/icon.ico"
       ],
-      "resources":[
-        "lib/libc++_chrome.dylib",
-        "lib/libicuuc.dylib",
-        "lib/libthird_party_abseil-cpp_absl.dylib",
-        "lib/libthird_party_icu_icui18n.dylib",
-        "lib/libv8_libbase.dylib",
-        "lib/libv8_libplatform.dylib",
-        "lib/libv8.dylib"
+      "resources": [
+        "../../target/release/gn_out/libc++_chrome.dylib",
+        "../../target/release/gn_out/libicuuc.dylib",
+        "../../target/release/gn_out/libthird_party_abseil-cpp_absl.dylib",
+        "../../target/release/gn_out/libthird_party_icu_icui18n.dylib",
+        "../../target/release/gn_out/libv8_libbase.dylib",
+        "../../target/release/gn_out/libv8_libplatform.dylib",
+        "../../target/release/gn_out/libv8.dylib"
       ],
       "copyright": "",
       "category": "DeveloperTool",
