@@ -54,7 +54,7 @@ jobs:
           command: cargo fmt --check
       - run:
           name: install gobjc
-          command: sudo apt-get install gobjc clang gnustep-devel libobjc4 libgnustep-base-dev libasound2-dev pkg-config fuse libfuse2
+          command: sudo apt-get install gobjc clang gnustep-devel libobjc4 libgnustep-base-dev libasound2-dev pkg-config fuse libfuse2 mesa-utils mesa-vulkan-drivers mesa-dri-drivers
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile

@@ -94,7 +94,7 @@ jobs:
       if: matrix.platform == 'GH-hosted-ubuntu'
       run: |
         sudo apt-get update
-        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake fuse libfuse2
+        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake fuse libfuse2 mesa-vulkan-drivers mesa-dri-drivers
 
     - name: install dependencies (macos only)
       if: matrix.platform == 'macos-latest'
@@ -356,7 +356,7 @@ jobs:
       - name: Install Linux Deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake fuse libfuse2
+          sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake fuse libfuse2 mesa-vulkan-drivers mesa-dri-drivers
 
       - name: Build modules
         run: pnpm run build-libs
@@ -438,7 +438,7 @@ jobs:
      - name: Install Linux Deps
        run: |
          sudo apt-get update
-         sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake fuse libfuse2
+         sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake fuse libfuse2 mesa-utils mesa-vulkan-drivers mesa-dri-drivers
   
      - uses: actions/setup-node@v3
        with:
