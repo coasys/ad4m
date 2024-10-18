@@ -39,6 +39,9 @@ fn main() {
                 "../../target/release/gn_out/libc++.so".to_string(),
             ));
             resources.push(Value::String(
+                "../../target/release/gn_out/libc++_chrome.so".to_string(),
+            ));
+            resources.push(Value::String(
                 "../../target/release/gn_out/libicuuc.so".to_string(),
             ));
             resources.push(Value::String(
@@ -125,6 +128,20 @@ fn wait_for_dependencies() {
             }
             println!("Waiting for dependency {} to be built...", dependency);
             sleep(check_interval);
+        }
+    }
+
+    if cfg!(target_os = "linux") {
+        let source_path = Path::new("../target/release/gn_out/libc++.so");
+        let dest_path = Path::new("../target/release/gn_out/libc++_chrome.so");
+
+        if source_path.exists() {
+            match std::fs::copy(source_path, dest_path) {
+                Ok(_) => println!("Successfully copied libc++.so to libc++_chrome.so"),
+                Err(e) => eprintln!("Failed to copy libc++.so to libc++_chrome.so: {}", e),
+            }
+        } else {
+            eprintln!("Source file libc++.so not found");
         }
     }
 

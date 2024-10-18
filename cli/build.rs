@@ -59,5 +59,19 @@ fn wait_for_dependencies() {
         }
     }
 
+    if cfg!(target_os = "linux") {
+        let source_path = Path::new("../target/release/gn_out/libc++.so");
+        let dest_path = Path::new("../target/release/gn_out/libc++_chrome.so");
+
+        if source_path.exists() {
+            match std::fs::copy(source_path, dest_path) {
+                Ok(_) => println!("Successfully copied libc++.so to libc++_chrome.so"),
+                Err(e) => eprintln!("Failed to copy libc++.so to libc++_chrome.so: {}", e),
+            }
+        } else {
+            eprintln!("Source file libc++.so not found");
+        }
+    }
+
     println!("All dependencies are built and available");
 }
