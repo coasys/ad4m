@@ -1,6 +1,8 @@
 #![allow(non_snake_case)]
 use super::graphql_types::*;
 use crate::agent::{capabilities::*, signatures};
+use crate::ai_service::AIService;
+use crate::types::AITask;
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
 use crate::{
     db::Ad4mDb,
@@ -542,5 +544,27 @@ impl Query {
             return Err(FieldError::new(e.to_string(), Value::null()));
         }
         Ok(notifications_result.unwrap())
+    }
+
+    async fn ai_tasks(&self, context: &RequestContext) -> FieldResult<Vec<AITask>> {
+        check_capability(&context.capabilities, &AI_READ_CAPABILITY)?;
+
+        match AIService::get_tasks() {
+            Ok(tasks) => Ok(tasks),
+            Err(e) => Err(FieldError::new(e.to_string(), Value::null())),
+        }
+    }
+
+    async fn ai_model_loading_status(
+        &self,
+        context: &RequestContext,
+        model: String,
+    ) -> FieldResult<AIModelLoadingStatus> {
+        check_capability(&context.capabilities, &AI_READ_CAPABILITY)?;
+
+        match AIService::model_status(model).await {
+            Ok(status) => Ok(status),
+            Err(e) => Err(FieldError::new(e.to_string(), Value::null())),
+        }
     }
 }

@@ -14,3 +14,4 @@ export const RUNTIME_NOTIFICATION_TRIGGERED_TOPIC = "runtime-notification-trigge
 export const NEIGHBOURHOOD_SIGNAL_RECEIVED_TOPIC = "neighbourhood-signal-received-topic"
 export const PERSPECTIVE_SYNC_STATE_CHANGE = "perspective-sync-state-change"
 export const APPS_CHANGED = "apps-changed"
+export const AI_TRANSCRIPTION_TEXT_TOPIC = "ai-transcription-text-topic"

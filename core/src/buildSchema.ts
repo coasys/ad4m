@@ -9,6 +9,7 @@ import LanguageResolver from "./language/LanguageResolver";
 import NeighbourhoodResolver from "./neighbourhood/NeighbourhoodResolver";
 import PerspectiveResolver from "./perspectives/PerspectiveResolver";
 import RuntimeResolver from "./runtime/RuntimeResolver";
+import AIResolver from "./ai/AIResolver";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,7 +21,8 @@ buildSchema({
         LanguageResolver,
         NeighbourhoodResolver,
         PerspectiveResolver,
-        RuntimeResolver
+        RuntimeResolver,
+        AIResolver
     ],
     emitSchemaFile: {
         path: __dirname + '/schema.gql',

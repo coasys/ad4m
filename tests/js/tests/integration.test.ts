@@ -8,6 +8,7 @@ import { startExecutor, apolloClient, runHcLocalServices } from "../utils/utils"
 import { ChildProcess } from 'child_process';
 import perspectiveTests from "./perspective";
 import agentTests from "./agent";
+import aiTests from "./ai";
 import languageTests from "./language";
 import expressionTests from "./expression";
 import neighbourhoodTests from "./neighbourhood";
@@ -128,6 +129,7 @@ describe("Integration tests", function () {
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
+    describe('Artificial Intelligence', aiTests(testContext))
     describe('Runtime', runtimeTests(testContext))
     describe('Expression', expressionTests(testContext))
     describe('Perspective', perspectiveTests(testContext))
