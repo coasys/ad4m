@@ -7,6 +7,8 @@ pub const CREATE: &str = "CREATE";
 pub const UPDATE: &str = "UPDATE";
 pub const DELETE: &str = "DELETE";
 pub const SUBSCRIBE: &str = "SUBSCRIBE";
+pub const PROMPT: &str = "PROMPT";
+pub const TRANSCRIBE: &str = "TRANSCRIBE";
 
 // capabilities domains
 pub const AGENT: &str = "agent";
@@ -19,6 +21,7 @@ pub const RUNTIME_TRUSTED_AGENTS: &str = "runtime.trusted_agents";
 pub const RUNTIME_KNOWN_LINK_LANGUAGES: &str = "runtime.known_link_languages";
 pub const RUNTIME_FRIENDS: &str = "runtime.friends";
 pub const RUNTIME_MESSAGES: &str = "runtime.messages";
+pub const AI: &str = "artificial intelligence";
 
 // admin capabilities
 lazy_static! {
@@ -155,6 +158,64 @@ lazy_static! {
         },
         can: vec![CREATE.to_string()],
     };
+
+    // AI related capabilities
+    pub static ref AI_CREATE_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: AI.to_string(),
+            pointers: vec![WILD_CARD.to_string()],
+        },
+        can: vec![CREATE.to_string()],
+    };
+
+    pub static ref AI_READ_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: AI.to_string(),
+            pointers: vec![WILD_CARD.to_string()],
+        },
+        can: vec![READ.to_string()],
+    };
+
+    pub static ref AI_UPDATE_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: AI.to_string(),
+            pointers: vec![WILD_CARD.to_string()],
+        },
+        can: vec![UPDATE.to_string()],
+    };
+
+    pub static ref AI_DELETE_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: AI.to_string(),
+            pointers: vec![WILD_CARD.to_string()],
+        },
+        can: vec![DELETE.to_string()],
+    };
+
+    pub static ref AI_PROMPT_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: AI.to_string(),
+            pointers: vec![WILD_CARD.to_string()],
+        },
+        can: vec![PROMPT.to_string()],
+    };
+
+    pub static ref AI_TRANSCRIBE_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: AI.to_string(),
+            pointers: vec![WILD_CARD.to_string()],
+        },
+        can: vec![TRANSCRIBE.to_string()],
+    };
+
+    pub static ref AI_ALL_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: AI.to_string(),
+            pointers: vec![WILD_CARD.to_string()],
+        },
+        can: vec![WILD_CARD.to_string()],
+    };
+
 }
 
 #[allow(dead_code)]

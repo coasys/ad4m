@@ -13,6 +13,7 @@ mod utils;
 mod wallet;
 
 pub mod agent;
+pub mod ai_service;
 mod dapp_server;
 mod db;
 pub mod init;
@@ -34,15 +35,16 @@ pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
 
 use crate::{
-    agent::AgentService, dapp_server::serve_dapp, db::Ad4mDb, languages::LanguageController,
-    prolog_service::init_prolog_service, runtime_service::RuntimeService,
+    agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb,
+    languages::LanguageController, prolog_service::init_prolog_service,
+    runtime_service::RuntimeService,
 };
 
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     env::set_var(
         "RUST_LOG",
-        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=debug,warp=warn,warp::server=warn",
+        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=debug,warp::server",
     );
     let _ = env_logger::try_init();
     config.prepare();
@@ -64,8 +66,15 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     )
     .expect("Failed to initialize Ad4mDb");
 
+    info!("Initializing AI service...");
+    AIService::init_global_instance()
+        .await
+        .expect("Couldn't initialize AI service");
+
+    info!("Initializing Agent service...");
     AgentService::init_global_instance(config.app_data_path.clone().unwrap());
 
+    info!("Initializing Runtime service...");
     RuntimeService::init_global_instance(
         std::path::Path::new(&config.app_data_path.clone().unwrap().to_string())
             .join("mainnet_seed.seed")
@@ -107,13 +116,13 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     LanguageController::init_global_instance(js_core_handle.clone());
     perspectives::initialize_from_db();
 
-    info!("Starting GraphQL...");
-
     let app_dir = config
         .app_data_path
         .as_ref()
         .expect("App data path not set in Ad4mConfig")
         .clone();
+
+    info!("Starting dapp server...");
 
     if let Some(true) = config.run_dapp_server {
         std::thread::spawn(|| {
@@ -127,6 +136,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             }
         });
     };
+
+    info!("Starting GraphQL...");
 
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()

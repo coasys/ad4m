@@ -2,7 +2,7 @@ use lazy_static::lazy_static;
 
 lazy_static! {
     /// The current version of AD4M
-    pub static ref AD4M_VERSION: String = String::from("0.10.0-rc7");
+    pub static ref AD4M_VERSION: String = String::from("0.10.0-rc8");
 }
 
 /// Struct representing oldest supported version and indicator if state should be cleared if update is required

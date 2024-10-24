@@ -1,7 +1,7 @@
 {
   "package": {
     "productName": "ADAM Launcher",
-    "version": "0.10.0-rc7"
+    "version": "0.10.0-rc8"
   },
   "build": {
     "distDir": "../dist",
@@ -34,7 +34,15 @@
         "icons/icon.icns",
         "icons/icon.ico"
       ],
-      "resources": [],
+      "resources": [
+        "../../target/release/gn_out/libc++_chrome.dylib",
+        "../../target/release/gn_out/libicuuc.dylib",
+        "../../target/release/gn_out/libthird_party_abseil-cpp_absl.dylib",
+        "../../target/release/gn_out/libthird_party_icu_icui18n.dylib",
+        "../../target/release/gn_out/libv8_libbase.dylib",
+        "../../target/release/gn_out/libv8_libplatform.dylib",
+        "../../target/release/gn_out/libv8.dylib"
+      ],
       "copyright": "",
       "category": "DeveloperTool",
       "shortDescription": "",

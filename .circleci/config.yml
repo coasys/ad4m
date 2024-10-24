@@ -8,7 +8,7 @@ orbs:
 jobs:
   build-and-test:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:1278f700839a43daa0edd31b605c4a73e7f5c54c0d8c7dfbc26b3aa4e2e4ef66
+      - image: coasys/ad4m-ci-linux:latest@sha256:989a070068192050e61f2fab134f598739b0ec6756588fada602709081b28152
     resource_class: xlarge
     steps:
       - checkout
@@ -53,6 +53,9 @@ jobs:
           name: cargo fmt --check
           command: cargo fmt --check
       - run:
+          name: install gobjc
+          command: sudo apt-get install gobjc clang gnustep-devel libobjc4 libgnustep-base-dev libasound2-dev pkg-config fuse libfuse2 mesa-utils mesa-vulkan-drivers 
+      - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
       - run:
@@ -78,6 +81,7 @@ jobs:
             - ./target/release/ad4m-executor
       - run:
           name: cargo clippy
+          no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
       - run:
           name: Remove pnpm patches

@@ -16,6 +16,7 @@ import { appWindow } from "@tauri-apps/api/window";
 import { Connect } from "./components/Connect";
 import Apps from "./components/Apps";
 import TrayMessage from "./components/TrayMessage";
+import Tasks from "./components/Tasks";
 
 const App = () => {
   const [opened, setOpened] = useState(false);
@@ -71,6 +72,9 @@ const App = () => {
             path="perspective"
             element={<Perspectives setOpened={setOpened} opened={opened} />}
           />
+          <Route path="tasks" element={
+            <Tasks />
+          } />
           <Route
             path="settings"
             element={

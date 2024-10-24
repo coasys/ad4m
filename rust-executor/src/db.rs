@@ -1,9 +1,10 @@
 use crate::graphql::graphql_types::{
-    EntanglementProof, LinkStatus, NotificationInput, PerspectiveExpression, PerspectiveHandle,
-    SentMessage,
+    AIModelLoadingStatus, EntanglementProof, LinkStatus, NotificationInput, PerspectiveExpression,
+    PerspectiveHandle, SentMessage,
 };
 use crate::types::{
-    Expression, ExpressionProof, Link, LinkExpression, Notification, PerspectiveDiff,
+    AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, Notification,
+    PerspectiveDiff,
 };
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -162,8 +163,168 @@ impl Ad4mDb {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                system_prompt TEXT NOT NULL,
+                prompt_examples TEXT NOT NULL,
+                metadata TEXT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS model_status (
+                model TEXT PRIMARY KEY,
+                progress DOUBLE NOT NULL,
+                status TEXT NOT NULL,
+                downloaded BOOLEAN NOT NULL,
+                loaded BOOLEAN NOT NULL
+            )",
+            [],
+        )?;
+
         Ok(Self { conn })
     }
+
+    pub fn create_or_update_model_status(
+        &self,
+        model: &str,
+        progress: f64,
+        status: &str,
+        downloaded: bool,
+        loaded: bool,
+    ) -> Result<(), rusqlite::Error> {
+        let conn = &self.conn;
+        conn.execute(
+            "INSERT INTO model_status (model, progress, status, downloaded, loaded)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(model) DO UPDATE SET
+             progress = excluded.progress,
+             status = excluded.status,
+             downloaded = excluded.downloaded,
+             loaded = excluded.loaded",
+            params![model, progress, status, downloaded, loaded],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_model_status(
+        &self,
+        model: &str,
+    ) -> Result<Option<AIModelLoadingStatus>, rusqlite::Error> {
+        let conn = &self.conn;
+        let mut stmt = conn.prepare(
+            "SELECT model, progress, status, downloaded, loaded FROM model_status WHERE model = ?1",
+        )?;
+        let mut rows = stmt.query(params![model])?;
+
+        if let Some(row) = rows.next()? {
+            let model = AIModelLoadingStatus {
+                model: row.get(0)?,
+                progress: row.get(1)?,
+                status: row.get(2)?,
+                downloaded: row.get(3)?,
+                loaded: row.get(4)?,
+            };
+            Ok(Some(model))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn add_task(
+        &self,
+        name: String,
+        model_id: String,
+        system_prompt: String,
+        prompt_examples: Vec<AIPromptExamples>,
+        metadata: Option<String>,
+    ) -> Result<String, rusqlite::Error> {
+        let created_at = chrono::Utc::now().to_string();
+        let updated_at = created_at.clone();
+        let id = uuid::Uuid::new_v4().to_string();
+        self.conn.execute(
+            "INSERT INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, name, model_id, system_prompt, serde_json::to_string(&prompt_examples).unwrap(), metadata, created_at, updated_at],
+        )?;
+        Ok(id)
+    }
+
+    pub fn remove_task(&self, id: String) -> Result<(), rusqlite::Error> {
+        self.conn.execute("DELETE FROM tasks WHERE id = ?", [id])?;
+        Ok(())
+    }
+
+    pub fn get_task(&self, id: String) -> Result<Option<AITask>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT * FROM tasks WHERE id = ?")?;
+        let mut rows = stmt.query(params![id])?;
+
+        if let Some(row) = rows.next()? {
+            let prompt_examples: Vec<AIPromptExamples> =
+                serde_json::from_str(&row.get::<_, String>(4)?).unwrap();
+            Ok(Some(AITask {
+                task_id: row.get(0)?,
+                name: row.get(1)?,
+                model_id: row.get(2)?,
+                system_prompt: row.get(3)?,
+                prompt_examples,
+                meta_data: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_tasks(&self) -> Result<Vec<AITask>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare("SELECT * FROM tasks")?;
+        let task_iter = stmt.query_map([], |row| {
+            let prompt_examples: Vec<AIPromptExamples> =
+                serde_json::from_str(&row.get::<_, String>(4)?).unwrap();
+            let task = AITask {
+                task_id: row.get(0)?,
+                name: row.get(1)?,
+                model_id: row.get(2)?,
+                system_prompt: row.get(3)?,
+                prompt_examples,
+                meta_data: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            };
+            Ok(task)
+        })?;
+
+        let mut tasks = Vec::new();
+        for task in task_iter {
+            tasks.push(task?);
+        }
+        Ok(tasks)
+    }
+
+    pub fn update_task(
+        &self,
+        id: String,
+        name: String,
+        model_id: String,
+        system_prompt: String,
+        prompt_examples: Vec<AIPromptExamples>,
+        metadata: Option<String>,
+    ) -> Result<bool, rusqlite::Error> {
+        let updated_at = chrono::Utc::now().to_string();
+
+        let result = self.conn.execute(
+            "UPDATE tasks SET name = ?2, model_id = ?3, system_prompt = ?4, prompt_examples = ?5, metadata = ?6, updated_at = ?7 WHERE id = ?1",
+            params![id, name, model_id, system_prompt, serde_json::to_string(&prompt_examples).unwrap(), metadata, updated_at],
+        )?;
+        Ok(result > 0)
+    }
+
     pub fn add_notification(
         &self,
         notification: NotificationInput,
@@ -1130,5 +1291,51 @@ mod tests {
         assert!(notifications_after_removal
             .iter()
             .all(|n| n.id != notification_id));
+    }
+
+    #[test]
+    fn test_task_operations() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Test adding a task
+        let name = "Test Task".to_string();
+        let model_id = "test_model".to_string();
+        let system_prompt = "Test system prompt".to_string();
+        let prompt_examples = vec![AIPromptExamples {
+            input: "Test human prompt".to_string(),
+            output: "Test AI response".to_string(),
+        }];
+
+        let task_id = db
+            .add_task(
+                name.clone(),
+                model_id.clone(),
+                system_prompt.clone(),
+                prompt_examples.clone(),
+                None,
+            )
+            .unwrap();
+
+        // Test getting the task
+        let retrieved_task = db.get_task(task_id.clone()).unwrap().unwrap();
+        assert_eq!(retrieved_task.task_id, task_id);
+        assert_eq!(retrieved_task.model_id, model_id);
+        assert_eq!(retrieved_task.system_prompt, system_prompt);
+        assert_eq!(retrieved_task.prompt_examples, prompt_examples);
+
+        // Test getting all tasks
+        let all_tasks = db.get_tasks().unwrap();
+        assert_eq!(all_tasks.len(), 1);
+        assert_eq!(all_tasks[0].task_id, task_id);
+
+        // Test removing the task
+        db.remove_task(task_id.clone()).unwrap();
+
+        // Ensure the task is removed
+        let task_after_removal = db.get_task(task_id.clone()).unwrap();
+        assert!(task_after_removal.is_none());
+
+        let all_tasks_after_removal = db.get_tasks().unwrap();
+        assert!(all_tasks_after_removal.is_empty());
     }
 }

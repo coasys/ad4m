@@ -5,6 +5,7 @@ import { NeighbourhoodClient } from './neighbourhood/NeighbourhoodClient'
 import { PerspectiveClient } from './perspectives/PerspectiveClient'
 import { RuntimeClient } from './runtime/RuntimeClient'
 import { ExpressionClient } from './expression/ExpressionClient'
+import { AIClient } from './ai/AIClient'
 
 /**
  * Client for the Ad4m interface wrapping GraphQL queryies
@@ -23,6 +24,7 @@ export class Ad4mClient {
     #neighbourhoodClient: NeighbourhoodClient
     #perspectiveClient: PerspectiveClient
     #runtimeClient: RuntimeClient
+    #aiClient: AIClient
 
 
     constructor(client: ApolloClient<any>, subscribe: boolean = true) {
@@ -35,6 +37,7 @@ export class Ad4mClient {
         this.#perspectiveClient.setExpressionClient(this.#expressionClient)
         this.#perspectiveClient.setNeighbourhoodClient(this.#neighbourhoodClient)
         this.#runtimeClient = new RuntimeClient(this.#apolloClient, subscribe)
+        this.#aiClient = new AIClient(this.#apolloClient, subscribe)
     }
 
     get agent(): AgentClient {
@@ -59,5 +62,9 @@ export class Ad4mClient {
 
     get runtime(): RuntimeClient {
         return this.#runtimeClient
+    }
+
+    get ai(): AIClient {
+        return this.#aiClient
     }
 }
