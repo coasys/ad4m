@@ -1,7 +1,7 @@
 {
   "package": {
     "productName": "ADAM Launcher",
-    "version": "0.10.0-rc7"
+    "version": "0.10.0-rc8"
   },
   "build": {
     "distDir": "../dist",
