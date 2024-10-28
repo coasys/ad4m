@@ -1,16 +1,22 @@
+use std::env;
 use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
-use std::env;
 
 fn main() {
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     wait_for_dependencies(&target_arch);
 
     if cfg!(target_os = "macos") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/gn_out/{}", &target_arch);
+        println!(
+            "cargo:rustc-link-arg=-Wl,-rpath,@loader_path/gn_out/{}",
+            &target_arch
+        );
     } else if cfg!(target_os = "linux") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/gn_out/{}", &target_arch);
+        println!(
+            "cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/gn_out/{}",
+            &target_arch
+        );
     } else if cfg!(target_os = "windows") {
     } else {
         panic!("Unsupported target OS");
@@ -20,8 +26,6 @@ fn main() {
 fn in_target_dir(target: &str, target_arch: &String) -> String {
     format!("../target/release/gn_out/{}/{}", target_arch, target)
 }
-
-
 
 fn wait_for_dependencies(target_arch: &String) {
     let dependencies = if cfg!(target_os = "macos") {
@@ -52,7 +56,10 @@ fn wait_for_dependencies(target_arch: &String) {
         panic!("Unsupported target OS");
     };
 
-    let dependencies: Vec<String> = dependencies.into_iter().map(|d| in_target_dir(d, target_arch)).collect();
+    let dependencies: Vec<String> = dependencies
+        .into_iter()
+        .map(|d| in_target_dir(d, target_arch))
+        .collect();
 
     let timeout = Duration::from_secs(3600); // 5 minutes timeout
     let check_interval = Duration::from_secs(5); // Check every 5 seconds
