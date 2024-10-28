@@ -1,40 +1,48 @@
 use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
+use std::env;
 
 fn main() {
-    wait_for_dependencies();
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    wait_for_dependencies(&target_arch);
 
     if cfg!(target_os = "macos") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/gn_out");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/gn_out/{}", &target_arch);
     } else if cfg!(target_os = "linux") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/gn_out");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/gn_out/{}", &target_arch);
     } else if cfg!(target_os = "windows") {
     } else {
         panic!("Unsupported target OS");
     }
 }
 
-fn wait_for_dependencies() {
+fn in_target_dir(target: &str, target_arch: &String) -> String {
+    format!("../target/release/gn_out/{}/{}", target_arch, target)
+}
+
+
+
+fn wait_for_dependencies(target_arch: &String) {
     let dependencies = if cfg!(target_os = "macos") {
         vec![
-            "../target/release/gn_out/libc++_chrome.dylib",
-            "../target/release/gn_out/libicuuc.dylib",
-            "../target/release/gn_out/libthird_party_abseil-cpp_absl.dylib",
-            "../target/release/gn_out/libthird_party_icu_icui18n.dylib",
-            "../target/release/gn_out/libv8_libbase.dylib",
-            "../target/release/gn_out/libv8_libplatform.dylib",
-            "../target/release/gn_out/libv8.dylib",
+            "libc++_chrome.dylib",
+            "libicuuc.dylib",
+            "libthird_party_abseil-cpp_absl.dylib",
+            "libthird_party_icu_icui18n.dylib",
+            "libv8_libbase.dylib",
+            "libv8_libplatform.dylib",
+            "libv8.dylib",
         ]
     } else if cfg!(target_os = "linux") {
         vec![
-            "../target/release/gn_out/libc++.so",
-            "../target/release/gn_out/libicuuc.so",
-            "../target/release/gn_out/libthird_party_abseil-cpp_absl.so",
-            "../target/release/gn_out/libthird_party_icu_icui18n.so",
-            "../target/release/gn_out/libv8_libbase.so",
-            "../target/release/gn_out/libv8_libplatform.so",
-            "../target/release/gn_out/libv8.so",
+            "libc++.so",
+            "libicuuc.so",
+            "libthird_party_abseil-cpp_absl.so",
+            "libthird_party_icu_icui18n.so",
+            "libv8_libbase.so",
+            "libv8_libplatform.so",
+            "libv8.so",
         ]
     } else if cfg!(target_os = "windows") {
         vec![
@@ -43,6 +51,8 @@ fn wait_for_dependencies() {
     } else {
         panic!("Unsupported target OS");
     };
+
+    let dependencies: Vec<String> = dependencies.into_iter().map(|d| in_target_dir(d, target_arch)).collect();
 
     let timeout = Duration::from_secs(3600); // 5 minutes timeout
     let check_interval = Duration::from_secs(5); // Check every 5 seconds
@@ -60,8 +70,10 @@ fn wait_for_dependencies() {
     }
 
     if cfg!(target_os = "linux") {
-        let source_path = Path::new("../target/release/gn_out/libc++.so");
-        let dest_path = Path::new("../target/release/gn_out/libc++_chrome.so");
+        let source = in_target_dir("libc++.so", target_arch);
+        let source_path = Path::new(&source);
+        let dest = in_target_dir("libc++_chrome.so", target_arch);
+        let dest_path = Path::new(&dest);
 
         if source_path.exists() {
             match std::fs::copy(source_path, dest_path) {
