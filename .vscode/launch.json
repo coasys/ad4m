@@ -5,6 +5,27 @@
     "version": "0.2.0",
     "configurations": [
         {
+            {
+                "type": "lldb",
+                "request": "launch",
+                "name": "Debug ad4m executor",
+                "cargo": {
+                    "args": [
+                        "build",
+                        "--bin=ad4m-executor",
+                        "--package=ad4m"
+                    ],
+                    "filter": {
+                        "name": "ad4m-executor",
+                        "kind": "bin"
+                    }
+                },
+                "args": [
+                    "run"
+                ],
+                "cwd": "${workspaceFolder}"
+        },
+        {
             "type": "lldb",
             "request": "launch",
             "name": "Debug ad4m executor for JS tests",
