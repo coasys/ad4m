@@ -4,8 +4,12 @@ use std::thread::sleep;
 use std::time::Duration;
 
 fn main() {
+    let out_dir = std::env::var("OUT_DIR").unwrap();
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     wait_for_dependencies(&target_arch);
+    println!("cargo:rustc-link-search=native={}/gn_out/{}", out_dir, target_arch);
+    println!("cargo:rustc-link-search=native=./target/release/gn_out/{}", target_arch);
+    println!("cargo:rustc-link-search=native=./target/debug/gn_out/{}", target_arch);
 
     if cfg!(target_os = "macos") {
         println!(
@@ -24,7 +28,8 @@ fn main() {
 }
 
 fn in_target_dir(target: &str, target_arch: &String) -> String {
-    format!("../target/release/gn_out/{}/{}", target_arch, target)
+    let profile = std::env::var("PROFILE").unwrap();
+    format!("../target/{}/gn_out/{}/{}", profile, target_arch, target)
 }
 
 fn wait_for_dependencies(target_arch: &String) {
