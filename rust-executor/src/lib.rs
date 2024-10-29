@@ -33,7 +33,7 @@ use js_core::JsCore;
 
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
-
+use signal_hook::{consts::signal::SIGURG, iterator::Signals};
 use crate::{
     agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb,
     languages::LanguageController, prolog_service::init_prolog_service,
@@ -42,6 +42,13 @@ use crate::{
 
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut signals = Signals::new(&[SIGURG]).expect("Unable to register SIGURG signal handler");
+        for _ in signals.forever() {
+            println!("Received SIGURG signal, but ignoring it.");
+        }
+    });
+
     env::set_var(
         "RUST_LOG",
         "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=debug,warp::server",
