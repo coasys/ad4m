@@ -121,11 +121,11 @@ enum Domain {
         admin_credential: Option<String>,
         #[arg(long, action)]
         localhost: Option<bool>,
-        #[arg(short, long, action)]
+        #[arg(long, action)]
         tls_cert_file: Option<String>,
-        #[arg(short, long, action)]
+        #[arg(long, action)]
         tls_key_file: Option<String>,
-        #[arg(short, long, action)]
+        #[arg(long, action)]
         log_holochain_metrics: Option<bool>,
     },
     RunLocalHcServices {},
