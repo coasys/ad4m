@@ -7,9 +7,18 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     wait_for_dependencies(&target_arch);
-    println!("cargo:rustc-link-search=native={}/gn_out/{}", out_dir, target_arch);
-    println!("cargo:rustc-link-search=native=./target/release/gn_out/{}", target_arch);
-    println!("cargo:rustc-link-search=native=./target/debug/gn_out/{}", target_arch);
+    println!(
+        "cargo:rustc-link-search=native={}/gn_out/{}",
+        out_dir, target_arch
+    );
+    println!(
+        "cargo:rustc-link-search=native=./target/release/gn_out/{}",
+        target_arch
+    );
+    println!(
+        "cargo:rustc-link-search=native=./target/debug/gn_out/{}",
+        target_arch
+    );
 
     if cfg!(target_os = "macos") {
         println!(
