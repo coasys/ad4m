@@ -44,7 +44,7 @@ use signal_hook::{consts::signal::SIGURG, iterator::Signals};
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let mut signals =
-            Signals::new(&[SIGURG]).expect("Unable to register SIGURG signal handler");
+            Signals::new([SIGURG]).expect("Unable to register SIGURG signal handler");
         for _ in signals.forever() {
             println!("Received SIGURG signal, but ignoring it.");
         }
