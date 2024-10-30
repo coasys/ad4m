@@ -37,8 +37,13 @@ fn main() {
 }
 
 fn in_target_dir(target: &str, target_arch: &String) -> String {
-    let profile = std::env::var("PROFILE").unwrap();
-    format!("../target/{}/gn_out/{}/{}", profile, target_arch, target)
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    let out_dir = Path::new(&out_dir)
+        .parent() // .../build/ad4m-launcher-163f64../out
+        .and_then(|p| p.parent()) // .../build/ad4m-launcher-163f64..
+        .and_then(|p| p.parent()) // .../target/release
+        .unwrap();
+    format!("{}/gn_out/{}/{}", out_dir.display(), target_arch, target)
 }
 
 fn wait_for_dependencies(target_arch: &String) {
