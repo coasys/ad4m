@@ -49,7 +49,7 @@ fn main() {
                 &target_arch,
             )));
             resources.push(Value::String(in_target_dir(
-                "libthird_party_icu_icui18n.soo",
+                "libthird_party_icu_icui18n.so",
                 &target_arch,
             )));
             resources.push(Value::String(in_target_dir(
