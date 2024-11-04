@@ -5,7 +5,7 @@ use crate::{config::data_path, get_main_window};
 
 use remove_dir_all::*;
 
-use tauri::api::path::home_dir;
+use tauri::path::home_dir;
 use tauri::Size;
 use tauri::{LogicalSize, Manager};
 use tauri_plugin_positioner::{Position, WindowExt};

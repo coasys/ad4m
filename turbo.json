@@ -1,12 +1,18 @@
 {
   "$schema": "https://turborepo.org/schema.json",
-  "pipeline": {
+  "tasks": {
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "build-libs": {
-      "dependsOn": ["@coasys/dapp#build", "@coasys/ad4m#build", "@coasys/ad4m-connect#build", "@coasys/ad4m-executor#build", "@coasys/ad4m-cli#build"],
+      "dependsOn": [
+        "@coasys/dapp#build",
+        "@coasys/ad4m#build",
+        "@coasys/ad4m-connect#build",
+        "@coasys/ad4m-executor#build",
+        "@coasys/ad4m-cli#build"
+      ],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "build-core-executor": {
@@ -14,12 +20,21 @@
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
     "build-languages": {
-      "dependsOn": ["@coasys/perspective-diff-sync#build", "@coasys/agent-language#build",
-        "@coasys/direct-message-language#build", "@coasys/perspective-language#build",
-        "@coasys/language-language#build", "@coasys/neighbourhood-language#build",
-        "@coasys/file-storage#build", "@coasys/perspective-diff-sync-socket-signaling#build",
-        "@coasys/centralized-perspective-diff-sync#build", "@coasys/centralized-agent-language#build",
-        "@coasys/centralized-file-storage#build", "@coasys/eas#build", "@coasys/embedding-vector-language#build"],
+      "dependsOn": [
+        "@coasys/perspective-diff-sync#build",
+        "@coasys/agent-language#build",
+        "@coasys/direct-message-language#build",
+        "@coasys/perspective-language#build",
+        "@coasys/language-language#build",
+        "@coasys/neighbourhood-language#build",
+        "@coasys/file-storage#build",
+        "@coasys/perspective-diff-sync-socket-signaling#build",
+        "@coasys/centralized-perspective-diff-sync#build",
+        "@coasys/centralized-agent-language#build",
+        "@coasys/centralized-file-storage#build",
+        "@coasys/eas#build",
+        "@coasys/embedding-vector-language#build"
+      ],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
 

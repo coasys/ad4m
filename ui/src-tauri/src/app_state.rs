@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::prelude::*;
 use std::path::PathBuf;
-use tauri::api::path::home_dir;
+use tauri::path::home_dir;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AgentList {

@@ -1,82 +1,76 @@
 {
-  "package": {
-    "productName": "ADAM Launcher",
-    "version": "0.10.0-rc8"
-  },
-  "build": {
-    "distDir": "../dist",
-    "devPath": "http://127.0.0.1:3000",
-    "beforeDevCommand": "",
-    "beforeBuildCommand": "",
-    "withGlobalTauri": true
-  },
-  "tauri": {
-    "systemTray": {
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": true,
-      "menuOnLeftClick": false
+  "bundle": {
+    "active": true,
+    "targets": [
+      "appimage",
+      "deb",
+      "msi",
+      "dmg",
+      "app"
+    ],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
     },
-    "bundle": {
-      "active": true,
-      "targets": [
-        "appimage",
-        "deb",
-        "msi",
-        "dmg",
-        "app",
-        "updater"
-      ],
-      "identifier": "dev.ad4m.ad4min",
-      "icon": [
-        "icons/32x32.png",
-        "icons/128x128.png",
-        "icons/128x128@2x.png",
-        "icons/icon.icns",
-        "icons/icon.ico"
-      ],
-      "resources": [
-        "../../target/release/gn_out/libc++_chrome.dylib",
-        "../../target/release/gn_out/libicuuc.dylib",
-        "../../target/release/gn_out/libthird_party_abseil-cpp_absl.dylib",
-        "../../target/release/gn_out/libthird_party_icu_icui18n.dylib",
-        "../../target/release/gn_out/libv8_libbase.dylib",
-        "../../target/release/gn_out/libv8_libplatform.dylib",
-        "../../target/release/gn_out/libv8.dylib"
-      ],
-      "copyright": "",
-      "category": "DeveloperTool",
-      "shortDescription": "",
-      "longDescription": "",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "../../target/release/gn_out/x86_64/libc++.so",
+      "../../target/release/gn_out/x86_64/libc++_chrome.so",
+      "../../target/release/gn_out/x86_64/libicuuc.so",
+      "../../target/release/gn_out/x86_64/libthird_party_abseil-cpp_absl.so",
+      "../../target/release/gn_out/x86_64/libthird_party_icu_icui18n.so",
+      "../../target/release/gn_out/x86_64/libv8_libbase.so",
+      "../../target/release/gn_out/x86_64/libv8_libplatform.so",
+      "../../target/release/gn_out/x86_64/libv8.so"
+    ],
+    "copyright": "",
+    "category": "DeveloperTool",
+    "shortDescription": "",
+    "longDescription": "",
+    "macOS": {
+      "frameworks": [],
+      "minimumSystemVersion": "",
+      "exceptionDomain": "",
+      "signingIdentity": null,
+      "providerShortName": null,
+      "entitlements": null
+    },
+    "linux": {
       "deb": {
         "depends": []
       },
       "appimage": {
         "bundleMediaFramework": true
-      },
-      "macOS": {
-        "frameworks": [],
-        "minimumSystemVersion": "",
-        "exceptionDomain": "",
-        "signingIdentity": null,
-        "providerShortName": null,
-        "entitlements": null
-      },
-      "windows": {
-        "certificateThumbprint": null,
-        "digestAlgorithm": "sha256",
-        "timestampUrl": ""
       }
     },
+    "createUpdaterArtifacts": "v1Compatible"
+  },
+  "build": {
+    "beforeDevCommand": "pnpm run dev",
+    "beforeBuildCommand": "pnpm run build"
+  },
+  "productName": "ADAM Launcher",
+  "mainBinaryName": "ADAM Launcher",
+  "version": "0.10.0-rc8",
+  "identifier": "dev.ad4m.ad4min",
+  "plugins": {
     "updater": {
-      "active": true,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM1OTBGNDkzMkI2MTczMEMKUldRTWMyRXJrL1NReGFTUVBTMjRhQWlEVTFuOHBkcEZwbmEwSG9DdWczeDdtRUdNK3hMMm1GUnoK",
       "endpoints": [
         "https://launcher-update-worker.perspect3vism.workers.dev/update/{{target}}/{{current_version}}"
-      ],
-      "dialog": false,
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM1OTBGNDkzMkI2MTczMEMKUldRTWMyRXJrL1NReGFTUVBTMjRhQWlEVTFuOHBkcEZwbmEwSG9DdWczeDdtRUdNK3hMMm1GUnoK"
-    },
-    "allowlist": {
-      "all": true
+      ]
+    }
+  },
+  "app": {
+    "security": {
+      "csp": null
     },
     "windows": [
       {
@@ -93,8 +87,11 @@
         "url": "/splashscreen"
       }
     ],
-    "security": {
-      "csp": null
-    }
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": true,
+      "menuOnLeftClick": false
+    },
+    "withGlobalTauri": true
   }
 }
