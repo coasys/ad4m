@@ -10,58 +10,59 @@ fn main() {
     let mut config: Value =
         serde_json::from_str(&config_str).expect("Unable to parse tauri.conf.json");
 
-    if let Some(resources) = config["tauri"]["bundle"]["resources"].as_array_mut() {
-        resources.clear();
-        if cfg!(target_os = "macos") {
-            resources.push(Value::String(
-                "../../target/release/gn_out/libc++_chrome.dylib".to_string(),
-            ));
-            resources.push(Value::String(
-                "../../target/release/gn_out/libicuuc.dylib".to_string(),
-            ));
-            resources.push(Value::String(
-                "../../target/release/gn_out/libthird_party_abseil-cpp_absl.dylib".to_string(),
-            ));
-            resources.push(Value::String(
-                "../../target/release/gn_out/libthird_party_icu_icui18n.dylib".to_string(),
-            ));
-            resources.push(Value::String(
-                "../../target/release/gn_out/libv8_libbase.dylib".to_string(),
-            ));
-            resources.push(Value::String(
-                "../../target/release/gn_out/libv8_libplatform.dylib".to_string(),
-            ));
-            resources.push(Value::String(
-                "../../target/release/gn_out/libv8.dylib".to_string(),
-            ));
-        } else if cfg!(target_os = "linux") {
-            resources.push(Value::String(
-                "../../target/release/gn_out/x86_64/libc++.so".to_string(),
-            ));
-            resources.push(Value::String(
-                "../../target/release/gn_out/x86_64/libc++_chrome.so".to_string(),
-            ));
-            resources.push(Value::String(
-                "../../target/release/gn_out/x86_64/libicuuc.so".to_string(),
-            ));
-            resources.push(Value::String(
-                "../../target/release/gn_out/x86_64/libthird_party_abseil-cpp_absl.so".to_string(),
-            ));
-            resources.push(Value::String(
-                "../../target/release/gn_out/x86_64/libthird_party_icu_icui18n.so".to_string(),
-            ));
-            resources.push(Value::String(
-                "../../target/release/gn_out/x86_64/libv8_libbase.so".to_string(),
-            ));
-            resources.push(Value::String(
-                "../../target/release/gn_out/x86_64/libv8_libplatform.so".to_string(),
-            ));
-            resources.push(Value::String(
-                "../../target/release/gn_out/x86_64/libv8.so".to_string(),
-            ));
-        } else if cfg!(target_os = "windows") {
-        } else {
-            panic!("Unsupported target OS");
+    if let Some(resources) = config.get_mut("tauri").and_then(|t| t.get_mut("bundle")).and_then(|b| b.get_mut("resources")).and_then(|r| r.as_array_mut()) {
+        if resources.is_empty() {
+            if cfg!(target_os = "macos") {
+                resources.push(Value::String(
+                    "../../target/release/gn_out/libc++_chrome.dylib".to_string(),
+                ));
+                resources.push(Value::String(
+                    "../../target/release/gn_out/libicuuc.dylib".to_string(),
+                ));
+                resources.push(Value::String(
+                    "../../target/release/gn_out/libthird_party_abseil-cpp_absl.dylib".to_string(),
+                ));
+                resources.push(Value::String(
+                    "../../target/release/gn_out/libthird_party_icu_icui18n.dylib".to_string(),
+                ));
+                resources.push(Value::String(
+                    "../../target/release/gn_out/libv8_libbase.dylib".to_string(),
+                ));
+                resources.push(Value::String(
+                    "../../target/release/gn_out/libv8_libplatform.dylib".to_string(),
+                ));
+                resources.push(Value::String(
+                    "../../target/release/gn_out/libv8.dylib".to_string(),
+                ));
+            } else if cfg!(target_os = "linux") {
+                resources.push(Value::String(
+                    "../../target/release/gn_out/x86_64/libc++.so".to_string(),
+                ));
+                resources.push(Value::String(
+                    "../../target/release/gn_out/x86_64/libc++_chrome.so".to_string(),
+                ));
+                resources.push(Value::String(
+                    "../../target/release/gn_out/x86_64/libicuuc.so".to_string(),
+                ));
+                resources.push(Value::String(
+                    "../../target/release/gn_out/x86_64/libthird_party_abseil-cpp_absl.so".to_string(),
+                ));
+                resources.push(Value::String(
+                    "../../target/release/gn_out/x86_64/libthird_party_icu_icui18n.so".to_string(),
+                ));
+                resources.push(Value::String(
+                    "../../target/release/gn_out/x86_64/libv8_libbase.so".to_string(),
+                ));
+                resources.push(Value::String(
+                    "../../target/release/gn_out/x86_64/libv8_libplatform.so".to_string(),
+                ));
+                resources.push(Value::String(
+                    "../../target/release/gn_out/x86_64/libv8.so".to_string(),
+                ));
+            } else if cfg!(target_os = "windows") {
+            } else {
+                panic!("Unsupported target OS");
+            }
         }
     }
 
