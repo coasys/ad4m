@@ -38,6 +38,7 @@ fn main() {
             )));
             resources.push(Value::String(in_target_dir("libv8.dylib", &target_arch)));
         } else if cfg!(target_os = "linux") {
+            /*
             resources.push(Value::String(in_target_dir("libc++.so", &target_arch)));
             resources.push(Value::String(in_target_dir(
                 "libc++_chrome.so",
@@ -61,6 +62,7 @@ fn main() {
                 &target_arch,
             )));
             resources.push(Value::String(in_target_dir("libv8.so", &target_arch)));
+             */
         } else if cfg!(target_os = "windows") {
         } else {
             panic!("Unsupported target OS");
@@ -113,13 +115,13 @@ fn wait_for_dependencies(target_arch: &String) {
         ]
     } else if cfg!(target_os = "linux") {
         vec![
-            "libc++.so",
-            "libicuuc.so",
-            "libthird_party_abseil-cpp_absl.so",
-            "libthird_party_icu_icui18n.so",
-            "libv8_libbase.so",
-            "libv8_libplatform.so",
-            "libv8.so",
+            //"libc++.so",
+            //"libicuuc.so",
+            //"libthird_party_abseil-cpp_absl.so",
+            //"libthird_party_icu_icui18n.so",
+            //"libv8_libbase.so",
+            //"libv8_libplatform.so",
+            //"libv8.so",
         ]
     } else if cfg!(target_os = "windows") {
         vec![
@@ -148,7 +150,7 @@ fn wait_for_dependencies(target_arch: &String) {
             sleep(check_interval);
         }
     }
-
+/*
     if cfg!(target_os = "linux") {
         let source = in_target_dir("libc++.so", target_arch);
         let source_path = Path::new(&source);
@@ -164,6 +166,6 @@ fn wait_for_dependencies(target_arch: &String) {
             eprintln!("Source file libc++.so not found");
         }
     }
-
+ */
     println!("All dependencies are built and available");
 }
