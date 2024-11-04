@@ -18,7 +18,7 @@ fn main() {
         );
     } else if cfg!(target_os = "linux") {
         println!(
-            "cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/gn_out/{}",
+            "cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/gn_out/x86_64/{}",
             &target_arch
         );
     } else if cfg!(target_os = "windows") {

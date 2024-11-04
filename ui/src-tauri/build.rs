@@ -36,28 +36,28 @@ fn main() {
             ));
         } else if cfg!(target_os = "linux") {
             resources.push(Value::String(
-                "../../target/release/gn_out/libc++.so".to_string(),
+                "../../target/release/gn_out/x86_64/libc++.so".to_string(),
             ));
             resources.push(Value::String(
-                "../../target/release/gn_out/libc++_chrome.so".to_string(),
+                "../../target/release/gn_out/x86_64/libc++_chrome.so".to_string(),
             ));
             resources.push(Value::String(
-                "../../target/release/gn_out/libicuuc.so".to_string(),
+                "../../target/release/gn_out/x86_64/libicuuc.so".to_string(),
             ));
             resources.push(Value::String(
-                "../../target/release/gn_out/libthird_party_abseil-cpp_absl.so".to_string(),
+                "../../target/release/gn_out/x86_64/libthird_party_abseil-cpp_absl.so".to_string(),
             ));
             resources.push(Value::String(
-                "../../target/release/gn_out/libthird_party_icu_icui18n.so".to_string(),
+                "../../target/release/gn_out/x86_64/libthird_party_icu_icui18n.so".to_string(),
             ));
             resources.push(Value::String(
-                "../../target/release/gn_out/libv8_libbase.so".to_string(),
+                "../../target/release/gn_out/x86_64/libv8_libbase.so".to_string(),
             ));
             resources.push(Value::String(
-                "../../target/release/gn_out/libv8_libplatform.so".to_string(),
+                "../../target/release/gn_out/x86_64/libv8_libplatform.so".to_string(),
             ));
             resources.push(Value::String(
-                "../../target/release/gn_out/libv8.so".to_string(),
+                "../../target/release/gn_out/x86_64/libv8.so".to_string(),
             ));
         } else if cfg!(target_os = "windows") {
         } else {
@@ -78,7 +78,7 @@ fn main() {
     if cfg!(target_os = "macos") {
         println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../Resources/_up_/_up_/target/release/gn_out");
     } else if cfg!(target_os = "linux") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/adam-launcher/_up_/_up_/target/release/gn_out");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/adam-launcher/_up_/_up_/target/release/gn_out/x86_64");
     } else if cfg!(target_os = "windows") {
     } else {
         panic!("Unsupported target OS");
@@ -100,13 +100,13 @@ fn wait_for_dependencies() {
         ]
     } else if cfg!(target_os = "linux") {
         vec![
-            "../../target/release/gn_out/libc++.so",
-            "../../target/release/gn_out/libicuuc.so",
-            "../../target/release/gn_out/libthird_party_abseil-cpp_absl.so",
-            "../../target/release/gn_out/libthird_party_icu_icui18n.so",
-            "../../target/release/gn_out/libv8_libbase.so",
-            "../../target/release/gn_out/libv8_libplatform.so",
-            "../../target/release/gn_out/libv8.so",
+            "../../target/release/gn_out/x86_64/libc++.so",
+            "../../target/release/gn_out/x86_64/libicuuc.so",
+            "../../target/release/gn_out/x86_64/libthird_party_abseil-cpp_absl.so",
+            "../../target/release/gn_out/x86_64/libthird_party_icu_icui18n.so",
+            "../../target/release/gn_out/x86_64/libv8_libbase.so",
+            "../../target/release/gn_out/x86_64/libv8_libplatform.so",
+            "../../target/release/gn_out/x86_64/libv8.so",
         ]
     } else if cfg!(target_os = "windows") {
         vec![
@@ -132,8 +132,8 @@ fn wait_for_dependencies() {
     }
 
     if cfg!(target_os = "linux") {
-        let source_path = Path::new("../target/release/gn_out/libc++.so");
-        let dest_path = Path::new("../target/release/gn_out/libc++_chrome.so");
+        let source_path = Path::new("../target/release/gn_out/x86_64/libc++.so");
+        let dest_path = Path::new("../target/release/gn_out/x86_64/libc++_chrome.so");
 
         if source_path.exists() {
             match std::fs::copy(source_path, dest_path) {
