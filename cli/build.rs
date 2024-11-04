@@ -7,9 +7,18 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     wait_for_dependencies(&target_arch);
-    println!("cargo:rustc-link-search=native={}/gn_out/{}", out_dir, target_arch);
-    println!("cargo:rustc-link-search=native=./target/release/gn_out/{}", target_arch);
-    println!("cargo:rustc-link-search=native=./target/debug/gn_out/{}", target_arch);
+    println!(
+        "cargo:rustc-link-search=native={}/gn_out/{}",
+        out_dir, target_arch
+    );
+    println!(
+        "cargo:rustc-link-search=native=./target/release/gn_out/{}",
+        target_arch
+    );
+    println!(
+        "cargo:rustc-link-search=native=./target/debug/gn_out/{}",
+        target_arch
+    );
 
     if cfg!(target_os = "macos") {
         println!(
@@ -28,8 +37,13 @@ fn main() {
 }
 
 fn in_target_dir(target: &str, target_arch: &String) -> String {
-    let profile = std::env::var("PROFILE").unwrap();
-    format!("../target/{}/gn_out/{}/{}", profile, target_arch, target)
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    let out_dir = Path::new(&out_dir)
+        .parent() // .../build/ad4m-launcher-163f64../out
+        .and_then(|p| p.parent()) // .../build/ad4m-launcher-163f64..
+        .and_then(|p| p.parent()) // .../target/release
+        .unwrap();
+    format!("{}/gn_out/{}/{}", out_dir.display(), target_arch, target)
 }
 
 fn wait_for_dependencies(target_arch: &String) {
@@ -45,13 +59,13 @@ fn wait_for_dependencies(target_arch: &String) {
         ]
     } else if cfg!(target_os = "linux") {
         vec![
-            "libc++.so",
-            "libicuuc.so",
-            "libthird_party_abseil-cpp_absl.so",
-            "libthird_party_icu_icui18n.so",
-            "libv8_libbase.so",
-            "libv8_libplatform.so",
-            "libv8.so",
+            //"libc++.so",
+            //"libicuuc.so",
+            //"libthird_party_abseil-cpp_absl.so",
+            //"libthird_party_icu_icui18n.so",
+            //"libv8_libbase.so",
+            //"libv8_libplatform.so",
+            //"libv8.so",
         ]
     } else if cfg!(target_os = "windows") {
         vec![
@@ -81,6 +95,7 @@ fn wait_for_dependencies(target_arch: &String) {
         }
     }
 
+    /*
     if cfg!(target_os = "linux") {
         let source = in_target_dir("libc++.so", target_arch);
         let source_path = Path::new(&source);
@@ -95,7 +110,7 @@ fn wait_for_dependencies(target_arch: &String) {
         } else {
             eprintln!("Source file libc++.so not found");
         }
-    }
+    } */
 
     println!("All dependencies are built and available");
 }
