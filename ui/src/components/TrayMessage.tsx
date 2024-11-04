@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react'
 import { splashscreenContainer, splashscreenError, splashscreenErrorFlex } from "./styles";
-import { appWindow } from '@tauri-apps/api/window';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { invoke } from '@tauri-apps/api';
+const appWindow = getCurrentWebviewWindow()
 // @ts-ignore
 // const { invoke } = window.__TAURI__.tauri;
 

@@ -4,8 +4,8 @@ import { AgentContext } from "../context/AgentContext";
 import { invoke } from "@tauri-apps/api";
 import { buildAd4mClient } from "../util";
 import { fetchProfile } from "./Settings";
-import { checkUpdate, installUpdate } from '@tauri-apps/api/updater'
-import { relaunch } from '@tauri-apps/api/process'
+import { checkUpdate, installUpdate } from '@tauri-apps/plugin-updater'
+import { relaunch } from '@tauri-apps/plugin-process'
 
 function Profile() {
   const {

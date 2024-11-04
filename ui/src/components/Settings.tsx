@@ -13,9 +13,10 @@ import { invoke } from "@tauri-apps/api";
 import QRCode from "react-qr-code";
 import { AgentContext } from "../context/AgentContext";
 import ActionButton from "./ActionButton";
-import { appWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/api/shell";
-import { writeText } from '@tauri-apps/api/clipboard'
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { open } from "@tauri-apps/plugin-shell";
+import { writeText } from '@tauri-apps/plugin-clipboard-manager'
+const appWindow = getCurrentWebviewWindow()
 
 type Props = {
   did: String;

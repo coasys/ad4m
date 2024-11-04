@@ -1,7 +1,7 @@
 import { useState, useContext, useEffect } from "preact/compat";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { cardStyle, linkStyle, listStyle } from "./styles";
-import { open } from "@tauri-apps/api/shell";
+import { open } from "@tauri-apps/plugin-shell";
 
 const Apps = () => {
   const {
