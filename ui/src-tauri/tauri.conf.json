@@ -1,4 +1,47 @@
 {
+  "productName": "ADAM Launcher",
+  "mainBinaryName": "ADAM Launcher",
+  "version": "0.10.0-rc8",
+  "identifier": "dev.ad4m.ad4min",
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM1OTBGNDkzMkI2MTczMEMKUldRTWMyRXJrL1NReGFTUVBTMjRhQWlEVTFuOHBkcEZwbmEwSG9DdWczeDdtRUdNK3hMMm1GUnoK",
+      "endpoints": [
+        "https://launcher-update-worker.perspect3vism.workers.dev/update/{{target}}/{{current_version}}"
+      ]
+    }
+  },
+  "app": {
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "label": "splashscreen",
+        "title": "ADAM Launcher",
+        "width": 1000,
+        "height": 700,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "focus": true,
+        "visible": true,
+        "decorations": true,
+        "url": "/splashscreen"
+      }
+    ],
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": true,
+      "menuOnLeftClick": false
+    },
+    "withGlobalTauri": true
+  },
+  "build": {
+    "beforeDevCommand": "pnpm run dev",
+    "beforeBuildCommand": "pnpm run build",
+    "frontendDist": "../dist"
+  },
   "bundle": {
     "active": true,
     "targets": [
@@ -42,47 +85,5 @@
       }
     },
     "createUpdaterArtifacts": "v1Compatible"
-  },
-  "build": {
-    "beforeDevCommand": "pnpm run dev",
-    "beforeBuildCommand": "pnpm run build"
-  },
-  "productName": "ADAM Launcher",
-  "mainBinaryName": "ADAM Launcher",
-  "version": "0.10.0-rc8",
-  "identifier": "dev.ad4m.ad4min",
-  "plugins": {
-    "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM1OTBGNDkzMkI2MTczMEMKUldRTWMyRXJrL1NReGFTUVBTMjRhQWlEVTFuOHBkcEZwbmEwSG9DdWczeDdtRUdNK3hMMm1GUnoK",
-      "endpoints": [
-        "https://launcher-update-worker.perspect3vism.workers.dev/update/{{target}}/{{current_version}}"
-      ]
-    }
-  },
-  "app": {
-    "security": {
-      "csp": null
-    },
-    "windows": [
-      {
-        "label": "splashscreen",
-        "title": "ADAM Launcher",
-        "width": 1000,
-        "height": 700,
-        "resizable": true,
-        "fullscreen": false,
-        "center": true,
-        "focus": true,
-        "visible": true,
-        "decorations": true,
-        "url": "/splashscreen"
-      }
-    ],
-    "trayIcon": {
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": true,
-      "menuOnLeftClick": false
-    },
-    "withGlobalTauri": true
   }
 }
