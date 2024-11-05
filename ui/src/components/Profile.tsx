@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { checkUpdate, installUpdate } from "@tauri-apps/plugin-updater";
+//import { checkUpdate, installUpdate } from "@tauri-apps/plugin-updater";
 import { useCallback, useContext, useEffect, useState } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { AgentContext } from "../context/AgentContext";
@@ -58,6 +58,7 @@ function Profile() {
     setPassword(value);
   };
 
+  /*
   const onCheckUpdate = async () => {
     try {
       const { shouldUpdate, manifest } = await checkUpdate();
@@ -78,7 +79,7 @@ function Profile() {
       console.log(error);
     }
   };
-
+*/
   const onOpenDApp = async () => {
     try {
       await invoke("open_dapp");

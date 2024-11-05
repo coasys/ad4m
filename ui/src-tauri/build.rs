@@ -16,23 +16,23 @@ fn main() {
         resources.clear();
         if cfg!(target_os = "macos") {
             resources.push(Value::String(in_target_dir(
-                &target_arch,
                 "libc++_chrome.dylib",
+                &target_arch,
+            )));
             resources.push(Value::String(in_target_dir("libicuuc.dylib", &target_arch)));
+            resources.push(Value::String(in_target_dir(
+                "libthird_party_abseil-cpp_absl.dylib",
+                &target_arch,
             )));
             resources.push(Value::String(in_target_dir(
-                &target_arch,
-                "libthird_party_abseil-cpp_absl.dylib",
-            )));
                 "libthird_party_icu_icui18n.dylib",
                 &target_arch,
-            resources.push(Value::String(in_target_dir(
             )));
             resources.push(Value::String(in_target_dir(
-                &target_arch,
                 "libv8_libbase.dylib",
-            resources.push(Value::String(in_target_dir(
+                &target_arch,
             )));
+            resources.push(Value::String(in_target_dir(
                 "libv8_libplatform.dylib",
                 &target_arch,
             )));
@@ -82,7 +82,7 @@ fn main() {
     if cfg!(target_os = "macos") {
         println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../Resources/_up_/_up_/target/release/gn_out");
     } else if cfg!(target_os = "linux") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/adam-launcher/_up_/_up_/target/release/gn_out/x86_64");
+        //println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/adam-launcher/_up_/_up_/target/release/gn_out/x86_64");
     } else if cfg!(target_os = "windows") {
     } else {
         panic!("Unsupported target OS");

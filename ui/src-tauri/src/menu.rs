@@ -1,43 +1,41 @@
 use crate::config::data_path;
-use tauri::{CustomMenuItem, Window, Wry};
-use tauri::{Menu, MenuItem, Submenu};
+use tauri::{AppHandle, Result};
+use tauri::menu::{MenuBuilder, SubmenuBuilder};
 
-pub fn build_menu() -> Menu {
-    let open_logs = CustomMenuItem::new("open_logs".to_string(), "Open Logs");
-    let report_issue = CustomMenuItem::new("report_issue".to_string(), "Report Issue");
+pub fn build_menu(app: &AppHandle) -> Result<()> {
+    let edit_menu = SubmenuBuilder::new(app, "Edit")
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
 
-    let edit_menu = Submenu::new(
-        "Edit",
-        Menu::new()
-            .add_native_item(MenuItem::Cut)
-            .add_native_item(MenuItem::Copy)
-            .add_native_item(MenuItem::Paste)
-            .add_native_item(MenuItem::SelectAll),
-    );
+    let help_menu = SubmenuBuilder::new(app, "Help")
+        .text("open_logs", "Open Logs")
+        .text("report_issue", "Report Issue")
+        .build()?;
 
-    let help_menu = Submenu::new(
-        "Help",
-        Menu::new().add_item(open_logs).add_item(report_issue),
-    );
+    let main_menu = MenuBuilder::new(app).item(&edit_menu).item(&help_menu).build()?;
 
-    Menu::new().add_submenu(edit_menu).add_submenu(help_menu)
-}
-
-pub fn handle_menu_event(event_id: &str, _window: &Window<Wry>) {
-    match event_id {
-        "open_logs" => {
-            open_logs_folder();
+    app.set_menu(main_menu)?;
+    app.on_menu_event(move |_app, event| {
+        match event.id().0.as_str() {
+            "open_logs" => {
+                open_logs_folder();
+            }
+            "report_issue" => {
+                report_issue();
+            }
+            _ => {}
         }
-        "report_issue" => {
-            report_issue();
-        }
-        _ => {}
-    }
+    });
+
+    Ok(())
 }
 
 fn report_issue() {
     tauri::async_runtime::spawn(async move {
-        open::that("https://github.com/perspect3vism/ad4m/issues/new")
+        open::that("https://github.com/coasys/ad4m/issues/new")
             .map_err(|err| format!("Could not open url: {}", err))
     });
 }

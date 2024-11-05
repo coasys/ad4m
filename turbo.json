@@ -1,6 +1,6 @@
 {
   "$schema": "https://turborepo.org/schema.json",
-  "tasks": {
+  "pipeline": {
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
@@ -54,7 +54,7 @@
     },
 
     "ad4m-launcher#package-ad4m": {
-      "dependsOn": ["build-libs"],
+      "dependsOn": ["build-core-executor"],
       "outputs": ["dist/**"]
     },
 
