@@ -54,7 +54,7 @@ jobs:
           command: cargo fmt --check
       - run:
           name: install gobjc
-          command: sudo apt-get install gobjc clang gnustep-devel libobjc4 libgnustep-base-dev libasound2-dev pkg-config fuse libfuse2 mesa-utils mesa-vulkan-drivers 
+          command: sudo apt-get install gobjc clang gnustep-devel libobjc4 libgnustep-base-dev libasound2-dev pkg-config fuse libfuse2 mesa-utils mesa-vulkan-drivers
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
@@ -67,6 +67,7 @@ jobs:
       - run:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
+          no_output_timeout: 30m
       - save_cache:
           key: rust-cache-{{ checksum "Cargo.lock" }}-v2
           paths:
