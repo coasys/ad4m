@@ -274,6 +274,7 @@ impl AIService {
             .await
             .insert(model_id, bert_tx);
     }
+
     pub async fn spawn_llm_model(&self, model_id: String) {
         let (llama_tx, mut llama_rx) = mpsc::unbounded_channel::<LLMTaskRequest>();
 
@@ -612,7 +613,7 @@ mod tests {
 
         let task = service.add_task(AITaskInput {
                 name: "Test task".into(),
-                model_id: "Llama tiny 1b".into(),
+                model_id: "llama".into(),
                 system_prompt: "You are inside a test for tasks. Please make sure to create any non-zero length output".into(),
                 prompt_examples: vec![AIPromptExamplesInput{
                     input: "Test string".into(),
@@ -637,7 +638,7 @@ mod tests {
 
         let task = service.add_task(AITaskInput {
                 name: "Test task".into(),
-                model_id: "Llama tiny 1b".into(),
+                model_id: "llama".into(),
                 system_prompt: "You are inside a test for tasks. Please make sure to create any non-zero length output".into(),
                 meta_data: None,
                 prompt_examples: vec![AIPromptExamplesInput{
