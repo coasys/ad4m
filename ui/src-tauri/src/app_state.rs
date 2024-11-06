@@ -1,8 +1,8 @@
+use dirs::home_dir;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::prelude::*;
 use std::path::PathBuf;
-use dirs::home_dir;  
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AgentList {

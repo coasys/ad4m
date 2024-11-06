@@ -1,6 +1,6 @@
 use crate::config::data_path;
-use tauri::{AppHandle, Result};
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
+use tauri::{AppHandle, Result};
 
 pub fn build_menu(app: &AppHandle) -> Result<()> {
     let edit_menu = SubmenuBuilder::new(app, "Edit")
@@ -15,19 +15,20 @@ pub fn build_menu(app: &AppHandle) -> Result<()> {
         .text("report_issue", "Report Issue")
         .build()?;
 
-    let main_menu = MenuBuilder::new(app).item(&edit_menu).item(&help_menu).build()?;
+    let main_menu = MenuBuilder::new(app)
+        .item(&edit_menu)
+        .item(&help_menu)
+        .build()?;
 
     app.set_menu(main_menu)?;
-    app.on_menu_event(move |_app, event| {
-        match event.id().0.as_str() {
-            "open_logs" => {
-                open_logs_folder();
-            }
-            "report_issue" => {
-                report_issue();
-            }
-            _ => {}
+    app.on_menu_event(move |_app, event| match event.id().0.as_str() {
+        "open_logs" => {
+            open_logs_folder();
         }
+        "report_issue" => {
+            report_issue();
+        }
+        _ => {}
     });
 
     Ok(())

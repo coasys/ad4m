@@ -12,7 +12,12 @@ fn main() {
     let mut config: Value =
         serde_json::from_str(&config_str).expect("Unable to parse tauri.conf.json");
 
-        if let Some(resources) = config.get_mut("tauri").and_then(|t| t.get_mut("bundle")).and_then(|b| b.get_mut("resources")).and_then(|r| r.as_array_mut()) {
+    if let Some(resources) = config
+        .get_mut("tauri")
+        .and_then(|t| t.get_mut("bundle"))
+        .and_then(|b| b.get_mut("resources"))
+        .and_then(|r| r.as_array_mut())
+    {
         resources.clear();
         if cfg!(target_os = "macos") {
             resources.push(Value::String(in_target_dir(
@@ -61,9 +66,9 @@ fn main() {
                 &target_arch,
                 "libv8_libplatform.so",
             )));
-        } else if cfg!(target_os = "windows") {
-            resources.push(Value::String(in_target_dir("libv8.so", &target_arch)));
-        } else {
+            } else if cfg!(target_os = "windows") {
+                resources.push(Value::String(in_target_dir("libv8.so", &target_arch)));
+            } else {
              */
             panic!("Unsupported target OS");
         }
@@ -150,34 +155,34 @@ fn wait_for_dependencies(target_arch: &String) {
             sleep(check_interval);
         }
     }
-/*
-    if cfg!(target_os = "linux") {
-        let source = in_target_dir("libc++.so", target_arch);
-        let source_path = Path::new(&source);
-        let dest = in_target_dir("libc++_chrome.so", target_arch);
-        let dest_path = Path::new(&dest);
+    /*
+        if cfg!(target_os = "linux") {
+            let source = in_target_dir("libc++.so", target_arch);
+            let source_path = Path::new(&source);
+            let dest = in_target_dir("libc++_chrome.so", target_arch);
+            let dest_path = Path::new(&dest);
 
-        // Print the absolute path of libc++.so for debugging
-        match source_path.canonicalize() {
-            Ok(absolute_path) => {
-                println!("Absolute path of libc++.so: {}", absolute_path.display())
-            }
-            Err(e) => println!("Failed to get absolute path for libc++.so: {}", e),
-        };
+            // Print the absolute path of libc++.so for debugging
+            match source_path.canonicalize() {
+                Ok(absolute_path) => {
+                    println!("Absolute path of libc++.so: {}", absolute_path.display())
+                }
+                Err(e) => println!("Failed to get absolute path for libc++.so: {}", e),
+            };
 
-        if source_path.exists() {
-            println!("Found source file: {}", source_path.display());
-            match std::fs::copy(&source_path, &dest_path) {
-                Ok(_) => println!("Successfully copied libc++.so to libc++_chrome.so"),
-                Err(e) => panic!("Failed to copy libc++.so to libc++_chrome.so: {}", e),
+            if source_path.exists() {
+                println!("Found source file: {}", source_path.display());
+                match std::fs::copy(&source_path, &dest_path) {
+                    Ok(_) => println!("Successfully copied libc++.so to libc++_chrome.so"),
+                    Err(e) => panic!("Failed to copy libc++.so to libc++_chrome.so: {}", e),
+                }
+            } else {
+                panic!(
+                    "Source file libc++.so not found at {}",
+                    source_path.display()
+                );
             }
-        } else {
-            panic!(
-                "Source file libc++.so not found at {}",
-                source_path.display()
-            );
         }
-    }
- */
+    */
     println!("All dependencies are built and available");
 }

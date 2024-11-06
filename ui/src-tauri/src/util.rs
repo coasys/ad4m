@@ -8,7 +8,7 @@ use std::io::prelude::*;
 use sysinfo::Process;
 use sysinfo::{System, SystemExt};
 use tauri::Listener;
-use tauri::{AppHandle, Manager, WebviewWindowBuilder, WindowEvent, WebviewUrl, Wry};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent, Wry};
 use tauri_plugin_positioner::Position;
 use tauri_plugin_positioner::WindowExt;
 
@@ -80,12 +80,13 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
 pub fn create_tray_message_windows(app: &AppHandle<Wry>) {
     let url = app_tray_message_url();
 
-    let new_ad4m_window = WebviewWindowBuilder::new(app, "TrayMessage", WebviewUrl::App(url.into()))
-        .center()
-        .focused(true)
-        .inner_size(360.0, 120.0)
-        .title("TrayMessage")
-        .visible(true);
+    let new_ad4m_window =
+        WebviewWindowBuilder::new(app, "TrayMessage", WebviewUrl::App(url.into()))
+            .center()
+            .focused(true)
+            .inner_size(360.0, 120.0)
+            .title("TrayMessage")
+            .visible(true);
 
     let _ = new_ad4m_window.build();
 

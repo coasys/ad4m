@@ -26,9 +26,8 @@ extern crate remove_dir_all;
 
 use config::app_url;
 use menu::build_menu;
-use system_tray::{build_system_tray};
-use tauri::{AppHandle, RunEvent}; // SystemTrayEvent
-//use tauri_plugin_positioner::{on_tray_event, Position, WindowExt};
+use system_tray::build_system_tray;
+use tauri::{AppHandle, RunEvent};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -48,7 +47,7 @@ use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
 use crate::config::log_path;
 
-use crate::menu::{open_logs_folder};
+use crate::menu::open_logs_folder;
 use crate::util::find_port;
 use crate::util::{create_main_window, save_executor_port};
 use tauri::Manager;
