@@ -12,7 +12,7 @@ fn main() {
     let mut config: Value =
         serde_json::from_str(&config_str).expect("Unable to parse tauri.conf.json");
 
-    if let Some(resources) = config["tauri"]["bundle"]["resources"].as_array_mut() {
+        if let Some(resources) = config.get_mut("tauri").and_then(|t| t.get_mut("bundle")).and_then(|b| b.get_mut("resources")).and_then(|r| r.as_array_mut()) {
         resources.clear();
         if cfg!(target_os = "macos") {
             resources.push(Value::String(in_target_dir(
@@ -45,26 +45,26 @@ fn main() {
                 &target_arch,
             )));
             resources.push(Value::String(in_target_dir("libicuuc.so", &target_arch)));
-            resources.push(Value::String(in_target_dir(
                 "libthird_party_abseil-cpp_absl.so",
+            resources.push(Value::String(in_target_dir(
                 &target_arch,
             )));
-            resources.push(Value::String(in_target_dir(
                 "libthird_party_icu_icui18n.so",
-                &target_arch,
-            )));
             resources.push(Value::String(in_target_dir(
+                &target_arch,
+            resources.push(Value::String(in_target_dir(
+            )));
                 "libv8_libbase.so",
                 &target_arch,
             )));
             resources.push(Value::String(in_target_dir(
-                "libv8_libplatform.so",
                 &target_arch,
+                "libv8_libplatform.so",
             )));
-            resources.push(Value::String(in_target_dir("libv8.so", &target_arch)));
-             */
         } else if cfg!(target_os = "windows") {
+            resources.push(Value::String(in_target_dir("libv8.so", &target_arch)));
         } else {
+             */
             panic!("Unsupported target OS");
         }
     }
@@ -82,7 +82,7 @@ fn main() {
     if cfg!(target_os = "macos") {
         println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../Resources/_up_/_up_/target/release/gn_out");
     } else if cfg!(target_os = "linux") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/adam-launcher/_up_/_up_/target/release/gn_out");
+        //println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/adam-launcher/_up_/_up_/target/release/gn_out/x86_64");
     } else if cfg!(target_os = "windows") {
     } else {
         panic!("Unsupported target OS");
@@ -157,13 +157,25 @@ fn wait_for_dependencies(target_arch: &String) {
         let dest = in_target_dir("libc++_chrome.so", target_arch);
         let dest_path = Path::new(&dest);
 
+        // Print the absolute path of libc++.so for debugging
+        match source_path.canonicalize() {
+            Ok(absolute_path) => {
+                println!("Absolute path of libc++.so: {}", absolute_path.display())
+            }
+            Err(e) => println!("Failed to get absolute path for libc++.so: {}", e),
+        };
+
         if source_path.exists() {
-            match std::fs::copy(source_path, dest_path) {
+            println!("Found source file: {}", source_path.display());
+            match std::fs::copy(&source_path, &dest_path) {
                 Ok(_) => println!("Successfully copied libc++.so to libc++_chrome.so"),
-                Err(e) => eprintln!("Failed to copy libc++.so to libc++_chrome.so: {}", e),
+                Err(e) => panic!("Failed to copy libc++.so to libc++_chrome.so: {}", e),
             }
         } else {
-            eprintln!("Source file libc++.so not found");
+            panic!(
+                "Source file libc++.so not found at {}",
+                source_path.display()
+            );
         }
     }
  */

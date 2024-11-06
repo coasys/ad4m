@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use tauri::api::path::home_dir;
+use dirs::home_dir;
 
 pub fn data_path() -> PathBuf {
     home_dir().expect("Could not get home dir").join(".ad4m")

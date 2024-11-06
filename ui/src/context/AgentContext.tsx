@@ -1,5 +1,5 @@
 import { Link, Literal } from "@coasys/ad4m";
-import { invoke } from "@tauri-apps/api";
+import { invoke } from "@tauri-apps/api/core";
 import { createContext, useContext, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { PREDICATE_FIRSTNAME, PREDICATE_LASTNAME, PREDICATE_USERNAME } from "../constants/triples";
@@ -8,17 +8,17 @@ import { Ad4minContext } from "./Ad4minContext";
 type State = {
   loading: boolean;
   hasLoginError: Boolean;
-}
+};
 
 type ContextProps = {
   state: State;
   methods: {
-    unlockAgent: (str: string, holochain: boolean) => void,
-    lockAgent: (str: string) => void,
-    generateAgent: (password: string) => void,
-    mutateAgent: (username: string, firstName: string, lastName: string) => void,
+    unlockAgent: (str: string, holochain: boolean) => void;
+    lockAgent: (str: string) => void;
+    generateAgent: (password: string) => void;
+    mutateAgent: (username: string, firstName: string, lastName: string) => void;
   };
-}
+};
 
 const initialState: ContextProps = {
   state: {
@@ -29,30 +29,27 @@ const initialState: ContextProps = {
     unlockAgent: () => null,
     lockAgent: () => null,
     generateAgent: () => null,
-    mutateAgent: () => null
-  }
-}
+    mutateAgent: () => null,
+  },
+};
 
 export const AgentContext = createContext(initialState);
 
-
 export function AgentProvider({ children }: any) {
-  const {state: {
-    client
-  }, methods: {
-    handleLogin
-  }} = useContext(Ad4minContext);
+  const {
+    state: { client },
+    methods: { handleLogin },
+  } = useContext(Ad4minContext);
   let navigate = useNavigate();
 
   const [state, setState] = useState(initialState.state);
 
-
   const setLoading = (loading: boolean) => {
     setState((prev) => ({
       ...prev,
-      loading
-    }))
-  }
+      loading,
+    }));
+  };
 
   const generateAgent = async (password: string) => {
     setLoading(true);
@@ -66,7 +63,7 @@ export function AgentProvider({ children }: any) {
 
     setLoading(false);
 
-    await invoke('login_proxy', { subdomain: agentStatus.did! });
+    await invoke("login_proxy", { subdomain: agentStatus.did! });
   };
 
   const mutateAgent = async (username: string, firstName: string, lastName: string) => {
@@ -74,17 +71,17 @@ export function AgentProvider({ children }: any) {
 
     handleLogin(client!, agentStatus.isUnlocked, agentStatus.did!);
 
-    await invoke('close_main_window');
-    await invoke('open_tray_message');
+    await invoke("close_main_window");
+    await invoke("open_tray_message");
 
     const additions = [];
 
-    if(username) {
+    if (username) {
       additions.push(
         new Link({
           source: agentStatus.did!,
           target: Literal.from(username).toUrl(),
-          predicate: PREDICATE_USERNAME
+          predicate: PREDICATE_USERNAME,
         })
       );
     }
@@ -94,7 +91,7 @@ export function AgentProvider({ children }: any) {
         new Link({
           source: agentStatus.did!,
           target: Literal.from(firstName).toUrl(),
-          predicate: PREDICATE_FIRSTNAME
+          predicate: PREDICATE_FIRSTNAME,
         })
       );
     }
@@ -104,7 +101,7 @@ export function AgentProvider({ children }: any) {
         new Link({
           source: agentStatus.did!,
           target: Literal.from(lastName).toUrl(),
-          predicate: PREDICATE_LASTNAME
+          predicate: PREDICATE_LASTNAME,
         })
       );
     }
@@ -112,32 +109,31 @@ export function AgentProvider({ children }: any) {
     console.log("mutating public perspective: ", additions);
     await client?.agent.mutatePublicPerspective({
       additions,
-      removals: []
+      removals: [],
     });
 
-    navigate('/apps');
-  }
+    navigate("/apps");
+  };
 
   const unlockAgent = async (password: string, holochain: boolean) => {
-    console.log("Holochain config:", holochain)
-    setLoading(true)
+    console.log("Holochain config:", holochain);
+    setLoading(true);
 
     let agentStatus = await client?.agent.unlock(password, holochain);
 
     setLoading(false);
 
-    if(agentStatus!.isUnlocked) {
+    if (agentStatus!.isUnlocked) {
       handleLogin(client!, agentStatus!.isUnlocked, agentStatus!.did!);
       console.log("agent status in unlock: ", agentStatus);
-      await invoke('close_main_window');
-      await invoke('open_tray_message');
-      await invoke('login_proxy', { subdomain: agentStatus!.did });
-      navigate('/apps');
+      await invoke("close_main_window");
+      await invoke("open_tray_message");
+      await invoke("login_proxy", { subdomain: agentStatus!.did });
+      navigate("/apps");
     } else {
       setState((prev) => ({ ...prev, hasLoginError: true }));
     }
-
-  }
+  };
 
   const lockAgent = async (passphrase: string) => {
     setLoading(true);
@@ -147,7 +143,7 @@ export function AgentProvider({ children }: any) {
     handleLogin(client!, status!.isUnlocked, status!.did!);
 
     setLoading(false);
-  }
+  };
 
   return (
     <AgentContext.Provider
@@ -157,11 +153,11 @@ export function AgentProvider({ children }: any) {
           generateAgent,
           unlockAgent,
           lockAgent,
-          mutateAgent
-        }
+          mutateAgent,
+        },
       }}
     >
       {children}
     </AgentContext.Provider>
-  )
+  );
 }
