@@ -21,11 +21,9 @@ use std::collections::HashMap;
 // use std::io::Cursor;
 use std::panic::catch_unwind;
 use std::path::PathBuf;
-// use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-// use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 mod audio_stream;
@@ -292,7 +290,7 @@ impl AIService {
                         let llama = Llama::builder()
                             .with_source(
                                 LlamaSource::tiny_llama_1_1b()
-                                    .with_cache(kalosm_common::Cache::new(PathBuf::from("."))),
+                                    .with_cache(Cache::new(PathBuf::from("."))),
                             )
                             .build_with_loading_handler({
                                 let model_id = model_id.clone();
