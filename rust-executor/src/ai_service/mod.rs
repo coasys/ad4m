@@ -19,6 +19,7 @@ use tokio::time::sleep;
 use std::collections::HashMap;
 // use std::io::Cursor;
 use std::panic::catch_unwind;
+use std::path::PathBuf;
 // use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -288,7 +289,7 @@ impl AIService {
                         publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
 
                         let llama = Llama::builder()
-                            .with_source(LlamaSource::tiny_llama_1_1b())
+                            .with_source(LlamaSource::tiny_llama_1_1b().with_cache(kalosm_common::Cache::new(PathBuf::from("."))))
                             .build_with_loading_handler({
                                 let model_id = model_id.clone();
                                 move |progress| {
