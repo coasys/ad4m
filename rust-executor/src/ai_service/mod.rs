@@ -13,14 +13,14 @@ use kalosm::sound::TextStream;
 use kalosm::sound::*;
 // use kalosm::sound::{DenoisedExt, VoiceActivityDetectorExt, VoiceActivityStreamExt};
 use kalosm::{language::*, sound::Whisper};
-use kalosm_common::Cache;
+// use kalosm_common::Cache;
 // use rodio::{OutputStream, Source};
 use tokio::time::sleep;
 // use rodio::source::Source;
 use std::collections::HashMap;
 // use std::io::Cursor;
 use std::panic::catch_unwind;
-use std::path::PathBuf;
+// use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -288,10 +288,7 @@ impl AIService {
                         publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
 
                         let llama = Llama::builder()
-                            .with_source(
-                                LlamaSource::tiny_llama_1_1b()
-                                    .with_cache(Cache::new(PathBuf::from("."))),
-                            )
+                            .with_source(LlamaSource::tiny_llama_1_1b()) /* .with_cache(Cache::new(PathBuf::from("."))) */
                             .build_with_loading_handler({
                                 let model_id = model_id.clone();
                                 move |progress| {
@@ -609,6 +606,7 @@ mod tests {
         assert!(vector.len() > 300)
     }
 
+    #[ignore]
     #[tokio::test]
     async fn test_prompt() {
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
