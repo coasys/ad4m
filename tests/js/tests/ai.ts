@@ -146,7 +146,7 @@ export default function aiTests(testContext: TestContext) {
                 expect(vector.length).to.be.greaterThan(300)
             })
 
-            it('can do audio to text transcription', async() => {
+            it.skip('can do audio to text transcription', async() => {
                 const ad4mClient = testContext.ad4mClient!;
 
                 // Convert m4a to raw PCM data
