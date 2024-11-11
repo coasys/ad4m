@@ -536,7 +536,7 @@ impl AIService {
                         .rechunk_voice_activity()
                         .transcribe(whisper)
                         .words();
-                    
+
                     let _ = done_tx.send(Ok(()));
 
                     tokio::select! {
@@ -545,7 +545,7 @@ impl AIService {
                             while let Some(word) = word_stream.next().await {
                                 println!("GOT WORD: {}", word);
                                 let stream_id_clone = stream_id_clone.clone();
-        
+
                                 rt.spawn(async move {
                                     let _ = get_global_pubsub()
                                         .await
@@ -559,7 +559,7 @@ impl AIService {
                                         )
                                         .await;
                                 });
-        
+
                                 sleep(Duration::from_millis(50)).await;
                             }
                         } => {}
