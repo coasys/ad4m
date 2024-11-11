@@ -198,7 +198,12 @@ export default function aiTests(testContext: TestContext) {
 
                 // Stream the audio data in chunks
                 for (let i = 0; i < audioData.length; i += chunkSize) {
-                    const chunk = audioData.slice(i, i + chunkSize);
+                    console.log(`Sending chunk: ${i} - ${i+chunkSize}`)
+                    let end = i+chunkSize
+                    if(end > audioData.length) {
+                        end = audioData.length
+                    }
+                    const chunk = audioData.slice(i, end);
                     //@ts-ignore
                     await ad4mClient.ai.feedTranscriptionStream(streamId, Array.from(chunk));
 
@@ -208,6 +213,8 @@ export default function aiTests(testContext: TestContext) {
 
                 // Close the transcription stream
                 await ad4mClient.ai.closeTranscriptionStream(streamId);
+
+                await new Promise(resolve => setTimeout(resolve, 10000));
 
                 // Assertions
                 expect(transcribedText).to.be.a('string');
