@@ -28,6 +28,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 mod audio_stream;
 mod error;
+use log::error;
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
@@ -144,14 +145,19 @@ async fn handle_progress(model_name: String, progress: ModelLoadingProgress) {
 }
 
 impl AIService {
-    pub async fn new() -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let service = AIService {
             embedding_channel: Arc::new(Mutex::new(HashMap::new())),
             llm_channel: Arc::new(Mutex::new(HashMap::new())),
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
         };
 
-        let _ = service.load().await;
+        let clone = service.clone();
+        tokio::spawn(async move {
+            if let Err(e) = clone.load().await {
+                error!("AIService error while loading models: {:?}", e);
+            }
+        });
 
         Ok(service)
     }
@@ -182,7 +188,7 @@ impl AIService {
     }
 
     pub async fn init_global_instance() -> Result<()> {
-        let new_service = AIService::new().await?;
+        let new_service = AIService::new()?;
         let mut ai_service = AI_SERVICE.lock().await;
         *ai_service = Some(new_service);
         Ok(())
