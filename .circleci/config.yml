@@ -96,6 +96,7 @@ jobs:
       - run:
           name: Root tests
           command: pnpm test
+          no_output_timeout: 30m
 
   integration-tests-js:
     docker:
