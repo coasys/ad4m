@@ -516,7 +516,7 @@ impl AIService {
         let stream_id_clone = stream_id.clone();
         let (samples_tx, sampels_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
         //TODO: use drop_rx to exit thread
-        let (drop_tx, _drop_rx) = oneshot::channel();
+        let (drop_tx, drop_rx) = oneshot::channel();
         let (done_tx, done_rx) = oneshot::channel();
 
         thread::spawn(move || {
@@ -531,31 +531,38 @@ impl AIService {
                         receiver: Box::pin(sampels_rx.map(futures_util::stream::iter).flatten()),
                     };
 
-                    let text_stream = audio_stream
+                    let mut word_stream = audio_stream
                         .voice_activity_stream()
-                        .rechunk_voice_activity();
-                    let mut word_stream = text_stream.transcribe(whisper).words();
-
+                        .rechunk_voice_activity()
+                        .transcribe(whisper)
+                        .words();
+                    
                     let _ = done_tx.send(Ok(()));
 
-                    while let Some(word) = word_stream.next().await {
-                        let stream_id_clone = stream_id_clone.clone();
-
-                        rt.spawn(async move {
-                            let _ = get_global_pubsub()
-                                .await
-                                .publish(
-                                    &AI_TRANSCRIPTION_TEXT_TOPIC,
-                                    &serde_json::to_string(&TranscriptionTextFilter {
-                                        stream_id: stream_id_clone.clone(),
-                                        text: word.clone(),
-                                    })
-                                    .expect("TranscriptionTextFilter must be serializable"),
-                                )
-                                .await;
-                        });
-
-                        sleep(Duration::from_millis(50)).await;
+                    tokio::select! {
+                        _ = drop_rx => {},
+                        _ = async {
+                            while let Some(word) = word_stream.next().await {
+                                println!("GOT WORD: {}", word);
+                                let stream_id_clone = stream_id_clone.clone();
+        
+                                rt.spawn(async move {
+                                    let _ = get_global_pubsub()
+                                        .await
+                                        .publish(
+                                            &AI_TRANSCRIPTION_TEXT_TOPIC,
+                                            &serde_json::to_string(&TranscriptionTextFilter {
+                                                stream_id: stream_id_clone.clone(),
+                                                text: word.clone(),
+                                            })
+                                            .expect("TranscriptionTextFilter must be serializable"),
+                                        )
+                                        .await;
+                                });
+        
+                                sleep(Duration::from_millis(50)).await;
+                            }
+                        } => {}
                     }
                 } else {
                     let _ = done_tx.send(Err(maybe_model.err().unwrap()));
