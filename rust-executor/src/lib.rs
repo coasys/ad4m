@@ -38,7 +38,7 @@ use crate::{
 };
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
-use libc::{sigaction, sighandler_t, sigemptyset, SA_ONSTACK, SIGURG};
+use libc::{sigaction, sigemptyset, sighandler_t, SA_ONSTACK, SIGURG};
 use std::ptr;
 
 extern "C" fn handle_sigurg(_: libc::c_int) {
