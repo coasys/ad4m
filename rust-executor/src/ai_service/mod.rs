@@ -20,6 +20,8 @@ use tokio::time::sleep;
 use std::collections::HashMap;
 // use std::io::Cursor;
 use std::panic::catch_unwind;
+use std::pin::Pin;
+use std::future::Future;
 // use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -164,9 +166,13 @@ impl AIService {
 
     pub async fn load(&self) -> Result<()> {
         // Get the models from the database & loop over it to spawn models
+        let futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![
+            Box::pin(async { self.spawn_embedding_model("bert".to_string()).await; }),
+            Box::pin(async { self.spawn_llm_model("llama".to_string()).await; }),
+            Box::pin(async { let _ = Whisper::new().await; })
+        ];
 
-        self.spawn_embedding_model("bert".to_string()).await;
-        self.spawn_llm_model("llama".to_string()).await;
+        futures::future::join_all(futures).await;
 
         // Spawn tasks from the database
         let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
