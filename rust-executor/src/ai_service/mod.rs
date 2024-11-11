@@ -623,7 +623,7 @@ mod tests {
     #[tokio::test]
     async fn test_embedding() {
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        let service = AIService::new().await.expect("initialization to work");
+        let service = AIService::new().expect("initialization to work");
         let vector = service
             .embed("Test string".into())
             .await
@@ -635,7 +635,7 @@ mod tests {
     #[tokio::test]
     async fn test_prompt() {
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        let service = AIService::new().await.expect("initialization to work");
+        let service = AIService::new().expect("initialization to work");
 
         let task = service.add_task(AITaskInput {
                 name: "Test task".into(),
@@ -660,7 +660,7 @@ mod tests {
     #[tokio::test]
     async fn test_prompt_stress() {
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        let service = AIService::new().await.expect("initialization to work");
+        let service = AIService::new().expect("initialization to work");
 
         let task = service.add_task(AITaskInput {
                 name: "Test task".into(),
