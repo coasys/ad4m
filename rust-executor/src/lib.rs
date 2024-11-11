@@ -38,16 +38,25 @@ use crate::{
 };
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
-use signal_hook::{consts::signal::SIGURG, iterator::Signals};
+use libc::{sigaction, sighandler_t, sigemptyset, SA_ONSTACK, SIGURG};
+use std::ptr;
+
+extern "C" fn handle_sigurg(_: libc::c_int) {
+    println!("Received SIGURG signal, but ignoring it.");
+}
 
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
-    std::thread::spawn(move || {
-        let mut signals = Signals::new([SIGURG]).expect("Unable to register SIGURG signal handler");
-        for _ in signals.forever() {
-            println!("Received SIGURG signal, but ignoring it.");
+    unsafe {
+        let mut action: sigaction = std::mem::zeroed();
+        action.sa_flags = SA_ONSTACK;
+        action.sa_sigaction = handle_sigurg as sighandler_t;
+        sigemptyset(&mut action.sa_mask);
+
+        if libc::sigaction(SIGURG, &action, ptr::null_mut()) != 0 {
+            eprintln!("Failed to set up SIGURG signal handler");
         }
-    });
+    }
 
     env::set_var(
         "RUST_LOG",
