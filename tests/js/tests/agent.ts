@@ -17,6 +17,7 @@ export default function agentTests(testContext: TestContext) {
                 expect(generate.isInitialized).to.be.true;
                 expect(generate.isUnlocked).to.be.true;
 
+                await sleep(1000)
                 expect(agentUpdated.calledOnce).to.be.true;
     
                 // //Should be able to create a perspective
@@ -24,10 +25,11 @@ export default function agentTests(testContext: TestContext) {
                 // expect(create.name).to.equal("test");
     
                 const lockAgent = await ad4mClient.agent.lock("passphrase");
-                await sleep(3000)
+                
                 expect(lockAgent.isInitialized).to.be.true;
                 expect(lockAgent.isUnlocked).to.be.false;
 
+                await sleep(1000)
                 expect(agentUpdated.calledTwice).to.be.true;
     
                 // //Should not be able to create a perspective
@@ -38,6 +40,7 @@ export default function agentTests(testContext: TestContext) {
                 expect(unlockAgent.isInitialized).to.be.true;
                 expect(unlockAgent.isUnlocked).to.be.true;
 
+                await sleep(1000)
                 expect(agentUpdated.calledThrice).to.be.true;
     
                 // //Should be able to create a perspective
