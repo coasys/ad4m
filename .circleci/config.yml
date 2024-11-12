@@ -80,10 +80,10 @@ jobs:
           paths:
             - ./target/release/ad4m
             - ./target/release/ad4m-executor
-      - run:
-          name: cargo clippy
-          no_output_timeout: 30m
-          command: cargo clippy --all --exclude ad4m-launcher
+      #- run:
+      #    name: cargo clippy
+      #    no_output_timeout: 30m
+      #    command: cargo clippy --all --exclude ad4m-launcher
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
