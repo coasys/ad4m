@@ -162,6 +162,7 @@ jobs:
       - run:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
+          no_output_timeout: 30m
 
   integration-tests-cli:
     docker:

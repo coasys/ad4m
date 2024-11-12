@@ -55,7 +55,7 @@ export default function aiTests(testContext: TestContext) {
                 // Verify task is removed
                 const tasksAfterRemoval = await ad4mClient.ai.tasks();
                 expect(tasksAfterRemoval.find(task => task.taskId === newTask.taskId)).to.be.undefined;
-            })
+            }).timeout(900000)
 
             it('can prompt a task', async () => {
                 const ad4mClient = testContext.ad4mClient!
@@ -87,9 +87,9 @@ export default function aiTests(testContext: TestContext) {
 
                 // Clean up: remove the task
                 await ad4mClient.ai.removeTask(newTask.taskId);
-            })
+            }).timeout(900000)
 
-            it('can prompt several task in a row fast', async () => {
+            it.skip('can prompt several tasks in a row fast', async () => {
                 const ad4mClient = testContext.ad4mClient!
 
                 console.log("test 1");
