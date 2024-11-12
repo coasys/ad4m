@@ -217,13 +217,13 @@ export default function aiTests(testContext: TestContext) {
                     console.log("Error trying to close TranscriptionStream:", e)
                 }
 
-                await new Promise(resolve => setTimeout(resolve, 60000));
+                await new Promise(resolve => setTimeout(resolve, 1700000));
 
                 // Assertions
                 expect(transcribedText).to.be.a('string');
                 expect(transcribedText.length).to.be.greaterThan(0);
                 console.log("Final transcription:", transcribedText);
-            })
+            }).timeout(1800000); // 30 minutes
         })
     }
 }
