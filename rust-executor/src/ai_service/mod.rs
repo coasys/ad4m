@@ -543,7 +543,7 @@ impl AIService {
                         _ = drop_rx => {},
                         _ = async {
                             while let Some(word) = word_stream.next().await {
-                                println!("GOT WORD: {}", word);
+                                //println!("GOT WORD: {}", word);
                                 let stream_id_clone = stream_id_clone.clone();
 
                                 rt.spawn(async move {
