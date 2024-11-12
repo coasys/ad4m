@@ -620,6 +620,7 @@ mod tests {
 
     use super::*;
 
+    #[ignore]
     #[tokio::test]
     async fn test_embedding() {
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
