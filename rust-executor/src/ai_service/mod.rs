@@ -536,20 +536,20 @@ impl AIService {
                         read_data: Vec::new(),
                         receiver: Box::pin(sampels_rx.map(futures_util::stream::iter).flatten()),
                     };
-
+                    
                     let mut word_stream = audio_stream
                         .voice_activity_stream()
                         .rechunk_voice_activity()
-                        .transcribe(whisper)
-                        .words();
+                        .with_end_window(Duration::from_millis(500)) 
+                        .transcribe(whisper);
 
                     let _ = done_tx.send(Ok(()));
 
                     tokio::select! {
                         _ = drop_rx => {},
                         _ = async {
-                            while let Some(word) = word_stream.next().await {
-                                //println!("GOT WORD: {}", word);
+                            while let Some(segment) = word_stream.next().await {
+                                //println!("GOT segment: {}", segment.text());
                                 let stream_id_clone = stream_id_clone.clone();
 
                                 rt.spawn(async move {
@@ -559,7 +559,7 @@ impl AIService {
                                             &AI_TRANSCRIPTION_TEXT_TOPIC,
                                             &serde_json::to_string(&TranscriptionTextFilter {
                                                 stream_id: stream_id_clone.clone(),
-                                                text: word.clone(),
+                                                text: segment.text().to_string(),
                                             })
                                             .expect("TranscriptionTextFilter must be serializable"),
                                         )
