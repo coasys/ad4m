@@ -12,7 +12,7 @@ use futures::SinkExt;
 use kalosm::sound::TextStream;
 use kalosm::sound::*;
 // use kalosm::sound::{DenoisedExt, VoiceActivityDetectorExt, VoiceActivityStreamExt};
-use kalosm::{language::*};
+use kalosm::language::*;
 // use kalosm_common::Cache;
 // use rodio::{OutputStream, Source};
 use tokio::time::sleep;
@@ -536,11 +536,11 @@ impl AIService {
                         read_data: Vec::new(),
                         receiver: Box::pin(sampels_rx.map(futures_util::stream::iter).flatten()),
                     };
-                    
+
                     let mut word_stream = audio_stream
                         .voice_activity_stream()
                         .rechunk_voice_activity()
-                        .with_end_window(Duration::from_millis(500)) 
+                        .with_end_window(Duration::from_millis(500))
                         .transcribe(whisper);
 
                     let _ = done_tx.send(Ok(()));
