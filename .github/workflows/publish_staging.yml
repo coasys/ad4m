@@ -42,7 +42,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [GH-hosted-ubuntu, macos-latest, windows-latest]
+        #platform: [GH-hosted-ubuntu, macos-latest, windows-latest]
+        platform: [GH-hosted-ubuntu, macos-latest]
         node-version: [18.x]
 
     needs:
