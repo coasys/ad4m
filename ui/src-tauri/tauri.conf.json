@@ -1,7 +1,7 @@
 {
   "productName": "ADAM Launcher",
   "mainBinaryName": "ADAM Launcher",
-  "version": "0.10.0-rc8",
+  "version": "0.10.0-rc9",
   "identifier": "dev.ad4m.ad4min",
   "plugins": {
     "updater": {
