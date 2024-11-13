@@ -5,7 +5,7 @@ use crate::{config::data_path, get_main_window};
 
 use remove_dir_all::*;
 
-use tauri::api::path::home_dir;
+use dirs::home_dir;
 use tauri::Size;
 use tauri::{LogicalSize, Manager};
 use tauri_plugin_positioner::{Position, WindowExt};
@@ -81,7 +81,7 @@ pub fn get_app_agent_list() -> Option<String> {
 #[tauri::command]
 #[cfg(feature = "custom-protocol")]
 pub fn open_tray_message(app_handle: tauri::AppHandle) {
-    match app_handle.get_window("TrayMessage") {
+    match app_handle.get_webview_window("TrayMessage") {
         Some(tray_window) => {
             if let Ok(true) = tray_window.is_visible() {
                 let _ = tray_window.hide();

@@ -7,7 +7,8 @@ use std::fs::File;
 use std::io::prelude::*;
 use sysinfo::Process;
 use sysinfo::{System, SystemExt};
-use tauri::{AppHandle, Manager, WindowBuilder, WindowEvent, WindowUrl, Wry};
+use tauri::Listener;
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent, Wry};
 use tauri_plugin_positioner::Position;
 use tauri_plugin_positioner::WindowExt;
 
@@ -33,7 +34,7 @@ pub fn _has_processes_running(name: &str) -> usize {
 pub fn create_main_window(app: &AppHandle<Wry>) {
     let url = app_url();
 
-    let new_ad4m_window = WindowBuilder::new(app, "AD4M", WindowUrl::App(url.into()))
+    let new_ad4m_window = WebviewWindowBuilder::new(app, "AD4M", WebviewUrl::App(url.into()))
         .center()
         .focused(true)
         .inner_size(1000.0, 700.0)
@@ -41,7 +42,7 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
 
     let _ = new_ad4m_window.build();
 
-    let tray_window = app.get_window("AD4M").unwrap();
+    let tray_window = app.get_webview_window("AD4M").unwrap();
     let _ = tray_window.set_decorations(true);
     let _ = tray_window.set_always_on_top(true);
     //let _ = tray_window.move_window(Position::TrayCenter);
@@ -79,16 +80,17 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
 pub fn create_tray_message_windows(app: &AppHandle<Wry>) {
     let url = app_tray_message_url();
 
-    let new_ad4m_window = WindowBuilder::new(app, "TrayMessage", WindowUrl::App(url.into()))
-        .center()
-        .focused(true)
-        .inner_size(360.0, 120.0)
-        .title("TrayMessage")
-        .visible(true);
+    let new_ad4m_window =
+        WebviewWindowBuilder::new(app, "TrayMessage", WebviewUrl::App(url.into()))
+            .center()
+            .focused(true)
+            .inner_size(360.0, 120.0)
+            .title("TrayMessage")
+            .visible(true);
 
     let _ = new_ad4m_window.build();
 
-    let tray_window = app.get_window("TrayMessage").unwrap();
+    let tray_window = app.get_webview_window("TrayMessage").unwrap();
     let _ = tray_window.move_window(Position::TopRight);
     let _ = tray_window.set_decorations(false);
     let _ = tray_window.set_always_on_top(true);

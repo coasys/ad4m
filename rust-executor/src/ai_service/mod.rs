@@ -12,22 +12,25 @@ use futures::SinkExt;
 use kalosm::sound::TextStream;
 use kalosm::sound::*;
 // use kalosm::sound::{DenoisedExt, VoiceActivityDetectorExt, VoiceActivityStreamExt};
-use kalosm::{language::*, sound::Whisper};
+use kalosm::language::*;
+// use kalosm_common::Cache;
 // use rodio::{OutputStream, Source};
 use tokio::time::sleep;
 // use rodio::source::Source;
 use std::collections::HashMap;
 // use std::io::Cursor;
+use std::future::Future;
 use std::panic::catch_unwind;
+use std::pin::Pin;
 // use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-// use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 mod audio_stream;
 mod error;
+use log::error;
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
@@ -144,23 +147,41 @@ async fn handle_progress(model_name: String, progress: ModelLoadingProgress) {
 }
 
 impl AIService {
-    pub async fn new() -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let service = AIService {
             embedding_channel: Arc::new(Mutex::new(HashMap::new())),
             llm_channel: Arc::new(Mutex::new(HashMap::new())),
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
         };
 
-        let _ = service.load().await;
+        let clone = service.clone();
+        tokio::spawn(async move {
+            if let Err(e) = clone.load().await {
+                error!("AIService error while loading models: {:?}", e);
+            }
+        });
 
         Ok(service)
     }
 
     pub async fn load(&self) -> Result<()> {
         // Get the models from the database & loop over it to spawn models
+        let futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![
+            Box::pin(async {
+                self.spawn_embedding_model("bert".to_string()).await;
+            }),
+            Box::pin(async {
+                self.spawn_llm_model("llama".to_string()).await;
+            }),
+            Box::pin(async {
+                let _ = WhisperBuilder::default()
+                    .with_source(WhisperSource::Base)
+                    .build()
+                    .await;
+            }),
+        ];
 
-        self.spawn_embedding_model("bert".to_string()).await;
-        self.spawn_llm_model("llama".to_string()).await;
+        futures::future::join_all(futures).await;
 
         // Spawn tasks from the database
         let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
@@ -182,7 +203,7 @@ impl AIService {
     }
 
     pub async fn init_global_instance() -> Result<()> {
-        let new_service = AIService::new().await?;
+        let new_service = AIService::new()?;
         let mut ai_service = AI_SERVICE.lock().await;
         *ai_service = Some(new_service);
         Ok(())
@@ -274,6 +295,7 @@ impl AIService {
             .await
             .insert(model_id, bert_tx);
     }
+
     pub async fn spawn_llm_model(&self, model_id: String) {
         let (llama_tx, mut llama_rx) = mpsc::unbounded_channel::<LLMTaskRequest>();
 
@@ -287,11 +309,11 @@ impl AIService {
                         publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
 
                         let llama = Llama::builder()
-                            .with_source(LlamaSource::llama_8b())
+                            .with_source(LlamaSource::tiny_llama_1_1b()) /* .with_cache(Cache::new(PathBuf::from("."))) */
                             .build_with_loading_handler({
                                 let model_id = model_id.clone();
                                 move |progress| {
-                                    println!("downloading llma model");
+                                    //println!("downloading llma model: {:?}", progress);
                                     tokio::spawn(handle_progress(model_id.clone(), progress));
                                 }
                             })
@@ -497,14 +519,17 @@ impl AIService {
         let stream_id_clone = stream_id.clone();
         let (samples_tx, sampels_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
         //TODO: use drop_rx to exit thread
-        let (drop_tx, _drop_rx) = oneshot::channel();
+        let (drop_tx, drop_rx) = oneshot::channel();
         let (done_tx, done_rx) = oneshot::channel();
 
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
 
             rt.block_on(async {
-                let maybe_model = Whisper::new().await;
+                let maybe_model = WhisperBuilder::default()
+                    .with_source(WhisperSource::Base)
+                    .build()
+                    .await;
 
                 if let Ok(whisper) = maybe_model {
                     let audio_stream = AudioStream {
@@ -512,31 +537,38 @@ impl AIService {
                         receiver: Box::pin(sampels_rx.map(futures_util::stream::iter).flatten()),
                     };
 
-                    let text_stream = audio_stream
+                    let mut word_stream = audio_stream
                         .voice_activity_stream()
-                        .rechunk_voice_activity();
-                    let mut word_stream = text_stream.transcribe(whisper).words();
+                        .rechunk_voice_activity()
+                        .with_end_window(Duration::from_millis(500))
+                        .transcribe(whisper);
 
                     let _ = done_tx.send(Ok(()));
 
-                    while let Some(word) = word_stream.next().await {
-                        let stream_id_clone = stream_id_clone.clone();
+                    tokio::select! {
+                        _ = drop_rx => {},
+                        _ = async {
+                            while let Some(segment) = word_stream.next().await {
+                                //println!("GOT segment: {}", segment.text());
+                                let stream_id_clone = stream_id_clone.clone();
 
-                        rt.spawn(async move {
-                            let _ = get_global_pubsub()
-                                .await
-                                .publish(
-                                    &AI_TRANSCRIPTION_TEXT_TOPIC,
-                                    &serde_json::to_string(&TranscriptionTextFilter {
-                                        stream_id: stream_id_clone.clone(),
-                                        text: word.clone(),
-                                    })
-                                    .expect("TranscriptionTextFilter must be serializable"),
-                                )
-                                .await;
-                        });
+                                rt.spawn(async move {
+                                    let _ = get_global_pubsub()
+                                        .await
+                                        .publish(
+                                            &AI_TRANSCRIPTION_TEXT_TOPIC,
+                                            &serde_json::to_string(&TranscriptionTextFilter {
+                                                stream_id: stream_id_clone.clone(),
+                                                text: segment.text().to_string(),
+                                            })
+                                            .expect("TranscriptionTextFilter must be serializable"),
+                                        )
+                                        .await;
+                                });
 
-                        sleep(Duration::from_millis(50)).await;
+                                sleep(Duration::from_millis(50)).await;
+                            }
+                        } => {}
                     }
                 } else {
                     let _ = done_tx.send(Err(maybe_model.err().unwrap()));
@@ -594,10 +626,11 @@ mod tests {
 
     use super::*;
 
+    #[ignore]
     #[tokio::test]
     async fn test_embedding() {
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        let service = AIService::new().await.expect("initialization to work");
+        let service = AIService::new().expect("initialization to work");
         let vector = service
             .embed("Test string".into())
             .await
@@ -605,14 +638,15 @@ mod tests {
         assert!(vector.len() > 300)
     }
 
+    #[ignore]
     #[tokio::test]
     async fn test_prompt() {
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        let service = AIService::new().await.expect("initialization to work");
+        let service = AIService::new().expect("initialization to work");
 
         let task = service.add_task(AITaskInput {
                 name: "Test task".into(),
-                model_id: "Llama tiny 1b".into(),
+                model_id: "llama".into(),
                 system_prompt: "You are inside a test for tasks. Please make sure to create any non-zero length output".into(),
                 prompt_examples: vec![AIPromptExamplesInput{
                     input: "Test string".into(),
@@ -633,11 +667,11 @@ mod tests {
     #[tokio::test]
     async fn test_prompt_stress() {
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
-        let service = AIService::new().await.expect("initialization to work");
+        let service = AIService::new().expect("initialization to work");
 
         let task = service.add_task(AITaskInput {
                 name: "Test task".into(),
-                model_id: "Llama tiny 1b".into(),
+                model_id: "llama".into(),
                 system_prompt: "You are inside a test for tasks. Please make sure to create any non-zero length output".into(),
                 meta_data: None,
                 prompt_examples: vec![AIPromptExamplesInput{

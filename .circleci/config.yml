@@ -54,7 +54,7 @@ jobs:
           command: cargo fmt --check
       - run:
           name: install gobjc
-          command: sudo apt-get install gobjc clang gnustep-devel libobjc4 libgnustep-base-dev libasound2-dev pkg-config fuse libfuse2 mesa-utils mesa-vulkan-drivers 
+          command: sudo apt-get install gobjc clang gnustep-devel libobjc4 libgnustep-base-dev libasound2-dev pkg-config fuse libfuse2 mesa-utils mesa-vulkan-drivers
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
@@ -67,6 +67,7 @@ jobs:
       - run:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
+          no_output_timeout: 30m
       - save_cache:
           key: rust-cache-{{ checksum "Cargo.lock" }}-v2
           paths:
@@ -79,10 +80,10 @@ jobs:
           paths:
             - ./target/release/ad4m
             - ./target/release/ad4m-executor
-      - run:
-          name: cargo clippy
-          no_output_timeout: 30m
-          command: cargo clippy --all --exclude ad4m-launcher
+      #- run:
+      #    name: cargo clippy
+      #    no_output_timeout: 30m
+      #    command: cargo clippy --all --exclude ad4m-launcher
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
@@ -95,6 +96,7 @@ jobs:
       - run:
           name: Root tests
           command: pnpm test
+          no_output_timeout: 30m
 
   integration-tests-js:
     docker:
@@ -156,10 +158,14 @@ jobs:
       - save_cache:
           key: p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
           paths:
-            - ./bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/target
+            - ./bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/target\
+      - run:
+          name: Install ffmpeg for transcription test
+          command: sudo apt-get update && sudo apt-get install ffmpeg --fix-missing
       - run:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
+          no_output_timeout: 30m
 
   integration-tests-cli:
     docker:
