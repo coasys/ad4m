@@ -158,7 +158,10 @@ jobs:
       - save_cache:
           key: p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
           paths:
-            - ./bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/target
+            - ./bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/target\
+      - run:
+          name: Install ffmpeg for transcription test
+          command: sudo apt-get update && sudo apt-get install ffmpeg --fix-missing
       - run:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
