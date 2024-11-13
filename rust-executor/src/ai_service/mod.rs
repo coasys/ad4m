@@ -12,7 +12,7 @@ use futures::SinkExt;
 use kalosm::sound::TextStream;
 use kalosm::sound::*;
 // use kalosm::sound::{DenoisedExt, VoiceActivityDetectorExt, VoiceActivityStreamExt};
-use kalosm::{language::*, sound::Whisper};
+use kalosm::{language::*};
 // use kalosm_common::Cache;
 // use rodio::{OutputStream, Source};
 use tokio::time::sleep;
@@ -174,7 +174,10 @@ impl AIService {
                 self.spawn_llm_model("llama".to_string()).await;
             }),
             Box::pin(async {
-                let _ = Whisper::new().await;
+                let _ = WhisperBuilder::default()
+                    .with_source(WhisperSource::Base)
+                    .build()
+                    .await;
             }),
         ];
 
@@ -523,7 +526,10 @@ impl AIService {
             let rt = tokio::runtime::Runtime::new().unwrap();
 
             rt.block_on(async {
-                let maybe_model = Whisper::new().await;
+                let maybe_model = WhisperBuilder::default()
+                    .with_source(WhisperSource::Base)
+                    .build()
+                    .await;
 
                 if let Ok(whisper) = maybe_model {
                     let audio_stream = AudioStream {
