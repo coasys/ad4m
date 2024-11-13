@@ -58,7 +58,7 @@ jobs:
       uses: actions-rs/toolchain@v1
       with:
         override: true
-        toolchain: 1.77.0
+        toolchain: 1.81.0
     - run: rustup target add wasm32-unknown-unknown
 
     - name: Install Rust targets for macOS
@@ -79,7 +79,7 @@ jobs:
       if: matrix.platform == 'GH-hosted-ubuntu'
       run: |
         sudo apt-get update
-        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake fuse libfuse2 mesa-utils mesa-vulkan-drivers 
+        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake fuse libfuse2 mesa-utils mesa-vulkan-drivers libsoup-3.0-dev 
 
     - name: install dependencies (macos only)
       if: matrix.platform == 'macos-latest'
