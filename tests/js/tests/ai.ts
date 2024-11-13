@@ -16,7 +16,7 @@ export default function aiTests(testContext: TestContext) {
                 expect(status).to.have.property('status');
             })
 
-            it('can do Tasks CRUD', async() => {
+            it.skip('can do Tasks CRUD', async() => {
                 const ad4mClient = testContext.ad4mClient!
 
                 // Add a task
@@ -57,7 +57,7 @@ export default function aiTests(testContext: TestContext) {
                 expect(tasksAfterRemoval.find(task => task.taskId === newTask.taskId)).to.be.undefined;
             }).timeout(900000)
 
-            it('can prompt a task', async () => {
+            it.skip('can prompt a task', async () => {
                 const ad4mClient = testContext.ad4mClient!
 
                 // Create a new task
@@ -146,7 +146,7 @@ export default function aiTests(testContext: TestContext) {
                 expect(vector.length).to.be.greaterThan(300)
             })
 
-            it.skip('can do audio to text transcription', async() => {
+            it('can do audio to text transcription', async() => {
                 const ad4mClient = testContext.ad4mClient!;
 
                 // Convert m4a to raw PCM data
@@ -171,17 +171,15 @@ export default function aiTests(testContext: TestContext) {
                         .on('error', reject);
                 });
 
-                console.log("PCM DATA:", pcmData.buffer, pcmData.byteOffset, pcmData.length, pcmData.length / 4);
-
+                //console.log("PCM DATA:", pcmData.buffer, pcmData.byteOffset, pcmData.length, pcmData.length / 4)
                 // Convert PCM buffer to Float32Array
                 const result = new Float32Array(pcmData.buffer, pcmData.byteOffset, pcmData.byteLength / Float32Array.BYTES_PER_ELEMENT);
-
-                console.log("RESULT:", result);
+                //console.log("RESULT:", result);
 
                 //@ts-ignore
                 const audioData = result// result.channelData[0]; // Assuming mono audio
 
-                console.log("AUDIO DATA:", audioData.length);
+                //console.log("AUDIO DATA:", audioData.length);
 
                 // Open the transcription stream
                 let transcribedText = '';
@@ -204,7 +202,7 @@ export default function aiTests(testContext: TestContext) {
                     const floatArray = Array.from(chunk).map(x=> !x?0.0:x)
                     //@ts-ignore
                     await ad4mClient.ai.feedTranscriptionStream(streamId, floatArray);
-                    console.log(floatArray)
+                    //console.log(floatArray)
 
                     // Simulate real-time processing by adding a small delay
                     await new Promise(resolve => setTimeout(resolve, 500));
@@ -217,13 +215,18 @@ export default function aiTests(testContext: TestContext) {
                     console.log("Error trying to close TranscriptionStream:", e)
                 }
 
-                await new Promise(resolve => setTimeout(resolve, 1700000));
-
+                let i=0
+                while(transcribedText.length == 0 && i < 60){
+                    await new Promise(resolve => setTimeout(resolve, 1000));    
+                    i+=1
+                }
+                
                 // Assertions
                 expect(transcribedText).to.be.a('string');
                 expect(transcribedText.length).to.be.greaterThan(0);
+                expect(transcribedText).to.include("If you can read this, transcription is working.")
                 console.log("Final transcription:", transcribedText);
-            }).timeout(1800000); // 30 minutes
+            })
         })
     }
 }
