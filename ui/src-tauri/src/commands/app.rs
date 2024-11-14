@@ -12,7 +12,8 @@ use tauri_plugin_positioner::{Position, WindowExt};
 
 #[tauri::command]
 pub fn close_application(app_handle: tauri::AppHandle) {
-    app_handle.exit(0)
+    app_handle.exit(0);
+    std::process::exit(0);
 }
 
 #[tauri::command]

@@ -55,6 +55,7 @@ pub fn build_system_tray(app: &AppHandle) -> Result<()> {
             "quit" => {
                 let _ = remove_file(executor_port_path());
                 app.exit(0);
+                std::process::exit(0);
             }
             _ => log::error!("Event is not defined."),
         })
