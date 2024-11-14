@@ -293,6 +293,16 @@ pub fn run() {
 
             Ok(())
         })
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                if let Err(e) = window.hide() {
+                    println!("Error trying to hide window: {:?}", e);
+                } else {
+                    api.prevent_close();
+                }
+            }
+            _ => {}
+        })
         .build(tauri::generate_context!());
 
     match builder_result {
