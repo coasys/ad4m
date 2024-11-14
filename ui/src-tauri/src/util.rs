@@ -94,6 +94,12 @@ pub fn create_tray_message_windows(app: &AppHandle<Wry>) {
     let _ = tray_window.move_window(Position::TopRight);
     let _ = tray_window.set_decorations(false);
     let _ = tray_window.set_always_on_top(true);
+    // Hide window after 5 seconds
+    let window_clone = tray_window.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        let _ = window_clone.hide();
+    });
 }
 
 pub fn save_executor_port(port: u16) {
