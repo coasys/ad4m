@@ -8,7 +8,7 @@ use std::io::prelude::*;
 use sysinfo::Process;
 use sysinfo::{System, SystemExt};
 use tauri::Listener;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent, Wry};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
 use tauri_plugin_positioner::Position;
 use tauri_plugin_positioner::WindowExt;
 
@@ -55,25 +55,6 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
         );
 
         open_logs_folder();
-    });
-
-    let window_clone = tray_window.clone();
-    tray_window.on_window_event(move |event| {
-        //println!("window event: {:?}", event);
-        if let WindowEvent::Focused(f) = event {
-            //println!("focused: {}", f);
-            if let Some(monitor) = window_clone.current_monitor().unwrap() {
-                let final_width = window_clone
-                    .inner_size()
-                    .unwrap()
-                    .to_logical::<f64>(monitor.scale_factor())
-                    .width;
-
-                if !f && final_width == 400.0 {
-                    let _ = window_clone.hide();
-                }
-            }
-        }
     });
 }
 
