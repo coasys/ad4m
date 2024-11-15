@@ -25,6 +25,13 @@ pub fn close_main_window(app_handle: tauri::AppHandle) {
 }
 
 #[tauri::command]
+pub fn show_main_window(app_handle: tauri::AppHandle) {
+    let window = get_main_window(&app_handle);
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+#[tauri::command]
 pub fn open_tray(app_handle: tauri::AppHandle) {
     let window = get_main_window(&app_handle);
     if let Ok(true) = window.is_visible() {
