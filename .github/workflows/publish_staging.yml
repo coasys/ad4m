@@ -216,7 +216,7 @@ jobs:
         asset_content_type: application/octet-stream
 
     - name: Upload Release AD4M CLI client Linux Binary
-      id: upload-release-linux-ad4m-cli-binary
+      id: upload-release-linux-ad4m-cli-client-binary
       if: matrix.platform == 'GH-hosted-ubuntu'
       uses: actions/upload-release-asset@v1
       env:
@@ -228,7 +228,7 @@ jobs:
         asset_content_type: application/octet-stream
 
     - name: Upload Release AD4M CLI executor Linux Binary
-      id: upload-release-linux-ad4m-cli-binary
+      id: upload-release-linux-ad4m-cli-executor-binary
       if: matrix.platform == 'GH-hosted-ubuntu'
       uses: actions/upload-release-asset@v1
       env:
@@ -276,7 +276,7 @@ jobs:
         asset_content_type: application/octet-stream
 
     - name: Upload Release AD4M CLI client macOS Binary
-      id: upload-release-macos-ad4m-cli-binary
+      id: upload-release-macos-ad4m-cli-client-binary
       if: matrix.platform == 'macos-latest'
       uses: actions/upload-release-asset@v1
       env:
@@ -288,7 +288,7 @@ jobs:
         asset_content_type: application/octet-stream
 
     - name: Upload Release AD4M CLI executor macOS Binary
-      id: upload-release-macos-ad4m-cli-binary
+      id: upload-release-macos-ad4m-cli-executor-binary
       if: matrix.platform == 'macos-latest'
       uses: actions/upload-release-asset@v1
       env:
