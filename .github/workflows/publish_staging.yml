@@ -133,19 +133,19 @@ jobs:
     - name: Install core dependencies
       run: cd ./core && pnpm install --no-cache
 
-    - name: Decrypt and install certificates
-      if: matrix.platform == 'macos-latest'
-      env:
-        APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-        APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      run: |
-        echo $APPLE_CERTIFICATE | base64 --decode > certificate.p12
-        security create-keychain -p "actions" build.keychain
-        security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-        security list-keychain -d user -s build.keychain
-        security unlock-keychain -p "actions" build.keychain
-        mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "actions" build.keychain
+    #- name: Decrypt and install certificates
+    #  if: matrix.platform == 'macos-latest'
+    #  env:
+    #    APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+    #    APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+    #  run: |
+    #    echo $APPLE_CERTIFICATE | base64 --decode > certificate.p12
+    #    security create-keychain -p "actions" build.keychain
+    #    security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+    #    security list-keychain -d user -s build.keychain
+    #    security unlock-keychain -p "actions" build.keychain
+    #    mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+    #    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "actions" build.keychain
 
     - name: Build AD4M-CLI & build Launcher binary (macos/linux-latest)
       if: matrix.platform != 'windows-latest'
