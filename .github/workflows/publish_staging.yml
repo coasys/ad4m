@@ -215,7 +215,7 @@ jobs:
         asset_name: ADAM-Launcher_${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz.sig
         asset_content_type: application/octet-stream
 
-    - name: Upload Release AD4M CLI Linux Binary
+    - name: Upload Release AD4M CLI client Linux Binary
       id: upload-release-linux-ad4m-cli-binary
       if: matrix.platform == 'GH-hosted-ubuntu'
       uses: actions/upload-release-asset@v1
@@ -224,7 +224,19 @@ jobs:
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
         asset_path: /home/runner/work/ad4m/ad4m/target/release/ad4m
-        asset_name: ad4m-linux-${{ steps.extract_version.outputs.version }}-x64
+        asset_name: ad4m-cli-client-linux-${{ steps.extract_version.outputs.version }}-x64
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI executor Linux Binary
+      id: upload-release-linux-ad4m-cli-binary
+      if: matrix.platform == 'GH-hosted-ubuntu'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/ad4m-executor
+        asset_name: ad4m-cli-executor-linux-${{ steps.extract_version.outputs.version }}-x64
         asset_content_type: application/octet-stream
 
     - name: Upload Release Macos Asset
@@ -263,7 +275,7 @@ jobs:
         asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_aarch64.app.tar.gz.sig
         asset_content_type: application/octet-stream
 
-    - name: Upload Release AD4M CLI Macos Binary
+    - name: Upload Release AD4M CLI client macOS Binary
       id: upload-release-macos-ad4m-cli-binary
       if: matrix.platform == 'macos-latest'
       uses: actions/upload-release-asset@v1
@@ -272,7 +284,19 @@ jobs:
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
         asset_path: /Users/runner/work/ad4m/ad4m/target/release/ad4m
-        asset_name: ad4m-macos-${{ steps.extract_version.outputs.version }}-x64
+        asset_name: ad4m-cli-client-macos-${{ steps.extract_version.outputs.version }}-aarch64
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI executor macOS Binary
+      id: upload-release-macos-ad4m-cli-binary
+      if: matrix.platform == 'macos-latest'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: /Users/runner/work/ad4m/ad4m/target/release/ad4m-executor
+        asset_name: ad4m-cli-executor-macos-${{ steps.extract_version.outputs.version }}-aarch64
         asset_content_type: application/octet-stream
 
     - name: Upload Release MSI Asset
