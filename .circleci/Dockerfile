@@ -5,7 +5,7 @@ USER root
 
 # Install system dependencies or any other tools you need
 RUN apt-get update && sudo apt-get install -y \
-    libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake
+    libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake gobjc clang gnustep-devel libobjc4 libgnustep-base-dev libasound2-dev pkg-config fuse libfuse2 mesa-utils mesa-vulkan-drivers
 
 # Install Go
 ENV GO_VERSION 1.22.0
@@ -29,8 +29,8 @@ RUN echo 'export PATH="/usr/local/bin:$PATH"' >> $HOME/.bashrc
 # Install Rust
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 RUN echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> /home/circleci/.bashrc
-RUN ~/.cargo/bin/rustup install 1.80
-RUN ~/.cargo/bin/rustup default 1.80
+RUN ~/.cargo/bin/rustup install 1.81
+RUN ~/.cargo/bin/rustup default 1.81
 RUN ~/.cargo/bin/rustup target add wasm32-unknown-unknown
 
 # Install Deno
