@@ -40,8 +40,9 @@ mod util;
 
 use crate::app_state::LauncherState;
 use crate::commands::app::{
-    add_app_agent_state, clear_state, close_application, close_main_window, show_main_window, get_app_agent_list,
+    add_app_agent_state, clear_state, close_application, close_main_window, get_app_agent_list,
     open_dapp, open_tray, open_tray_message, remove_app_agent_state, set_selected_agent,
+    show_main_window,
 };
 use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};

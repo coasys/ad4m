@@ -5,8 +5,7 @@ use std::fs::remove_file;
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
-    tray::{TrayIconBuilder, MouseButtonState, MouseButton, TrayIconEvent},
-    
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, LogicalSize, Manager, Result, Size,
 };
 
@@ -59,18 +58,15 @@ pub fn build_system_tray(app: &AppHandle) -> Result<()> {
             }
             _ => log::error!("Event is not defined."),
         })
-        .menu_on_left_click(false) 
-        .on_tray_icon_event(|tray, event| {
-            match event {
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } => toggle_main_window(tray.app_handle()),
-                _ => {}
-            }
+        .menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } => toggle_main_window(tray.app_handle()),
+            _ => {}
         })
-
         .build(app)?;
 
     //} else {
