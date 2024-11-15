@@ -30,11 +30,6 @@
         "url": "/splashscreen"
       }
     ],
-    "trayIcon": {
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": true,
-      "menuOnLeftClick": false
-    },
     "withGlobalTauri": true
   },
   "build": {

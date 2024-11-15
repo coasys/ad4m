@@ -148,9 +148,7 @@ export function Ad4minProvider({ children }: any) {
             }
           });
           console.log(exception);
-
-          appWindow.setFocus();
-
+          invoke("show_main_window");
           return null;
         });
 
