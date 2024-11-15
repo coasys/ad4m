@@ -1,12 +1,12 @@
 use crate::config::executor_port_path;
 use crate::create_main_window;
 use crate::Payload;
-use log::info;
 use std::fs::remove_file;
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
-    tray::TrayIconBuilder,
+    tray::{TrayIconBuilder, MouseButtonState, MouseButton, TrayIconEvent},
+    
     AppHandle, Emitter, LogicalSize, Manager, Result, Size,
 };
 
@@ -59,6 +59,18 @@ pub fn build_system_tray(app: &AppHandle) -> Result<()> {
             }
             _ => log::error!("Event is not defined."),
         })
+        .menu_on_left_click(false) 
+        .on_tray_icon_event(|tray, event| {
+            match event {
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } => toggle_main_window(tray.app_handle()),
+                _ => {}
+            }
+        })
+
         .build(app)?;
 
     //} else {
