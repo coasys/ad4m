@@ -149,7 +149,7 @@ jobs:
 
     - name: Build AD4M-CLI & build Launcher binary (macos/linux-latest)
       if: matrix.platform != 'windows-latest'
-      env:
+      #env:
         #TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
         #TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         #APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -162,7 +162,7 @@ jobs:
 
     - name:  Build AD4M-CLI & build Launcher binary (windows-latest)
       if: matrix.platform == 'windows-latest'
-      env:
+      #env:
         #TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
         #TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
       run: pnpm run package-ad4m
