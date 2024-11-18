@@ -8,7 +8,7 @@ orbs:
 jobs:
   build-and-test:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:1278f700839a43daa0edd31b605c4a73e7f5c54c0d8c7dfbc26b3aa4e2e4ef66
+      - image: coasys/ad4m-ci-linux:latest@sha256:2dd8206db5ee73ae58f48e2c2db595320ab88b94f5e0c0ddc99698191a03114f
     resource_class: xlarge
     steps:
       - checkout
@@ -64,6 +64,7 @@ jobs:
       - run:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
+          no_output_timeout: 30m
       - save_cache:
           key: rust-cache-{{ checksum "Cargo.lock" }}-v2
           paths:
@@ -78,6 +79,7 @@ jobs:
             - ./target/release/ad4m-executor
       - run:
           name: cargo clippy
+          no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
       - run:
           name: Remove pnpm patches
@@ -91,6 +93,7 @@ jobs:
       - run:
           name: Root tests
           command: pnpm test
+          no_output_timeout: 30m
 
   integration-tests-js:
     docker:
@@ -152,10 +155,14 @@ jobs:
       - save_cache:
           key: p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
           paths:
-            - ./bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/target
+            - ./bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/target\
+      - run:
+          name: Install ffmpeg for transcription test
+          command: sudo apt-get update && sudo apt-get install ffmpeg --fix-missing
       - run:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
+          no_output_timeout: 30m
 
   integration-tests-cli:
     docker:

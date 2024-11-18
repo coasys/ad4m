@@ -1,11 +1,11 @@
+import { invoke } from "@tauri-apps/api/core";
+import { relaunch } from "@tauri-apps/plugin-process";
+//import { checkUpdate, installUpdate } from "@tauri-apps/plugin-updater";
 import { useCallback, useContext, useEffect, useState } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { AgentContext } from "../context/AgentContext";
-import { invoke } from "@tauri-apps/api";
 import { buildAd4mClient } from "../util";
 import { fetchProfile } from "./Settings";
-import { checkUpdate, installUpdate } from '@tauri-apps/api/updater'
-import { relaunch } from '@tauri-apps/api/process'
 
 function Profile() {
   const {
@@ -58,16 +58,17 @@ function Profile() {
     setPassword(value);
   };
 
+  /*
   const onCheckUpdate = async () => {
     try {
-      const { shouldUpdate, manifest } = await checkUpdate()
+      const { shouldUpdate, manifest } = await checkUpdate();
       if (shouldUpdate) {
-        setInstallUpdateModelOpen(true)
+        setInstallUpdateModelOpen(true);
       }
     } catch (error) {
-      console.log(error)
+      console.log(error);
     }
-  }
+  };
 
   const onInstallUpdate = async () => {
     try {
@@ -75,17 +76,17 @@ function Profile() {
 
       await relaunch();
     } catch (error) {
-      console.log(error)
+      console.log(error);
     }
-  }
-
+  };
+*/
   const onOpenDApp = async () => {
     try {
-      await invoke("open_dapp")
+      await invoke("open_dapp");
     } catch (error) {
-      console.log(error)
+      console.log(error);
     }
-  }
+  };
 
   return (
     <div>
@@ -143,35 +144,19 @@ function Profile() {
               onKeyDown={onKeyDown}
               autovalidate
             >
-              <j-button
-                onClick={() => setShowPassword(!showPassword)}
-                slot="end"
-                variant="link"
-                square
-              >
-                <j-icon
-                  name={showPassword ? "eye-slash" : "eye"}
-                  size="sm"
-                ></j-icon>
+              <j-button onClick={() => setShowPassword(!showPassword)} slot="end" variant="link" square>
+                <j-icon name={showPassword ? "eye-slash" : "eye"} size="sm"></j-icon>
               </j-button>
             </j-input>
             <j-box p="200"></j-box>
-            <j-button
-              variant="primary"
-              onClick={() => lockAgent(password)}
-              loading={loading}
-            >
+            <j-button variant="primary" onClick={() => lockAgent(password)} loading={loading}>
               Lock agent
             </j-button>
           </j-box>
         </j-modal>
       )}
       {showProfileInfo && (
-        <j-modal
-          size="fullscreen"
-          open={showProfileInfo}
-          onToggle={(e: any) => setShowProfileInfo(e.target.open)}
-        >
+        <j-modal size="fullscreen" open={showProfileInfo} onToggle={(e: any) => setShowProfileInfo(e.target.open)}>
           <j-box px="400" py="600">
             <j-box pb="900">
               <j-text nomargin color="black" size="600" weight="600">
@@ -194,7 +179,9 @@ function Profile() {
               <j-text>{`${profile.firstName} ${profile.lastName}`}</j-text>
             </j-box>
 
-            <j-button variant="secondary" onClick={() => setShowProfileInfo(false)}>Close</j-button>
+            <j-button variant="secondary" onClick={() => setShowProfileInfo(false)}>
+              Close
+            </j-button>
           </j-box>
         </j-modal>
       )}
@@ -209,16 +196,10 @@ function Profile() {
               <j-text nomargin size="600" color="black" weight="600">
                 Install Update
               </j-text>
-              <j-text>
-                Warning: App will restart once the update is installed.
-              </j-text>
+              <j-text>Warning: App will restart once the update is installed.</j-text>
             </j-box>
             <j-box p="200"></j-box>
-            <j-button
-              variant="primary"
-              onClick={() => onInstallUpdate()}
-              loading={loading}
-            >
+            <j-button variant="primary" onClick={() => onInstallUpdate()} loading={loading}>
               Install
             </j-button>
           </j-box>
