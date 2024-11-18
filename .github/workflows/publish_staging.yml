@@ -147,8 +147,11 @@ jobs:
     #    mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
     #    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "actions" build.keychain
 
-    - name: Build AD4M-CLI & build Launcher binary (macos/linux-latest)
-      if: matrix.platform != 'windows-latest'
+    - name: Build AD4M-CLI
+      run: cd cli && cargo build --release
+      
+    - name: Build AD4M-CLI & build Launcher binary #(macos/linux-latest)
+      #if: matrix.platform != 'windows-latest'
       #env:
         #TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
         #TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
@@ -160,12 +163,12 @@ jobs:
         #APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
       run: pnpm run package-ad4m
 
-    - name:  Build AD4M-CLI & build Launcher binary (windows-latest)
-      if: matrix.platform == 'windows-latest'
+    #- name:  Build AD4M-CLI & build Launcher binary (windows-latest)
+    #  if: matrix.platform == 'windows-latest'
       #env:
         #TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
         #TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
-      run: pnpm run package-ad4m
+    #  run: pnpm run package-ad4m
 
     - name: Upload Release Deb Asset
       id: upload-release-deb-asset
