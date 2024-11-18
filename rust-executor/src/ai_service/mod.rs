@@ -254,7 +254,7 @@ impl AIService {
         Ok(tasks)
     }
 
-    pub async fn spawn_embedding_model(&self, model_id: String) {
+    async fn spawn_embedding_model(&self, model_id: String) {
         let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
 
         thread::spawn({
@@ -296,7 +296,7 @@ impl AIService {
             .insert(model_id, bert_tx);
     }
 
-    pub async fn spawn_llm_model(&self, model_id: String) {
+    async fn spawn_llm_model(&self, model_id: String) {
         let (llama_tx, mut llama_rx) = mpsc::unbounded_channel::<LLMTaskRequest>();
 
         thread::spawn({
