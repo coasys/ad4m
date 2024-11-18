@@ -148,7 +148,7 @@ jobs:
     #    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "actions" build.keychain
 
     - name: Build AD4M-CLI
-      run: pnpm build
+      run: pnpm build-libs
       
     - name: Build AD4M-CLI & build Launcher binary #(macos/linux-latest)
       #if: matrix.platform != 'windows-latest'
