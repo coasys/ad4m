@@ -1,9 +1,10 @@
-import { appWindow } from "@tauri-apps/api/window";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useState } from "react";
 import { useEffect } from "react";
 
 import Logo from "./Logo";
 import { splashscreenContainer, splashscreenError, splashscreenErrorFlex } from "./styles";
+const appWindow = getCurrentWebviewWindow()
 
 export default function Splashscreen() {
   const [copied, setCopied] = useState(false);

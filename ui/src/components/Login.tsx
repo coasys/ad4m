@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api";
+import { invoke } from "@tauri-apps/api/core";
 import { useContext, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Ad4minContext } from "../context/Ad4minContext";
@@ -534,10 +534,7 @@ const Login = (props: any) => {
       )}
 
       {clearAgentModalOpen && (
-        <j-modal
-          open={clearAgentModalOpen}
-          onToggle={(e: any) => setClearAgentModalOpen(e.target.open)}
-        >
+        <j-modal open={clearAgentModalOpen} onToggle={(e: any) => setClearAgentModalOpen(e.target.open)}>
           <j-box px="400" py="600">
             <j-box pb="500">
               <j-text nomargin size="600" color="black" weight="600">

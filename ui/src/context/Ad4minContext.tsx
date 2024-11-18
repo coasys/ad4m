@@ -1,5 +1,5 @@
 import { Ad4mClient, ExceptionType } from "@coasys/ad4m";
-import { sendNotification } from "@tauri-apps/api/notification";
+import { sendNotification } from "@tauri-apps/plugin-notification";
 import { ExceptionInfo, Notification as NotificationType } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
 import { createContext, useCallback, useEffect, useState } from "react";
 import {
@@ -8,8 +8,9 @@ import {
   setForVersion,
   removeForVersion,
 } from "../util";
-import { appWindow } from "@tauri-apps/api/window";
-import { invoke } from "@tauri-apps/api/tauri";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { invoke } from "@tauri-apps/api/core";
+const appWindow = getCurrentWebviewWindow()
 
 type State = {
   url: string;
@@ -147,9 +148,7 @@ export function Ad4minProvider({ children }: any) {
             }
           });
           console.log(exception);
-
-          appWindow.setFocus();
-
+          invoke("show_main_window");
           return null;
         });
 

@@ -24,6 +24,7 @@ import NeighbourhoodResolver from "./neighbourhood/NeighbourhoodResolver";
 import PerspectiveResolver from "./perspectives/PerspectiveResolver";
 import RuntimeResolver from "./runtime/RuntimeResolver";
 import ExpressionResolver from "./expression/ExpressionResolver";
+import AIResolver from './ai/AIResolver'
 import { AuthInfoInput, EntanglementProofInput, CapabilityInput, ResourceInput } from "./agent/Agent";
 import { LanguageMetaInput } from "./language/LanguageMeta";
 import { InteractionCall } from "./language/Language";
@@ -39,7 +40,8 @@ async function createGqlServer(port: number) {
             LanguageResolver,
             NeighbourhoodResolver,
             PerspectiveResolver,
-            RuntimeResolver
+            RuntimeResolver,
+            AIResolver
         ]
     })
 
@@ -1184,6 +1186,80 @@ describe('Ad4mClient', () => {
                 await new Promise<void>(resolve => setTimeout(resolve, 100))
                 expect(perspectiveRemovedCallback).toBeCalledTimes(1)
             })
+        })
+    })
+    describe('.ai', () => {
+        it('embed()', async () => {
+            const vector = await ad4mClient.ai.embed("model", "test ets")
+            expect(vector[0]).toEqual(0)
+            expect(vector[1]).toEqual(10)
+            expect(vector[2]).toEqual(20)
+            expect(vector[3]).toEqual(30)
+        })
+
+        it('tasks()', async () => {
+            const tasks = await ad4mClient.ai.tasks()
+            expect(tasks.length).toBe(2)
+            expect(tasks[0].taskId).toBe("task_id")
+            expect(tasks[0].modelId).toBe("modelId")
+        })
+
+        it('addTask()', async () => {
+            const task = await ad4mClient.ai.addTask("task_name", "model_id", "system prompt", []);
+            expect(task.name).toBe("task_name")
+            expect(task.taskId).toBe("task_id")
+            expect(task.modelId).toBe("model_id")
+            expect(task.systemPrompt).toBe("system prompt")
+        });
+
+        it('removeTask()', async () => {
+            const task = await ad4mClient.ai.removeTask("task_id", "system prompt", []);
+            expect(task.taskId).toBe("task_id")
+            expect(task.modelId).toBe("model_id")
+            expect(task.systemPrompt).toBe("system prompt")
+        });
+
+        it('updateTask()', async () => {
+            const task = await ad4mClient.ai.updateTask("task_id", {
+                name: "task_name",
+                modelId: "model_id",
+                systemPrompt: "system prompt",
+                promptExamples: []
+            });
+            expect(task.name).toBe("task_name")
+            expect(task.taskId).toBe("task_id")
+            expect(task.modelId).toBe("model_id")
+            expect(task.systemPrompt).toBe("system prompt")
+        });
+
+        it('modelLoadingStatus()', async () => {
+            const status = await ad4mClient.ai.modelLoadingStatus("model_id");
+            expect(status.status).toBe("loaded")
+        });
+
+        it('prompt()', async () => {
+            const prompt = await ad4mClient.ai.prompt("task_id", "Do something");
+            console.log(prompt)
+            expect(prompt).toBe("output")
+        })
+
+        it('openTranscriptionStream(), closeTranscriptionStream(), feedTranscriptionStream() & aiTranscriptionText subscription', async () => {
+            const streamCallback = jest.fn()
+            const streamId = await ad4mClient.ai.openTranscriptionStream("model_id", streamCallback);
+            expect(streamId).toBeTruthy()
+            expect(streamId).toBe("streamId")
+            expect(streamCallback).toBeCalledTimes(0)
+
+            await new Promise<void>(resolve => setTimeout(resolve, 100))
+
+            await ad4mClient.ai.feedTranscriptionStream(streamId, [0, 10, 20, 30]);
+
+            await new Promise<void>(resolve => setTimeout(resolve, 100))
+
+            expect(streamCallback).toBeCalledTimes(1)
+
+            const stream = await ad4mClient.ai.closeTranscriptionStream(streamId)
+            expect(stream).toBeTruthy()
         })
     })
 })

@@ -13,6 +13,7 @@ mod utils;
 mod wallet;
 
 pub mod agent;
+pub mod ai_service;
 mod dapp_server;
 mod db;
 pub mod init;
@@ -30,16 +31,33 @@ use log::{error, info, warn};
 
 use js_core::JsCore;
 
+use crate::{
+    agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb,
+    languages::LanguageController, prolog_service::init_prolog_service,
+    runtime_service::RuntimeService,
+};
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
+use libc::{sigaction, sigemptyset, sighandler_t, SA_ONSTACK, SIGURG};
+use std::ptr;
 
-use crate::{
-    agent::AgentService, dapp_server::serve_dapp, db::Ad4mDb, languages::LanguageController,
-    prolog_service::init_prolog_service, runtime_service::RuntimeService,
-};
+extern "C" fn handle_sigurg(_: libc::c_int) {
+    println!("Received SIGURG signal, but ignoring it.");
+}
 
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
+    unsafe {
+        let mut action: sigaction = std::mem::zeroed();
+        action.sa_flags = SA_ONSTACK;
+        action.sa_sigaction = handle_sigurg as sighandler_t;
+        sigemptyset(&mut action.sa_mask);
+
+        if libc::sigaction(SIGURG, &action, ptr::null_mut()) != 0 {
+            eprintln!("Failed to set up SIGURG signal handler");
+        }
+    }
+
     env::set_var(
         "RUST_LOG",
         "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=debug,warp::server",
@@ -64,8 +82,15 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     )
     .expect("Failed to initialize Ad4mDb");
 
+    info!("Initializing AI service...");
+    AIService::init_global_instance()
+        .await
+        .expect("Couldn't initialize AI service");
+
+    info!("Initializing Agent service...");
     AgentService::init_global_instance(config.app_data_path.clone().unwrap());
 
+    info!("Initializing Runtime service...");
     RuntimeService::init_global_instance(
         std::path::Path::new(&config.app_data_path.clone().unwrap().to_string())
             .join("mainnet_seed.seed")

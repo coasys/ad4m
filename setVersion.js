@@ -130,11 +130,11 @@ fs.writeFileSync('ui/package.json', JSON.stringify(uiPackage, null, 2) + '\n')
 
 const uiTauri = JSON.parse(fs.readFileSync('ui/src-tauri/tauri.conf.json', 'utf8'))
 if (isPreRelease) {
-    console.log("UI Tauri version: " + uiTauri.package.version + " -> " + VERSION)
-    uiTauri.package.version = VERSION
+    console.log("UI Tauri version: " + uiTauri.version + " -> " + VERSION)
+    uiTauri.version = VERSION
 } else {
-    console.log("UI Tauri version: " + uiTauri.package.version + " -> " + RAW_VERSION)
-    uiTauri.package.version = RAW_VERSION
+    console.log("UI Tauri version: " + uiTauri.version + " -> " + RAW_VERSION)
+    uiTauri.version = RAW_VERSION
 }
 fs.writeFileSync('ui/src-tauri/tauri.conf.json', JSON.stringify(uiTauri, null, 2) + '\n')
 

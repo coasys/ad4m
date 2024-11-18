@@ -2,13 +2,14 @@
 
 use crate::{
     agent::create_signed_expression,
+    ai_service::AIService,
     neighbourhoods::{self, install_neighbourhood},
     perspectives::{
         add_perspective, get_perspective,
         perspective_instance::{PerspectiveInstance, SdnaType},
         remove_perspective, update_perspective,
     },
-    types::{DecoratedLinkExpression, Link, LinkExpression},
+    types::{AITask, DecoratedLinkExpression, Link, LinkExpression},
 };
 use crate::{
     db::Ad4mDb,
@@ -30,6 +31,7 @@ use crate::{
     holochain_service::{agent_infos_from_str, get_holochain_service},
     pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC},
 };
+use base64::prelude::*;
 
 pub struct Mutation;
 
@@ -1260,5 +1262,127 @@ impl Mutation {
         Ad4mDb::with_global_instance(|db| db.remove_model(&name)).map_err(|e| e.to_string())?;
 
         Ok(true)
+    async fn ai_add_task(
+        &self,
+        context: &RequestContext,
+        task: AITaskInput,
+    ) -> FieldResult<AITask> {
+        check_capability(&context.capabilities, &AI_CREATE_CAPABILITY)?;
+        Ok(AIService::global_instance()
+            .await?
+            .add_task(task.clone())
+            .await?)
+    }
+
+    async fn ai_remove_task(
+        &self,
+        context: &RequestContext,
+        task_id: String,
+    ) -> FieldResult<AITask> {
+        check_capability(&context.capabilities, &AI_DELETE_CAPABILITY)?;
+        if let Some(task) = AIService::get_tasks()?
+            .into_iter()
+            .find(|t| t.task_id == task_id)
+        {
+            AIService::global_instance()
+                .await?
+                .delete_task(task_id.clone())
+                .await?;
+            Ok(task)
+        } else {
+            Err(FieldError::new(
+                "Task not found",
+                graphql_value!({ "task_id": task_id }),
+            ))
+        }
+    }
+
+    async fn ai_update_task(
+        &self,
+        context: &RequestContext,
+        task_id: String,
+        task: AITaskInput,
+    ) -> FieldResult<AITask> {
+        check_capability(&context.capabilities, &AI_UPDATE_CAPABILITY)?;
+        let mut task: AITask = task.into();
+        task.task_id = task_id;
+        Ok(AIService::global_instance()
+            .await?
+            .update_task(task.clone())
+            .await?)
+    }
+
+    async fn ai_prompt(
+        &self,
+        context: &RequestContext,
+        task_id: String,
+        prompt: String,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
+        Ok(AIService::global_instance()
+            .await?
+            .prompt(task_id, prompt)
+            .await?)
+    }
+
+    async fn ai_embed(
+        &self,
+        context: &RequestContext,
+        _model_id: String,
+        text: String,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
+        let vector = AIService::global_instance().await?.embed(text).await?;
+        let json_string = serde_json::to_string(&vector)
+            .map_err(|e| FieldError::from(format!("Failed to serialize vector: {}", e)))?;
+
+        // Compress the JSON string using zlib compression
+        let compressed_bytes = deflate::deflate_bytes_zlib(json_string.as_bytes());
+
+        // Encode the compressed bytes to base64
+        let base64_encoded = BASE64_STANDARD.encode(compressed_bytes);
+
+        Ok(base64_encoded)
+    }
+
+    async fn ai_open_transcription_stream(
+        &self,
+        context: &RequestContext,
+        model_id: String,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
+        Ok(AIService::global_instance()
+            .await?
+            .open_transcription_stream(model_id)
+            .await?)
+    }
+
+    // note: f32 does not implement IsInputType, so I'm taking f64 here
+    async fn ai_feed_transcription_stream(
+        &self,
+        context: &RequestContext,
+        stream_id: String,
+        audio: Vec<f64>,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
+        let audio_f32: Vec<f32> = audio.into_iter().map(|x| x as f32).collect();
+        AIService::global_instance()
+            .await?
+            .feed_transcription_stream(&stream_id, audio_f32)
+            .await?;
+        Ok(String::from("true"))
+    }
+
+    async fn ai_close_transcription_stream(
+        &self,
+        context: &RequestContext,
+        stream_id: String,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
+        AIService::global_instance()
+            .await?
+            .close_transcription_stream(&stream_id)
+            .await?;
+        Ok(String::from("true"))
     }
 }

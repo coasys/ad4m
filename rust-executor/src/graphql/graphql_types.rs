@@ -2,8 +2,8 @@ use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::agent::signatures::verify;
 use crate::js_core::JsCoreHandle;
 use crate::types::{
-    DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link,
-    ModelType, Notification, TriggeredNotification,
+    AIPromptExamples, AITask, DecoratedExpressionProof, DecoratedLinkExpression, Expression,
+    ExpressionProof, Link, ModelType, Notification, TriggeredNotification,
 };
 use coasys_juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
@@ -601,6 +601,29 @@ pub struct ModelApiInput {
     pub api_type: String,
 }
 
+pub struct AIPromptExamplesInput {
+    pub input: String,
+    pub output: String,
+}
+
+impl From<AIPromptExamplesInput> for AIPromptExamples {
+    fn from(input: AIPromptExamplesInput) -> AIPromptExamples {
+        AIPromptExamples {
+            input: input.input,
+            output: input.output,
+        }
+    }
+}
+
+impl From<AIPromptExamples> for AIPromptExamplesInput {
+    fn from(input: AIPromptExamples) -> AIPromptExamplesInput {
+        AIPromptExamplesInput {
+            input: input.input,
+            output: input.output,
+        }
+    }
+}
+
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalModelInput {
@@ -617,6 +640,48 @@ pub struct ModelInput {
     pub local: Option<LocalModelInput>,
     #[serde(rename = "type")]
     pub model_type: ModelType,
+}
+
+pub struct AITaskInput {
+    pub name: String,
+    pub model_id: String,
+    pub system_prompt: String,
+    pub prompt_examples: Vec<AIPromptExamplesInput>,
+    pub meta_data: Option<String>,
+}
+
+impl From<AITaskInput> for AITask {
+    fn from(input: AITaskInput) -> AITask {
+        let created_at = chrono::Utc::now().to_string();
+        let updated_at = created_at.clone();
+
+        AITask {
+            name: input.name,
+            task_id: String::new(),
+            model_id: input.model_id,
+            system_prompt: input.system_prompt,
+            prompt_examples: input
+                .prompt_examples
+                .into_iter()
+                .map(|p| p.into())
+                .collect(),
+            meta_data: input.meta_data,
+            created_at,
+            updated_at,
+        }
+    }
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptOutput {
+    pub result: String,
+}
+
+#[derive(Default, Debug, Deserialize, Serialize)]
+pub struct TranscriptionTextFilter {
+    pub stream_id: String,
+    pub text: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -648,6 +713,22 @@ pub trait GetValue {
 
 pub trait GetFilter {
     fn get_filter(&self) -> Option<String>;
+}
+
+// Implement the trait for the `TranscriptionTextFilter` struct
+impl GetValue for TranscriptionTextFilter {
+    type Value = String;
+
+    fn get_value(&self) -> Self::Value {
+        self.text.clone()
+    }
+}
+
+// Implement the trait for the `TranscriptionTextFilter` struct
+impl GetFilter for TranscriptionTextFilter {
+    fn get_filter(&self) -> Option<String> {
+        Some(self.stream_id.clone())
+    }
 }
 
 impl GetValue for Option<Apps> {
@@ -854,6 +935,32 @@ impl GetValue for TriggeredNotification {
 
 //Implement the trait for `Notification`
 impl GetFilter for TriggeredNotification {
+    fn get_filter(&self) -> Option<String> {
+        None
+    }
+}
+
+#[derive(GraphQLObject, Serialize, Deserialize, Default, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AIModelLoadingStatus {
+    pub model: String,
+    pub progress: f64,
+    pub status: String,
+    pub downloaded: bool,
+    pub loaded: bool,
+}
+
+//Implement the trait for `AIModelLoadingStatus` struct
+impl GetValue for AIModelLoadingStatus {
+    type Value = AIModelLoadingStatus;
+
+    fn get_value(&self) -> Self::Value {
+        self.clone()
+    }
+}
+
+//Implement the trait for `AIModelLoadingStatus` struct
+impl GetFilter for AIModelLoadingStatus {
     fn get_filter(&self) -> Option<String> {
         None
     }

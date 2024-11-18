@@ -1,74 +1,11 @@
 {
-  "package": {
-    "productName": "ADAM Launcher",
-    "version": "0.10.0-rc7"
-  },
-  "build": {
-    "distDir": "../dist",
-    "devPath": "http://127.0.0.1:3000",
-    "beforeDevCommand": "",
-    "beforeBuildCommand": "",
-    "withGlobalTauri": true
-  },
-  "tauri": {
-    "systemTray": {
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": true,
-      "menuOnLeftClick": false
-    },
-    "bundle": {
-      "active": true,
-      "targets": [
-        "appimage",
-        "deb",
-        "msi",
-        "dmg",
-        "app",
-        "updater"
-      ],
-      "identifier": "dev.ad4m.ad4min",
-      "icon": [
-        "icons/32x32.png",
-        "icons/128x128.png",
-        "icons/128x128@2x.png",
-        "icons/icon.icns",
-        "icons/icon.ico"
-      ],
-      "resources": [],
-      "copyright": "",
-      "category": "DeveloperTool",
-      "shortDescription": "",
-      "longDescription": "",
-      "deb": {
-        "depends": []
-      },
-      "appimage": {
-        "bundleMediaFramework": true
-      },
-      "macOS": {
-        "frameworks": [],
-        "minimumSystemVersion": "",
-        "exceptionDomain": "",
-        "signingIdentity": null,
-        "providerShortName": null,
-        "entitlements": null
-      },
-      "windows": {
-        "certificateThumbprint": null,
-        "digestAlgorithm": "sha256",
-        "timestampUrl": ""
-      }
-    },
-    "updater": {
-      "active": true,
-      "endpoints": [
-        "https://launcher-update-worker.perspect3vism.workers.dev/update/{{target}}/{{current_version}}"
-      ],
-      "dialog": false,
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM1OTBGNDkzMkI2MTczMEMKUldRTWMyRXJrL1NReGFTUVBTMjRhQWlEVTFuOHBkcEZwbmEwSG9DdWczeDdtRUdNK3hMMm1GUnoK"
-    },
-    "allowlist": {
-      "all": true
+  "productName": "ADAM Launcher",
+  "mainBinaryName": "ADAM Launcher",
+  "version": "0.10.0-rc9",
+  "identifier": "dev.ad4m.ad4min",
+  "app": {
+    "security": {
+      "csp": null
     },
     "windows": [
       {
@@ -85,8 +22,54 @@
         "url": "/splashscreen"
       }
     ],
-    "security": {
-      "csp": null
+    "withGlobalTauri": true
+  },
+  "build": {
+    "beforeDevCommand": "pnpm run dev",
+    "beforeBuildCommand": "pnpm run build",
+    "frontendDist": "../dist"
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "appimage",
+      "deb",
+      "msi",
+      "dmg",
+      "app"
+    ],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [],
+    "copyright": "",
+    "category": "DeveloperTool",
+    "shortDescription": "",
+    "longDescription": "",
+    "macOS": {
+      "frameworks": [],
+      "minimumSystemVersion": "",
+      "exceptionDomain": "",
+      "signingIdentity": null,
+      "providerShortName": null,
+      "entitlements": null
+    },
+    "linux": {
+      "deb": {
+        "depends": []
+      },
+      "appimage": {
+        "bundleMediaFramework": true
+      }
     }
   }
 }

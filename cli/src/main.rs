@@ -7,6 +7,7 @@ extern crate rand;
 extern crate regex;
 extern crate rustyline;
 extern crate tokio;
+extern crate llm;
 extern crate kitsune_p2p_types;
 
 mod formatting;
@@ -22,9 +23,12 @@ mod neighbourhoods;
 mod perspectives;
 mod repl;
 mod runtime;
+mod eve;
+
+
 
 use crate::{
-    agent::*, dev::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*,
+    agent::*, dev::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*, eve::*,
 };
 use ad4m_client::*;
 use anyhow::{Context, Result};
@@ -154,7 +158,11 @@ enum Domain {
         #[arg(long, action)]
         admin_credential: Option<String>
     },
-    RunLocalHcServices {}
+    RunLocalHcServices {},
+    Eve {
+        #[command(subcommand)]
+        command: EveCommands,
+    },
 }
 
 async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
@@ -268,6 +276,11 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if let Domain::Eve { command } = args.domain {
+        eve::run(command).await?;
+        return Ok(());
+    }
+
     let ad4m_client = get_ad4m_client(&args).await?;
 
     match args.domain {
@@ -310,6 +323,7 @@ async fn main() -> Result<()> {
             admin_credential: _
         } => unreachable!(),
         Domain::RunLocalHcServices {} => unreachable!(),
+        Domain::Eve { command: _ } => unreachable!(),
     }
 
     Ok(())
