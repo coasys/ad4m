@@ -253,8 +253,8 @@ pub fn run() {
                 open_logs_folder();
             });
 
-            build_menu(&app.handle())?;
-            build_system_tray(&app.handle())?;
+            build_menu(app.handle())?;
+            build_system_tray(app.handle())?;
 
             let config = rust_executor::Ad4mConfig {
                 admin_credential: Some(req_credential.to_string()),
@@ -295,15 +295,14 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(|window, event| match event {
-            tauri::WindowEvent::CloseRequested { api, .. } => {
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if let Err(e) = window.hide() {
                     println!("Error trying to hide window: {:?}", e);
                 } else {
                     api.prevent_close();
                 }
             }
-            _ => {}
         })
         .build(tauri::generate_context!());
 

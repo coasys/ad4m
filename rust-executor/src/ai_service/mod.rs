@@ -254,7 +254,7 @@ impl AIService {
         Ok(tasks)
     }
 
-    pub async fn spawn_embedding_model(&self, model_id: String) {
+    async fn spawn_embedding_model(&self, model_id: String) {
         let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
 
         thread::spawn({
@@ -296,7 +296,7 @@ impl AIService {
             .insert(model_id, bert_tx);
     }
 
-    pub async fn spawn_llm_model(&self, model_id: String) {
+    async fn spawn_llm_model(&self, model_id: String) {
         let (llama_tx, mut llama_rx) = mpsc::unbounded_channel::<LLMTaskRequest>();
 
         thread::spawn({
@@ -517,7 +517,7 @@ impl AIService {
     pub async fn open_transcription_stream(&self, _model_id: String) -> Result<String> {
         let stream_id = uuid::Uuid::new_v4().to_string();
         let stream_id_clone = stream_id.clone();
-        let (samples_tx, sampels_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
+        let (samples_tx, samples_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
         //TODO: use drop_rx to exit thread
         let (drop_tx, drop_rx) = oneshot::channel();
         let (done_tx, done_rx) = oneshot::channel();
@@ -534,7 +534,7 @@ impl AIService {
                 if let Ok(whisper) = maybe_model {
                     let audio_stream = AudioStream {
                         read_data: Vec::new(),
-                        receiver: Box::pin(sampels_rx.map(futures_util::stream::iter).flatten()),
+                        receiver: Box::pin(samples_rx.map(futures_util::stream::iter).flatten()),
                     };
 
                     let mut word_stream = audio_stream
