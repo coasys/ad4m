@@ -59,13 +59,15 @@ pub fn build_system_tray(app: &AppHandle) -> Result<()> {
             _ => log::error!("Event is not defined."),
         })
         .menu_on_left_click(false)
-        .on_tray_icon_event(|tray, event| match event {
-            TrayIconEvent::Click {
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 ..
-            } => toggle_main_window(tray.app_handle()),
-            _ => {}
+            } = event
+            {
+                toggle_main_window(tray.app_handle())
+            }
         })
         .build(app)?;
 
