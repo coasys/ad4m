@@ -1262,6 +1262,8 @@ impl Mutation {
         Ad4mDb::with_global_instance(|db| db.remove_model(&name)).map_err(|e| e.to_string())?;
 
         Ok(true)
+    }
+    
     async fn ai_add_task(
         &self,
         context: &RequestContext,
