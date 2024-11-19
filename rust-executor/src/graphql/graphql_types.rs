@@ -601,6 +601,8 @@ pub struct ModelApiInput {
     pub api_type: String,
 }
 
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct AIPromptExamplesInput {
     pub input: String,
     pub output: String,
@@ -642,6 +644,8 @@ pub struct ModelInput {
     pub model_type: ModelType,
 }
 
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct AITaskInput {
     pub name: String,
     pub model_id: String,

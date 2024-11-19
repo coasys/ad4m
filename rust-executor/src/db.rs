@@ -178,7 +178,7 @@ impl Ad4mDb {
             [],
         )?;
 
-        conn.executr(
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS models (
                 id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
