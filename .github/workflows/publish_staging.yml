@@ -58,7 +58,7 @@ jobs:
       uses: actions-rs/toolchain@v1
       with:
         override: true
-        toolchain: 1.77.0
+        toolchain: 1.81.0
     - run: rustup target add wasm32-unknown-unknown
 
     - name: Install Rust targets for macOS
@@ -79,7 +79,7 @@ jobs:
       if: matrix.platform == 'GH-hosted-ubuntu'
       run: |
         sudo apt-get update
-        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake fuse libfuse2 mesa-utils mesa-vulkan-drivers 
+        sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake fuse libfuse2 mesa-utils mesa-vulkan-drivers libsoup-3.0-dev javascriptcoregtk-4.1-dev webkit2gtk-4.1-dev librust-alsa-sys-dev
 
     - name: install dependencies (macos only)
       if: matrix.platform == 'macos-latest'
@@ -133,25 +133,28 @@ jobs:
     - name: Install core dependencies
       run: cd ./core && pnpm install --no-cache
 
-    - name: Decrypt and install certificates
-      if: matrix.platform == 'macos-latest'
-      env:
-        APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-        APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      run: |
-        echo $APPLE_CERTIFICATE | base64 --decode > certificate.p12
-        security create-keychain -p "actions" build.keychain
-        security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-        security list-keychain -d user -s build.keychain
-        security unlock-keychain -p "actions" build.keychain
-        mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "actions" build.keychain
+    #- name: Decrypt and install certificates
+    #  if: matrix.platform == 'macos-latest'
+    #  env:
+    #    APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+    #    APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+    #  run: |
+    #    echo $APPLE_CERTIFICATE | base64 --decode > certificate.p12
+    #    security create-keychain -p "actions" build.keychain
+    #    security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+    #    security list-keychain -d user -s build.keychain
+    #    security unlock-keychain -p "actions" build.keychain
+    #    mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+    #    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "actions" build.keychain
 
-    - name: Build AD4M-CLI & build Launcher binary (macos/linux-latest)
-      if: matrix.platform != 'windows-latest'
-      env:
-        TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-        TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+    - name: Build AD4M-CLI
+      run: pnpm build-libs
+      
+    - name: Build AD4M-CLI & build Launcher binary #(macos/linux-latest)
+      #if: matrix.platform != 'windows-latest'
+      #env:
+        #TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+        #TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         #APPLE_ID: ${{ secrets.APPLE_ID }}
         #APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
         #APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -160,12 +163,12 @@ jobs:
         #APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
       run: pnpm run package-ad4m
 
-    - name:  Build AD4M-CLI & build Launcher binary (windows-latest)
-      if: matrix.platform == 'windows-latest'
-      env:
-        TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-        TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
-      run: pnpm run package-ad4m
+    #- name:  Build AD4M-CLI & build Launcher binary (windows-latest)
+    #  if: matrix.platform == 'windows-latest'
+      #env:
+        #TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+        #TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+    #  run: pnpm run package-ad4m
 
     - name: Upload Release Deb Asset
       id: upload-release-deb-asset
@@ -175,8 +178,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.deb
-        asset_name: adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.deb
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/deb/ADAM Launcher_${{ steps.extract_version.outputs.version }}_amd64.deb
+        asset_name: ADAM/ Launcher_${{ steps.extract_version.outputs.version }}_amd64.deb
         asset_content_type: application/octet-stream
 
     - name: Upload Release AppImage Asset
@@ -187,36 +190,36 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
-        asset_name: adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/ADAM Launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
+        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
         asset_content_type: application/octet-stream
 
-    - name: Upload Release AppImage Update Asset
-      id: upload-release-appimage-asset-update
-      if: matrix.platform == 'GH-hosted-ubuntu'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage.tar.gz
-        asset_name: adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz
-        asset_content_type: application/octet-stream
+    #- name: Upload Release AppImage Update Asset
+    #  id: upload-release-appimage-asset-update
+    #  if: matrix.platform == 'GH-hosted-ubuntu'
+    #  uses: actions/upload-release-asset@v1
+    #  env:
+    #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #  with:
+    #    upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+    #    asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage.tar.gz
+    #    asset_name: ADAM-Launcher_${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz
+    #    asset_content_type: application/octet-stream
 
-    - name: Upload Release AppImage update sig Asset
-      id: upload-release-appimage-asset-update-sig
-      if: matrix.platform == 'GH-hosted-ubuntu'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage.tar.gz.sig
-        asset_name: adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz.sig
-        asset_content_type: application/octet-stream
+    #- name: Upload Release AppImage update sig Asset
+    #  id: upload-release-appimage-asset-update-sig
+    #  if: matrix.platform == 'GH-hosted-ubuntu'
+    #  uses: actions/upload-release-asset@v1
+    #  env:
+    #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #  with:
+    #    upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+    #    asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/adam-launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage.tar.gz.sig
+    #    asset_name: ADAM-Launcher_${{ steps.extract_version.outputs.version }}_amd64.deb.tar.gz.sig
+    #    asset_content_type: application/octet-stream
 
-    - name: Upload Release AD4M CLI Linux Binary
-      id: upload-release-linux-ad4m-cli-binary
+    - name: Upload Release AD4M CLI client Linux Binary
+      id: upload-release-linux-ad4m-cli-client-binary
       if: matrix.platform == 'GH-hosted-ubuntu'
       uses: actions/upload-release-asset@v1
       env:
@@ -224,7 +227,19 @@ jobs:
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
         asset_path: /home/runner/work/ad4m/ad4m/target/release/ad4m
-        asset_name: ad4m-linux-${{ steps.extract_version.outputs.version }}-x64
+        asset_name: ad4m-cli-client-linux-${{ steps.extract_version.outputs.version }}-x64
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI executor Linux Binary
+      id: upload-release-linux-ad4m-cli-executor-binary
+      if: matrix.platform == 'GH-hosted-ubuntu'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: /home/runner/work/ad4m/ad4m/target/release/ad4m-executor
+        asset_name: ad4m-cli-executor-linux-${{ steps.extract_version.outputs.version }}-x64
         asset_content_type: application/octet-stream
 
     - name: Upload Release Macos Asset
@@ -235,36 +250,36 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path:  "/Users/runner/work/ad4m/ad4m/target/universal-apple-darwin/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_universal.dmg"
+        asset_path:  "/Users/runner/work/ad4m/ad4m/target/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_aarch64.dmg"
         asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_aarch64.dmg
         asset_content_type: application/octet-stream
 
-    - name: Upload Release Macos update Asset
-      id: upload-release-macos-asset-update
-      if: matrix.platform == 'macos-latest'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path:  "/Users/runner/work/ad4m/ad4m/target/universal-apple-darwin/release/bundle/macos/ADAM Launcher.app.tar.gz"
-        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_aarch64.app.tar.gz
-        asset_content_type: application/octet-stream
+    #- name: Upload Release Macos update Asset
+    #  id: upload-release-macos-asset-update
+    #  if: matrix.platform == 'macos-latest'
+    #  uses: actions/upload-release-asset@v1
+    #  env:
+    #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #  with:
+    #    upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+    #    asset_path:  "/Users/runner/work/ad4m/ad4m/target/release/bundle/macos/ADAM Launcher.app.tar.gz"
+    #    asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_aarch64.app.tar.gz
+    #    asset_content_type: application/octet-stream
 
-    - name: Upload Release Macos update sig Asset
-      id: upload-release-macos-asset-update-sig
-      if: matrix.platform == 'macos-latest'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path:  "/Users/runner/work/ad4m/ad4m/target/universal-apple-darwin/release/bundle/macos/ADAM Launcher.app.tar.gz.sig"
-        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_aarch64.app.tar.gz.sig
-        asset_content_type: application/octet-stream
+    #- name: Upload Release Macos update sig Asset
+    #  id: upload-release-macos-asset-update-sig
+    #  if: matrix.platform == 'macos-latest'
+    #  uses: actions/upload-release-asset@v1
+    #  env:
+    #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #  with:
+    #    upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+    #    asset_path:  "/Users/runner/work/ad4m/ad4m/target/release/bundle/macos/ADAM Launcher.app.tar.gz.sig"
+    #    asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_aarch64.app.tar.gz.sig
+    #    asset_content_type: application/octet-stream
 
-    - name: Upload Release AD4M CLI Macos Binary
-      id: upload-release-macos-ad4m-cli-binary
+    - name: Upload Release AD4M CLI client macOS Binary
+      id: upload-release-macos-ad4m-cli-client-binary
       if: matrix.platform == 'macos-latest'
       uses: actions/upload-release-asset@v1
       env:
@@ -272,7 +287,19 @@ jobs:
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
         asset_path: /Users/runner/work/ad4m/ad4m/target/release/ad4m
-        asset_name: ad4m-macos-${{ steps.extract_version.outputs.version }}-x64
+        asset_name: ad4m-cli-client-macos-${{ steps.extract_version.outputs.version }}-aarch64
+        asset_content_type: application/octet-stream
+
+    - name: Upload Release AD4M CLI executor macOS Binary
+      id: upload-release-macos-ad4m-cli-executor-binary
+      if: matrix.platform == 'macos-latest'
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+        asset_path: /Users/runner/work/ad4m/ad4m/target/release/ad4m-executor
+        asset_name: ad4m-cli-executor-macos-${{ steps.extract_version.outputs.version }}-aarch64
         asset_content_type: application/octet-stream
 
     - name: Upload Release MSI Asset
@@ -287,29 +314,29 @@ jobs:
         asset_name: ADAM\ Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi
         asset_content_type: application/octet-stream
 
-    - name: Upload Release MSI update Asset
-      id: upload-release-msi-asset-update
-      if: matrix.platform == 'windows-latest'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi.zip'
-        asset_name: ADAM\ Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi.zip
-        asset_content_type: application/octet-stream
+    #- name: Upload Release MSI update Asset
+    #  id: upload-release-msi-asset-update
+    #  if: matrix.platform == 'windows-latest'
+    #  uses: actions/upload-release-asset@v1
+    #  env:
+    #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #  with:
+    #    upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+    #    asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi.zip'
+    #    asset_name: ADAM\ Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi.zip
+    #    asset_content_type: application/octet-stream
 
-    - name: Upload Release MSI update sig Asset
-      id: upload-release-msi-asset-update-sig
-      if: matrix.platform == 'windows-latest'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi.zip.sig'
-        asset_name: ADAM\ Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi.zip.sig
-        asset_content_type: application/octet-stream
+    #- name: Upload Release MSI update sig Asset
+    #  id: upload-release-msi-asset-update-sig
+    #  if: matrix.platform == 'windows-latest'
+    #  uses: actions/upload-release-asset@v1
+    #  env:
+    #    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    #  with:
+    #    upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
+    #    asset_path: 'D:\a\ad4m\ad4m\target\release\bundle\msi\ADAM Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi.zip.sig'
+    #    asset_name: ADAM\ Launcher_${{ steps.changed_extract_version.outputs.version }}_x64_en-US.msi.zip.sig
+    #    asset_content_type: application/octet-stream
 
     # - name: Upload Release AD4M CLI Windows Binary
     #   id: upload-release-windows-ad4m-cli-binary
