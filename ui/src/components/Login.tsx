@@ -107,24 +107,25 @@ const Login = (props: any) => {
       setApiUrlError(!apiUrl);
       setApiKeyError(!apiKey);
     } else if (client) {
-      client.runtime.addModel({
-        name: llmModel,
+      client.ai.addModel({
+        name: "default",
         api: { baseUrl: apiUrl, apiKey, apiType: "LLM" },
-        local: { fileName: "", tokenizerSource: "", modelParameters: "" },
+        // local: llmModel,
+        local: { fileName: llmModel, tokenizerSource: "", modelParameters: "" },
         type: "llm",
       });
-      client.runtime.addModel({
-        name: audioModel,
-        api: { baseUrl: "", apiKey: "", apiType: "" },
-        local: { fileName: "", tokenizerSource: "", modelParameters: "" },
-        type: "transcription",
-      });
-      client.runtime.addModel({
-        name: vectorModel,
-        api: { baseUrl: "", apiKey: "", apiType: "" },
-        local: { fileName: "", tokenizerSource: "", modelParameters: "" },
-        type: "embeding",
-      });
+      // client.ai.addModel({
+      //   name: audioModel,
+      //   api: { baseUrl: "", apiKey: "", apiType: "" },
+      //   // local: { fileName: "", tokenizerSource: "", modelParameters: "" },
+      //   type: "transcription",
+      // });
+      // client.ai.addModel({
+      //   name: vectorModel,
+      //   api: { baseUrl: "", apiKey: "", apiType: "" },
+      //   // local: { fileName: "", tokenizerSource: "", modelParameters: "" },
+      //   type: "embeding",
+      // });
       setCurrentIndex(6);
     }
   }
@@ -132,7 +133,7 @@ const Login = (props: any) => {
   useEffect(() => {
     if (!connected && !connectedLoading) navigate("/connect");
     else if (connected && isUnlocked) navigate("/apps");
-    else if (isInitialized) setCurrentIndex(6);
+    else if (isInitialized) setCurrentIndex(7);
   }, [connected, isUnlocked, navigate, isInitialized, connectedLoading]);
 
   return (
@@ -403,9 +404,7 @@ const Login = (props: any) => {
                           onClick={() => {
                             setLlmModel(model);
                             if (model === "External API") {
-                              setApiUrl(
-                                "https://api.openai.com/v1/chat/completions"
-                              );
+                              setApiUrl("https://api.openai.com/v1");
                             } else {
                               setApiUrl("");
                               setApiKey("");
