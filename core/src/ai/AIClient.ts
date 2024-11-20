@@ -17,7 +17,7 @@ export class AIClient {
         const result = await this.#apolloClient.query({
             query: gql`
                 query {
-                    runtimeGetModels {
+                    aiGetModels {
                         name
                         api {
                             baseUrl
@@ -34,31 +34,31 @@ export class AIClient {
                 }
             `
         });
-        return unwrapApolloResult(result).runtimeGetModels;
+        return unwrapApolloResult(result).aiGetModels;
     }
 
     async addModel(model: ModelInput): Promise<boolean> {
         const result = await this.#apolloClient.mutate({
             mutation: gql`
                 mutation($model: ModelInput!) {
-                    runtimeAddModel(model: $model)
+                    aiAddModel(model: $model)
                 }
             `,
             variables: { model }
         });
-        return unwrapApolloResult(result).runtimeAddModel;
+        return unwrapApolloResult(result).aiAddModel;
     }
 
     async removeModel(name: string): Promise<boolean> {
         const result = await this.#apolloClient.mutate({
             mutation: gql`
                 mutation($name: String!) {
-                    runtimeRemoveModel(name: $name)
+                    aiRemoveModel(name: $name)
                 }
             `,
             variables: { name }
         });
-        return unwrapApolloResult(result).runtimeRemoveModel;
+        return unwrapApolloResult(result).aiRemoveModel;
     }
 
     async tasks(): Promise<AITask[]> {
