@@ -1123,7 +1123,7 @@ impl Ad4mDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ExpressionProof, Link, LinkExpression, ModelType, ModelApiType};
+    use crate::types::{ExpressionProof, Link, LinkExpression, ModelApiType, ModelType};
     use chrono::Utc;
     use fake::{Fake, Faker};
     use uuid::Uuid;
