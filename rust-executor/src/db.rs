@@ -1123,13 +1123,9 @@ impl Ad4mDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ExpressionProof, Link, LinkExpression};
-    use crate::{db::Ad4mDb, graphql::graphql_types::NotificationInput};
-    use crate::{db::Ad4mDb, graphql::graphql_types::NotificationInput, types::ModelType};
+    use crate::types::{ExpressionProof, Link, LinkExpression, ModelType, ModelApiType};
     use chrono::Utc;
     use fake::{Fake, Faker};
-    use url::Url;
-    use uuid::Uuid;
     use uuid::Uuid;
 
     fn construct_dummy_link_expression(status: LinkStatus) -> LinkExpression {
@@ -1425,98 +1421,98 @@ mod tests {
         let all_tasks_after_removal = db.get_tasks().unwrap();
         assert!(all_tasks_after_removal.is_empty());
     }
-}
 
-#[test]
-fn test_models_crud() {
-    let db = Ad4mDb::new(":memory:").unwrap();
+    #[test]
+    fn test_models_crud() {
+        let db = Ad4mDb::new(":memory:").unwrap();
 
-    // Create a test model with ModelApi
-    let test_model_api = Model {
-        name: "Test Model API".to_string(),
-        api: Some(ModelApi {
-            base_url: Url::parse("https://api.example.com").unwrap(),
-            api_key: "test_api_key".to_string(),
-            api_type: ModelApiType::OpenAi,
-        }),
-        local: None,
-        model_type: ModelType::Llm,
-    };
+        // Create a test model with ModelApi
+        let test_model_api = Model {
+            name: "Test Model API".to_string(),
+            api: Some(ModelApi {
+                base_url: Url::parse("https://api.example.com").unwrap(),
+                api_key: "test_api_key".to_string(),
+                api_type: ModelApiType::OpenAi,
+            }),
+            local: None,
+            model_type: ModelType::Llm,
+        };
 
-    // Create a test model with LocalModel
-    let test_model_local = Model {
-        name: "Test Model Local".to_string(),
-        api: None,
-        local: Some(LocalModel {
-            file_name: "test_model.bin".to_string(),
-            tokenizer_source: "test_tokenizer".to_string(),
-            model_parameters: "test_parameters".to_string(),
-        }),
-        model_type: ModelType::Llm,
-    };
+        // Create a test model with LocalModel
+        let test_model_local = Model {
+            name: "Test Model Local".to_string(),
+            api: None,
+            local: Some(LocalModel {
+                file_name: "test_model.bin".to_string(),
+                tokenizer_source: "test_tokenizer".to_string(),
+                model_parameters: "test_parameters".to_string(),
+            }),
+            model_type: ModelType::Llm,
+        };
 
-    // Add the test models
-    db.add_model(&test_model_api).unwrap();
-    db.add_model(&test_model_local).unwrap();
+        // Add the test models
+        db.add_model(&test_model_api).unwrap();
+        db.add_model(&test_model_local).unwrap();
 
-    // Get all models
-    let models = db.get_models().unwrap();
+        // Get all models
+        let models = db.get_models().unwrap();
 
-    // Ensure the test models are in the list of models and have all properties set
-    let retrieved_model_api = models.iter().find(|m| m.name == "Test Model API").unwrap();
-    assert_eq!(retrieved_model_api.name, "Test Model API");
-    assert!(retrieved_model_api.api.is_some());
-    assert!(retrieved_model_api.local.is_none());
-    assert_eq!(
-        retrieved_model_api.api.as_ref().unwrap().base_url,
-        Url::parse("https://api.example.com").unwrap()
-    );
-    assert_eq!(
-        retrieved_model_api.api.as_ref().unwrap().api_key,
-        "test_api_key"
-    );
-    assert_eq!(
-        retrieved_model_api.api.as_ref().unwrap().api_type,
-        ModelApiType::OpenAi
-    );
-    assert_eq!(retrieved_model_api.model_type, ModelType::Llm);
+        // Ensure the test models are in the list of models and have all properties set
+        let retrieved_model_api = models.iter().find(|m| m.name == "Test Model API").unwrap();
+        assert_eq!(retrieved_model_api.name, "Test Model API");
+        assert!(retrieved_model_api.api.is_some());
+        assert!(retrieved_model_api.local.is_none());
+        assert_eq!(
+            retrieved_model_api.api.as_ref().unwrap().base_url,
+            Url::parse("https://api.example.com").unwrap()
+        );
+        assert_eq!(
+            retrieved_model_api.api.as_ref().unwrap().api_key,
+            "test_api_key"
+        );
+        assert_eq!(
+            retrieved_model_api.api.as_ref().unwrap().api_type,
+            ModelApiType::OpenAi
+        );
+        assert_eq!(retrieved_model_api.model_type, ModelType::Llm);
 
-    let retrieved_model_local = models
-        .iter()
-        .find(|m| m.name == "Test Model Local")
-        .unwrap();
-    assert_eq!(retrieved_model_local.name, "Test Model Local");
-    assert!(retrieved_model_local.api.is_none());
-    assert!(retrieved_model_local.local.is_some());
-    assert_eq!(
-        retrieved_model_local.local.as_ref().unwrap().file_name,
-        "test_model.bin"
-    );
-    assert_eq!(
-        retrieved_model_local
-            .local
-            .as_ref()
-            .unwrap()
-            .tokenizer_source,
-        "test_tokenizer"
-    );
-    assert_eq!(
-        retrieved_model_local
-            .local
-            .as_ref()
-            .unwrap()
-            .model_parameters,
-        "test_parameters"
-    );
-    assert_eq!(retrieved_model_local.model_type, ModelType::Llm);
+        let retrieved_model_local = models
+            .iter()
+            .find(|m| m.name == "Test Model Local")
+            .unwrap();
+        assert_eq!(retrieved_model_local.name, "Test Model Local");
+        assert!(retrieved_model_local.api.is_none());
+        assert!(retrieved_model_local.local.is_some());
+        assert_eq!(
+            retrieved_model_local.local.as_ref().unwrap().file_name,
+            "test_model.bin"
+        );
+        assert_eq!(
+            retrieved_model_local
+                .local
+                .as_ref()
+                .unwrap()
+                .tokenizer_source,
+            "test_tokenizer"
+        );
+        assert_eq!(
+            retrieved_model_local
+                .local
+                .as_ref()
+                .unwrap()
+                .model_parameters,
+            "test_parameters"
+        );
+        assert_eq!(retrieved_model_local.model_type, ModelType::Llm);
 
-    // Remove the test models
-    db.remove_model("Test Model API").unwrap();
-    db.remove_model("Test Model Local").unwrap();
+        // Remove the test models
+        db.remove_model("Test Model API").unwrap();
+        db.remove_model("Test Model Local").unwrap();
 
-    // Ensure the test models are removed
-    let models_after_removal = db.get_models().unwrap();
-    assert!(models_after_removal
-        .iter()
-        .all(|m| m.name != "Test Model API" && m.name != "Test Model Local"));
+        // Ensure the test models are removed
+        let models_after_removal = db.get_models().unwrap();
+        assert!(models_after_removal
+            .iter()
+            .all(|m| m.name != "Test Model API" && m.name != "Test Model Local"));
+    }
 }
