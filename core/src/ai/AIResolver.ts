@@ -1,4 +1,4 @@
-import { Query, Resolver, Mutation, Arg, InputType, Field, Subscription, Float, PubSub} from "type-graphql";
+import { Query, Resolver, Mutation, Arg, InputType, Field, Subscription, Float, PubSub, ObjectType} from "type-graphql";
 import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
 import pako from "pako";
 import base64js from 'base64-js';
@@ -7,8 +7,121 @@ import { AI_TRANSCRIPTION_TEXT_TOPIC } from "../PubSub";
 let createdAt = Date.now().toString();
 let updatedAt = Date.now().toString();
 
+
+@ObjectType()
+export class ModelApi {
+    @Field()
+    baseUrl: string;
+
+    @Field()
+    apiKey: string;
+
+    @Field()
+    apiType: String;
+}
+
+@ObjectType()
+export class LocalModel {
+    @Field()
+    fileName: string;
+
+    @Field()
+    tokenizerSource: string;
+
+    @Field()
+    modelParameters: string;
+}
+
+type ModelType = "llm" | "embeding" | "transcription";
+
+@ObjectType()
+export class Model {
+    @Field()
+    name: string;
+
+    @Field(type => ModelApi, { nullable: true })
+    api?: ModelApi;
+
+    @Field(type => LocalModel, { nullable: true })
+    local?: LocalModel;
+
+    @Field()
+    type: ModelType;
+}
+
+@InputType()
+export class ModelApiInput {
+    @Field()
+    baseUrl: string;
+
+    @Field()
+    apiKey: string;
+
+    @Field()
+    apiType: string;
+}
+
+@InputType()
+export class LocalModelInput {
+    @Field()
+    fileName: string;
+
+    @Field()
+    tokenizerSource: string;
+
+    @Field()
+    modelParameters: string;
+}
+
+@InputType()
+export class ModelInput {
+    @Field()
+    name: string;
+
+    @Field(type => ModelApiInput, { nullable: true })
+    api?: ModelApiInput;
+
+    @Field(type => LocalModelInput, { nullable: true })
+    local?: LocalModelInput;
+
+    @Field()
+    type: ModelType;
+}
+
 @Resolver()
 export default class AIResolver {
+    @Query(returns => [Model])
+    aiGetModels(): Model[] {
+        return [
+            {
+                name: "Test Model",
+                api: {
+                    baseUrl: "https://api.example.com",
+                    apiKey: "test-api-key",
+                    apiType: "OpenAi"
+                },
+                local: {
+                    fileName: "test-model.bin",
+                    tokenizerSource: "test-tokenizer",
+                    modelParameters: "{}"
+                },
+                type: "llm"
+            }
+        ]
+    }
+
+    @Mutation(returns => Boolean)
+    aiAddModel(@Arg("model", type => ModelInput) model: ModelInput): boolean {
+        // In a real implementation, this would add the model to storage
+        return true
+    }
+
+    @Mutation(returns => Boolean)
+    aiRemoveModel(@Arg("name", type => String) name: string): boolean {
+        // In a real implementation, this would remove the model from storage
+        return true
+    }
+
     @Query(returns => [AITask])
     aiTasks(): AITask[] {
         return [new AITask(

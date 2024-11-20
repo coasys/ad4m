@@ -1,7 +1,7 @@
 import { ApolloClient, gql } from "@apollo/client/core"
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import unwrapApolloResult from "../unwrapApolloResult"
-import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ModelInput, Model } from "./RuntimeResolver"
+import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification } from "./RuntimeResolver"
 
 const PERSPECTIVE_EXPRESSION_FIELDS = `
 author
@@ -377,53 +377,5 @@ export class RuntimeClient {
             },
             error: (e) => console.error(e)
         })
-    }
-
-    async getModels(): Promise<Model[]> {
-        const result = await this.#apolloClient.query({
-            query: gql`
-                query {
-                    runtimeGetModels {
-                        name
-                        api {
-                            baseUrl
-                            apiKey
-                            apiType
-                        }
-                        local {
-                            fileName
-                            tokenizerSource
-                            modelParameters
-                        }
-                        type
-                    }
-                }
-            `
-        });
-        return unwrapApolloResult(result).runtimeGetModels;
-    }
-
-    async addModel(model: ModelInput): Promise<boolean> {
-        const result = await this.#apolloClient.mutate({
-            mutation: gql`
-                mutation($model: ModelInput!) {
-                    runtimeAddModel(model: $model)
-                }
-            `,
-            variables: { model }
-        });
-        return unwrapApolloResult(result).runtimeAddModel;
-    }
-
-    async removeModel(name: string): Promise<boolean> {
-        const result = await this.#apolloClient.mutate({
-            mutation: gql`
-                mutation($name: String!) {
-                    runtimeRemoveModel(name: $name)
-                }
-            `,
-            variables: { name }
-        });
-        return unwrapApolloResult(result).runtimeRemoveModel;
     }
 }

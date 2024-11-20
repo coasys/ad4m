@@ -3,6 +3,7 @@ import unwrapApolloResult from "../unwrapApolloResult";
 import base64js from 'base64-js';
 import pako from 'pako'
 import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
+import { ModelInput, Model } from "./AIResolver"
 
 export class AIClient {
     #apolloClient: ApolloClient<any>;
@@ -10,6 +11,54 @@ export class AIClient {
 
     constructor(apolloClient: ApolloClient<any>, subscribe: boolean = true) {
         this.#apolloClient = apolloClient;
+    }
+
+    async getModels(): Promise<Model[]> {
+        const result = await this.#apolloClient.query({
+            query: gql`
+                query {
+                    runtimeGetModels {
+                        name
+                        api {
+                            baseUrl
+                            apiKey
+                            apiType
+                        }
+                        local {
+                            fileName
+                            tokenizerSource
+                            modelParameters
+                        }
+                        type
+                    }
+                }
+            `
+        });
+        return unwrapApolloResult(result).runtimeGetModels;
+    }
+
+    async addModel(model: ModelInput): Promise<boolean> {
+        const result = await this.#apolloClient.mutate({
+            mutation: gql`
+                mutation($model: ModelInput!) {
+                    runtimeAddModel(model: $model)
+                }
+            `,
+            variables: { model }
+        });
+        return unwrapApolloResult(result).runtimeAddModel;
+    }
+
+    async removeModel(name: string): Promise<boolean> {
+        const result = await this.#apolloClient.mutate({
+            mutation: gql`
+                mutation($name: String!) {
+                    runtimeRemoveModel(name: $name)
+                }
+            `,
+            variables: { name }
+        });
+        return unwrapApolloResult(result).runtimeRemoveModel;
     }
 
     async tasks(): Promise<AITask[]> {

@@ -4,10 +4,75 @@ import fs from 'fs';
 //@ts-ignore
 import ffmpeg from 'fluent-ffmpeg';
 import { Readable } from 'stream';
+import { ModelInput } from '@coasys/ad4m/lib/src/ai/AIResolver';
 
 export default function aiTests(testContext: TestContext) {
     return () => {
         describe('AI service', () => {
+            it("can perform Model CRUD operations", async () => {
+                const ad4mClient = testContext.ad4mClient!
+
+                // Test adding an API model
+                const apiModelInput: ModelInput = {
+                    name: "TestApiModel",
+                    api: {
+                        baseUrl: "https://api.example.com/",
+                        apiKey: "test-api-key",
+                        apiType: "OPEN_AI"
+                    },
+                    type: "llm"
+                }
+
+                const addApiResult = await ad4mClient.ai.addModel(apiModelInput)
+                expect(addApiResult).to.be.true
+
+                // Test adding a local model
+                const localModelInput: ModelInput = {
+                    name: "TestLocalModel",
+                    local: {
+                        fileName: "test_model.bin",
+                        tokenizerSource: "test_tokenizer.json",
+                        modelParameters: JSON.stringify({ param1: "value1", param2: "value2" })
+                    }
+                    type: "embeding"
+                }
+
+                const addLocalResult = await ad4mClient.ai.addModel(localModelInput)
+                expect(addLocalResult).to.be.true
+
+                // Test getting models
+                const models = await ad4mClient.ai.getModels()
+                expect(models).to.be.an('array')
+                expect(models.length).to.be.at.least(2)
+                
+                const addedApiModel = models.find(model => model.name === "TestApiModel")
+                expect(addedApiModel).to.exist
+                expect(addedApiModel?.api?.baseUrl).to.equal("https://api.example.com/")
+                expect(addedApiModel?.api?.apiKey).to.equal("test-api-key")
+                expect(addedApiModel?.api?.apiType).to.equal("OPEN_AI")
+
+                const addedLocalModel = models.find(model => model.name === "TestLocalModel")
+                expect(addedLocalModel).to.exist
+                expect(addedLocalModel?.local?.fileName).to.equal("test_model.bin")
+                expect(addedLocalModel?.local?.tokenizerSource).to.equal("test_tokenizer.json")
+                expect(addedLocalModel?.local?.modelParameters).to.deep.equal(JSON.stringify({ param1: "value1", param2: "value2" }))
+
+                // Test removing models
+                const removeApiResult = await ad4mClient.ai.removeModel("TestApiModel")
+                expect(removeApiResult).to.be.true
+
+                const removeLocalResult = await ad4mClient.ai.removeModel("TestLocalModel")
+                expect(removeLocalResult).to.be.true
+
+                // Verify the models were removed
+                const updatedModels = await ad4mClient.ai.getModels()
+                const removedApiModel = updatedModels.find(model => model.name === "TestApiModel")
+                expect(removedApiModel).to.be.undefined
+
+                const removedLocalModel = updatedModels.find(model => model.name === "TestLocalModel")
+                expect(removedLocalModel).to.be.undefined
+            })
+
             it ('AI model status', async () => {
                 const ad4mClient = testContext.ad4mClient!
                 const status = await ad4mClient.ai.modelLoadingStatus("bert");

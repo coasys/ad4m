@@ -989,42 +989,6 @@ describe('Ad4mClient', () => {
         it('removeNotification smoke test', async () => {
             await ad4mClient.runtime.removeNotification("test-notification");
         })
-
-        it('getModels smoke test', async () => {
-            const models = await ad4mClient.runtime.getModels();
-            expect(models).toBeDefined();
-            expect(Array.isArray(models)).toBe(true);
-            if (models.length > 0) {
-                expect(models[0]).toHaveProperty('name');
-                expect(models[0]).toHaveProperty('api');
-                expect(models[0]).toHaveProperty('local');
-            }
-        })
-
-        it('addModel smoke test', async () => {
-            const newModel = {
-                name: "New Test Model",
-                api: {
-                    baseUrl: "https://api.newexample.com",
-                    apiKey: "new-test-api-key",
-                    apiType: "OpenAi"
-                },
-                local: {
-                    fileName: "new-test-model.bin",
-                    tokenizerSource: "new-test-tokenizer",
-                    modelParameters: "{}"
-                },
-                type: "LLM"
-            };
-            const result = await ad4mClient.runtime.addModel(newModel);
-            expect(result).toBe(true);
-        })
-
-        it('removeModel smoke test', async () => {
-            const modelName = "Test Model to Remove";
-            const result = await ad4mClient.runtime.removeModel(modelName);
-            expect(result).toBe(true);
-        })
     })
 
     describe('Ad4mClient subscriptions', () => {
@@ -1189,6 +1153,42 @@ describe('Ad4mClient', () => {
         })
     })
     describe('.ai', () => {
+        it('getModels smoke test', async () => {
+            const models = await ad4mClient.ai.getModels();
+            expect(models).toBeDefined();
+            expect(Array.isArray(models)).toBe(true);
+            if (models.length > 0) {
+                expect(models[0]).toHaveProperty('name');
+                expect(models[0]).toHaveProperty('api');
+                expect(models[0]).toHaveProperty('local');
+            }
+        })
+
+        it('addModel smoke test', async () => {
+            const newModel = {
+                name: "New Test Model",
+                api: {
+                    baseUrl: "https://api.newexample.com",
+                    apiKey: "new-test-api-key",
+                    apiType: "OpenAi"
+                },
+                local: {
+                    fileName: "new-test-model.bin",
+                    tokenizerSource: "new-test-tokenizer",
+                    modelParameters: "{}"
+                },
+                type: "LLM"
+            };
+            const result = await ad4mClient.ai.addModel(newModel);
+            expect(result).toBe(true);
+        })
+
+        it('removeModel smoke test', async () => {
+            const modelName = "Test Model to Remove";
+            const result = await ad4mClient.ai.removeModel(modelName);
+            expect(result).toBe(true);
+        })
+
         it('embed()', async () => {
             const vector = await ad4mClient.ai.embed("model", "test ets")
             expect(vector[0]).toEqual(0)

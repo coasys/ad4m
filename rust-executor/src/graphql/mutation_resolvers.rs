@@ -1214,7 +1214,7 @@ impl Mutation {
         Ok(true)
     }
 
-    async fn runtime_add_model(
+    async fn ai_add_model(
         &self,
         context: &RequestContext,
         model: ModelInput,
@@ -1252,7 +1252,7 @@ impl Mutation {
         Ok(true)
     }
 
-    async fn runtime_remove_model(
+    async fn ai_remove_model(
         &self,
         context: &RequestContext,
         name: String,

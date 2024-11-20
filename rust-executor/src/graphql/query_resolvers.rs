@@ -546,7 +546,7 @@ impl Query {
         Ok(notifications_result.unwrap())
     }
 
-    async fn runtime_get_models(&self, context: &RequestContext) -> FieldResult<Vec<Model>> {
+    async fn ai_get_models(&self, context: &RequestContext) -> FieldResult<Vec<Model>> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
         let models_result = Ad4mDb::with_global_instance(|db| db.get_models());
         match models_result {
