@@ -33,7 +33,7 @@ export default function aiTests(testContext: TestContext) {
                         fileName: "test_model.bin",
                         tokenizerSource: "test_tokenizer.json",
                         modelParameters: JSON.stringify({ param1: "value1", param2: "value2" })
-                    }
+                    },
                     type: "embeding"
                 }
 
