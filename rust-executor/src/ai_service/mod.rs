@@ -13,6 +13,7 @@ use kalosm::sound::TextStream;
 use kalosm::sound::*;
 // use kalosm::sound::{DenoisedExt, VoiceActivityDetectorExt, VoiceActivityStreamExt};
 use kalosm::language::*;
+// use kalosm::language::Gpt3_5;
 // use kalosm_common::Cache;
 // use rodio::{OutputStream, Source};
 use tokio::time::sleep;
@@ -170,9 +171,10 @@ impl AIService {
             Box::pin(async {
                 self.spawn_embedding_model("bert".to_string()).await;
             }),
-            Box::pin(async {
-                self.spawn_llm_model("llama".to_string()).await;
-            }),
+            // check db for default llm model
+            // Box::pin(async {
+            //     self.spawn_llm_model("llama".to_string()).await;
+            // }),
             Box::pin(async {
                 let _ = WhisperBuilder::default()
                     .with_source(WhisperSource::Base)
@@ -308,20 +310,64 @@ impl AIService {
                     .block_on(async {
                         publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
 
-                        let llama = Llama::builder()
-                            .with_source(LlamaSource::tiny_llama_1_1b()) /* .with_cache(Cache::new(PathBuf::from("."))) */
+                        let llama = match model_id.as_str() {
+                            // Local TinyLlama models
+                            "llama_7b" => {
+                                Llama::builder().with_source(LlamaSource::llama_7b())
+                            }
+                            "llama_8b" => {
+                                Llama::builder().with_source(LlamaSource::llama_8b())
+                            }
+                            "llama_13b" => {
+                                Llama::builder().with_source(LlamaSource::llama_13b())
+                            }
+                            "llama_70b" => {
+                                Llama::builder().with_source(LlamaSource::llama_70b())
+                            }
+                            // External API model
+                            "gpt3_5" => {
+                                let base_url = std::env::var("OPENAI_API_BASE").unwrap_or_else(|_| {
+                                    "https://api.openai.com/v1".to_string() // Default OpenAI URL
+                                });
+    
+                                // Build Gpt3_5 using the external API endpoint
+                                return Ok(Gpt3_5::builder()
+                                    .with_base_url(&base_url)
+                                    .with_api_key(&api_key)
+                                    .build());
+                            }
+    
+                            // Handle unknown models
+                            _ => {
+                                log::error!("Unknown model_id: {}", model_id);
+                                return Err(anyhow::anyhow!("Unknown model_id: {}", model_id));
+                            }
+                        };
+
+                        // Build the local Llama model
+                        let llama = llama
                             .build_with_loading_handler({
                                 let model_id = model_id.clone();
                                 move |progress| {
-                                    //println!("downloading llma model: {:?}", progress);
                                     tokio::spawn(handle_progress(model_id.clone(), progress));
                                 }
                             })
-                            .await;
+                            .await?;
+
+                        // let llama = Llama::builder()
+                        //     .with_source(LlamaSource::tiny_llama_1_1b()) /* .with_cache(Cache::new(PathBuf::from("."))) */
+                        //     .build_with_loading_handler({
+                        //         let model_id = model_id.clone();
+                        //         move |progress| {
+                        //             //println!("downloading llma model: {:?}", progress);
+                        //             tokio::spawn(handle_progress(model_id.clone(), progress));
+                        //         }
+                        //     })
+                        //     .await;
 
                         publish_model_status(model_id.clone(), 100.0, "Loaded", false).await;
 
-                        llama
+                        Ok(llama)
                     })
                     .expect("couldn't build Llama model");
 
@@ -445,15 +491,22 @@ impl AIService {
     pub async fn prompt(&self, task_id: String, prompt: String) -> Result<String> {
         let (result_sender, rx) = oneshot::channel();
 
+        // Retrieve the task to find the associated model_id
+        let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id.clone()))
+            .map_err(|e| anyhow::anyhow!("Database error: {}", e))?
+            .ok_or_else(|| anyhow::anyhow!("Task not found for task_id: {}", task_id))?;
+
+        let model_id = task.model_id;
+
         let llm_channel = self.llm_channel.lock().await;
-        if let Some(sender) = llm_channel.get("llama") {
+        if let Some(sender) = llm_channel.get(&model_id) {
             sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
                 task_id,
                 prompt,
                 result_sender,
             }))?;
         } else {
-            return Err(anyhow::anyhow!("Model 'llama' not found in LLM channel"));
+            return Err(anyhow::anyhow!("Model '{}' not found in LLM channel", model_id));
         }
 
         rx.await?
