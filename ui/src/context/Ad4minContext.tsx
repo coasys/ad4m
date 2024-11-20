@@ -1,16 +1,19 @@
 import { Ad4mClient, ExceptionType } from "@coasys/ad4m";
+import {
+  ExceptionInfo,
+  Notification as NotificationType,
+} from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { sendNotification } from "@tauri-apps/plugin-notification";
-import { ExceptionInfo, Notification as NotificationType } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
 import { createContext, useCallback, useEffect, useState } from "react";
 import {
   buildAd4mClient,
   getForVersion,
-  setForVersion,
   removeForVersion,
+  setForVersion,
 } from "../util";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { invoke } from "@tauri-apps/api/core";
-const appWindow = getCurrentWebviewWindow()
+const appWindow = getCurrentWebviewWindow();
 
 type State = {
   url: string;
@@ -22,7 +25,7 @@ type State = {
   candidate: string;
   auth: string;
   connected: boolean;
-  connectedLaoding: boolean;
+  connectedLoading: boolean;
   expertMode: boolean;
   notifications: NotificationType[];
 };
@@ -50,7 +53,7 @@ const initialState: ContextProps = {
     candidate: "",
     auth: "",
     connected: false,
-    connectedLaoding: true,
+    connectedLoading: true,
     expertMode: getForVersion("expertMode") === "true",
     notifications: [],
   },
@@ -138,7 +141,10 @@ export function Ad4minProvider({ children }: any) {
           if (exception.type === ExceptionType.InstallNotificationRequest) {
             setState((prev) => ({
               ...prev,
-              notifications: [...prev.notifications, JSON.parse(exception.addon!)],
+              notifications: [
+                ...prev.notifications,
+                JSON.parse(exception.addon!),
+              ],
             }));
           }
 
@@ -158,14 +164,15 @@ export function Ad4minProvider({ children }: any) {
           const match = notification.triggerMatch;
           const parsed = JSON.parse(match);
           const firstMatch = parsed[0];
-          const title = firstMatch?.Title
+          const title = firstMatch?.Title;
           sendNotification({
             icon: notification.notification.appIconPath,
-            title: notification.notification.appName + (title ? ": " + title : ""),
+            title:
+              notification.notification.appName + (title ? ": " + title : ""),
             body: firstMatch?.Description || "Received a new notification",
             //body: match
           });
-        })
+        });
       }
     },
     []
@@ -191,9 +198,8 @@ export function Ad4minProvider({ children }: any) {
       try {
         await checkConnection(url, client);
 
-        const { isInitialized, isUnlocked } = await checkIfAgentIsInitialized(
-          client
-        );
+        const { isInitialized, isUnlocked } =
+          await checkIfAgentIsInitialized(client);
 
         setState((prev) => ({
           ...prev,
@@ -202,7 +208,7 @@ export function Ad4minProvider({ children }: any) {
           isInitialized,
           isUnlocked,
           connected: true,
-          connectedLaoding: false,
+          connectedLoading: false,
         }));
 
         setForVersion("url", url as string);
@@ -260,9 +266,9 @@ export function Ad4minProvider({ children }: any) {
       return {
         ...prev,
         notifications: filteredNotifications,
-      }
+      };
     });
-  }
+  };
 
   const configureEndpoint = async (url: string) => {
     if (url) {
@@ -310,7 +316,7 @@ export function Ad4minProvider({ children }: any) {
           resetEndpoint,
           handleLogin,
           toggleExpertMode,
-          handleNotification
+          handleNotification,
         },
       }}
     >

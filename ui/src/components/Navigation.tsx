@@ -1,10 +1,10 @@
 import { useContext, useEffect } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { Ad4minContext } from "../context/Ad4minContext";
 import PackageInfo from "../../package.json";
+import { Ad4minContext } from "../context/Ad4minContext";
+import { AgentProvider } from "../context/AgentContext";
 import Logo from "./Logo";
 import Profile from "./Profile";
-import { AgentProvider } from "../context/AgentContext";
 
 type Props = {
   did: String;
@@ -14,19 +14,19 @@ type Props = {
 
 const Navigation = ({ did, opened, setOpened }: Props) => {
   const {
-    state: { connected, isUnlocked, expertMode, connectedLaoding },
+    state: { connected, isUnlocked, expertMode, connectedLoading },
   } = useContext(Ad4minContext);
 
   let navigate = useNavigate();
   let location = useLocation();
 
   useEffect(() => {
-    if (!connected && !connectedLaoding) {
+    if (!connected && !connectedLoading) {
       navigate("/connect");
     } else if (connected && !isUnlocked) {
       navigate("/login");
     }
-  }, [connected, isUnlocked, navigate, connectedLaoding]);
+  }, [connected, isUnlocked, navigate, connectedLoading]);
 
   return (
     <>

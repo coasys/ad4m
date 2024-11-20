@@ -5,7 +5,14 @@ import { Ad4minContext } from "../context/Ad4minContext";
 import { AgentContext } from "../context/AgentContext";
 import Logo from "./Logo";
 
-const llmModels = ["tiny_llama_1_1b", "llama_7b", "llama_8b", "llama_13b", "llama_70b", "OpenAI"];
+const llmModels = [
+  // "tiny_llama_1_1b",
+  "External API",
+  "llama_7b",
+  "llama_8b",
+  "llama_13b",
+  "llama_70b",
+];
 const audioModels = ["whisper"];
 const vectorModels = ["bert"];
 
@@ -16,13 +23,13 @@ const Login = (props: any) => {
   } = useContext(AgentContext);
 
   const {
-    state: { isInitialized, isUnlocked, connected, connectedLaoding, client },
+    state: { isInitialized, isUnlocked, connected, connectedLoading, client },
     methods: { resetEndpoint },
   } = useContext(Ad4minContext);
 
   let navigate = useNavigate();
 
-  const [currentIndex, setCurrentIndex] = useState(5);
+  const [currentIndex, setCurrentIndex] = useState(0);
   const [currentSignupIndex, setCurrentSignupIndex] = useState(0);
 
   const [password, setPassword] = useState("");
@@ -31,45 +38,54 @@ const Login = (props: any) => {
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [llmModel, setLlmModel] = useState(llmModels[0]);
+  const [apiUrl, setApiUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [audioModel, setAudioModel] = useState(audioModels[0]);
   const [vectorModel, setVectorModel] = useState(vectorModels[0]);
-  const [usernameError, setUsernameError] = useState<string | null>(null);
+  const [apiUrlError, setApiUrlError] = useState(false);
+  const [apiKeyError, setApiKeyError] = useState(false);
   let [passwordError, setPasswordError] = useState<string | null>(null);
   const [clearAgentModalOpen, setClearAgentModalOpen] = useState(false);
   const [holochain, setHolochain] = useState(true);
 
-  if (hasLoginError) {
-    passwordError = "Invalid password";
+  if (hasLoginError) setPasswordError("Invalid password");
+
+  async function clearAgent() {
+    let agentStatus = await client?.agent.status();
+    if (!agentStatus?.isUnlocked) await invoke("clear_state");
   }
 
-  const clearAgent = async () => {
-    let agentStatus = await client?.agent.status();
+  // todo:
+  // + refactor checkPassword, generate, & onSignupStepOneKeyDown code
+  // + switch to 'client.ai.addModel' when moved into ai service
+  // + check all stages complete (vs. isInitialized boolean) before skipping to end?
+  // + look into weird glitching when UI first loads
+  // + distinguish 'ADAM Layer' title from subtitle on first screen (& use SVG for 'powered by holochain' text)
+  // + add lock icon on Privacy & security screen
+  // + remove background colour on input title text
+  // + fix background image screen resizing issues
+  // + close menus when items selected (if possible using 'open' prop)
 
-    if (!agentStatus?.isUnlocked) {
-      await invoke("clear_state");
-    }
-  };
+  function checkPassword() {
+    if (password.length === 0) setPasswordError("Password is requied");
+    else setPasswordError(null);
+  }
 
-  const generate = () => {
+  function generate() {
     checkPassword();
-    if (password.length > 0) {
-      generateAgent(password);
-    }
-  };
+    if (password.length > 0) generateAgent(password);
+  }
 
-  // @ts-ignore
-  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+  function onKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
     if (event.key === "Enter") {
-      if (isInitialized) {
-        unlockAgent(password, holochain);
-      } else {
-        generate();
-      }
+      if (isInitialized) unlockAgent(password, holochain);
+      else generate();
     }
-  };
+  }
 
-  const onSignupStepOneKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+  function onSignupStepOneKeyDown(
+    event: React.KeyboardEvent<HTMLInputElement>
+  ) {
     if (event.key === "Enter") {
       checkPassword();
       if (password.length > 0) {
@@ -77,42 +93,47 @@ const Login = (props: any) => {
         setCurrentIndex(3);
       }
     }
-  };
+  }
 
-  const onSignupStepTwoKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "Enter") {
-      generate();
-    }
-  };
+  function onSignupStepTwoKeyDown(
+    event: React.KeyboardEvent<HTMLInputElement>
+  ) {
+    if (event.key === "Enter") generate();
+  }
 
-  const checkPassword = () => {
-    if (password.length === 0) {
-      setPasswordError("Password is requied");
-    } else {
-      setPasswordError(null);
-    }
-  };
-
-  const applyModels = () => {
-    // add LLM
-    client?.runtime.addModel({
-      name: llmModel,
-      api: { baseUrl: "", apiKey: "", apiType: "LLM Transcription Model" },
-      local: { fileName: "", tokenizerSource: "", modelParameters: "" },
-      type: "llm",
-    });
-    setCurrentIndex(6);
-  };
-
-  useEffect(() => {
-    if (!connected && !connectedLaoding) {
-      navigate("/connect");
-    } else if (connected && isUnlocked) {
-      navigate("/apps");
-    } else if (isInitialized) {
+  // todo: switch to 'client.ai.addModel' when moved into ai service
+  function applyModels() {
+    if (llmModel === "External API" && !(apiUrl && apiUrl)) {
+      setApiUrlError(!apiUrl);
+      setApiKeyError(!apiKey);
+    } else if (client) {
+      client.runtime.addModel({
+        name: llmModel,
+        api: { baseUrl: apiUrl, apiKey, apiType: "LLM" },
+        local: { fileName: "", tokenizerSource: "", modelParameters: "" },
+        type: "llm",
+      });
+      client.runtime.addModel({
+        name: audioModel,
+        api: { baseUrl: "", apiKey: "", apiType: "" },
+        local: { fileName: "", tokenizerSource: "", modelParameters: "" },
+        type: "transcription",
+      });
+      client.runtime.addModel({
+        name: vectorModel,
+        api: { baseUrl: "", apiKey: "", apiType: "" },
+        local: { fileName: "", tokenizerSource: "", modelParameters: "" },
+        type: "embeding",
+      });
       setCurrentIndex(6);
     }
-  }, [connected, isUnlocked, navigate, isInitialized, connectedLaoding]);
+  }
+
+  useEffect(() => {
+    if (!connected && !connectedLoading) navigate("/connect");
+    else if (connected && isUnlocked) navigate("/apps");
+    else if (isInitialized) setCurrentIndex(6);
+  }, [connected, isUnlocked, navigate, isInitialized, connectedLoading]);
 
   return (
     <div className="slider">
@@ -135,7 +156,11 @@ const Login = (props: any) => {
             </j-text>
 
             <j-flex direction="column" gap="200">
-              <j-button size="xl" onClick={() => setCurrentIndex(1)} variant="primary">
+              <j-button
+                size="xl"
+                onClick={() => setCurrentIndex(1)}
+                variant="primary"
+              >
                 Get Started
               </j-button>
             </j-flex>
@@ -155,24 +180,32 @@ const Login = (props: any) => {
                 marginBottom: "var(--j-space-500)",
               }}
               gradient
-            ></Logo>
+            />
 
             <div>
               <j-text variant="heading">Privacy and Security</j-text>
               <j-text variant="ingress" nomargin>
-                ADAM generates keys on your device, so only you have access to your account and
-                data.
+                ADAM generates keys on your device, so only you have access to
+                your account and data.
                 <p />
-                We will ask for a password used to encrypt your local keys. Don't forget it! There
-                is no way to recover it.
+                We will ask for a password used to encrypt your local keys.
+                Don't forget it! There is no way to recover it.
               </j-text>
             </div>
 
             <j-flex j="center" a="center" gap="500">
-              <j-button variant="link" size="xl" onClick={() => setCurrentIndex(0)}>
+              <j-button
+                variant="link"
+                size="xl"
+                onClick={() => setCurrentIndex(0)}
+              >
                 Previous
               </j-button>
-              <j-button variant="primary" size="xl" onClick={() => setCurrentIndex(2)}>
+              <j-button
+                variant="primary"
+                size="xl"
+                onClick={() => setCurrentIndex(2)}
+              >
                 Next
               </j-button>
             </j-flex>
@@ -191,7 +224,7 @@ const Login = (props: any) => {
                 marginBottom: "var(--j-space-500)",
               }}
               gradient
-            ></Logo>
+            />
             <j-flex direction="column" gap="500" style={{ width: "100%" }}>
               <j-input
                 size="lg"
@@ -211,7 +244,7 @@ const Login = (props: any) => {
                   variant="link"
                   square
                 >
-                  <j-icon name={showPassword ? "eye-slash" : "eye"} size="sm"></j-icon>
+                  <j-icon name={showPassword ? "eye-slash" : "eye"} size="sm" />
                 </j-button>
               </j-input>
               <j-button
@@ -221,11 +254,11 @@ const Login = (props: any) => {
                 variant="primary"
                 style={{ alignSelf: "center" }}
                 onClick={() => {
-                  setCurrentIndex(3);
                   generate();
+                  setCurrentIndex(3);
                 }}
                 loading={loading}
-                disabled={password.length == 0}
+                disabled={password.length === 0}
               >
                 Generate Agent
               </j-button>
@@ -250,18 +283,24 @@ const Login = (props: any) => {
             <div>
               <j-text variant="heading">Censorship free</j-text>
               <j-text variant="ingress" nomargin>
-                ADAM allows you to express yourself without fear of censorship or suppression. You
-                can share your thoughts and opinions without depending on a central authority or a
-                particular app.
+                ADAM allows you to express yourself without fear of censorship
+                or suppression. You can share your thoughts and opinions without
+                depending on a central authority or a particular app.
                 <p />
-                That includes and starts with your personal profile. In the next step you can add
-                optional information about yourself that ADAM will make available publicly to other
-                users through any ADAM app.
+                That includes and starts with your personal profile. In the next
+                step you can add optional information about yourself that ADAM
+                will make available publicly to other users through any ADAM
+                app.
               </j-text>
             </div>
 
             <j-flex j="center" a="center" gap="500">
-              <j-button size="xl" full variant="primary" onClick={() => setCurrentIndex(4)}>
+              <j-button
+                size="xl"
+                full
+                variant="primary"
+                onClick={() => setCurrentIndex(4)}
+              >
                 Next
               </j-button>
             </j-flex>
@@ -280,7 +319,7 @@ const Login = (props: any) => {
                 marginBottom: "var(--j-space-500)",
               }}
               gradient
-            ></Logo>
+            />
             <j-flex direction="column" gap="500" style={{ width: "100%" }}>
               <j-input
                 full
@@ -292,7 +331,7 @@ const Login = (props: any) => {
                 autovalidate
                 type="text"
                 onInput={(e: any) => setUsername(e.target.value)}
-              ></j-input>
+              />
               <j-input
                 full
                 autofocus
@@ -303,7 +342,7 @@ const Login = (props: any) => {
                 autovalidate
                 type="text"
                 onInput={(e: any) => setFirstName(e.target.value)}
-              ></j-input>
+              />
               <j-input
                 full
                 size="lg"
@@ -313,7 +352,7 @@ const Login = (props: any) => {
                 autovalidate
                 type="text"
                 onInput={(e: any) => setLastName(e.target.value)}
-              ></j-input>
+              />
               <j-button
                 className="full-button"
                 full
@@ -345,8 +384,8 @@ const Login = (props: any) => {
             <div>
               <j-text variant="heading">AI Model Selection</j-text>
               <j-text variant="ingress" nomargin>
-                Choose between local or remote AI processing and the models you want to use for
-                different tasks
+                Choose between local or remote AI processing and the models you
+                want to use for different tasks
               </j-text>
             </div>
 
@@ -361,9 +400,24 @@ const Login = (props: any) => {
                       {llmModels.map((model) => (
                         <j-menu-item
                           selected={llmModel === model}
-                          onClick={() => setLlmModel(model)}
+                          onClick={() => {
+                            setLlmModel(model);
+                            if (model === "External API") {
+                              setApiUrl(
+                                "https://api.openai.com/v1/chat/completions"
+                              );
+                            } else {
+                              setApiUrl("");
+                              setApiKey("");
+                              setApiUrlError(false);
+                              setApiKeyError(false);
+                            }
+                          }}
                         >
                           {model}
+                          {model === "External API"
+                            ? " (Recommended for low to mid spec devices)"
+                            : ""}
                         </j-menu-item>
                       ))}
                     </j-menu-group>
@@ -371,13 +425,27 @@ const Login = (props: any) => {
                 </div>
               </j-flex>
 
-              {llmModel === "OpenAI" && (
-                <j-input
-                  size="lg"
-                  label="API Key:"
-                  type="text"
-                  onInput={(e: any) => setApiKey(e.target.value)}
-                />
+              {llmModel === "External API" && (
+                <>
+                  <j-input
+                    size="lg"
+                    label="External API URL:"
+                    type="text"
+                    value={apiUrl}
+                    error={apiUrlError}
+                    errortext="Required"
+                    onInput={(e: any) => setApiUrl(e.target.value)}
+                  />
+                  <j-input
+                    size="lg"
+                    label="External API Key:"
+                    type="text"
+                    value={apiKey}
+                    error={apiKeyError}
+                    errortext="Required"
+                    onInput={(e: any) => setApiKey(e.target.value)}
+                  />
+                </>
               )}
 
               <j-flex a="center" gap="400" wrap>
@@ -447,17 +515,23 @@ const Login = (props: any) => {
             <div>
               <j-text variant="heading">Agent centric</j-text>
               <j-text variant="ingress" nomargin>
-                With ADAM you own your data and decide what apps get to use it. No more app silos
-                with you as the central authority.
+                With ADAM you own your data and decide what apps get to use it.
+                No more app silos with you as the central authority.
                 <p />
-                Once agent generation is done, ADAM will run on your device, in the background. Open
-                an ADAM app, like{" "}
-                <a href="https://fluxsocial.io" target="_blank" style="color: var(--end-color)">
+                Once agent generation is done, ADAM will run on your device, in
+                the background. Open an ADAM app, like{" "}
+                <a
+                  href="https://fluxsocial.io"
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ color: "var(--end-color)" }}
+                >
                   Flux
                 </a>
                 , and connect it to your ADAM agent.
                 <p />
-                To interact with ADAM, click the ADAM icon in your system tray (next to the clock).
+                To interact with ADAM, click the ADAM icon in your system tray
+                (next to the clock).
               </j-text>
             </div>
             <j-button
@@ -466,9 +540,7 @@ const Login = (props: any) => {
               size="lg"
               variant="primary"
               style={{ alignSelf: "center" }}
-              onClick={() => {
-                mutateAgent(username, firstName, lastName);
-              }}
+              onClick={() => mutateAgent(username, firstName, lastName)}
               loading={loading}
             >
               Finish ADAM setup
@@ -511,10 +583,14 @@ const Login = (props: any) => {
                   variant="link"
                   square
                 >
-                  <j-icon name={showPassword ? "eye-slash" : "eye"} size="sm"></j-icon>
+                  <j-icon name={showPassword ? "eye-slash" : "eye"} size="sm" />
                 </j-button>
               </j-input>
-              <j-button size="sm" variant="link" onClick={() => setClearAgentModalOpen(true)}>
+              <j-button
+                size="sm"
+                variant="link"
+                onClick={() => setClearAgentModalOpen(true)}
+              >
                 Reset agent
               </j-button>
               <j-button
@@ -534,7 +610,10 @@ const Login = (props: any) => {
       )}
 
       {clearAgentModalOpen && (
-        <j-modal open={clearAgentModalOpen} onToggle={(e: any) => setClearAgentModalOpen(e.target.open)}>
+        <j-modal
+          open={clearAgentModalOpen}
+          onToggle={(e: any) => setClearAgentModalOpen(e.target.open)}
+        >
           <j-box px="400" py="600">
             <j-box pb="500">
               <j-text nomargin size="600" color="black" weight="600">
@@ -542,12 +621,16 @@ const Login = (props: any) => {
               </j-text>
             </j-box>
             <j-text>
-              Warning: by clearing the agent you will loose all the data and will have to start with
-              a fresh agent
+              Warning: by clearing the agent you will loose all the data and
+              will have to start with a fresh agent
             </j-text>
             <j-box p="200"></j-box>
             <j-flex>
-              <j-button variant="primary" onClick={clearAgent} loading={loading}>
+              <j-button
+                variant="primary"
+                onClick={clearAgent}
+                loading={loading}
+              >
                 Delete Agent
               </j-button>
             </j-flex>
