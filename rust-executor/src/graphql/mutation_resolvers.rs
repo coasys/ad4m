@@ -1214,11 +1214,7 @@ impl Mutation {
         Ok(true)
     }
 
-    async fn ai_add_model(
-        &self,
-        context: &RequestContext,
-        model: ModelInput,
-    ) -> FieldResult<bool> {
+    async fn ai_add_model(&self, context: &RequestContext, model: ModelInput) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
 
         let model = if let Some(api) = model.api {
@@ -1252,18 +1248,14 @@ impl Mutation {
         Ok(true)
     }
 
-    async fn ai_remove_model(
-        &self,
-        context: &RequestContext,
-        name: String,
-    ) -> FieldResult<bool> {
+    async fn ai_remove_model(&self, context: &RequestContext, name: String) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
 
         Ad4mDb::with_global_instance(|db| db.remove_model(&name)).map_err(|e| e.to_string())?;
 
         Ok(true)
     }
-    
+
     async fn ai_add_task(
         &self,
         context: &RequestContext,

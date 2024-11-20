@@ -3,8 +3,8 @@ use crate::graphql::graphql_types::{
     PerspectiveHandle, SentMessage,
 };
 use crate::types::{
-    AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model, ModelApi, Notification,
-    PerspectiveDiff,
+    AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
+    ModelApi, Notification, PerspectiveDiff,
 };
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -190,7 +190,7 @@ impl Ad4mDb {
                 local_model_parameters TEXT,
                 type TEXT NOT NULL
             )",
-            []
+            [],
         )?;
 
         conn.execute(

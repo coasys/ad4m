@@ -554,7 +554,7 @@ impl Query {
             Err(e) => Err(FieldError::new(e.to_string(), Value::null())),
         }
     }
-    
+
     async fn ai_tasks(&self, context: &RequestContext) -> FieldResult<Vec<AITask>> {
         check_capability(&context.capabilities, &AI_READ_CAPABILITY)?;
 
