@@ -307,7 +307,10 @@ impl AIService {
             .insert(model_id, bert_tx);
     }
 
-    async fn build_local_llama_from_string(model_name: String, model_size_string: String) -> Result<Llama> {
+    async fn build_local_llama_from_string(
+        model_name: String,
+        model_size_string: String,
+    ) -> Result<Llama> {
         publish_model_status(model_name.clone(), 0.0, "Loading", false).await;
 
         let llama = match model_size_string.as_str() {
@@ -354,7 +357,10 @@ impl AIService {
 
     async fn spawn_llm_model(&self, model_config: crate::types::Model) {
         if model_config.local.is_none() && model_config.api.is_none() {
-            error!("AI model definition {} doesn't have a body, nothing to spawn!", model_config.name);
+            error!(
+                "AI model definition {} doesn't have a body, nothing to spawn!",
+                model_config.name
+            );
             return;
         }
 
@@ -390,28 +396,30 @@ impl AIService {
 
                 while let Some(task_request) = rt.block_on(llama_rx.recv()) {
                     match task_request {
-                        LLMTaskRequest::Spawn(spawn_request) => {
-                            match model {
-                                LlmModel::Remote(_) => { task_descriptions.insert(spawn_request.task.task_id.clone(), spawn_request.task); },
-                                LlmModel::Local(ref mut llama) => {
-                                    let task_description = spawn_request.task;
-                                    let task = Task::builder(task_description.system_prompt.clone())
-                                        .with_examples(
-                                            task_description
-                                                .prompt_examples
-                                                .clone()
-                                                .into_iter()
-                                                .map(|example| (example.input, example.output))
-                                                .collect::<Vec<(String, String)>>(),
-                                        )
-                                        .build();
-        
-                                    let mut task_run = false;
-                                    let mut tries = 0;
-                                    while !task_run && tries < 20 {
-                                        tries += 1;
-        
-                                        match catch_unwind(|| {
+                        LLMTaskRequest::Spawn(spawn_request) => match model {
+                            LlmModel::Remote(_) => {
+                                task_descriptions
+                                    .insert(spawn_request.task.task_id.clone(), spawn_request.task);
+                            }
+                            LlmModel::Local(ref mut llama) => {
+                                let task_description = spawn_request.task;
+                                let task = Task::builder(task_description.system_prompt.clone())
+                                    .with_examples(
+                                        task_description
+                                            .prompt_examples
+                                            .clone()
+                                            .into_iter()
+                                            .map(|example| (example.input, example.output))
+                                            .collect::<Vec<(String, String)>>(),
+                                    )
+                                    .build();
+
+                                let mut task_run = false;
+                                let mut tries = 0;
+                                while !task_run && tries < 20 {
+                                    tries += 1;
+
+                                    match catch_unwind(|| {
                                             rt.block_on(task.run("Test example prompt", llama).all_text())
                                         }) {
                                             Err(e) => log::error!(
@@ -420,90 +428,93 @@ impl AIService {
                                             ),
                                             Ok(_) => task_run = true,
                                         }
-                                    }
-        
-                                    if task_run {
-                                        tasks.insert(task_description.task_id.clone(), task);
-                                        let _ = spawn_request.result_sender.send(Ok(()));
-                                    } else {
-                                        let _ = spawn_request
-                                            .result_sender
-                                            .send(Err(anyhow!("Couldn't run task without panicks")));
-                                    }
+                                }
+
+                                if task_run {
+                                    tasks.insert(task_description.task_id.clone(), task);
+                                    let _ = spawn_request.result_sender.send(Ok(()));
+                                } else {
+                                    let _ = spawn_request
+                                        .result_sender
+                                        .send(Err(anyhow!("Couldn't run task without panicks")));
                                 }
                             }
-                        }
+                        },
 
-                        LLMTaskRequest::Prompt(prompt_request) => {
-                            match model {
-                                LlmModel::Remote(ref mut gpt) => {
-                                    if let Some(task) = task_descriptions.get(&prompt_request.task_id) {
-                                        let mut lines = vec![format!("You are: {}", task.system_prompt)];
-                                        for example in task.prompt_examples.iter() {
-                                            lines.push(format!("Input: {}", example.input));
-                                            lines.push(format!("Output: {}", example.output));
-                                        }
-                                        lines.push(format!("Input: {}", prompt_request.prompt));
-                                        lines.push(format!("Output:"));
-                                        
-                                        let prompt = lines.join("\n");
-                                        match rt.block_on(gpt.stream_text(&prompt).with_max_length(1000).into_future()) {
-                                            Err(e) => {
-                                                let _ = prompt_request.result_sender.send(Err(anyhow!(
+                        LLMTaskRequest::Prompt(prompt_request) => match model {
+                            LlmModel::Remote(ref mut gpt) => {
+                                if let Some(task) = task_descriptions.get(&prompt_request.task_id) {
+                                    let mut lines =
+                                        vec![format!("You are: {}", task.system_prompt)];
+                                    for example in task.prompt_examples.iter() {
+                                        lines.push(format!("Input: {}", example.input));
+                                        lines.push(format!("Output: {}", example.output));
+                                    }
+                                    lines.push(format!("Input: {}", prompt_request.prompt));
+                                    lines.push(format!("Output:"));
+
+                                    let prompt = lines.join("\n");
+                                    match rt.block_on(
+                                        gpt.stream_text(&prompt)
+                                            .with_max_length(1000)
+                                            .into_future(),
+                                    ) {
+                                        Err(e) => {
+                                            let _ =
+                                                prompt_request.result_sender.send(Err(anyhow!(
                                                     "Error connecting to remote LLM API: {:?}",
                                                     e
                                                 )));
-                                            },
-                                            Ok(mut stream) => {
-                                                let response = rt.block_on(stream.all_text()); 
-                                                let _ = prompt_request.result_sender.send(Ok(response));
-                                            }
                                         }
-                                    } else {
-                                        let _ = prompt_request.result_sender.send(Err(anyhow!(
-                                            "Task with ID {} not spawned",
-                                            prompt_request.task_id
-                                        )));
+                                        Ok(mut stream) => {
+                                            let response = rt.block_on(stream.all_text());
+                                            let _ = prompt_request.result_sender.send(Ok(response));
+                                        }
                                     }
-                                },
-                                LlmModel::Local(ref mut llama) => {
-                                    if let Some(task) = tasks.get(&prompt_request.task_id) {
-                                        let mut maybe_result: Option<String> = None;
-                                        let mut tries = 0;
-                                        while maybe_result.is_none() && tries < 20 {
-                                            tries += 1;
-        
-                                            match catch_unwind(|| {
-                                                rt.block_on(async {
-                                                    task.run(prompt_request.prompt.clone(), llama)
-                                                        .all_text()
-                                                        .await
-                                                })
-                                            }) {
-                                                Err(e) => {
-                                                    log::error!(
-                                                        "Llama panicked with: {:?}. Trying again..",
-                                                        e
-                                                    )
-                                                }
-                                                Ok(result) => maybe_result = Some(result),
-                                            }
-                                        }
-        
-                                        if let Some(result) = maybe_result {
-                                            let _ = prompt_request.result_sender.send(Ok(result));
-                                        } else {
-                                            let _ = prompt_request.result_sender.send(Err(anyhow!("Unable to get response from Llama model. Giving up after 20 retries")));
-                                        }
-                                    } else {
-                                        let _ = prompt_request.result_sender.send(Err(anyhow!(
-                                            "Task with ID {} not spawned",
-                                            prompt_request.task_id
-                                        )));
-                                    }
+                                } else {
+                                    let _ = prompt_request.result_sender.send(Err(anyhow!(
+                                        "Task with ID {} not spawned",
+                                        prompt_request.task_id
+                                    )));
                                 }
                             }
-                        }
+                            LlmModel::Local(ref mut llama) => {
+                                if let Some(task) = tasks.get(&prompt_request.task_id) {
+                                    let mut maybe_result: Option<String> = None;
+                                    let mut tries = 0;
+                                    while maybe_result.is_none() && tries < 20 {
+                                        tries += 1;
+
+                                        match catch_unwind(|| {
+                                            rt.block_on(async {
+                                                task.run(prompt_request.prompt.clone(), llama)
+                                                    .all_text()
+                                                    .await
+                                            })
+                                        }) {
+                                            Err(e) => {
+                                                log::error!(
+                                                    "Llama panicked with: {:?}. Trying again..",
+                                                    e
+                                                )
+                                            }
+                                            Ok(result) => maybe_result = Some(result),
+                                        }
+                                    }
+
+                                    if let Some(result) = maybe_result {
+                                        let _ = prompt_request.result_sender.send(Ok(result));
+                                    } else {
+                                        let _ = prompt_request.result_sender.send(Err(anyhow!("Unable to get response from Llama model. Giving up after 20 retries")));
+                                    }
+                                } else {
+                                    let _ = prompt_request.result_sender.send(Err(anyhow!(
+                                        "Task with ID {} not spawned",
+                                        prompt_request.task_id
+                                    )));
+                                }
+                            }
+                        },
 
                         LLMTaskRequest::Remove(remove_request) => {
                             let _ = tasks.remove(&remove_request.task_id);
