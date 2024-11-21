@@ -316,32 +316,24 @@ impl AIService {
 
                         let llama = match model_id.as_str() {
                             // Local TinyLlama models
-                            "llama_7b" => {
-                                Llama::builder().with_source(LlamaSource::llama_7b())
-                            }
-                            "llama_8b" => {
-                                Llama::builder().with_source(LlamaSource::llama_8b())
-                            }
-                            "llama_13b" => {
-                                Llama::builder().with_source(LlamaSource::llama_13b())
-                            }
-                            "llama_70b" => {
-                                Llama::builder().with_source(LlamaSource::llama_70b())
-                            }
+                            "llama_7b" => Llama::builder().with_source(LlamaSource::llama_7b()),
+                            "llama_8b" => Llama::builder().with_source(LlamaSource::llama_8b()),
+                            "llama_13b" => Llama::builder().with_source(LlamaSource::llama_13b()),
+                            "llama_70b" => Llama::builder().with_source(LlamaSource::llama_70b()),
                             // External API model
                             //"gpt3_5" => {
                             //    let base_url = std::env::var("OPENAI_API_BASE").unwrap_or_else(|_| {
                             //        "https://api.openai.com/v1".to_string() // Default OpenAI URL
                             //    });
-    
-                                // Build Gpt3_5 using the external API endpoint
-                                //return Ok(Gpt3_5::builder()
-                                //    .with_base_url(&base_url)
-                                //    .with_api_key(&api_key)
-                                //    .build());
-                                
+
+                            // Build Gpt3_5 using the external API endpoint
+                            //return Ok(Gpt3_5::builder()
+                            //    .with_base_url(&base_url)
+                            //    .with_api_key(&api_key)
+                            //    .build());
+
                             //}
-    
+
                             // Handle unknown models
                             _ => {
                                 log::error!("Unknown model_id: {}", model_id);
@@ -511,7 +503,10 @@ impl AIService {
                 result_sender,
             }))?;
         } else {
-            return Err(anyhow::anyhow!("Model '{}' not found in LLM channel", model_id));
+            return Err(anyhow::anyhow!(
+                "Model '{}' not found in LLM channel",
+                model_id
+            ));
         }
 
         rx.await?
