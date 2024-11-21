@@ -325,17 +325,18 @@ impl AIService {
                                 Llama::builder().with_source(LlamaSource::llama_70b())
                             }
                             // External API model
-                            "gpt3_5" => {
-                                let base_url = std::env::var("OPENAI_API_BASE").unwrap_or_else(|_| {
-                                    "https://api.openai.com/v1".to_string() // Default OpenAI URL
-                                });
+                            //"gpt3_5" => {
+                            //    let base_url = std::env::var("OPENAI_API_BASE").unwrap_or_else(|_| {
+                            //        "https://api.openai.com/v1".to_string() // Default OpenAI URL
+                            //    });
     
                                 // Build Gpt3_5 using the external API endpoint
-                                return Ok(Gpt3_5::builder()
-                                    .with_base_url(&base_url)
-                                    .with_api_key(&api_key)
-                                    .build());
-                            }
+                                //return Ok(Gpt3_5::builder()
+                                //    .with_base_url(&base_url)
+                                //    .with_api_key(&api_key)
+                                //    .build());
+                                
+                            //}
     
                             // Handle unknown models
                             _ => {
