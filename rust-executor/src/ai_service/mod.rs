@@ -375,7 +375,7 @@ impl AIService {
                         if let Some(local_model) = model_config.local {
                             Self::build_local_llama_from_string(model_id, local_model.file_name)
                                 .await
-                                .map(|llama| LlmModel::Local(llama))
+                                .map(LlmModel::Local)
                         } else if let Some(api) = model_config.api {
                             Ok(LlmModel::Remote(Self::build_remote_gpt4(model_id, api.api_key, api.base_url).await))
                         } else {
@@ -451,7 +451,7 @@ impl AIService {
                                         lines.push(format!("Output: {}", example.output));
                                     }
                                     lines.push(format!("Input: {}", prompt_request.prompt));
-                                    lines.push(format!("Output:"));
+                                    lines.push("Output:".to_string());
 
                                     let prompt = lines.join("\n");
                                     match rt.block_on(
