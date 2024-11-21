@@ -4,7 +4,7 @@ use crate::graphql::graphql_types::{AIModelLoadingStatus, AITaskInput, Transcrip
 use crate::pubsub::AI_MODEL_LOADING_STATUS;
 #[allow(unused_imports)]
 use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
-use crate::types::AITask;
+use crate::types::{AITask, ModelType};
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -175,15 +175,15 @@ impl AIService {
     }
 
     pub async fn load(&self) -> Result<()> {
+        let models = Ad4mDb::with_global_instance(|db| db.get_models())?;
+        let maybe_default_llm = models
+            .iter()
+            .find(|m| m.name == "default" && m.model_type == ModelType::Llm);
         // Get the models from the database & loop over it to spawn models
-        let futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![
+        let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![
             Box::pin(async {
                 self.spawn_embedding_model("bert".to_string()).await;
             }),
-            // check db for default llm model
-            // Box::pin(async {
-            //     self.spawn_llm_model("llama".to_string()).await;
-            // }),
             Box::pin(async {
                 let _ = WhisperBuilder::default()
                     .with_source(WhisperSource::Base)
@@ -191,6 +191,12 @@ impl AIService {
                     .await;
             }),
         ];
+
+        if let Some(default_llm) = maybe_default_llm {
+            futures.push(Box::pin(async {
+                self.spawn_llm_model(default_llm.clone()).await;
+            }))
+        }
 
         futures::future::join_all(futures).await;
 
