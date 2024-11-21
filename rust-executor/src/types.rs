@@ -462,18 +462,13 @@ pub struct LocalModel {
     pub model_parameters: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, GraphQLEnum, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, GraphQLEnum, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelType {
+    #[default]
     Llm,
     Embedding,
     Transcription,
-}
-
-impl Default for ModelType {
-    fn default() -> Self {
-        ModelType::Llm
-    }
 }
 
 impl Display for ModelType {

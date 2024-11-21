@@ -56,12 +56,14 @@ struct EmbeddingRequest {
     pub result_sender: oneshot::Sender<Result<Vec<f32>>>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct LLMTaskSpawnRequest {
     pub task: AITask,
     pub result_sender: oneshot::Sender<Result<()>>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct LLMTaskPromptRequest {
     pub task_id: String,
@@ -69,12 +71,14 @@ struct LLMTaskPromptRequest {
     pub result_sender: oneshot::Sender<Result<String>>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct LLMTaskRemoveRequest {
     pub task_id: String,
     pub result_sender: oneshot::Sender<()>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 enum LLMTaskRequest {
     Spawn(LLMTaskSpawnRequest),
