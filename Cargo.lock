@@ -19074,7 +19074,7 @@ dependencies = [
 [[package]]
 name = "v8"
 version = "0.92.0"
-source = "git+https://github.com/coasys/rusty_v8.git?branch=v0.92-dll#7efd271408acc90335cdca5caaca6f998a71efdd"
+source = "git+https://github.com/coasys/rusty_v8.git?branch=v0.92-dll#4a13d4083e0abe291c2b1c769b7b612e26f6ab5d"
 dependencies = [
  "bitflags 2.6.0",
  "fslock",
