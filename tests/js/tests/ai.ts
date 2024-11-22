@@ -20,7 +20,7 @@ export default function aiTests(testContext: TestContext) {
                         apiKey: "test-api-key",
                         apiType: "OPEN_AI"
                     },
-                    type: "llm"
+                    modelType: "LLM"
                 }
 
                 const addApiResult = await ad4mClient.ai.addModel(apiModelInput)
@@ -34,7 +34,7 @@ export default function aiTests(testContext: TestContext) {
                         tokenizerSource: "test_tokenizer.json",
                         modelParameters: JSON.stringify({ param1: "value1", param2: "value2" })
                     },
-                    type: "embeding"
+                    modelType: "EMBEDDING"
                 }
 
                 const addLocalResult = await ad4mClient.ai.addModel(localModelInput)

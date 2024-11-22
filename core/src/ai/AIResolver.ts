@@ -32,7 +32,7 @@ export class LocalModel {
     modelParameters: string;
 }
 
-type ModelType = "llm" | "embeding" | "transcription";
+type ModelType = "LLM" | "EMBEDDING" | "TRANSCRIPTION";
 
 @ObjectType()
 export class Model {
@@ -46,7 +46,7 @@ export class Model {
     local?: LocalModel;
 
     @Field()
-    type: ModelType;
+    modelType: ModelType;
 }
 
 @InputType()
@@ -85,7 +85,7 @@ export class ModelInput {
     local?: LocalModelInput;
 
     @Field()
-    type: ModelType;
+    modelType: ModelType;
 }
 
 @Resolver()
@@ -105,7 +105,7 @@ export default class AIResolver {
                     tokenizerSource: "test-tokenizer",
                     modelParameters: "{}"
                 },
-                type: "llm"
+                modelType: "LLM"
             }
         ]
     }

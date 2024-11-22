@@ -29,7 +29,7 @@ export class AIClient {
                             tokenizerSource
                             modelParameters
                         }
-                        type
+                        modelType
                     }
                 }
             `
