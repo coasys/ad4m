@@ -129,7 +129,7 @@ describe("Integration tests", function () {
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
-    //describe('Artificial Intelligence', aiTests(testContext))
+    describe('Artificial Intelligence', aiTests(testContext))
     describe('Runtime', runtimeTests(testContext))
     describe('Expression', expressionTests(testContext))
     describe('Perspective', perspectiveTests(testContext))
