@@ -1052,7 +1052,7 @@ impl Ad4mDb {
                 model.local.as_ref().map(|local| local.file_name.clone()),
                 model.local.as_ref().map(|local| local.tokenizer_source.clone()),
                 model.local.as_ref().map(|local| local.model_parameters.clone()),
-                model.model_type.to_string(),
+                serde_json::to_string(&model.model_type).unwrap(),
             ],
         )?;
         Ok(())
