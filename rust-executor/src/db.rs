@@ -1515,4 +1515,74 @@ mod tests {
             .iter()
             .all(|m| m.name != "Test Model API" && m.name != "Test Model Local"));
     }
+
+    #[test]
+    fn test_model_status() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create three models of different types
+        let model_llm = Model {
+            name: "Test LLM Model".to_string(),
+            api: Some(ModelApi {
+                base_url: Url::parse("https://api.example.com").unwrap(),
+                api_key: "llm_key".to_string(),
+                api_type: ModelApiType::OpenAi,
+            }),
+            local: None,
+            model_type: ModelType::Llm,
+        };
+
+        let model_embedding = Model {
+            name: "Test Embedding Model".to_string(),
+            local: Some(LocalModel {
+                file_name: "embedding.bin".to_string(),
+                tokenizer_source: "embedding_tokenizer".to_string(),
+                model_parameters: "{}".to_string(),
+            }),
+            api: None,
+            model_type: ModelType::Embedding,
+        };
+
+        let model_transcription = Model {
+            name: "Test Transcription Model".to_string(),
+            api: Some(ModelApi {
+                base_url: Url::parse("https://api.transcribe.com").unwrap(),
+                api_key: "transcribe_key".to_string(),
+                api_type: ModelApiType::OpenAi,
+            }),
+            local: None,
+            model_type: ModelType::Transcription,
+        };
+
+        // Add first model and test its status
+        db.add_model(&model_llm).unwrap();
+        db.create_or_update_model_status(&model_llm.name, 1.0, "ready", true, true).unwrap();
+        assert!(db.get_model_status(&model_llm.name).unwrap().unwrap().loaded);
+
+        // Add second model and test both statuses
+        db.add_model(&model_embedding).unwrap();
+        db.create_or_update_model_status(&model_embedding.name, 1.0, "ready", false, false).unwrap();
+        assert!(db.get_model_status(&model_llm.name).unwrap().unwrap().loaded);
+        assert!(!db.get_model_status(&model_embedding.name).unwrap().unwrap().loaded);
+
+        // Add third model and test all statuses
+        db.add_model(&model_transcription).unwrap();
+        db.create_or_update_model_status(&model_transcription.name, 1.0, "ready", true, true).unwrap();
+        assert!(db.get_model_status(&model_llm.name).unwrap().unwrap().loaded);
+        assert!(!db.get_model_status(&model_embedding.name).unwrap().unwrap().loaded);
+        assert!(db.get_model_status(&model_transcription.name).unwrap().unwrap().loaded);
+
+        // Update some statuses and verify all still work
+        db.create_or_update_model_status(&model_transcription.name, 1.0, "ready", false, false).unwrap();
+        db.create_or_update_model_status(&model_embedding.name, 1.0, "ready", true, true).unwrap();
+        
+        assert!(db.get_model_status(&model_llm.name).unwrap().unwrap().loaded);
+        assert!(db.get_model_status(&model_embedding.name).unwrap().unwrap().loaded); 
+        assert!(!db.get_model_status(&model_transcription.name).unwrap().unwrap().loaded);
+
+        // Clean up
+        db.remove_model(&model_llm.name).unwrap();
+        db.remove_model(&model_embedding.name).unwrap();
+        db.remove_model(&model_transcription.name).unwrap();
+    }
 }
