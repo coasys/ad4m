@@ -1177,7 +1177,7 @@ describe('Ad4mClient', () => {
                     tokenizerSource: "new-test-tokenizer",
                     modelParameters: "{}"
                 },
-                type: "LLM"
+                modelType: "LLM"
             };
             const result = await ad4mClient.ai.addModel(newModel);
             expect(result).toBe(true);
