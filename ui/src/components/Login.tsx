@@ -1,3 +1,4 @@
+import { ModelInput } from "@coasys/ad4m/lib/src/ai/AIResolver";
 import { invoke } from "@tauri-apps/api/core";
 import { useContext, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -13,10 +14,10 @@ const llmModels = [
   "llama_13b",
   "llama_70b",
 ];
-const audioModels = ["whisper"];
-const vectorModels = ["bert"];
+const transcriptionModels = ["whisper"];
+const embeddingModels = ["bert"];
 
-const Login = (props: any) => {
+const Login = () => {
   const {
     state: { loading, hasLoginError },
     methods: { generateAgent, unlockAgent, mutateAgent },
@@ -31,17 +32,18 @@ const Login = (props: any) => {
 
   const [currentIndex, setCurrentIndex] = useState(0);
   const [currentSignupIndex, setCurrentSignupIndex] = useState(0);
-
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [username, setUsername] = useState("");
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [llmModel, setLlmModel] = useState(llmModels[0]);
-  const [apiUrl, setApiUrl] = useState("");
+  const [transcriptionModel, setTranscriptionModel] = useState(
+    transcriptionModels[0]
+  );
+  const [embeddingModel, setEmbeddingModel] = useState(embeddingModels[0]);
+  const [apiUrl, setApiUrl] = useState("https://api.openai.com/v1");
   const [apiKey, setApiKey] = useState("");
-  const [audioModel, setAudioModel] = useState(audioModels[0]);
-  const [vectorModel, setVectorModel] = useState(vectorModels[0]);
   const [apiUrlError, setApiUrlError] = useState(false);
   const [apiKeyError, setApiKeyError] = useState(false);
   let [passwordError, setPasswordError] = useState<string | null>(null);
@@ -56,8 +58,6 @@ const Login = (props: any) => {
   }
 
   // todo:
-  // + refactor checkPassword, generate, & onSignupStepOneKeyDown code
-  // + switch to 'client.ai.addModel' when moved into ai service
   // + check all stages complete (vs. isInitialized boolean) before skipping to end?
   // + look into weird glitching when UI first loads
   // + distinguish 'ADAM Layer' title from subtitle on first screen (& use SVG for 'powered by holochain' text)
@@ -66,66 +66,48 @@ const Login = (props: any) => {
   // + fix background image screen resizing issues
   // + close menus when items selected (if possible using 'open' prop)
 
-  function checkPassword() {
-    if (password.length === 0) setPasswordError("Password is requied");
-    else setPasswordError(null);
+  function passwordValid(): boolean {
+    const valid = password.length > 0;
+    setPasswordError(valid ? null : "Password is requied");
+    return valid;
   }
 
-  function generate() {
-    checkPassword();
-    if (password.length > 0) generateAgent(password);
-  }
-
-  function onKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
-    if (event.key === "Enter") {
-      if (isInitialized) unlockAgent(password, holochain);
-      else generate();
-    }
-  }
-
-  function onSignupStepOneKeyDown(
-    event: React.KeyboardEvent<HTMLInputElement>
-  ) {
-    if (event.key === "Enter") {
-      checkPassword();
-      if (password.length > 0) {
-        generate();
-        setCurrentIndex(3);
-      }
-    }
-  }
-
-  function onSignupStepTwoKeyDown(
-    event: React.KeyboardEvent<HTMLInputElement>
-  ) {
-    if (event.key === "Enter") generate();
-  }
-
-  // todo: switch to 'client.ai.addModel' when moved into ai service
   function applyModels() {
     if (llmModel === "External API" && !(apiUrl && apiUrl)) {
       setApiUrlError(!apiUrl);
       setApiKeyError(!apiKey);
     } else if (client) {
+      // add llm model
+      const llm = { name: llmModel, modelType: "LLM" } as ModelInput;
+      if (llmModel === "External API")
+        llm.api = { baseUrl: apiUrl, apiKey, apiType: "OPEN_AI" };
+      else
+        llm.local = {
+          fileName: llmModel,
+          tokenizerSource: "",
+          modelParameters: "",
+        };
+      client.ai.addModel(llm);
+      // add embedding model
       client.ai.addModel({
-        name: "default",
-        api: { baseUrl: apiUrl, apiKey, apiType: "LLM" },
-        // local: llmModel,
-        local: { fileName: llmModel, tokenizerSource: "", modelParameters: "" },
-        type: "llm",
+        name: embeddingModel,
+        local: {
+          fileName: embeddingModel,
+          tokenizerSource: "",
+          modelParameters: "",
+        },
+        modelType: "EMBEDDING",
       });
-      // client.ai.addModel({
-      //   name: audioModel,
-      //   api: { baseUrl: "", apiKey: "", apiType: "" },
-      //   // local: { fileName: "", tokenizerSource: "", modelParameters: "" },
-      //   type: "transcription",
-      // });
-      // client.ai.addModel({
-      //   name: vectorModel,
-      //   api: { baseUrl: "", apiKey: "", apiType: "" },
-      //   // local: { fileName: "", tokenizerSource: "", modelParameters: "" },
-      //   type: "embeding",
-      // });
+      // add transcription model
+      client.ai.addModel({
+        name: transcriptionModel,
+        local: {
+          fileName: transcriptionModel,
+          tokenizerSource: "",
+          modelParameters: "",
+        },
+        modelType: "TRANSCRIPTION",
+      });
       setCurrentIndex(6);
     }
   }
@@ -237,7 +219,12 @@ const Login = (props: any) => {
                 type={showPassword ? "text" : "password"}
                 full
                 onInput={(e: any) => setPassword(e.target.value)}
-                onKeyDown={onSignupStepOneKeyDown}
+                onKeyDown={(e: any) => {
+                  if (e.key === "Enter" && passwordValid()) {
+                    generateAgent(password);
+                    setCurrentIndex(3);
+                  }
+                }}
               >
                 <j-button
                   onClick={() => setShowPassword(!showPassword)}
@@ -255,8 +242,10 @@ const Login = (props: any) => {
                 variant="primary"
                 style={{ alignSelf: "center" }}
                 onClick={() => {
-                  generate();
-                  setCurrentIndex(3);
+                  if (passwordValid()) {
+                    generateAgent(password);
+                    setCurrentIndex(3);
+                  }
                 }}
                 loading={loading}
                 disabled={password.length === 0}
@@ -452,11 +441,11 @@ const Login = (props: any) => {
                   Audio Transcription
                 </j-text>
                 <j-menu>
-                  <j-menu-group collapsible title={audioModel}>
-                    {audioModels.map((model) => (
+                  <j-menu-group collapsible title={transcriptionModel}>
+                    {transcriptionModels.map((model) => (
                       <j-menu-item
-                        selected={audioModel === model}
-                        onClick={() => setAudioModel(model)}
+                        selected={transcriptionModel === model}
+                        onClick={() => setTranscriptionModel(model)}
                       >
                         {model}
                       </j-menu-item>
@@ -470,11 +459,11 @@ const Login = (props: any) => {
                   Vector Embedding
                 </j-text>
                 <j-menu>
-                  <j-menu-group collapsible title={vectorModel}>
-                    {vectorModels.map((model) => (
+                  <j-menu-group collapsible title={embeddingModel}>
+                    {embeddingModels.map((model) => (
                       <j-menu-item
-                        selected={vectorModel === model}
-                        onClick={() => setVectorModel(model)}
+                        selected={embeddingModel === model}
+                        onClick={() => setEmbeddingModel(model)}
                       >
                         {model}
                       </j-menu-item>
@@ -572,7 +561,12 @@ const Login = (props: any) => {
                 type={showPassword ? "text" : "password"}
                 full
                 onInput={(e: any) => setPassword(e.target.value)}
-                onKeyDown={onKeyDown}
+                onKeyDown={(e: any) => {
+                  if (e.key === "Enter") {
+                    if (isInitialized) unlockAgent(password, holochain);
+                    else if (passwordValid()) generateAgent(password);
+                  }
+                }}
                 errortext={passwordError || undefined}
                 error={!!passwordError}
               >
