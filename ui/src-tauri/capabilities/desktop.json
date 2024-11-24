@@ -5,6 +5,13 @@
     "windows",
     "linux"
   ],
+  "windows": [
+    "main",
+    "AD4M"
+  ],
+  "remote": {
+    "urls": ["http://127.0.0.1:3000"]
+  },
   "permissions": [
     "updater:default",
     "global-shortcut:default",
