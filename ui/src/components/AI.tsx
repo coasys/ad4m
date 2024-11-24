@@ -13,6 +13,8 @@ const AI = () => {
   const getData = useCallback(async () => {
     const modelsInDB = await client!.ai.getModels();
     const tasksInDB = await client!.ai.tasks();
+    console.log("modelsInDB: ", modelsInDB);
+    console.log("tasksInDB: ", tasksInDB);
     // attach tasks to models
     const modelsWithTasks = modelsInDB.map((model) => {
       const matchingTasks = tasksInDB.filter(
@@ -24,11 +26,18 @@ const AI = () => {
     setModels(modelsWithTasks);
   }, [client]);
 
-  function toggleTasks(modelName: string) {
+  function toggleModelTasks(modelName: string) {
     const newModels = [...models];
     const match = newModels.find((model) => model.name === modelName);
     if (match) match.collapsed = !match.collapsed;
     setModels(newModels);
+  }
+
+  function statusText(model: any) {
+    const { status, downloaded, loaded, progress } = model;
+    if (!status) return "Checking status...";
+    else if (downloaded && loaded) return "Model ready";
+    return `${downloaded ? "Loading" : "Downloading"}: ${progress?.toFixed(2) || 0}%`;
   }
 
   useEffect(() => {
@@ -50,8 +59,16 @@ const AI = () => {
             modelsRef.current.map(
               (model) =>
                 new Promise(async (resolve) => {
-                  const status = await client.ai.modelLoadingStatus(model.name);
-                  resolve({ ...model, ...status });
+                  client.ai
+                    .modelLoadingStatus(model.name)
+                    .then((status) => {
+                      console.log("model found: ", status);
+                      resolve({ ...model, ...status });
+                    })
+                    .catch((error) => {
+                      console.log("model not found: ", error, model.name);
+                      resolve(model);
+                    });
                 })
             )
           );
@@ -66,46 +83,43 @@ const AI = () => {
   return (
     <div style={listStyle}>
       {models.map((model) => (
-        <j-flex
-          key={model.name}
-          gap="400"
-          style={{ ...cardStyle, width: "100%" }}
-        >
-          <j-text variant="heading">{model.name}</j-text>
-          <j-text variant="heading-sm">{model.type}</j-text>
-          <j-text>Model {model.status}</j-text>
-          {!model.downloaded && (
-            <j-text>Downloading: {model.progress.toFixed(2)}%</j-text>
-          )}
-          {model.downloaded && !model.loaded && (
-            <j-text>Loading: {model.progress.toFixed(2)}%</j-text>
-          )}
-          {model.tasks.length === 0 ? (
-            <j-text nomargin>No tasks created</j-text>
-          ) : (
-            <j-flex gap="400">
-              <j-button onClick={() => toggleTasks(model.name)}>
-                {model.collapsed ? "Show" : "Hide"} tasks ({model.tasks.length})
-              </j-button>
-              {!model.collapsed && (
-                <j-flex gap="300">
-                  {model.tasks.map((task: any) => (
-                    <j-flex
-                      key={task.taskId}
-                      gap="300"
-                      style={{ ...cardStyle, width: "100%" }}
-                    >
-                      <j-text variant="heading-sm">{task.name}</j-text>
-                      <j-text>{task.modelId}</j-text>
-                      <j-text>{task.taskId}</j-text>
-                      <j-text>{task.systemPrompt}</j-text>
-                    </j-flex>
-                  ))}
-                </j-flex>
-              )}
-            </j-flex>
-          )}
-        </j-flex>
+        <div key={model.name} style={{ ...cardStyle, width: "100%" }}>
+          <j-flex direction="column" gap="400">
+            <j-text variant="heading" nomargin>
+              Model name: {model.name}
+            </j-text>
+            <j-text nomargin>Type: {model.modelType}</j-text>
+            <j-text nomargin>Status: {statusText(model)}</j-text>
+            {model.tasks.length === 0 ? (
+              <j-text nomargin>No tasks created</j-text>
+            ) : (
+              <>
+                <j-button onClick={() => toggleModelTasks(model.name)}>
+                  {model.collapsed ? "Show" : "Hide"} tasks (
+                  {model.tasks.length})
+                </j-button>
+                {!model.collapsed && (
+                  <j-flex gap="300">
+                    {model.tasks.map((task: any) => (
+                      <div
+                        key={task.taskId}
+                        style={{ ...cardStyle, width: "100%" }}
+                      >
+                        <j-flex direction="column" gap="400">
+                          <j-text variant="heading-sm" nomargin>
+                            Task name: {task.name}
+                          </j-text>
+                          <j-text nomargin>Id: {task.taskId}</j-text>
+                          <j-text nomargin>Prompt: {task.systemPrompt}</j-text>
+                        </j-flex>
+                      </div>
+                    ))}
+                  </j-flex>
+                )}
+              </>
+            )}
+          </j-flex>
+        </div>
       ))}
     </div>
   );
