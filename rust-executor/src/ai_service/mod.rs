@@ -178,12 +178,14 @@ impl AIService {
         let models = Ad4mDb::with_global_instance(|db| db.get_models())?;
         let maybe_default_llm = models
             .iter()
-            .find(|m| m.name == "default" && m.model_type == ModelType::Llm);
+            .find(|m| m.model_type == ModelType::Llm);
+
+        let maybe_default_embedder = models
+            .iter()
+            .find(|m| m.model_type == ModelType::Embedding);
+
         // Get the models from the database & loop over it to spawn models
         let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![
-            Box::pin(async {
-                self.spawn_embedding_model("bert".to_string()).await;
-            }),
             Box::pin(async {
                 let _ = WhisperBuilder::default()
                     .with_source(WhisperSource::Base)
@@ -196,6 +198,12 @@ impl AIService {
             futures.push(Box::pin(async {
                 self.spawn_llm_model(default_llm.clone()).await;
             }))
+        }
+
+        if let Some(default_embedder) = maybe_default_embedder {
+            futures.push(Box::pin(async {
+                self.spawn_embedding_model(default_embedder.name.clone()).await;
+            }));
         }
 
         futures::future::join_all(futures).await;
