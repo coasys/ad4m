@@ -248,8 +248,10 @@ impl AIService {
 
     pub async fn add_model(&self, model: crate::types::Model) -> Result<()> {
         self.init_model(model.clone()).await?;
-        Ad4mDb::with_global_instance(|db| db.add_model(&model))
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        Ad4mDb::with_global_instance(|db| {
+            db.add_model(&model)?;
+            db.set_default_model(model.model_type, &model.name)
+        }).map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(())
     }
 
@@ -610,7 +612,8 @@ impl AIService {
             .map_err(|e| anyhow::anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow::anyhow!("Task not found for task_id: {}", task_id))?;
 
-        let model_id = task.model_id;
+        let default_model = Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?;
+        let model_id = default_model.unwrap_or(task.model_id.clone());
 
         let llm_channel = self.llm_channel.lock().await;
         if let Some(sender) = llm_channel.get(&model_id) {
@@ -649,9 +652,11 @@ impl AIService {
 
     async fn spawn_task(&self, task: AITask) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-
         let llm_channel = self.llm_channel.lock().await;
-        if let Some(sender) = llm_channel.get(&task.model_id) {
+        let default_model = Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?;
+        let model = default_model.unwrap_or(task.model_id.clone());
+        
+        if let Some(sender) = llm_channel.get(&model) {
             sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
                 task: task.clone(),
                 result_sender: tx,
@@ -668,10 +673,11 @@ impl AIService {
 
     async fn remove_task(&self, task_id: String) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-
         let llm_channel = self.llm_channel.lock().await;
+        let default_model = Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?;
+        let model = default_model.ok_or(anyhow!("No default model set - can't remove task"))?;
 
-        if let Some(sender) = llm_channel.get("llama") {
+        if let Some(sender) = llm_channel.get(&model) {
             sender.send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
                 task_id,
                 result_sender: tx,
