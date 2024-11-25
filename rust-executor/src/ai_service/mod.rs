@@ -179,43 +179,60 @@ impl AIService {
         let maybe_default_llm = models
             .iter()
             .find(|m| m.model_type == ModelType::Llm);
-
+    
         let maybe_default_embedder = models
             .iter()
             .find(|m| m.model_type == ModelType::Embedding);
-
+    
+        let maybe_default_transcriber = models
+            .iter()
+            .find(|m| m.model_type == ModelType::Transcription);
+    
         // Get the models from the database & loop over it to spawn models
-        let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![
-            Box::pin(async {
-                let _ = WhisperBuilder::default()
-                    .with_source(WhisperSource::Base)
-                    .build()
-                    .await;
-            }),
-        ];
-
+        let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![];
+    
         if let Some(default_llm) = maybe_default_llm {
             futures.push(Box::pin(async {
                 self.spawn_llm_model(default_llm.clone()).await;
             }))
         }
-
+    
         if let Some(default_embedder) = maybe_default_embedder {
             futures.push(Box::pin(async {
                 self.spawn_embedding_model(default_embedder.name.clone()).await;
             }));
         }
-
+    
+        if let Some(default_transcriber) = maybe_default_transcriber {
+            let transcriber_name = default_transcriber.name.clone();
+            futures.push(Box::pin(async move {
+    
+                publish_model_status(transcriber_name.clone(), 0.0, "Loading", false).await;
+    
+                let _ = WhisperBuilder::default()
+                    .with_source(WhisperSource::Base)
+                    .build_with_loading_handler({
+                        let transcriber_name = transcriber_name.clone();
+                        move |progress| {
+                            tokio::spawn(handle_progress(transcriber_name.clone(), progress));
+                        }
+                    })
+                    .await;
+    
+                publish_model_status(transcriber_name, 100.0, "Loaded", false).await;
+            }));
+        }
+    
         futures::future::join_all(futures).await;
-
+    
         // Spawn tasks from the database
         let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
-
+    
         for task in tasks {
             self.spawn_task(task).await?;
         }
-
+    
         Ok(())
     }
 
