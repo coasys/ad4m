@@ -474,9 +474,9 @@ pub enum ModelType {
 impl Display for ModelType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ModelType::Llm => write!(f, "llm"),
-            ModelType::Embedding => write!(f, "embedding"),
-            ModelType::Transcription => write!(f, "transcription"),
+            ModelType::Llm => write!(f, "LLM"),
+            ModelType::Embedding => write!(f, "EMBEDDING"),
+            ModelType::Transcription => write!(f, "TRANSCRIPTION"),
         }
     }
 }
