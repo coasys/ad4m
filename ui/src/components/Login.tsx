@@ -69,9 +69,8 @@ const Login = () => {
 
   // todo:
   // + look into weird glitching when UI first loads
-  // + distinguish 'ADAM Layer' title from subtitle on first screen (& use SVG for 'powered by holochain' text)
+  // + use SVG for 'powered by holochain' text
   // + add lock icon on Privacy & security screen
-  // + close menus when items selected (if possible using 'open' prop)
 
   function passwordValid(): boolean {
     const valid = password.length > 0;
@@ -144,21 +143,29 @@ const Login = () => {
     <div className="slider">
       {currentIndex === 0 && (
         <div className="slider__slide">
-          <div className="slider__slide-content center text-center">
+          <div
+            className="slider__slide-content center text-center"
+            style={{ height: 400 }}
+          >
             <Logo
               style={{
                 width: "80px",
                 height: "80px",
                 margin: "0 auto",
-                marginBottom: "var(--j-space-500)",
               }}
               gradient
-            ></Logo>
+            />
 
-            <j-text size="800" color="black">
-              ADAM Layer<br></br>A social layer for the{" "}
-              <i style={{ fontFamily: "Noto Serif" }}>Wise Web</i>
-            </j-text>
+            <j-flex direction="column" gap="400" style={{ width: "100%" }}>
+              <j-text variant="heading-lg" size="900" color="black" nomargin>
+                ADAM Layer
+              </j-text>
+
+              <j-text size="800" color="black" style={{ textWrap: "wrap" }}>
+                A social layer for the{" "}
+                <span className="emphasis">Wise Web</span>
+              </j-text>
+            </j-flex>
 
             <j-flex direction="column" gap="200">
               <j-button
@@ -170,7 +177,11 @@ const Login = () => {
               </j-button>
             </j-flex>
           </div>
-          <img src="holochain-large.png" alt="" style={{ float: "left" }} />
+          <img
+            src="holochain-large.png"
+            alt=""
+            style={{ width: "100%", maxWidth: 500 }}
+          />
         </div>
       )}
 
@@ -290,7 +301,7 @@ const Login = () => {
                 marginBottom: "var(--j-space-500)",
               }}
               gradient
-            ></Logo>
+            />
 
             <div>
               <j-text variant="heading">Censorship free</j-text>
@@ -658,7 +669,7 @@ const Login = () => {
                 marginBottom: "var(--j-space-500)",
               }}
               gradient
-            ></Logo>
+            />
 
             <div>
               <j-text variant="heading">Agent centric</j-text>
@@ -708,7 +719,7 @@ const Login = () => {
                 marginBottom: "var(--j-space-500)",
               }}
               gradient
-            ></Logo>
+            />
             <j-flex direction="column" gap="500" style={{ width: "100%" }}>
               <j-input
                 autofocus
@@ -777,7 +788,6 @@ const Login = () => {
               Warning: by clearing the agent you will loose all the data and
               will have to start with a fresh agent
             </j-text>
-            <j-box p="200"></j-box>
             <j-flex>
               <j-button
                 variant="primary"
