@@ -79,6 +79,12 @@ const Login = () => {
     return valid;
   }
 
+  function closeMenu(menuId: string) {
+    const menu = document.getElementById(menuId);
+    const items = menu?.shadowRoot?.querySelector("details");
+    if (items) items.open = false;
+  }
+
   function saveModels() {
     // validate model settings
     const invalidNames = !(llmName && embedderName && transcriberName);
@@ -432,7 +438,11 @@ const Login = () => {
                     </j-text>
                     <div style={{ height: 42, zIndex: 15 }}>
                       <j-menu>
-                        <j-menu-group collapsible title={llmModel}>
+                        <j-menu-group
+                          collapsible
+                          title={llmModel}
+                          id="llm-models"
+                        >
                           {llmModels.map((model) => (
                             <j-menu-item
                               selected={llmModel === model}
@@ -446,6 +456,7 @@ const Login = () => {
                                   setApiUrlError(false);
                                   setApiKeyError(false);
                                 }
+                                closeMenu("llm-models");
                               }}
                             >
                               {model}
@@ -542,11 +553,18 @@ const Login = () => {
                       Model:
                     </j-text>
                     <j-menu>
-                      <j-menu-group collapsible title={transcriptionModel}>
+                      <j-menu-group
+                        collapsible
+                        title={transcriptionModel}
+                        id="transcription-models"
+                      >
                         {transcriptionModels.map((model) => (
                           <j-menu-item
                             selected={transcriptionModel === model}
-                            onClick={() => setTranscriptionModel(model)}
+                            onClick={() => {
+                              setTranscriptionModel(model);
+                              closeMenu("transcription-models");
+                            }}
                           >
                             {model}
                           </j-menu-item>
@@ -592,11 +610,18 @@ const Login = () => {
                       Model:
                     </j-text>
                     <j-menu>
-                      <j-menu-group collapsible title={embeddingModel}>
+                      <j-menu-group
+                        collapsible
+                        title={embeddingModel}
+                        id="embedding-models"
+                      >
                         {embeddingModels.map((model) => (
                           <j-menu-item
                             selected={embeddingModel === model}
-                            onClick={() => setEmbeddingModel(model)}
+                            onClick={() => {
+                              setEmbeddingModel(model);
+                              closeMenu("embedding-models");
+                            }}
                           >
                             {model}
                           </j-menu-item>
