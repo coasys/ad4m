@@ -176,21 +176,17 @@ impl AIService {
 
     pub async fn load(&self) -> Result<()> {
         let models = Ad4mDb::with_global_instance(|db| db.get_models())?;
-        let maybe_default_llm = models
-            .iter()
-            .find(|m| m.model_type == ModelType::Llm);
-    
-        let maybe_default_embedder = models
-            .iter()
-            .find(|m| m.model_type == ModelType::Embedding);
-    
+        let maybe_default_llm = models.iter().find(|m| m.model_type == ModelType::Llm);
+
+        let maybe_default_embedder = models.iter().find(|m| m.model_type == ModelType::Embedding);
+
         let maybe_default_transcriber = models
             .iter()
             .find(|m| m.model_type == ModelType::Transcription);
-    
+
         // Get the models from the database & loop over it to spawn models
         let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![];
-    
+
         if let Some(default_llm) = maybe_default_llm {
             futures.push(Box::pin(async {
                 if let Err(e) = self.spawn_llm_model(default_llm.clone()).await {
@@ -198,32 +194,34 @@ impl AIService {
                 }
             }))
         }
-    
+
         if let Some(default_embedder) = maybe_default_embedder {
-            futures.push(Box::pin(self.spawn_embedding_model(default_embedder.clone())));
+            futures.push(Box::pin(
+                self.spawn_embedding_model(default_embedder.clone()),
+            ));
         }
-    
+
         if let Some(default_transcriber) = maybe_default_transcriber {
             futures.push(Box::pin(Self::load_transcriber_model(default_transcriber)));
         }
-    
+
         futures::future::join_all(futures).await;
-    
+
         // Spawn tasks from the database
         let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
-    
+
         for task in tasks {
             self.spawn_task(task).await?;
         }
-    
+
         Ok(())
     }
 
     async fn load_transcriber_model(model: &crate::types::Model) {
         let name = model.name.clone();
         publish_model_status(name.clone(), 0.0, "Loading", false).await;
-    
+
         let _ = WhisperBuilder::default()
             .with_source(WhisperSource::Base)
             .build_with_loading_handler({
@@ -237,12 +235,17 @@ impl AIService {
         publish_model_status(name, 100.0, "Loaded", false).await;
     }
 
-    pub async fn add_model(&self, model: crate::types::Model) -> Result<()> {
+    async fn init_model(&self, model: crate::types::Model) -> Result<()> {
         match model.model_type {
-            ModelType::Llm => self.spawn_llm_model(model.clone()).await?,
-            ModelType::Embedding => self.spawn_embedding_model(model.clone()).await,
+            ModelType::Llm => self.spawn_llm_model(model).await?,
+            ModelType::Embedding => self.spawn_embedding_model(model).await,
             ModelType::Transcription => Self::load_transcriber_model(&model).await,
         };
+        Ok(())
+    }
+
+    pub async fn add_model(&self, model: crate::types::Model) -> Result<()> {
+        self.init_model(model.clone()).await?;
         Ad4mDb::with_global_instance(|db| db.add_model(&model))
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(())

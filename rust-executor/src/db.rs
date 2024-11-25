@@ -1556,29 +1556,79 @@ mod tests {
 
         // Add first model and test its status
         db.add_model(&model_llm).unwrap();
-        db.create_or_update_model_status(&model_llm.name, 1.0, "ready", true, true).unwrap();
-        assert!(db.get_model_status(&model_llm.name).unwrap().unwrap().loaded);
+        db.create_or_update_model_status(&model_llm.name, 1.0, "ready", true, true)
+            .unwrap();
+        assert!(
+            db.get_model_status(&model_llm.name)
+                .unwrap()
+                .unwrap()
+                .loaded
+        );
 
         // Add second model and test both statuses
         db.add_model(&model_embedding).unwrap();
-        db.create_or_update_model_status(&model_embedding.name, 1.0, "ready", false, false).unwrap();
-        assert!(db.get_model_status(&model_llm.name).unwrap().unwrap().loaded);
-        assert!(!db.get_model_status(&model_embedding.name).unwrap().unwrap().loaded);
+        db.create_or_update_model_status(&model_embedding.name, 1.0, "ready", false, false)
+            .unwrap();
+        assert!(
+            db.get_model_status(&model_llm.name)
+                .unwrap()
+                .unwrap()
+                .loaded
+        );
+        assert!(
+            !db.get_model_status(&model_embedding.name)
+                .unwrap()
+                .unwrap()
+                .loaded
+        );
 
         // Add third model and test all statuses
         db.add_model(&model_transcription).unwrap();
-        db.create_or_update_model_status(&model_transcription.name, 1.0, "ready", true, true).unwrap();
-        assert!(db.get_model_status(&model_llm.name).unwrap().unwrap().loaded);
-        assert!(!db.get_model_status(&model_embedding.name).unwrap().unwrap().loaded);
-        assert!(db.get_model_status(&model_transcription.name).unwrap().unwrap().loaded);
+        db.create_or_update_model_status(&model_transcription.name, 1.0, "ready", true, true)
+            .unwrap();
+        assert!(
+            db.get_model_status(&model_llm.name)
+                .unwrap()
+                .unwrap()
+                .loaded
+        );
+        assert!(
+            !db.get_model_status(&model_embedding.name)
+                .unwrap()
+                .unwrap()
+                .loaded
+        );
+        assert!(
+            db.get_model_status(&model_transcription.name)
+                .unwrap()
+                .unwrap()
+                .loaded
+        );
 
         // Update some statuses and verify all still work
-        db.create_or_update_model_status(&model_transcription.name, 1.0, "ready", false, false).unwrap();
-        db.create_or_update_model_status(&model_embedding.name, 1.0, "ready", true, true).unwrap();
-        
-        assert!(db.get_model_status(&model_llm.name).unwrap().unwrap().loaded);
-        assert!(db.get_model_status(&model_embedding.name).unwrap().unwrap().loaded); 
-        assert!(!db.get_model_status(&model_transcription.name).unwrap().unwrap().loaded);
+        db.create_or_update_model_status(&model_transcription.name, 1.0, "ready", false, false)
+            .unwrap();
+        db.create_or_update_model_status(&model_embedding.name, 1.0, "ready", true, true)
+            .unwrap();
+
+        assert!(
+            db.get_model_status(&model_llm.name)
+                .unwrap()
+                .unwrap()
+                .loaded
+        );
+        assert!(
+            db.get_model_status(&model_embedding.name)
+                .unwrap()
+                .unwrap()
+                .loaded
+        );
+        assert!(
+            !db.get_model_status(&model_transcription.name)
+                .unwrap()
+                .unwrap()
+                .loaded
+        );
 
         // Clean up
         db.remove_model(&model_llm.name).unwrap();
