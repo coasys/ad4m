@@ -4,6 +4,7 @@ import { useContext, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { AgentContext } from "../context/AgentContext";
+import "../index.css";
 import Logo from "./Logo";
 
 const llmModels = [
@@ -31,24 +32,33 @@ const Login = () => {
   let navigate = useNavigate();
 
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [currentSignupIndex, setCurrentSignupIndex] = useState(0);
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
   const [username, setUsername] = useState("");
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
+  const [clearAgentModalOpen, setClearAgentModalOpen] = useState(false);
+  const [holochain, setHolochain] = useState(true);
+  // LLM
   const [llmModel, setLlmModel] = useState(llmModels[0]);
+  const [llmName, setLlmName] = useState("");
+  const [llmNameError, setLlmNameError] = useState(false);
+  // Transcriber
   const [transcriptionModel, setTranscriptionModel] = useState(
     transcriptionModels[0]
   );
+  const [transcriberName, setTranscriberName] = useState("");
+  const [transcriberNameError, setTranscriberNameError] = useState(false);
+  // Embedder
   const [embeddingModel, setEmbeddingModel] = useState(embeddingModels[0]);
+  const [embedderName, setEmbedderName] = useState("");
+  const [embedderNameError, setEmbedderNameError] = useState(false);
+  // LLM API options
   const [apiUrl, setApiUrl] = useState("https://api.openai.com/v1");
   const [apiKey, setApiKey] = useState("");
   const [apiUrlError, setApiUrlError] = useState(false);
   const [apiKeyError, setApiKeyError] = useState(false);
-  let [passwordError, setPasswordError] = useState<string | null>(null);
-  const [clearAgentModalOpen, setClearAgentModalOpen] = useState(false);
-  const [holochain, setHolochain] = useState(true);
 
   if (hasLoginError) setPasswordError("Invalid password");
 
@@ -58,12 +68,9 @@ const Login = () => {
   }
 
   // todo:
-  // + check all stages complete (vs. isInitialized boolean) before skipping to end?
   // + look into weird glitching when UI first loads
   // + distinguish 'ADAM Layer' title from subtitle on first screen (& use SVG for 'powered by holochain' text)
   // + add lock icon on Privacy & security screen
-  // + remove background colour on input title text
-  // + fix background image screen resizing issues
   // + close menus when items selected (if possible using 'open' prop)
 
   function passwordValid(): boolean {
@@ -72,13 +79,22 @@ const Login = () => {
     return valid;
   }
 
-  function applyModels() {
-    if (llmModel === "External API" && !(apiUrl && apiUrl)) {
-      setApiUrlError(!apiUrl);
-      setApiKeyError(!apiKey);
-    } else if (client) {
+  function saveModels() {
+    // validate model settings
+    const invalidNames = !(llmName && embedderName && transcriberName);
+    const invalidApi = llmModel === "External API" && !(apiUrl && apiKey);
+    if (invalidNames || invalidApi) {
+      // display errors
+      setLlmNameError(!llmName);
+      setEmbedderNameError(!embedderName);
+      setTranscriberNameError(!transcriberName);
+      if (invalidApi) {
+        setApiUrlError(!apiUrl);
+        setApiKeyError(!apiKey);
+      }
+    } else {
       // add llm model
-      const llm = { name: llmModel, modelType: "LLM" } as ModelInput;
+      const llm = { name: llmName, modelType: "LLM" } as ModelInput;
       if (llmModel === "External API")
         llm.api = { baseUrl: apiUrl, apiKey, apiType: "OPEN_AI" };
       else
@@ -87,10 +103,10 @@ const Login = () => {
           tokenizerSource: "",
           modelParameters: "",
         };
-      client.ai.addModel(llm);
+      client!.ai.addModel(llm);
       // add embedding model
-      client.ai.addModel({
-        name: embeddingModel,
+      client!.ai.addModel({
+        name: embedderName,
         local: {
           fileName: embeddingModel,
           tokenizerSource: "",
@@ -99,8 +115,8 @@ const Login = () => {
         modelType: "EMBEDDING",
       });
       // add transcription model
-      client.ai.addModel({
-        name: transcriptionModel,
+      client!.ai.addModel({
+        name: transcriberName,
         local: {
           fileName: transcriptionModel,
           tokenizerSource: "",
@@ -148,7 +164,7 @@ const Login = () => {
               </j-button>
             </j-flex>
           </div>
-          <img src="holochain-large.png" style="float: left;"></img>
+          <img src="holochain-large.png" alt="" style={{ float: "left" }} />
         </div>
       )}
 
@@ -372,7 +388,7 @@ const Login = () => {
             />
 
             <div>
-              <j-text variant="heading">AI Model Selection</j-text>
+              <j-text variant="heading-lg">AI Model Selection</j-text>
               <j-text variant="ingress" nomargin>
                 Choose between local or remote AI processing and the models you
                 want to use for different tasks
@@ -380,97 +396,216 @@ const Login = () => {
             </div>
 
             <j-flex direction="column" gap="500" style={{ width: "100%" }}>
-              <j-flex a="center" gap="400" wrap>
-                <j-text nomargin style={{ flexShrink: 0 }}>
-                  LLM
-                </j-text>
-                <div style={{ height: 42, zIndex: 15 }}>
-                  <j-menu>
-                    <j-menu-group collapsible title={llmModel}>
-                      {llmModels.map((model) => (
-                        <j-menu-item
-                          selected={llmModel === model}
-                          onClick={() => {
-                            setLlmModel(model);
-                            if (model === "External API") {
-                              setApiUrl("https://api.openai.com/v1");
-                            } else {
-                              setApiUrl("");
-                              setApiKey("");
-                              setApiUrlError(false);
-                              setApiKeyError(false);
-                            }
-                          }}
+              <j-box pb="500" className="box">
+                <j-flex direction="column" gap="600">
+                  <j-text variant="heading-sm" nomargin>
+                    LLM Processing
+                  </j-text>
+                  <j-flex a="center" gap="400">
+                    <j-text
+                      nomargin
+                      color="color-white"
+                      style={{ flexShrink: 0 }}
+                    >
+                      Name:
+                    </j-text>
+                    <j-input
+                      size="md"
+                      type="text"
+                      value={llmName}
+                      error={llmNameError}
+                      errortext="Required"
+                      onInput={(e: any) => {
+                        setLlmNameError(false);
+                        setLlmName(e.target.value);
+                      }}
+                      style={{ width: "100%" }}
+                    />
+                  </j-flex>
+                  <j-flex a="center" gap="400">
+                    <j-text
+                      nomargin
+                      color="color-white"
+                      style={{ flexShrink: 0 }}
+                    >
+                      Model:
+                    </j-text>
+                    <div style={{ height: 42, zIndex: 15 }}>
+                      <j-menu>
+                        <j-menu-group collapsible title={llmModel}>
+                          {llmModels.map((model) => (
+                            <j-menu-item
+                              selected={llmModel === model}
+                              onClick={() => {
+                                setLlmModel(model);
+                                if (model === "External API") {
+                                  setApiUrl("https://api.openai.com/v1");
+                                } else {
+                                  setApiUrl("");
+                                  setApiKey("");
+                                  setApiUrlError(false);
+                                  setApiKeyError(false);
+                                }
+                              }}
+                            >
+                              {model}
+                              {model === "External API"
+                                ? " (Recommended for low to mid spec devices)"
+                                : ""}
+                            </j-menu-item>
+                          ))}
+                        </j-menu-group>
+                      </j-menu>
+                    </div>
+                  </j-flex>
+                  {llmModel === "External API" && (
+                    <>
+                      <j-flex a="center" gap="400">
+                        <j-text
+                          nomargin
+                          color="color-white"
+                          style={{ flexShrink: 0 }}
                         >
-                          {model}
-                          {model === "External API"
-                            ? " (Recommended for low to mid spec devices)"
-                            : ""}
-                        </j-menu-item>
-                      ))}
-                    </j-menu-group>
-                  </j-menu>
-                </div>
-              </j-flex>
+                          API URL:
+                        </j-text>
+                        <j-input
+                          size="md"
+                          type="text"
+                          value={apiUrl}
+                          error={apiUrlError}
+                          errortext="Required"
+                          onInput={(e: any) => {
+                            setApiUrlError(false);
+                            setApiUrl(e.target.value);
+                          }}
+                          style={{ width: "100%" }}
+                        />
+                      </j-flex>
+                      <j-flex a="center" gap="400">
+                        <j-text
+                          nomargin
+                          color="color-white"
+                          style={{ flexShrink: 0 }}
+                        >
+                          API Key:
+                        </j-text>
+                        <j-input
+                          size="md"
+                          type="text"
+                          value={apiKey}
+                          error={apiKeyError}
+                          errortext="Required"
+                          onInput={(e: any) => {
+                            setApiKeyError(false);
+                            setApiKey(e.target.value);
+                          }}
+                          style={{ width: "100%" }}
+                        />
+                      </j-flex>
+                    </>
+                  )}
+                </j-flex>
+              </j-box>
 
-              {llmModel === "External API" && (
-                <>
-                  <j-input
-                    size="lg"
-                    label="External API URL:"
-                    type="text"
-                    value={apiUrl}
-                    error={apiUrlError}
-                    errortext="Required"
-                    onInput={(e: any) => setApiUrl(e.target.value)}
-                  />
-                  <j-input
-                    size="lg"
-                    label="External API Key:"
-                    type="text"
-                    value={apiKey}
-                    error={apiKeyError}
-                    errortext="Required"
-                    onInput={(e: any) => setApiKey(e.target.value)}
-                  />
-                </>
-              )}
+              <j-box pb="500" className="box">
+                <j-flex direction="column" gap="600" wrap>
+                  <j-text variant="heading-sm" nomargin>
+                    Audio Transcription
+                  </j-text>
+                  <j-flex a="center" gap="400">
+                    <j-text
+                      nomargin
+                      color="color-white"
+                      style={{ flexShrink: 0 }}
+                    >
+                      Name:
+                    </j-text>
+                    <j-input
+                      size="md"
+                      type="text"
+                      value={transcriberName}
+                      error={transcriberNameError}
+                      errortext="Required"
+                      onInput={(e: any) => {
+                        setTranscriberNameError(false);
+                        setTranscriberName(e.target.value);
+                      }}
+                      style={{ width: "100%" }}
+                    />
+                  </j-flex>
+                  <j-flex a="center" gap="400">
+                    <j-text
+                      nomargin
+                      color="color-white"
+                      style={{ flexShrink: 0 }}
+                    >
+                      Model:
+                    </j-text>
+                    <j-menu>
+                      <j-menu-group collapsible title={transcriptionModel}>
+                        {transcriptionModels.map((model) => (
+                          <j-menu-item
+                            selected={transcriptionModel === model}
+                            onClick={() => setTranscriptionModel(model)}
+                          >
+                            {model}
+                          </j-menu-item>
+                        ))}
+                      </j-menu-group>
+                    </j-menu>
+                  </j-flex>
+                </j-flex>
+              </j-box>
 
-              <j-flex a="center" gap="400" wrap>
-                <j-text nomargin style={{ flexShrink: 0 }}>
-                  Audio Transcription
-                </j-text>
-                <j-menu>
-                  <j-menu-group collapsible title={transcriptionModel}>
-                    {transcriptionModels.map((model) => (
-                      <j-menu-item
-                        selected={transcriptionModel === model}
-                        onClick={() => setTranscriptionModel(model)}
-                      >
-                        {model}
-                      </j-menu-item>
-                    ))}
-                  </j-menu-group>
-                </j-menu>
-              </j-flex>
-
-              <j-flex a="center" gap="400" wrap>
-                <j-text nomargin style={{ flexShrink: 0 }}>
-                  Vector Embedding
-                </j-text>
-                <j-menu>
-                  <j-menu-group collapsible title={embeddingModel}>
-                    {embeddingModels.map((model) => (
-                      <j-menu-item
-                        selected={embeddingModel === model}
-                        onClick={() => setEmbeddingModel(model)}
-                      >
-                        {model}
-                      </j-menu-item>
-                    ))}
-                  </j-menu-group>
-                </j-menu>
-              </j-flex>
+              <j-box pb="500" className="box">
+                <j-flex direction="column" gap="600" wrap>
+                  <j-text variant="heading-sm" nomargin>
+                    Vector Embedding
+                  </j-text>
+                  <j-flex a="center" gap="400">
+                    <j-text
+                      nomargin
+                      color="color-white"
+                      style={{ flexShrink: 0 }}
+                    >
+                      Name:
+                    </j-text>
+                    <j-input
+                      size="md"
+                      type="text"
+                      value={embedderName}
+                      error={embedderNameError}
+                      errortext="Required"
+                      onInput={(e: any) => {
+                        setEmbedderNameError(false);
+                        setEmbedderName(e.target.value);
+                      }}
+                      style={{ width: "100%" }}
+                    />
+                  </j-flex>
+                  <j-flex a="center" gap="400">
+                    <j-text
+                      nomargin
+                      color="color-white"
+                      style={{ flexShrink: 0 }}
+                    >
+                      Model:
+                    </j-text>
+                    <j-menu>
+                      <j-menu-group collapsible title={embeddingModel}>
+                        {embeddingModels.map((model) => (
+                          <j-menu-item
+                            selected={embeddingModel === model}
+                            onClick={() => setEmbeddingModel(model)}
+                          >
+                            {model}
+                          </j-menu-item>
+                        ))}
+                      </j-menu-group>
+                    </j-menu>
+                  </j-flex>
+                </j-flex>
+              </j-box>
 
               <j-button
                 className="full-button"
@@ -478,9 +613,9 @@ const Login = () => {
                 size="lg"
                 variant="primary"
                 style={{ alignSelf: "center" }}
-                onClick={applyModels}
+                onClick={saveModels}
               >
-                Finish ADAM Setup
+                Save Models
               </j-button>
             </j-flex>
           </div>
