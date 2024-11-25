@@ -4,11 +4,11 @@ use crate::graphql::graphql_types::{AIModelLoadingStatus, AITaskInput, Transcrip
 use crate::pubsub::AI_MODEL_LOADING_STATUS;
 #[allow(unused_imports)]
 use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
-use crate::types::{AITask, ModelType};
+use crate::types::{AITask, LocalModel, Model, ModelType};
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use deno_core::error::AnyError;
-use futures::SinkExt;
+use futures::{FutureExt, SinkExt};
 use kalosm::sound::TextStream;
 use kalosm::sound::*;
 // use kalosm::sound::{DenoisedExt, VoiceActivityDetectorExt, VoiceActivityStreamExt};
@@ -180,14 +180,31 @@ impl AIService {
 
         // Create a future for each, initialzing that model
         let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![];
-        for model in models.into_iter() {
-            futures.push(Box::pin(async move {
-                if let Err(e) = self.init_model(model.clone()).await {
-                    error!("Error initializing model[{:?}]: {:?}", model, e);
-                }
-            }));
-        }
 
+        if models.is_empty() {
+            // for integration tests, make sure we have Bert loaded
+            futures.push(Box::pin(
+                self.init_model(Model {
+                    name: "bert".to_string(),
+                    model_type: ModelType::Embedding,
+                    local: Some(LocalModel {
+                        file_name: "bert".to_string(),
+                        tokenizer_source: String::new(),
+                        model_parameters: String::new()
+                    }),
+                    api: None
+                }).map(|_| ())
+            ));
+        } else {
+            for model in models.into_iter() {
+                futures.push(Box::pin(async move {
+                    if let Err(e) = self.init_model(model.clone()).await {
+                        error!("Error initializing model[{:?}]: {:?}", model, e);
+                    }
+                }));
+            }
+        }
+        
         // Wait for all initialization futures in parallel
         futures::future::join_all(futures).await;
 
