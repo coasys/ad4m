@@ -81,6 +81,38 @@ export default function aiTests(testContext: TestContext) {
                 expect(status).to.have.property('status');
             })
 
+            it('can set and get default model', async () => {
+                const ad4mClient = testContext.ad4mClient!
+
+                // Create test models first
+                const apiModelInput: ModelInput = {
+                    name: "TestDefaultApiModel",
+                    api: {
+                        baseUrl: "https://api.example.com/",
+                        apiKey: "test-api-key",
+                        apiType: "OPEN_AI"
+                    },
+                    modelType: "LLM"
+                }
+
+                await ad4mClient.ai.addModel(apiModelInput)
+
+                // Initially no default model set
+                const initialDefault = await ad4mClient.ai.getDefaultModel("LLM")
+                expect(initialDefault).to.be.null
+
+                // Set default model
+                const setResult = await ad4mClient.ai.setDefaultModel("TestDefaultApiModel", "LLM")
+                expect(setResult).to.be.true
+
+                // Verify default model is set correctly
+                const defaultModel = await ad4mClient.ai.getDefaultModel("LLM")
+                expect(defaultModel).to.equal("TestDefaultApiModel")
+
+                // Clean up
+                await ad4mClient.ai.removeModel("TestDefaultApiModel")
+            })
+
             it.skip('can do Tasks CRUD', async() => {
                 const ad4mClient = testContext.ad4mClient!
 

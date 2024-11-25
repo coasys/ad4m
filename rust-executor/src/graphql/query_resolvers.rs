@@ -2,7 +2,7 @@
 use super::graphql_types::*;
 use crate::agent::{capabilities::*, signatures};
 use crate::ai_service::AIService;
-use crate::types::AITask;
+use crate::types::{AITask, ModelType};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
 use crate::{
     db::Ad4mDb,
@@ -553,6 +553,17 @@ impl Query {
             Ok(models) => Ok(models),
             Err(e) => Err(FieldError::new(e.to_string(), Value::null())),
         }
+    }
+
+    async fn ai_get_default_model(
+        &self,
+        context: &RequestContext,
+        model_type: ModelType,
+    ) -> FieldResult<Option<String>> {
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        
+        Ad4mDb::with_global_instance(|db| db.get_default_model(model_type))
+            .map_err(|e| FieldError::new(e.to_string(), Value::null()))
     }
 
     async fn ai_tasks(&self, context: &RequestContext) -> FieldResult<Vec<AITask>> {

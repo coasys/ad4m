@@ -3,8 +3,7 @@ use crate::graphql::graphql_types::{
     PerspectiveHandle, SentMessage,
 };
 use crate::types::{
-    AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
-    ModelApi, Notification, PerspectiveDiff,
+    AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model, ModelApi, ModelType, Notification, PerspectiveDiff
 };
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -200,6 +199,14 @@ impl Ad4mDb {
                 status TEXT NOT NULL,
                 downloaded BOOLEAN NOT NULL,
                 loaded BOOLEAN NOT NULL
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS default_models (
+                model_type TEXT PRIMARY KEY,
+                model_id TEXT NOT NULL
             )",
             [],
         )?;
@@ -1108,6 +1115,30 @@ impl Ad4mDb {
         Ok(())
     }
 
+    pub fn set_default_model(&self, model_type: ModelType, model_id: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "INSERT INTO default_models (model_type, model_id) 
+             VALUES (?1, ?2)
+             ON CONFLICT(model_type) DO UPDATE SET
+             model_id = excluded.model_id",
+            params![serde_json::to_string(&model_type).unwrap(), model_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_default_model(&self, model_type: ModelType) -> Ad4mDbResult<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT model_id FROM default_models WHERE model_type = ?1"
+        )?;
+        let mut rows = stmt.query(params![serde_json::to_string(&model_type).unwrap()])?;
+
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn with_global_instance<F, R>(func: F) -> R
     where
         F: FnOnce(&Ad4mDb) -> R,
@@ -1123,7 +1154,7 @@ impl Ad4mDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ExpressionProof, Link, LinkExpression, ModelApiType, ModelType};
+    use crate::types::{ExpressionProof, Link, LinkExpression, ModelApiType, ModelType, LocalModel};
     use chrono::Utc;
     use fake::{Fake, Faker};
     use uuid::Uuid;
@@ -1634,5 +1665,58 @@ mod tests {
         db.remove_model(&model_llm.name).unwrap();
         db.remove_model(&model_embedding.name).unwrap();
         db.remove_model(&model_transcription.name).unwrap();
+    }
+
+    #[test]
+    fn can_set_and_get_default_model() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create a test model
+        let model = Model {
+            name: "test-model".to_string(),
+            api: Some(ModelApi {
+                base_url: Url::parse("https://api.test.com").unwrap(),
+                api_key: "test-key".to_string(),
+                api_type: ModelApiType::OpenAi,
+            }),
+            local: None,
+            model_type: ModelType::Llm,
+        };
+
+        // Add model to DB
+        db.add_model(&model).unwrap();
+
+        // Initially no default model set
+        let default = db.get_default_model(ModelType::Llm).unwrap();
+        assert!(default.is_none());
+
+        // Set default model
+        db.set_default_model(ModelType::Llm, &model.name).unwrap();
+
+        // Verify default model is set correctly
+        let default = db.get_default_model(ModelType::Llm).unwrap();
+        assert_eq!(default, Some("test-model".to_string()));
+
+        // Update default model
+        let model2 = Model {
+            name: "test-model-2".to_string(),
+            api: None,
+            local: Some(LocalModel {
+                file_name: "model.bin".to_string(),
+                tokenizer_source: "tokenizer".to_string(),
+                model_parameters: "{}".to_string(),
+            }),
+            model_type: ModelType::Transcription,
+        };
+        db.add_model(&model2).unwrap();
+        db.set_default_model(ModelType::Transcription, &model2.name).unwrap();
+
+        // Verify default was updated
+        let default = db.get_default_model(ModelType::Transcription).unwrap();
+        assert_eq!(default, Some("test-model-2".to_string()));
+
+        // Clean up
+        db.remove_model(&model.name).unwrap();
+        db.remove_model(&model2.name).unwrap();
     }
 }

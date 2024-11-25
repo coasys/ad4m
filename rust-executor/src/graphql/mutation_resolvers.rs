@@ -9,7 +9,7 @@ use crate::{
         perspective_instance::{PerspectiveInstance, SdnaType},
         remove_perspective, update_perspective,
     },
-    types::{AITask, DecoratedLinkExpression, Link, LinkExpression},
+    types::{AITask, DecoratedLinkExpression, Link, LinkExpression, ModelType},
 };
 use crate::{
     db::Ad4mDb,
@@ -1250,6 +1250,20 @@ impl Mutation {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
 
         Ad4mDb::with_global_instance(|db| db.remove_model(&name)).map_err(|e| e.to_string())?;
+
+        Ok(true)
+    }
+
+    async fn ai_set_default_model(
+        &self,
+        context: &RequestContext,
+        model_type: ModelType,
+        model_id: String,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+
+        Ad4mDb::with_global_instance(|db| db.set_default_model(model_type, &model_id))
+            .map_err(|e| e.to_string())?;
 
         Ok(true)
     }

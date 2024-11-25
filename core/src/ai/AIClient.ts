@@ -3,7 +3,7 @@ import unwrapApolloResult from "../unwrapApolloResult";
 import base64js from 'base64-js';
 import pako from 'pako'
 import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
-import { ModelInput, Model } from "./AIResolver"
+import { ModelInput, Model, ModelType } from "./AIResolver"
 
 export class AIClient {
     #apolloClient: ApolloClient<any>;
@@ -59,6 +59,43 @@ export class AIClient {
             variables: { name }
         });
         return unwrapApolloResult(result).aiRemoveModel;
+    }
+
+    async setDefaultModel(name: string, modelType: ModelType): Promise<boolean> {
+        const result = await this.#apolloClient.mutate({
+            mutation: gql`
+                mutation($name: String!, $modelType: String!) {
+                    aiSetDefaultModel(name: $name, modelType: $modelType)
+                }
+            `,
+            variables: { name, modelType }
+        });
+        return unwrapApolloResult(result).aiSetDefaultModel;
+    }
+
+    async getDefaultModel(modelType: ModelType): Promise<Model> {
+        const result = await this.#apolloClient.query({
+            query: gql`
+                query($modelType: String!) {
+                    aiGetDefaultModel(modelType: $modelType) {
+                        name
+                        api {
+                            baseUrl
+                            apiKey
+                            apiType
+                        }
+                        local {
+                            fileName
+                            tokenizerSource
+                            modelParameters
+                        }
+                        modelType
+                    }
+                }
+            `,
+            variables: { modelType }
+        });
+        return unwrapApolloResult(result).aiGetDefaultModel;
     }
 
     async tasks(): Promise<AITask[]> {

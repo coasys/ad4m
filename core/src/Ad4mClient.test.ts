@@ -1189,6 +1189,27 @@ describe('Ad4mClient', () => {
             expect(result).toBe(true);
         })
 
+        it('setDefaultModel and getDefaultModel smoke test', async () => {
+            const modelName = "Test Model";
+            const modelType = "LLM";
+            
+            const setResult = await ad4mClient.ai.setDefaultModel(modelName, modelType);
+            expect(setResult).toBe(true);
+
+            const model = await ad4mClient.ai.getDefaultModel(modelType);
+            expect(model).toBeDefined();
+            expect(model.name).toBe("Default Test Model");
+            expect(model.api).toBeDefined();
+            expect(model.api.baseUrl).toBe("https://api.example.com");
+            expect(model.api.apiKey).toBe("test-api-key");
+            expect(model.api.apiType).toBe("OpenAi");
+            expect(model.local).toBeDefined();
+            expect(model.local.fileName).toBe("test-model.bin");
+            expect(model.local.tokenizerSource).toBe("test-tokenizer");
+            expect(model.local.modelParameters).toBe("{}");
+            expect(model.modelType).toBe(modelType);
+        })
+
         it('embed()', async () => {
             const vector = await ad4mClient.ai.embed("model", "test ets")
             expect(vector[0]).toEqual(0)

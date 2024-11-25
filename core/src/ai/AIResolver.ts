@@ -32,7 +32,7 @@ export class LocalModel {
     modelParameters: string;
 }
 
-type ModelType = "LLM" | "EMBEDDING" | "TRANSCRIPTION";
+export type ModelType = "LLM" | "EMBEDDING" | "TRANSCRIPTION";
 
 @ObjectType()
 export class Model {
@@ -120,6 +120,34 @@ export default class AIResolver {
     aiRemoveModel(@Arg("name", type => String) name: string): boolean {
         // In a real implementation, this would remove the model from storage
         return true
+    }
+
+    @Mutation(returns => Boolean)
+    aiSetDefaultModel(
+        @Arg("name", type => String) name: string,
+        @Arg("modelType", type => String) modelType: ModelType
+    ): boolean {
+        // In a real implementation, this would set the default model
+        return true
+    }
+
+    @Query(returns => Model)
+    aiGetDefaultModel(@Arg("modelType", type => String) modelType: ModelType): Model {
+        // In a real implementation, this would get the default model for the given type
+        return {
+            name: "Default Test Model",
+            api: {
+                baseUrl: "https://api.example.com", 
+                apiKey: "test-api-key",
+                apiType: "OpenAi"
+            },
+            local: {
+                fileName: "test-model.bin",
+                tokenizerSource: "test-tokenizer", 
+                modelParameters: "{}"
+            },
+            modelType: modelType
+        }
     }
 
     @Query(returns => [AITask])
