@@ -1,5 +1,5 @@
 :root {
-  --background-color: #131533
+  --background-color: #131533;
 }
 
 .App {
@@ -10,5 +10,7 @@
   min-width: 100%;
   background-color: var(--background-color);
   background-image: url("/bg01.jpg");
-  background-size: auto 100%;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
 }

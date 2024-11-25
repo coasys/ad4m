@@ -122,7 +122,6 @@ html {
 :root j-input::part(base) {
   font-size: var(--j-font-size-400);
   border-color: var(--gradient);
-  background-color: var(--j-color-primary-50);
 }
 
 :root j-input::part(input-wrapper) {
@@ -186,7 +185,8 @@ j-tab-item {
 }
 
 code {
-  font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New", monospace;
+  font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New",
+    monospace;
 }
 
 .center {
@@ -207,12 +207,12 @@ code {
   padding-right: var(--j-space-500);
   padding-top: var(--j-space-1000);
   padding-bottom: var(--j-space-1000);
+  overflow-y: scroll;
 }
 
 .slider__slide-content {
   height: 100%;
   width: 100%;
-  max-height: 800px;
   max-width: 500px;
   display: flex;
   flex-direction: column;
@@ -232,4 +232,11 @@ code {
 
 .text-center {
   text-align: center;
+}
+
+.box {
+  border: 1px solid rgb(200, 200, 200);
+  border-radius: var(--j-border-radius);
+  padding: var(--j-space-500);
+  background-color: rgba(164, 164, 164, 0.2);
 }
