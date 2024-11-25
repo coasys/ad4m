@@ -175,36 +175,20 @@ impl AIService {
     }
 
     pub async fn load(&self) -> Result<()> {
+        // Get all models
         let models = Ad4mDb::with_global_instance(|db| db.get_models())?;
-        let maybe_default_llm = models.iter().find(|m| m.model_type == ModelType::Llm);
 
-        let maybe_default_embedder = models.iter().find(|m| m.model_type == ModelType::Embedding);
-
-        let maybe_default_transcriber = models
-            .iter()
-            .find(|m| m.model_type == ModelType::Transcription);
-
-        // Get the models from the database & loop over it to spawn models
+        // Create a future for each, initialzing that model
         let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![];
-
-        if let Some(default_llm) = maybe_default_llm {
-            futures.push(Box::pin(async {
-                if let Err(e) = self.spawn_llm_model(default_llm.clone()).await {
-                    error!("Error spawning LLM model: {:?}", e);
+        for model in models.into_iter() {
+            futures.push(Box::pin(async move {
+                if let Err(e) = self.init_model(model.clone()).await {
+                    error!("Error initializing model[{:?}]: {:?}", model, e);
                 }
-            }))
+            }));
         }
 
-        if let Some(default_embedder) = maybe_default_embedder {
-            futures.push(Box::pin(
-                self.spawn_embedding_model(default_embedder.clone()),
-            ));
-        }
-
-        if let Some(default_transcriber) = maybe_default_transcriber {
-            futures.push(Box::pin(Self::load_transcriber_model(default_transcriber)));
-        }
-
+        // Wait for all initialization futures in parallel
         futures::future::join_all(futures).await;
 
         // Spawn tasks from the database
