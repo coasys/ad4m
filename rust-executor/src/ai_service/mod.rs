@@ -193,34 +193,18 @@ impl AIService {
     
         if let Some(default_llm) = maybe_default_llm {
             futures.push(Box::pin(async {
-                self.spawn_llm_model(default_llm.clone()).await;
+                if let Err(e) = self.spawn_llm_model(default_llm.clone()).await {
+                    error!("Error spawning LLM model: {:?}", e);
+                }
             }))
         }
     
         if let Some(default_embedder) = maybe_default_embedder {
-            futures.push(Box::pin(async {
-                self.spawn_embedding_model(default_embedder.name.clone()).await;
-            }));
+            futures.push(Box::pin(self.spawn_embedding_model(default_embedder.clone())));
         }
     
         if let Some(default_transcriber) = maybe_default_transcriber {
-            let transcriber_name = default_transcriber.name.clone();
-            futures.push(Box::pin(async move {
-    
-                publish_model_status(transcriber_name.clone(), 0.0, "Loading", false).await;
-    
-                let _ = WhisperBuilder::default()
-                    .with_source(WhisperSource::Base)
-                    .build_with_loading_handler({
-                        let transcriber_name = transcriber_name.clone();
-                        move |progress| {
-                            tokio::spawn(handle_progress(transcriber_name.clone(), progress));
-                        }
-                    })
-                    .await;
-    
-                publish_model_status(transcriber_name, 100.0, "Loaded", false).await;
-            }));
+            futures.push(Box::pin(Self::load_transcriber_model(default_transcriber)));
         }
     
         futures::future::join_all(futures).await;
@@ -233,6 +217,34 @@ impl AIService {
             self.spawn_task(task).await?;
         }
     
+        Ok(())
+    }
+
+    async fn load_transcriber_model(model: &crate::types::Model) {
+        let name = model.name.clone();
+        publish_model_status(name.clone(), 0.0, "Loading", false).await;
+    
+        let _ = WhisperBuilder::default()
+            .with_source(WhisperSource::Base)
+            .build_with_loading_handler({
+                let name = name.clone();
+                move |progress| {
+                    tokio::spawn(handle_progress(name.clone(), progress));
+                }
+            })
+            .await;
+
+        publish_model_status(name, 100.0, "Loaded", false).await;
+    }
+
+    pub async fn add_model(&self, model: crate::types::Model) -> Result<()> {
+        match model.model_type {
+            ModelType::Llm => self.spawn_llm_model(model.clone()).await?,
+            ModelType::Embedding => self.spawn_embedding_model(model.clone()).await,
+            ModelType::Transcription => Self::load_transcriber_model(&model).await,
+        };
+        Ad4mDb::with_global_instance(|db| db.add_model(&model))
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(())
     }
 
@@ -296,11 +308,11 @@ impl AIService {
         Ok(tasks)
     }
 
-    async fn spawn_embedding_model(&self, model_id: String) {
+    async fn spawn_embedding_model(&self, model_config: crate::types::Model) {
         let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
-
+        let model_id = model_config.name.clone();
         thread::spawn({
-            let model_id = model_id.clone();
+            let model_id = model_config.name.clone();
             move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
 
@@ -386,13 +398,12 @@ impl AIService {
         gpt4
     }
 
-    async fn spawn_llm_model(&self, model_config: crate::types::Model) {
+    async fn spawn_llm_model(&self, model_config: crate::types::Model) -> Result<()> {
         if model_config.local.is_none() && model_config.api.is_none() {
-            error!(
+            return Err(anyhow!(
                 "AI model definition {} doesn't have a body, nothing to spawn!",
                 model_config.name
-            );
-            return;
+            ));
         }
 
         let (llama_tx, mut llama_rx) = mpsc::unbounded_channel::<LLMTaskRequest>();
@@ -558,6 +569,7 @@ impl AIService {
         });
 
         self.llm_channel.lock().await.insert(model_id, llama_tx);
+        Ok(())
     }
 
     pub async fn update_task(&self, task: AITask) -> Result<AITask> {
