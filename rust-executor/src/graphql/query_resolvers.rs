@@ -561,7 +561,7 @@ impl Query {
         model_type: ModelType,
     ) -> FieldResult<Option<Model>> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        
+
         let default_id = Ad4mDb::with_global_instance(|db| db.get_default_model(model_type))
             .map_err(|e| FieldError::new(e.to_string(), Value::null()))?;
 
@@ -571,7 +571,10 @@ impl Query {
             if let Some(model) = maybe_model {
                 Ok(Some(model.clone()))
             } else {
-                Err(FieldError::new("Default model ID is set, but a model with that ID does not exist", Value::null()))
+                Err(FieldError::new(
+                    "Default model ID is set, but a model with that ID does not exist",
+                    Value::null(),
+                ))
             }
         } else {
             Ok(None)

@@ -190,10 +190,11 @@ impl AIService {
                     local: Some(LocalModel {
                         file_name: "bert".to_string(),
                         tokenizer_source: String::new(),
-                        model_parameters: String::new()
+                        model_parameters: String::new(),
                     }),
-                    api: None
-                }).map(|_| ())
+                    api: None,
+                })
+                .map(|_| ()),
             ));
         } else {
             for model in models.into_iter() {
@@ -204,7 +205,7 @@ impl AIService {
                 }));
             }
         }
-        
+
         // Wait for all initialization futures in parallel
         futures::future::join_all(futures).await;
 

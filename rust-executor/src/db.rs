@@ -3,7 +3,8 @@ use crate::graphql::graphql_types::{
     PerspectiveHandle, SentMessage,
 };
 use crate::types::{
-    AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model, ModelApi, ModelType, Notification, PerspectiveDiff
+    AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
+    ModelApi, ModelType, Notification, PerspectiveDiff,
 };
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -1127,9 +1128,9 @@ impl Ad4mDb {
     }
 
     pub fn get_default_model(&self, model_type: ModelType) -> Ad4mDbResult<Option<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT model_id FROM default_models WHERE model_type = ?1"
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT model_id FROM default_models WHERE model_type = ?1")?;
         let mut rows = stmt.query(params![serde_json::to_string(&model_type).unwrap()])?;
 
         if let Some(row) = rows.next()? {
@@ -1154,7 +1155,9 @@ impl Ad4mDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ExpressionProof, Link, LinkExpression, ModelApiType, ModelType, LocalModel};
+    use crate::types::{
+        ExpressionProof, Link, LinkExpression, LocalModel, ModelApiType, ModelType,
+    };
     use chrono::Utc;
     use fake::{Fake, Faker};
     use uuid::Uuid;
@@ -1709,7 +1712,8 @@ mod tests {
             model_type: ModelType::Transcription,
         };
         db.add_model(&model2).unwrap();
-        db.set_default_model(ModelType::Transcription, &model2.name).unwrap();
+        db.set_default_model(ModelType::Transcription, &model2.name)
+            .unwrap();
 
         // Verify default was updated
         let default = db.get_default_model(ModelType::Transcription).unwrap();
