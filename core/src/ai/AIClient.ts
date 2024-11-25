@@ -61,14 +61,14 @@ export class AIClient {
         return unwrapApolloResult(result).aiRemoveModel;
     }
 
-    async setDefaultModel(name: string, modelType: ModelType): Promise<boolean> {
+    async setDefaultModel(modelType: ModelType, modelId: string): Promise<boolean> {
         const result = await this.#apolloClient.mutate({
             mutation: gql`
-                mutation($name: String!, $modelType: String!) {
-                    aiSetDefaultModel(name: $name, modelType: $modelType)
+                mutation($modelType: ModelType!, $modelId: String!) {
+                    aiSetDefaultModel(modelType: $modelType modelId: $modelId)
                 }
             `,
-            variables: { name, modelType }
+            variables: { modelId, modelType }
         });
         return unwrapApolloResult(result).aiSetDefaultModel;
     }
@@ -76,7 +76,7 @@ export class AIClient {
     async getDefaultModel(modelType: ModelType): Promise<Model> {
         const result = await this.#apolloClient.query({
             query: gql`
-                query($modelType: String!) {
+                query($modelType: ModelType!) {
                     aiGetDefaultModel(modelType: $modelType) {
                         name
                         api {

@@ -102,12 +102,13 @@ export default function aiTests(testContext: TestContext) {
                 expect(initialDefault).to.be.null
 
                 // Set default model
-                const setResult = await ad4mClient.ai.setDefaultModel("TestDefaultApiModel", "LLM")
+                const setResult = await ad4mClient.ai.setDefaultModel("LLM", "TestDefaultApiModel")
                 expect(setResult).to.be.true
 
                 // Verify default model is set correctly
                 const defaultModel = await ad4mClient.ai.getDefaultModel("LLM")
-                expect(defaultModel).to.equal("TestDefaultApiModel")
+                expect(defaultModel.name).to.equal("TestDefaultApiModel")
+                expect(defaultModel.api?.baseUrl).to.equal("https://api.example.com/")
 
                 // Clean up
                 await ad4mClient.ai.removeModel("TestDefaultApiModel")
@@ -237,7 +238,7 @@ export default function aiTests(testContext: TestContext) {
             it('can embed text to vectors', async () => {
                 const ad4mClient = testContext.ad4mClient!
 
-                let vector = await ad4mClient.ai.embed("Bert", "Test string");
+                let vector = await ad4mClient.ai.embed("bert", "Test string");
                 expect(typeof vector).to.equal("object")
                 expect(Array.isArray(vector)).to.be.true
                 expect(vector.length).to.be.greaterThan(300)

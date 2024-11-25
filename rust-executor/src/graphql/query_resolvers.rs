@@ -559,11 +559,23 @@ impl Query {
         &self,
         context: &RequestContext,
         model_type: ModelType,
-    ) -> FieldResult<Option<String>> {
+    ) -> FieldResult<Option<Model>> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
         
-        Ad4mDb::with_global_instance(|db| db.get_default_model(model_type))
-            .map_err(|e| FieldError::new(e.to_string(), Value::null()))
+        let default_id = Ad4mDb::with_global_instance(|db| db.get_default_model(model_type))
+            .map_err(|e| FieldError::new(e.to_string(), Value::null()))?;
+
+        if let Some(id) = default_id {
+            let models = Ad4mDb::with_global_instance(|db| db.get_models())?;
+            let maybe_model = models.iter().find(|m| m.name == id);
+            if let Some(model) = maybe_model {
+                Ok(Some(model.clone()))
+            } else {
+                Err(FieldError::new("Default model ID is set, but a model with that ID does not exist", Value::null()))
+            }
+        } else {
+            Ok(None)
+        }
     }
 
     async fn ai_tasks(&self, context: &RequestContext) -> FieldResult<Vec<AITask>> {

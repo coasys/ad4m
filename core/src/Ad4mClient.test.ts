@@ -1193,7 +1193,7 @@ describe('Ad4mClient', () => {
             const modelName = "Test Model";
             const modelType = "LLM";
             
-            const setResult = await ad4mClient.ai.setDefaultModel(modelName, modelType);
+            const setResult = await ad4mClient.ai.setDefaultModel(modelType, modelName);
             expect(setResult).toBe(true);
 
             const model = await ad4mClient.ai.getDefaultModel(modelType);
