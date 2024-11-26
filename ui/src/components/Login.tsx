@@ -147,14 +147,7 @@ const Login = () => {
             className="slider__slide-content center text-center"
             style={{ height: 400 }}
           >
-            <Logo
-              style={{
-                width: "80px",
-                height: "80px",
-                margin: "0 auto",
-              }}
-              gradient
-            />
+            <Logo className="logo" />
 
             <j-flex direction="column" gap="400" style={{ width: "100%" }}>
               <j-text variant="heading-lg" size="900" color="black" nomargin>
@@ -167,16 +160,15 @@ const Login = () => {
               </j-text>
             </j-flex>
 
-            <j-flex direction="column" gap="200">
-              <j-button
-                size="xl"
-                onClick={() => setCurrentIndex(1)}
-                variant="primary"
-              >
-                Get Started
-              </j-button>
-            </j-flex>
+            <j-button
+              size="xl"
+              onClick={() => setCurrentIndex(1)}
+              variant="primary"
+            >
+              Get Started
+            </j-button>
           </div>
+
           <img
             src="holochain-large.png"
             alt=""
@@ -188,15 +180,7 @@ const Login = () => {
       {currentIndex === 1 && (
         <div className="slider__slide">
           <div className="slider__slide-content text-center">
-            <Logo
-              style={{
-                width: "80px",
-                height: "80px",
-                margin: "0 auto",
-                marginBottom: "var(--j-space-500)",
-              }}
-              gradient
-            />
+            <Logo className="logo" />
 
             <div>
               <j-text variant="heading">Privacy and Security</j-text>
@@ -232,15 +216,8 @@ const Login = () => {
       {currentIndex === 2 && (
         <div className="slider__slide">
           <div className="slider__slide-content center">
-            <Logo
-              style={{
-                width: "80px",
-                height: "80px",
-                margin: "0 auto",
-                marginBottom: "var(--j-space-500)",
-              }}
-              gradient
-            />
+            <Logo className="logo" />
+
             <j-flex direction="column" gap="500" style={{ width: "100%" }}>
               <j-input
                 size="lg"
@@ -293,15 +270,7 @@ const Login = () => {
       {currentIndex === 3 && (
         <div className="slider__slide">
           <div className="slider__slide-content text-center">
-            <Logo
-              style={{
-                width: "80px",
-                height: "80px",
-                margin: "0 auto",
-                marginBottom: "var(--j-space-500)",
-              }}
-              gradient
-            />
+            <Logo className="logo" />
 
             <div>
               <j-text variant="heading">Censorship free</j-text>
@@ -334,15 +303,8 @@ const Login = () => {
       {currentIndex === 4 && (
         <div className="slider__slide">
           <div className="slider__slide-content center">
-            <Logo
-              style={{
-                width: "80px",
-                height: "80px",
-                margin: "0 auto",
-                marginBottom: "var(--j-space-500)",
-              }}
-              gradient
-            />
+            <Logo className="logo" />
+
             <j-flex direction="column" gap="500" style={{ width: "100%" }}>
               <j-input
                 full
@@ -394,15 +356,7 @@ const Login = () => {
       {currentIndex === 5 && (
         <div className="slider__slide">
           <div className="slider__slide-content center">
-            <Logo
-              style={{
-                width: "80px",
-                height: "80px",
-                margin: "0 auto",
-                marginBottom: "var(--j-space-500)",
-              }}
-              gradient
-            />
+            <Logo className="logo" />
 
             <div>
               <j-text variant="heading-lg">AI Model Selection</j-text>
@@ -661,15 +615,7 @@ const Login = () => {
       {currentIndex === 6 && (
         <div className="slider__slide">
           <div className="slider__slide-content text-center">
-            <Logo
-              style={{
-                width: "80px",
-                height: "80px",
-                margin: "0 auto",
-                marginBottom: "var(--j-space-500)",
-              }}
-              gradient
-            />
+            <Logo className="logo" />
 
             <div>
               <j-text variant="heading">Agent centric</j-text>
@@ -711,15 +657,8 @@ const Login = () => {
       {currentIndex === 7 && (
         <div className="slider__slide" style={{ height: "100vh" }}>
           <div className="slider__slide-content center">
-            <Logo
-              style={{
-                width: "80px",
-                height: "80px",
-                margin: "0 auto",
-                marginBottom: "var(--j-space-500)",
-              }}
-              gradient
-            />
+            <Logo className="logo" />
+
             <j-flex direction="column" gap="500" style={{ width: "100%" }}>
               <j-input
                 autofocus
