@@ -378,6 +378,7 @@ impl AIService {
 
         // Build the local Llama model
         let llama = llama
+            .with_device(accelerated_device_if_available().expect("couldn't get another candle device for LLM")) 
             .build_with_loading_handler({
                 let model_id = model_name.clone();
                 move |progress| {
