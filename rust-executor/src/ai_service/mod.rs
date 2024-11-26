@@ -88,7 +88,7 @@ enum LLMTaskRequest {
 
 enum LlmModel {
     Local(Llama),
-    Remote(Gpt4),
+    Remote(Gpt3_5),
 }
 
 async fn publish_model_status(model_name: String, progress: f32, status: &str, downloaded: bool) {
@@ -124,36 +124,14 @@ async fn publish_model_status(model_name: String, progress: f32, status: &str, d
         .await;
 }
 
-async fn handle_progress(model_name: String, progress: ModelLoadingProgress) {
-    match progress {
-        ModelLoadingProgress::Downloading {
-            source: _,
-            start_time,
-            progress,
-        } => {
-            let progress = progress * 100.0;
-            let _elapsed = start_time.elapsed().as_secs_f32();
-
-            let status = if progress < 100.0 {
-                "Downloading".to_string()
-            } else {
-                "Downloaded".to_string()
-            };
-
-            publish_model_status(model_name.clone(), progress, &status, true).await;
-        }
-        ModelLoadingProgress::Loading { progress } => {
-            let progress = progress * 100.0;
-
-            let status = if progress < 100.0 {
-                "Loading".to_string()
-            } else {
-                "Loaded".to_string()
-            };
-
-            publish_model_status(model_name.clone(), progress, &status, false).await;
-        }
-    }
+async fn handle_progress(model_name: String, loading: ModelLoadingProgress) {
+    let progress = loading.progress();
+    let status = if progress < 100.0 {
+        "Loading".to_string()
+    } else {
+        "Loaded".to_string()
+    };
+    publish_model_status(model_name.clone(), progress, &status, false).await;
 }
 
 impl AIService {
@@ -379,10 +357,6 @@ impl AIService {
 
         // Build the local Llama model
         let llama = llama
-            .with_device(
-                accelerated_device_if_available()
-                    .expect("couldn't get another candle device for LLM"),
-            )
             .build_with_loading_handler({
                 let model_id = model_name.clone();
                 move |progress| {
@@ -396,11 +370,11 @@ impl AIService {
         Ok(llama)
     }
 
-    async fn build_remote_gpt4(model_id: String, api_key: String, base_url: Url) -> Gpt4 {
+    async fn build_remote_gpt4(model_id: String, api_key: String, base_url: Url) -> Gpt3_5 {
         publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
 
         // Build Gpt3_5 using the external API endpoint
-        let gpt4 = Gpt4::builder()
+        let gpt4 = Gpt3_5::builder()
             .with_base_url(base_url.as_str())
             .with_api_key(&api_key)
             .build();

@@ -75,6 +75,7 @@ dependencies = [
  "ad4m-client",
  "argon2",
  "base64 0.21.7",
+ "candle-core 0.6.0",
  "chrono",
  "cid",
  "clap 4.5.11",
@@ -556,15 +557,16 @@ dependencies = [
 
 [[package]]
 name = "arroy"
-version = "0.3.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73897699bf04bac935c0b120990d2a511e91e563e0f9769f9c8bb983d98dfbc9"
+checksum = "dfc5f272f38fa063bbff0a7ab5219404e221493de005e2b4078c62d626ef567e"
 dependencies = [
  "bytemuck",
  "byteorder",
  "heed",
  "log",
  "memmap2 0.9.4",
+ "nohash",
  "ordered-float 4.2.2",
  "rand 0.8.5",
  "rayon",
@@ -834,18 +836,21 @@ checksum = "9338790e78aa95a416786ec8389546c4b6a1dfc3dc36071ed9518a9413a542eb"
 
 [[package]]
 name = "async-openai"
-version = "0.14.3"
+version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e1df052c2bd7b241fc828bc2fda74ce9a7ef05e0a593c37275aaaba52caf49d"
+checksum = "c6db3286b4f52b6556ac5208fb575d035eca61a2bf40d7e75d1db2733ffc599f"
 dependencies = [
  "async-convert",
  "backoff",
- "base64 0.21.7",
- "derive_builder 0.12.0",
+ "base64 0.22.1",
+ "bytes",
+ "derive_builder 0.20.1",
+ "eventsource-stream",
  "futures",
  "rand 0.8.5",
- "reqwest 0.11.20",
+ "reqwest 0.12.9",
  "reqwest-eventsource",
+ "secrecy",
  "serde",
  "serde_json",
  "thiserror 1.0.63",
@@ -1843,6 +1848,27 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5b18de020c2729dbf7ac390325312644808b6ba9b7962f1f724e9185b1d53c7"
 dependencies = [
+ "byteorder",
+ "gemm",
+ "half 2.4.1",
+ "memmap2 0.9.4",
+ "num-traits",
+ "num_cpus",
+ "rand 0.8.5",
+ "rand_distr",
+ "rayon",
+ "safetensors",
+ "thiserror 1.0.63",
+ "yoke",
+ "zip 1.1.4",
+]
+
+[[package]]
+name = "candle-core"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e1a39b963e261c58017edf2007e5b63425ad21538aaaf51fe23d1da41703701"
+dependencies = [
  "accelerate-src",
  "byteorder",
  "candle-kernels",
@@ -1866,18 +1892,18 @@ dependencies = [
 
 [[package]]
 name = "candle-kernels"
-version = "0.6.0"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bc0a71be8b2f0950b63fd602a5e10a74a4f94a5fd63059ae455e96163389488"
+checksum = "539cbfbf2d1d68a6ed97115e579c77c98f8ed0cfe7edbc6d7d30d2ac0c9e3d50"
 dependencies = [
  "bindgen_cuda",
 ]
 
 [[package]]
 name = "candle-metal-kernels"
-version = "0.6.0"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f889aacd02fd999620a0435133d7cf3b58c81ef9dd5e47c38939b7a72345ea86"
+checksum = "166a92826d615d98b205e346e52128fa0439f2ab3302587403fdc558b4219e19"
 dependencies = [
  "metal 0.27.0",
  "once_cell",
@@ -1887,12 +1913,12 @@ dependencies = [
 
 [[package]]
 name = "candle-nn"
-version = "0.6.0"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b006b30f66a0d94fc9cef0ac4de6ce510565f35ae2c6c35ce5d4aacfb0fc8eeb"
+checksum = "898f8d21b8bdf559a1c8635e2db8386b2134015cd3003c18c1a30a22a67daec6"
 dependencies = [
  "accelerate-src",
- "candle-core",
+ "candle-core 0.7.2",
  "candle-metal-kernels",
  "half 2.4.1",
  "metal 0.27.0",
@@ -1905,13 +1931,13 @@ dependencies = [
 
 [[package]]
 name = "candle-transformers"
-version = "0.6.0"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f0d4eb6a0d9279d5829b06b2bf3caa117904eefd6dcf879d16e687c4a84034c"
+checksum = "06b8a130a8ac1d1e20696d89f7a52948902e037ad0eec085fceb77021007cfee"
 dependencies = [
  "accelerate-src",
  "byteorder",
- "candle-core",
+ "candle-core 0.7.2",
  "candle-nn",
  "fancy-regex",
  "num-traits",
@@ -3131,9 +3157,9 @@ dependencies = [
 
 [[package]]
 name = "cudarc"
-version = "0.11.9"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a5bd4d1eee570c3b2ac64ed114125517dd1e541d88dd28fc259f1de4dba8d60"
+checksum = "38cd60a9a42ec83a2ed7effb0b1f073270264ea99da7acfc44f7e8d74dee0384"
 dependencies = [
  "half 2.4.1",
  "libloading 0.8.5",
@@ -3938,7 +3964,7 @@ dependencies = [
  "dlopen2 0.6.1",
  "dlopen2_derive",
  "once_cell",
- "rustls-native-certs",
+ "rustls-native-certs 0.6.3",
  "rustls-pemfile 1.0.4",
 ]
 
@@ -8128,6 +8154,7 @@ dependencies = [
  "hyper 1.1.0",
  "hyper-util",
  "rustls 0.23.12",
+ "rustls-native-certs 0.8.0",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls 0.26.0",
@@ -9032,14 +9059,17 @@ dependencies = [
 [[package]]
 name = "kalosm"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
 dependencies = [
  "anyhow",
+ "arroy",
  "async-trait",
+ "candle-core 0.7.2",
  "comfy-table",
  "ego-tree",
  "futures-util",
  "hdrhistogram",
+ "heed",
  "image 0.24.9",
  "kalosm-common",
  "kalosm-language",
@@ -9051,6 +9081,7 @@ dependencies = [
  "once_cell",
  "rand 0.8.5",
  "serde",
+ "thiserror 2.0.3",
  "tokio",
  "tracing",
 ]
@@ -9058,10 +9089,10 @@ dependencies = [
 [[package]]
 name = "kalosm-common"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
 dependencies = [
  "anyhow",
- "candle-core",
+ "candle-core 0.7.2",
  "candle-nn",
  "dirs 5.0.1",
  "hf-hub",
@@ -9077,12 +9108,12 @@ dependencies = [
 [[package]]
 name = "kalosm-language"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
 dependencies = [
  "anyhow",
  "arroy",
  "async-trait",
- "candle-core",
+ "candle-core 0.7.2",
  "candle-nn",
  "chrono",
  "convert_case 0.6.0",
@@ -9110,6 +9141,7 @@ dependencies = [
  "rbert",
  "readability",
  "reqwest 0.11.20",
+ "roaring",
  "rphi",
  "rss",
  "rustc-hash 1.1.0",
@@ -9120,6 +9152,7 @@ dependencies = [
  "srx",
  "tempfile",
  "texting_robots",
+ "thiserror 2.0.3",
  "tokenizers",
  "tokio",
  "tokio-util",
@@ -9131,12 +9164,12 @@ dependencies = [
 [[package]]
 name = "kalosm-language-model"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
 dependencies = [
  "anyhow",
  "async-openai",
  "async-trait",
- "candle-core",
+ "candle-core 0.7.2",
  "futures-util",
  "kalosm-common",
  "kalosm-sample",
@@ -9159,11 +9192,11 @@ dependencies = [
 [[package]]
 name = "kalosm-llama"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
 dependencies = [
  "anyhow",
  "async-trait",
- "candle-core",
+ "candle-core 0.7.2",
  "candle-nn",
  "candle-transformers",
  "half 2.4.1",
@@ -9182,10 +9215,10 @@ dependencies = [
 [[package]]
 name = "kalosm-ocr"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
 dependencies = [
  "anyhow",
- "candle-core",
+ "candle-core 0.7.2",
  "candle-nn",
  "candle-transformers",
  "hf-hub",
@@ -9201,7 +9234,7 @@ dependencies = [
 [[package]]
 name = "kalosm-parse-macro"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9211,7 +9244,7 @@ dependencies = [
 [[package]]
 name = "kalosm-sample"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
 dependencies = [
  "anyhow",
  "kalosm-parse-macro",
@@ -9221,12 +9254,12 @@ dependencies = [
 [[package]]
 name = "kalosm-sound"
 version = "0.3.4"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
 dependencies = [
  "anyhow",
  "async-trait",
  "byteorder",
- "candle-core",
+ "candle-core 0.7.2",
  "candle-nn",
  "candle-transformers",
  "cpal",
@@ -9239,6 +9272,7 @@ dependencies = [
  "kalosm-streams",
  "nnnoiseless",
  "ort",
+ "ort-sys",
  "rand 0.8.5",
  "rodio",
  "rwhisper",
@@ -9252,7 +9286,7 @@ dependencies = [
 [[package]]
 name = "kalosm-streams"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
 dependencies = [
  "futures-util",
  "image 0.24.9",
@@ -9263,7 +9297,7 @@ dependencies = [
 [[package]]
 name = "kalosm-vision"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
 dependencies = [
  "image 0.24.9",
  "kalosm-ocr",
@@ -11122,6 +11156,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72ef4a56884ca558e5ddb05a1d1e7e1bfd9a68d9ed024c21704cc98872dae1bb"
 
 [[package]]
+name = "nohash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0f889fb66f7acdf83442c35775764b51fed3c606ab9cee51500dbde2cf528ca"
+
+[[package]]
 name = "nom"
 version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11916,9 +11956,9 @@ dependencies = [
 
 [[package]]
 name = "ort-sys"
-version = "2.0.0-rc.5"
+version = "2.0.0-rc.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec6fe264a9467cd0c19cbee07afe689fae9480c4706c4a1a00b5e64ff99ea83a"
+checksum = "0f2f6427193c808010b126bef45ebd33f8dee43770223a1200f84d3734d6c656"
 dependencies = [
  "flate2",
  "pkg-config",
@@ -13440,7 +13480,7 @@ dependencies = [
  "rand 0.8.5",
  "ring 0.16.20",
  "rustls 0.20.9",
- "rustls-native-certs",
+ "rustls-native-certs 0.6.3",
  "rustls-pemfile 0.2.1",
  "slab",
  "thiserror 1.0.63",
@@ -13815,11 +13855,11 @@ dependencies = [
 [[package]]
 name = "rbert"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
 dependencies = [
  "anyhow",
  "async-trait",
- "candle-core",
+ "candle-core 0.7.2",
  "candle-nn",
  "candle-transformers",
  "kalosm-common",
@@ -14049,13 +14089,11 @@ dependencies = [
  "js-sys",
  "log",
  "mime",
- "mime_guess",
  "native-tls",
  "once_cell",
  "percent-encoding",
  "pin-project-lite",
  "rustls 0.21.11",
- "rustls-native-certs",
  "rustls-pemfile 1.0.4",
  "serde",
  "serde_json",
@@ -14099,11 +14137,13 @@ dependencies = [
  "js-sys",
  "log",
  "mime",
+ "mime_guess",
  "once_cell",
  "percent-encoding",
  "pin-project-lite",
  "quinn 0.11.6",
  "rustls 0.23.12",
+ "rustls-native-certs 0.8.0",
  "rustls-pemfile 2.1.3",
  "rustls-pki-types",
  "serde",
@@ -14126,9 +14166,9 @@ dependencies = [
 
 [[package]]
 name = "reqwest-eventsource"
-version = "0.4.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f03f570355882dd8d15acc3a313841e6e90eddbc76a93c748fd82cc13ba9f51"
+checksum = "632c55746dbb44275691640e7b40c907c16a2dc1a5842aa98aaec90da6ec6bde"
 dependencies = [
  "eventsource-stream",
  "futures-core",
@@ -14136,7 +14176,7 @@ dependencies = [
  "mime",
  "nom 7.1.3",
  "pin-project-lite",
- "reqwest 0.11.20",
+ "reqwest 0.12.9",
  "thiserror 1.0.63",
 ]
 
@@ -14462,11 +14502,11 @@ dependencies = [
 [[package]]
 name = "rphi"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
 dependencies = [
  "anyhow",
  "async-trait",
- "candle-core",
+ "candle-core 0.7.2",
  "candle-nn",
  "candle-transformers",
  "kalosm-common",
@@ -14710,6 +14750,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustls-native-certs"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcaf18a4f2be7326cd874a5fa579fae794320a0f388d365dca7e480e55f83f8a"
+dependencies = [
+ "openssl-probe",
+ "rustls-pemfile 2.1.3",
+ "rustls-pki-types",
+ "schannel",
+ "security-framework",
+]
+
+[[package]]
 name = "rustls-pemfile"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14879,13 +14932,13 @@ dependencies = [
 [[package]]
 name = "rwhisper"
 version = "0.3.5"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
 dependencies = [
  "accelerate-src",
  "anyhow",
  "async-trait",
  "byteorder",
- "candle-core",
+ "candle-core 0.7.2",
  "candle-nn",
  "candle-transformers",
  "cpal",
@@ -14906,11 +14959,11 @@ dependencies = [
 [[package]]
 name = "rwuerstchen"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
 dependencies = [
  "anyhow",
  "async-trait",
- "candle-core",
+ "candle-core 0.7.2",
  "candle-nn",
  "candle-transformers",
  "futures-util",
@@ -15229,6 +15282,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "secrecy"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bd1c54ea06cfd2f6b63219704de0b9b4f72dcc2b8fdef820be6cd799780e91e"
+dependencies = [
+ "serde",
+ "zeroize",
+]
+
+[[package]]
 name = "security-framework"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -15254,10 +15317,10 @@ dependencies = [
 [[package]]
 name = "segment-anything-rs"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
 dependencies = [
  "anyhow",
- "candle-core",
+ "candle-core 0.7.2",
  "candle-nn",
  "candle-transformers",
  "hf-hub",
@@ -18048,7 +18111,7 @@ dependencies = [
  "futures-util",
  "log",
  "rustls 0.20.9",
- "rustls-native-certs",
+ "rustls-native-certs 0.6.3",
  "tokio",
  "tokio-rustls 0.23.4",
  "tungstenite 0.18.0",
@@ -18639,7 +18702,7 @@ dependencies = [
  "rcgen",
  "ring 0.16.20",
  "rustls 0.20.9",
- "rustls-native-certs",
+ "rustls-native-certs 0.6.3",
  "rustls-pemfile 1.0.4",
  "serde_json",
  "sha2 0.10.8",
