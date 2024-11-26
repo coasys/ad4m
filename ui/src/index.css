@@ -1,20 +1,24 @@
 @import url("https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,200..800&display=swap");
 @import url("https://fonts.googleapis.com/css2?family=Noto+Serif:ital,wght@0,100..900;1,100..900&display=swap");
 
+* {
+  font-family: "Bricolage Grotesque", sans-serif;
+}
+
+*,
+*:before,
+*:after {
+  box-sizing: inherit;
+}
+
 body {
   margin: 0;
-  font-family: "Bricolage Grotesque", sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
 html {
   box-sizing: border-box;
-}
-*,
-*:before,
-*:after {
-  box-sizing: inherit;
 }
 
 :root {
@@ -217,7 +221,6 @@ code {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  gap: var(--j-space-900);
   margin: 0 auto;
 }
 
@@ -239,4 +242,9 @@ code {
   border-radius: var(--j-border-radius);
   padding: var(--j-space-500);
   background-color: rgba(164, 164, 164, 0.2);
+}
+
+.emphasis {
+  font-family: "Noto Serif";
+  font-style: italic;
 }
