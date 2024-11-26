@@ -40,9 +40,8 @@ pub fn signing_key_id() -> String {
 }
 
 pub fn did() -> String {
-    AgentService::with_global_instance(|a| {
-        a.did.clone()
-    }).expect("DID requested but not yet set in AgentService")
+    AgentService::with_global_instance(|a| a.did.clone())
+        .expect("DID requested but not yet set in AgentService")
 }
 
 pub fn check_keys_and_create(did: String) -> did_key::Document {
@@ -238,7 +237,8 @@ impl AgentService {
             let mut wallet = wallet_instance.lock().expect("wallet lock");
             let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
             wallet_ref.generate_keypair("main".to_string());
-            wallet_ref.get_did_document(&"main".to_string())
+            wallet_ref
+                .get_did_document(&"main".to_string())
                 .expect("couldn't get DID document for keys that were just generated above")
                 .id
         };

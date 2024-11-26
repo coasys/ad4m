@@ -251,7 +251,8 @@ impl AIService {
         Ad4mDb::with_global_instance(|db| {
             db.add_model(&model)?;
             db.set_default_model(model.model_type, &model.name)
-        }).map_err(|e| anyhow::anyhow!("{}", e))?;
+        })
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
         Ok(())
     }
 
@@ -378,7 +379,10 @@ impl AIService {
 
         // Build the local Llama model
         let llama = llama
-            .with_device(accelerated_device_if_available().expect("couldn't get another candle device for LLM")) 
+            .with_device(
+                accelerated_device_if_available()
+                    .expect("couldn't get another candle device for LLM"),
+            )
             .build_with_loading_handler({
                 let model_id = model_name.clone();
                 move |progress| {
@@ -613,7 +617,8 @@ impl AIService {
             .map_err(|e| anyhow::anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow::anyhow!("Task not found for task_id: {}", task_id))?;
 
-        let default_model = Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?;
+        let default_model =
+            Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?;
         let model_id = default_model.unwrap_or(task.model_id.clone());
 
         let llm_channel = self.llm_channel.lock().await;
@@ -654,9 +659,10 @@ impl AIService {
     async fn spawn_task(&self, task: AITask) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let llm_channel = self.llm_channel.lock().await;
-        let default_model = Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?;
+        let default_model =
+            Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?;
         let model = default_model.unwrap_or(task.model_id.clone());
-        
+
         if let Some(sender) = llm_channel.get(&model) {
             sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
                 task: task.clone(),
@@ -675,7 +681,8 @@ impl AIService {
     async fn remove_task(&self, task_id: String) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let llm_channel = self.llm_channel.lock().await;
-        let default_model = Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?;
+        let default_model =
+            Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?;
         let model = default_model.ok_or(anyhow!("No default model set - can't remove task"))?;
 
         if let Some(sender) = llm_channel.get(&model) {
