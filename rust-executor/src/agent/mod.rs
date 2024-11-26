@@ -40,7 +40,9 @@ pub fn signing_key_id() -> String {
 }
 
 pub fn did() -> String {
-    did_document().id.clone()
+    AgentService::with_global_instance(|a| {
+        a.did.clone()
+    }).expect("DID requested but not yet set in AgentService")
 }
 
 pub fn check_keys_and_create(did: String) -> did_key::Document {
