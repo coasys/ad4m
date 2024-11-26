@@ -1,54 +1,62 @@
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { useState } from "react";
-import { useEffect } from "react";
-
+import { useEffect, useState } from "react";
+import "../index.css";
 import Logo from "./Logo";
-import { splashscreenContainer, splashscreenError, splashscreenErrorFlex } from "./styles";
-const appWindow = getCurrentWebviewWindow()
+
+const appWindow = getCurrentWebviewWindow();
 
 export default function Splashscreen() {
   const [copied, setCopied] = useState(false);
+  const [error, setError] = useState(false);
 
   function copyFile() {
     appWindow.emit("copyLogs");
 
     setTimeout(() => {
       setCopied(true);
-
-      setTimeout(() => {
-        setCopied(false);
-      }, 2000);
+      setTimeout(() => setCopied(false), 2000);
     }, 500);
   }
 
   useEffect(() => {
-    setTimeout(() => {
-      const error = document.getElementById("error");
-      if (error) {
-        error.style.display = "block";
-        error.style.visibility = "visible";
-        error.style.opacity = "1";
-        error.style.height = "160px";
-      }
-    }, 30000);
+    setTimeout(() => setError(true), 30000);
   }, []);
 
   return (
-    <div style={splashscreenContainer}>
-      <Logo gradient style={{ width: "100px", height: "100px" }}></Logo>
-      <div id="error" style={splashscreenError}>
-        <div style={splashscreenErrorFlex}>
-          <j-text variant="heading-lg">Whoops, something broke! 😅</j-text>
-          <j-text variant="ingress">
-            To help us fix this, please click the button below to open your AD4M
-            data folder. Please then send the ad4m.log file found there to us on
-            Discord.
+    <div className="wrapper">
+      <Logo style={{ width: 80, height: 80, marginBottom: 40 }} />
+      {error ? (
+        <j-box style={{ maxWidth: 500, margin: "0 20px" }}>
+          <j-flex direction="column" gap="500" a="center">
+            <j-text
+              variant="heading-lg"
+              nomargin
+              style={{ textAlign: "center" }}
+            >
+              Whoops, something broke! 😅
+            </j-text>
+            <j-text variant="ingress" nomargin style={{ textAlign: "center" }}>
+              To help us fix this, please click the button below to open your
+              AD4M data folder. Please then send the ad4m.log file found there
+              to us on Discord.
+            </j-text>
+            <j-button
+              variant="primary"
+              onClick={copyFile}
+              style={{ marginTop: 20 }}
+            >
+              {copied ? "Opened" : "Open Logs"}
+            </j-button>
+          </j-flex>
+        </j-box>
+      ) : (
+        <j-flex a="center" gap="400">
+          <j-text size="700" nomargin>
+            Loading...
           </j-text>
-          <j-button variant="primary" onClick={copyFile}>
-            {copied ? "Opened" : "Open Logs"}
-          </j-button>
-        </div>
-      </div>
+          <j-spinner size="sm" />
+        </j-flex>
+      )}
     </div>
   );
 }

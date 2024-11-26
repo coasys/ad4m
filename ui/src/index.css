@@ -33,6 +33,10 @@ html {
   --j-color-primary-500: var(--gradient);
 }
 
+:root j-text::part(base) {
+  color: white;
+}
+
 ::-webkit-scrollbar {
   display: none;
 }
@@ -191,6 +195,15 @@ j-tab-item {
 code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New",
     monospace;
+}
+
+.wrapper {
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
 }
 
 .center {
