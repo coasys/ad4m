@@ -234,16 +234,19 @@ impl AgentService {
 
     pub fn create_new_keys(&mut self) {
         let wallet_instance = Wallet::instance();
-        {
+        let did = {
             let mut wallet = wallet_instance.lock().expect("wallet lock");
             let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
             wallet_ref.generate_keypair("main".to_string());
-        }
+            wallet_ref.get_did_document(&"main".to_string())
+                .expect("couldn't get DID document for keys that were just generated above")
+                .id
+        };
 
         self.did_document = Some(serde_json::to_string(&did_document()).unwrap());
-        self.did = Some(did());
+        self.did = Some(did.clone());
         self.agent = Some(Agent {
-            did: did(),
+            did,
             perspective: Some(Perspective { links: vec![] }),
             direct_message_language: None,
         });
