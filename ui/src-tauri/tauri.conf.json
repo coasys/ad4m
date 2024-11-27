@@ -12,7 +12,7 @@
         "label": "splashscreen",
         "title": "ADAM Launcher",
         "width": 1000,
-        "height": 700,
+        "height": 1000,
         "resizable": true,
         "fullscreen": false,
         "center": true,

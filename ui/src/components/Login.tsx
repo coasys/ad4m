@@ -297,19 +297,17 @@ const Login = () => {
         <div className="page" style={{ width: "100%", maxWidth: 350 }}>
           <Logo style={{ marginBottom: 40 }} />
 
-          <j-icon
-            name="person"
-            size="xl"
-            color="ui-500"
-            style={{ marginBottom: 10 }}
-          />
-          <j-text
-            size="800"
-            nomargin
-            style={{ marginBottom: 30, textAlign: "center" }}
+          <j-flex
+            direction="column"
+            a="center"
+            gap="300"
+            style={{ marginBottom: 30 }}
           >
-            Personal profile
-          </j-text>
+            <j-icon name="person" size="xl" color="ui-500" />
+            <j-text size="800" nomargin>
+              Personal profile
+            </j-text>
+          </j-flex>
 
           <j-flex direction="column" gap="500" style={{ width: "100%" }}>
             <j-input
