@@ -5,6 +5,12 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
+    "build-npm-packages": {
+      "dependsOn": [
+        "@coasys/ad4m#build",
+        "@coasys/ad4m-connect#build"
+      ]
+    },
     "build-libs": {
       "dependsOn": [
         "@coasys/dapp#build",
