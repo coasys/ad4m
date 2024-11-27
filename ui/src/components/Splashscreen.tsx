@@ -24,7 +24,7 @@ export default function Splashscreen() {
 
   return (
     <div className="wrapper">
-      <Logo style={{ width: 80, height: 80, marginBottom: 40 }} />
+      <Logo style={{ marginBottom: 40 }} />
       {error ? (
         <j-box style={{ maxWidth: 500, margin: "0 20px" }}>
           <j-flex direction="column" gap="500" a="center">

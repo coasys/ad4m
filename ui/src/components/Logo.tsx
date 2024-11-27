@@ -1,10 +1,10 @@
-function Logo(props: { style: any }) {
+function Logo(props: { style?: any }) {
   const { style } = props;
   return (
     <svg
       viewBox="0 0 64 60"
-      width="70px"
-      height="70px"
+      width="80px"
+      height="80px"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
       style={style}
