@@ -92,6 +92,16 @@ const Login = () => {
     else if (isInitialized) setCurrentIndex(7);
   }, [connected, isUnlocked, navigate, isInitialized, connectedLoading]);
 
+  // fix for radio button not being selected by prop on first load
+  useEffect(() => {
+    if (currentIndex === 5) {
+      const radio = document.getElementById(
+        `advanced-ai-${advancedAI ? "on" : "off"}`
+      ) as any;
+      if (radio) radio.checked = true;
+    }
+  }, [currentIndex]);
+
   return (
     <div className="wrapper">
       {currentIndex === 0 && (
@@ -389,6 +399,7 @@ const Login = () => {
 
           <j-flex direction="column" a="center" gap="400">
             <j-radio-button
+              id="advanced-ai-on"
               checked={advancedAI}
               onClick={() => setAdvancedAI(true)}
             >
@@ -397,6 +408,7 @@ const Login = () => {
               </j-text>
             </j-radio-button>
             <j-radio-button
+              id="advanced-ai-off"
               checked={!advancedAI}
               onClick={() => setAdvancedAI(false)}
             >
