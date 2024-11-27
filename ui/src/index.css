@@ -90,7 +90,7 @@ a {
 }
 
 :root j-modal::part(modal) {
-  padding: 30px;
+  padding: 40px 30px;
   align-items: center;
   border: 1px solid rgb(200, 200, 200);
   border-radius: var(--j-border-radius);
