@@ -35,8 +35,8 @@ pub fn get_executor_port() -> Result<u16> {
         Ok(port) => Ok(port.parse::<u16>().unwrap()),
         Err(err) => {
             println!("{}", err);
-            println!("Attempting to connect on default port 4000...\n");
-            Ok(4000)
+            println!("Attempting to connect on default port 12000...\n");
+            Ok(12000)
         }
     }
 }
