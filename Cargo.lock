@@ -75,7 +75,7 @@ dependencies = [
  "ad4m-client",
  "argon2",
  "base64 0.21.7",
- "candle-core 0.6.0",
+ "candle-core",
  "chrono",
  "cid",
  "clap 4.5.11",
@@ -1004,9 +1004,9 @@ checksum = "8b75356056920673b02621b35afd0f7dda9306d03c79a30f5c56c44cf256e3de"
 
 [[package]]
 name = "async-trait"
-version = "0.1.82"
+version = "0.1.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a27b8a3a6e1a44fa4c8baf1f653e4172e81486d4941f2237e20dc2d0cf4ddff1"
+checksum = "721cae7de5c34fbb2acd27e21e6d2cf7b886dce0c27388d46c4e6c47ea4318dd"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1844,27 +1844,6 @@ dependencies = [
 
 [[package]]
 name = "candle-core"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5b18de020c2729dbf7ac390325312644808b6ba9b7962f1f724e9185b1d53c7"
-dependencies = [
- "byteorder",
- "gemm",
- "half 2.4.1",
- "memmap2 0.9.4",
- "num-traits",
- "num_cpus",
- "rand 0.8.5",
- "rand_distr",
- "rayon",
- "safetensors",
- "thiserror 1.0.63",
- "yoke",
- "zip 1.1.4",
-]
-
-[[package]]
-name = "candle-core"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e1a39b963e261c58017edf2007e5b63425ad21538aaaf51fe23d1da41703701"
@@ -1918,7 +1897,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "898f8d21b8bdf559a1c8635e2db8386b2134015cd3003c18c1a30a22a67daec6"
 dependencies = [
  "accelerate-src",
- "candle-core 0.7.2",
+ "candle-core",
  "candle-metal-kernels",
  "half 2.4.1",
  "metal 0.27.0",
@@ -1937,7 +1916,7 @@ checksum = "06b8a130a8ac1d1e20696d89f7a52948902e037ad0eec085fceb77021007cfee"
 dependencies = [
  "accelerate-src",
  "byteorder",
- "candle-core 0.7.2",
+ "candle-core",
  "candle-nn",
  "fancy-regex",
  "num-traits",
@@ -3112,7 +3091,7 @@ dependencies = [
  "cssparser-macros",
  "dtoa-short",
  "itoa 1.0.11",
- "phf 0.11.2",
+ "phf 0.9.0",
  "smallvec",
 ]
 
@@ -3225,7 +3204,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b28bfe653d79bd16c77f659305b195b82bb5ce0c0eb2a4846b82ddbd77586813"
 dependencies = [
  "bitflags 2.6.0",
- "libloading 0.8.5",
+ "libloading 0.7.4",
  "winapi 0.3.9",
 ]
 
@@ -4728,7 +4707,7 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330c60081dcc4c72131f8eb70510f1ac07223e5d4163db481a04a0befcffa412"
 dependencies = [
- "libloading 0.8.5",
+ "libloading 0.7.4",
 ]
 
 [[package]]
@@ -5650,7 +5629,7 @@ source = "git+https://github.com/pdf-rs/font#78a8d9c58b4aafddd309ab7bbefd3bb5c34
 dependencies = [
  "decorum",
  "indexmap 1.9.3",
- "istring 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "istring 0.3.4",
  "itertools 0.10.5",
  "log",
  "nom 5.1.3",
@@ -6482,10 +6461,12 @@ dependencies = [
 
 [[package]]
 name = "globalcache"
-version = "0.2.4"
-source = "git+https://github.com/s3bk/cachelib#276f40d00528001bdcd1e1ed594157bd82c7c503"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f07c02868ebe3ffab0c273801b815f19a9fc05743b5b9da971449dd40604fe30"
 dependencies = [
  "async-trait",
+ "rustc-hash 2.0.0",
  "tuple 0.5.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "web-time",
 ]
@@ -6529,8 +6510,8 @@ version = "0.1.0"
 source = "git+https://github.com/s3bk/glyphmatcher#7bd5d40aaa8893fa4f2e07c758fa34127e176c8c"
 dependencies = [
  "font",
- "istring 0.3.4 (git+https://github.com/s3bk/istring)",
- "itertools 0.13.0",
+ "istring 0.4.1",
+ "itertools 0.8.2",
  "pathfinder_content",
  "pathfinder_geometry",
  "pdf_encoding 0.4.0 (git+https://github.com/pdf-rs/encoding)",
@@ -8102,7 +8083,7 @@ dependencies = [
  "httpdate",
  "itoa 1.0.11",
  "pin-project-lite",
- "socket2 0.5.7",
+ "socket2 0.4.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -8839,8 +8820,8 @@ dependencies = [
 
 [[package]]
 name = "istring"
-version = "0.3.4"
-source = "git+https://github.com/s3bk/istring#b9424bb1e291388f145a06558c15639dc87f3058"
+version = "0.4.1"
+source = "git+https://github.com/s3bk/istring#ac7b821c94cf5a1295b4712e60b65419e4c05352"
 dependencies = [
  "serde",
 ]
@@ -9059,12 +9040,12 @@ dependencies = [
 [[package]]
 name = "kalosm"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "arroy",
  "async-trait",
- "candle-core 0.7.2",
+ "candle-core",
  "comfy-table",
  "ego-tree",
  "futures-util",
@@ -9089,10 +9070,10 @@ dependencies = [
 [[package]]
 name = "kalosm-common"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
- "candle-core 0.7.2",
+ "candle-core",
  "candle-nn",
  "dirs 5.0.1",
  "hf-hub",
@@ -9108,12 +9089,12 @@ dependencies = [
 [[package]]
 name = "kalosm-language"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "arroy",
  "async-trait",
- "candle-core 0.7.2",
+ "candle-core",
  "candle-nn",
  "chrono",
  "convert_case 0.6.0",
@@ -9164,12 +9145,12 @@ dependencies = [
 [[package]]
 name = "kalosm-language-model"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "async-openai",
  "async-trait",
- "candle-core 0.7.2",
+ "candle-core",
  "futures-util",
  "kalosm-common",
  "kalosm-sample",
@@ -9192,11 +9173,11 @@ dependencies = [
 [[package]]
 name = "kalosm-llama"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "async-trait",
- "candle-core 0.7.2",
+ "candle-core",
  "candle-nn",
  "candle-transformers",
  "half 2.4.1",
@@ -9215,10 +9196,10 @@ dependencies = [
 [[package]]
 name = "kalosm-ocr"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
- "candle-core 0.7.2",
+ "candle-core",
  "candle-nn",
  "candle-transformers",
  "hf-hub",
@@ -9234,7 +9215,7 @@ dependencies = [
 [[package]]
 name = "kalosm-parse-macro"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9244,7 +9225,7 @@ dependencies = [
 [[package]]
 name = "kalosm-sample"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "kalosm-parse-macro",
@@ -9254,12 +9235,12 @@ dependencies = [
 [[package]]
 name = "kalosm-sound"
 version = "0.3.4"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "async-trait",
  "byteorder",
- "candle-core 0.7.2",
+ "candle-core",
  "candle-nn",
  "candle-transformers",
  "cpal",
@@ -9286,7 +9267,7 @@ dependencies = [
 [[package]]
 name = "kalosm-streams"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "futures-util",
  "image 0.24.9",
@@ -9297,7 +9278,7 @@ dependencies = [
 [[package]]
 name = "kalosm-vision"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "image 0.24.9",
  "kalosm-ocr",
@@ -11432,7 +11413,7 @@ version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af1844ef2428cc3e1cb900be36181049ef3d3193c63e43026cfe202983b27a56"
 dependencies = [
- "proc-macro-crate 3.1.0",
+ "proc-macro-crate 1.1.3",
  "proc-macro2",
  "quote",
  "syn 2.0.87",
@@ -12237,7 +12218,7 @@ checksum = "8835116a5c179084a830efb3adc117ab007512b535bc1a21c991d3b32a6b44dd"
 [[package]]
 name = "pathfinder_color"
 version = "0.5.0"
-source = "git+https://github.com/servo/pathfinder#45b7a89449d1ebc12da870d1914e1b85c6b475d0"
+source = "git+https://github.com/servo/pathfinder#1b7c8bcdaf9da3f045af6a650b5f5c00f0c5a7eb"
 dependencies = [
  "pathfinder_simd",
 ]
@@ -12245,7 +12226,7 @@ dependencies = [
 [[package]]
 name = "pathfinder_content"
 version = "0.5.0"
-source = "git+https://github.com/servo/pathfinder#45b7a89449d1ebc12da870d1914e1b85c6b475d0"
+source = "git+https://github.com/servo/pathfinder#1b7c8bcdaf9da3f045af6a650b5f5c00f0c5a7eb"
 dependencies = [
  "arrayvec 0.5.2",
  "bitflags 1.3.2",
@@ -12260,7 +12241,7 @@ dependencies = [
 [[package]]
 name = "pathfinder_geometry"
 version = "0.5.1"
-source = "git+https://github.com/servo/pathfinder#45b7a89449d1ebc12da870d1914e1b85c6b475d0"
+source = "git+https://github.com/servo/pathfinder#1b7c8bcdaf9da3f045af6a650b5f5c00f0c5a7eb"
 dependencies = [
  "log",
  "pathfinder_simd",
@@ -12269,7 +12250,7 @@ dependencies = [
 [[package]]
 name = "pathfinder_gpu"
 version = "0.5.0"
-source = "git+https://github.com/servo/pathfinder#45b7a89449d1ebc12da870d1914e1b85c6b475d0"
+source = "git+https://github.com/servo/pathfinder#1b7c8bcdaf9da3f045af6a650b5f5c00f0c5a7eb"
 dependencies = [
  "bitflags 1.3.2",
  "fxhash",
@@ -12286,7 +12267,7 @@ dependencies = [
 [[package]]
 name = "pathfinder_renderer"
 version = "0.5.0"
-source = "git+https://github.com/servo/pathfinder#45b7a89449d1ebc12da870d1914e1b85c6b475d0"
+source = "git+https://github.com/servo/pathfinder#1b7c8bcdaf9da3f045af6a650b5f5c00f0c5a7eb"
 dependencies = [
  "bitflags 1.3.2",
  "byte-slice-cast",
@@ -12314,12 +12295,12 @@ dependencies = [
 [[package]]
 name = "pathfinder_resources"
 version = "0.5.0"
-source = "git+https://github.com/servo/pathfinder#45b7a89449d1ebc12da870d1914e1b85c6b475d0"
+source = "git+https://github.com/servo/pathfinder#1b7c8bcdaf9da3f045af6a650b5f5c00f0c5a7eb"
 
 [[package]]
 name = "pathfinder_simd"
 version = "0.5.4"
-source = "git+https://github.com/servo/pathfinder#45b7a89449d1ebc12da870d1914e1b85c6b475d0"
+source = "git+https://github.com/servo/pathfinder#1b7c8bcdaf9da3f045af6a650b5f5c00f0c5a7eb"
 dependencies = [
  "rustc_version 0.4.1",
 ]
@@ -12327,7 +12308,7 @@ dependencies = [
 [[package]]
 name = "pathfinder_ui"
 version = "0.5.0"
-source = "git+https://github.com/servo/pathfinder#45b7a89449d1ebc12da870d1914e1b85c6b475d0"
+source = "git+https://github.com/servo/pathfinder#1b7c8bcdaf9da3f045af6a650b5f5c00f0c5a7eb"
 dependencies = [
  "hashbrown 0.7.2",
  "pathfinder_color",
@@ -12365,7 +12346,7 @@ dependencies = [
 [[package]]
 name = "pdf"
 version = "0.9.0"
-source = "git+https://github.com/pdf-rs/pdf#a94544dd6668f4c9b0d0037b2f3474c4d7e896aa"
+source = "git+https://github.com/pdf-rs/pdf#b69e0753c9d6adff567b911494309798e0954e6a"
 dependencies = [
  "aes",
  "bitflags 2.6.0",
@@ -12373,9 +12354,9 @@ dependencies = [
  "datasize",
  "deflate 1.0.0",
  "fax",
- "globalcache 0.2.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "globalcache 0.2.4",
  "indexmap 2.5.0",
- "istring 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "istring 0.3.4",
  "itertools 0.13.0",
  "jpeg-decoder",
  "libflate",
@@ -12393,7 +12374,7 @@ dependencies = [
 [[package]]
 name = "pdf_derive"
 version = "0.2.0"
-source = "git+https://github.com/pdf-rs/pdf#a94544dd6668f4c9b0d0037b2f3474c4d7e896aa"
+source = "git+https://github.com/pdf-rs/pdf#b69e0753c9d6adff567b911494309798e0954e6a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -12420,16 +12401,16 @@ dependencies = [
 [[package]]
 name = "pdf_render"
 version = "0.1.0"
-source = "git+https://github.com/pdf-rs/pdf_render#39a877d3dde5105ffff8f116a4dd5ae325c02867"
+source = "git+https://github.com/pdf-rs/pdf_render#24d48551c546ac285e8582a27b0ab2753eaf6a45"
 dependencies = [
  "custom_debug_derive",
  "font",
- "globalcache 0.2.4 (git+https://github.com/s3bk/cachelib)",
+ "globalcache 0.3.2",
  "glyphmatcher",
  "image 0.24.9",
  "instant",
- "istring 0.3.4 (git+https://github.com/s3bk/istring)",
- "itertools 0.13.0",
+ "istring 0.4.1",
+ "itertools 0.8.2",
  "log",
  "once_cell",
  "pathfinder_color",
@@ -12448,9 +12429,9 @@ version = "0.1.0"
 source = "git+https://github.com/pdf-rs/pdf_text#03d4789b4d23b24a991a18d31a352c8400237afc"
 dependencies = [
  "font",
- "itertools 0.13.0",
+ "itertools 0.8.2",
  "log",
- "ordered-float 4.2.2",
+ "ordered-float 2.10.1",
  "pathfinder_color",
  "pathfinder_content",
  "pathfinder_geometry",
@@ -13855,11 +13836,11 @@ dependencies = [
 [[package]]
 name = "rbert"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "async-trait",
- "candle-core 0.7.2",
+ "candle-core",
  "candle-nn",
  "candle-transformers",
  "kalosm-common",
@@ -14502,11 +14483,11 @@ dependencies = [
 [[package]]
 name = "rphi"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "async-trait",
- "candle-core 0.7.2",
+ "candle-core",
  "candle-nn",
  "candle-transformers",
  "kalosm-common",
@@ -14932,13 +14913,13 @@ dependencies = [
 [[package]]
 name = "rwhisper"
 version = "0.3.5"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "accelerate-src",
  "anyhow",
  "async-trait",
  "byteorder",
- "candle-core 0.7.2",
+ "candle-core",
  "candle-nn",
  "candle-transformers",
  "cpal",
@@ -14959,11 +14940,11 @@ dependencies = [
 [[package]]
 name = "rwuerstchen"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "async-trait",
- "candle-core 0.7.2",
+ "candle-core",
  "candle-nn",
  "candle-transformers",
  "futures-util",
@@ -15317,10 +15298,10 @@ dependencies = [
 [[package]]
 name = "segment-anything-rs"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#9fb90064126ac1119a8efceb185b2d34130e4045"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
- "candle-core 0.7.2",
+ "candle-core",
  "candle-nn",
  "candle-transformers",
  "hf-hub",
@@ -18587,8 +18568,8 @@ version = "1.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
- "cfg-if 0.1.10",
- "rand 0.8.5",
+ "cfg-if 1.0.0",
+ "rand 0.6.5",
  "static_assertions",
 ]
 
@@ -19913,7 +19894,7 @@ dependencies = [
  "log",
  "naga",
  "once_cell",
- "parking_lot 0.12.3",
+ "parking_lot 0.11.2",
  "profiling",
  "raw-window-handle 0.6.2",
  "ron",
@@ -19948,14 +19929,14 @@ dependencies = [
  "js-sys",
  "khronos-egl",
  "libc",
- "libloading 0.8.5",
+ "libloading 0.7.4",
  "log",
  "metal 0.28.0",
  "naga",
  "ndk-sys 0.5.0+25.2.9519653",
  "objc",
  "once_cell",
- "parking_lot 0.12.3",
+ "parking_lot 0.11.2",
  "profiling",
  "range-alloc",
  "raw-window-handle 0.6.2",

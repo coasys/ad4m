@@ -7,6 +7,7 @@ use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
 use crate::types::{AITask, LocalModel, Model, ModelType};
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
+use candle_core::Device;
 use deno_core::error::AnyError;
 use futures::{FutureExt, SinkExt};
 use kalosm::sound::TextStream;
@@ -204,6 +205,7 @@ impl AIService {
 
         let _ = WhisperBuilder::default()
             .with_source(WhisperSource::Base)
+            .with_device(Device::Cpu) 
             .build_with_loading_handler({
                 let name = name.clone();
                 move |progress| {
@@ -306,7 +308,8 @@ impl AIService {
                     .block_on(async {
                         publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
 
-                        let berd = Bert::builder()
+                        let bert = Bert::builder()
+                            .with_device(Device::Cpu) 
                             .build_with_loading_handler({
                                 let model_id = model_id.clone();
                                 move |progress| {
@@ -316,8 +319,8 @@ impl AIService {
                             .await;
 
                         publish_model_status(model_id.clone(), 100.0, "Loaded", false).await;
-
-                        berd
+                        
+                        bert
                     })
                     .expect("couldn't build Bert model");
 
@@ -336,6 +339,15 @@ impl AIService {
             .insert(model_id, bert_tx);
     }
 
+    fn new_candle_device() -> Result<Device> {
+        Ok(if cfg!(feature = "cuda") {
+            Device::new_cuda(0)?
+        } else if cfg!(feature = "metal") {
+            Device::new_metal(0)?
+        } else {
+            Device::Cpu
+        })
+    }
     async fn build_local_llama_from_string(
         model_name: String,
         model_size_string: String,
@@ -357,6 +369,7 @@ impl AIService {
 
         // Build the local Llama model
         let llama = llama
+            .with_device(Self::new_candle_device().expect("Couldn't create new candle device"))
             .build_with_loading_handler({
                 let model_id = model_name.clone();
                 move |progress| {
@@ -686,6 +699,7 @@ impl AIService {
             rt.block_on(async {
                 let maybe_model = WhisperBuilder::default()
                     .with_source(WhisperSource::Base)
+                    .with_device(Device::Cpu) 
                     .build()
                     .await;
 
