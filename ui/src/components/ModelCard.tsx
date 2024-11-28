@@ -8,8 +8,17 @@ export default function ModelCard(props: {
   deleteModel: () => void;
 }) {
   const { model, editModel, deleteModel } = props;
-  const { name, modelType, status, downloaded, loaded, progress, tasks } =
-    model;
+  const {
+    name,
+    modelType,
+    api,
+    local,
+    status,
+    downloaded,
+    loaded,
+    progress,
+    tasks,
+  } = model;
 
   const [showTasks, setShowTasks] = useState(false);
 
@@ -21,19 +30,21 @@ export default function ModelCard(props: {
 
   return (
     <j-box className="box">
-      <j-flex j="between">
-        <j-text size="700" nomargin color="ui-0">
-          {name}
-        </j-text>
-        <j-flex gap="300">
-          <j-button size="sm" onClick={editModel}>
-            <j-icon name="pencil-square" size="sm" />
-          </j-button>
-          <j-button size="sm" onClick={deleteModel}>
-            <j-icon name="trash" size="sm" />
-          </j-button>
+      <j-box pb="300">
+        <j-flex j="between">
+          <j-text size="700" nomargin color="ui-0">
+            {name}
+          </j-text>
+          <j-flex gap="300">
+            <j-button size="sm" onClick={editModel}>
+              <j-icon name="pencil-square" size="sm" />
+            </j-button>
+            <j-button size="sm" onClick={deleteModel}>
+              <j-icon name="trash" size="sm" />
+            </j-button>
+          </j-flex>
         </j-flex>
-      </j-flex>
+      </j-box>
       <j-flex direction="column" gap="400">
         <j-flex gap="300">
           <j-text nomargin>Type:</j-text>
@@ -41,6 +52,28 @@ export default function ModelCard(props: {
             {modelType}
           </j-text>
         </j-flex>
+        <j-flex gap="300">
+          <j-text nomargin>Model:</j-text>
+          <j-text nomargin color="ui-0">
+            {api ? "External API" : local.fileName}
+          </j-text>
+        </j-flex>
+        {api && (
+          <>
+            <j-flex gap="300">
+              <j-text nomargin>API URL:</j-text>
+              <j-text nomargin color="ui-0">
+                {api.baseUrl}
+              </j-text>
+            </j-flex>
+            <j-flex gap="300">
+              <j-text nomargin>API Key:</j-text>
+              <j-text nomargin color="ui-0">
+                {api.apiKey}
+              </j-text>
+            </j-flex>
+          </>
+        )}
         <j-flex gap="300">
           <j-text nomargin>Status:</j-text>
           <j-text nomargin color="ui-0">
