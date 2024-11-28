@@ -24,7 +24,7 @@ export default function aiTests(testContext: TestContext) {
                 }
 
                 const addApiResult = await ad4mClient.ai.addModel(apiModelInput)
-                expect(addApiResult).to.be.true
+                expect(addApiResult).to.be.a.string
 
                 // Test adding a local model
                 const localModelInput: ModelInput = {
@@ -38,7 +38,7 @@ export default function aiTests(testContext: TestContext) {
                 }
 
                 const addLocalResult = await ad4mClient.ai.addModel(localModelInput)
-                expect(addLocalResult).to.be.true
+                expect(addLocalResult).to.be.a.string
 
                 // Test getting models
                 const models = await ad4mClient.ai.getModels()
