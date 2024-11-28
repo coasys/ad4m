@@ -22,7 +22,7 @@ const Login = () => {
 
   let navigate = useNavigate();
 
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentIndex, setCurrentIndex] = useState(5);
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [passwordError, setPasswordError] = useState<string | null>(null);
@@ -36,6 +36,8 @@ const Login = () => {
   const [apiKey, setApiKey] = useState("");
   const [apiUrlError, setApiUrlError] = useState(false);
   const [apiKeyError, setApiKeyError] = useState(false);
+  const [apiLoading, setApiLoading] = useState(false);
+  const [apiError, setApiError] = useState("");
 
   if (hasLoginError) setPasswordError("Invalid password");
 
@@ -54,12 +56,43 @@ const Login = () => {
     return valid;
   }
 
-  function saveModels() {
-    // validate API
-    if (aiMode === "Remote" && !(apiUrl && apiKey)) {
-      setApiUrlError(!apiUrl);
-      setApiKeyError(!apiKey);
-    } else {
+  async function apiValid(): Promise<boolean> {
+    return new Promise(async (resolve) => {
+      if (aiMode !== "Remote") resolve(true);
+      else if (!(apiUrl && apiKey)) {
+        // missing values
+        setApiUrlError(!apiUrl);
+        setApiKeyError(!apiKey);
+        resolve(false);
+      } else {
+        // test api
+        setApiLoading(true);
+        try {
+          const response = await fetch(`${apiUrl}/models`, {
+            method: "GET",
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+            },
+          });
+          const { ok, status, statusText } = response;
+          if (ok) resolve(true);
+          else {
+            setApiError(status === 401 ? "Invalid key" : statusText);
+            resolve(false);
+          }
+          setApiLoading(false);
+        } catch {
+          resolve(false);
+          setApiError("Error connecting to API");
+          setApiLoading(false);
+        }
+      }
+    });
+  }
+
+  async function saveModels() {
+    if (await apiValid()) {
       // add llm model
       const llm = { name: "LLM Model 1", modelType: "LLM" } as ModelInput;
       if (aiMode === "Local") {
@@ -440,6 +473,7 @@ const Login = () => {
                 errortext="Required"
                 onInput={(e: any) => {
                   setApiUrlError(false);
+                  setApiError("");
                   setApiUrl(e.target.value);
                 }}
                 style={{ width: "100%" }}
@@ -453,10 +487,20 @@ const Login = () => {
                 errortext="Required"
                 onInput={(e: any) => {
                   setApiKeyError(false);
+                  setApiError("");
                   setApiKey(e.target.value);
                 }}
                 style={{ width: "100%" }}
               />
+              {apiLoading && (
+                <j-flex a="center" gap="400">
+                  <j-text nomargin color="ui-0" size="600">
+                    Testing API...
+                  </j-text>
+                  <j-spinner size="xs" />
+                </j-flex>
+              )}
+              {apiError && <j-text color="danger-500">{apiError}</j-text>}
             </j-flex>
           )}
 
