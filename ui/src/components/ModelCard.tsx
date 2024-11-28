@@ -36,9 +36,11 @@ export default function ModelCard(props: {
             {name}
           </j-text>
           <j-flex gap="300">
-            <j-button variant="subtle" size="sm" onClick={editModel}>
-              <j-icon name="pencil-square" size="sm" />
-            </j-button>
+            {modelType === "LLM" && (
+              <j-button variant="subtle" size="sm" onClick={editModel}>
+                <j-icon name="pencil-square" size="sm" />
+              </j-button>
+            )}
             <j-button variant="subtle" size="sm" onClick={deleteModel}>
               <j-icon name="trash" size="sm" />
             </j-button>
@@ -88,30 +90,34 @@ export default function ModelCard(props: {
             {statusText()}
           </j-text>
         </j-flex>
-        {tasks.length === 0 ? (
-          <j-text nomargin>No tasks created</j-text>
-        ) : (
+        {modelType === "LLM" && (
           <>
-            <j-button onClick={() => setShowTasks(!showTasks)}>
-              {showTasks ? "Hide" : "Show"} tasks ({tasks.length})
-            </j-button>
-            {showTasks && (
-              <j-flex gap="300">
-                {tasks.map((task: any) => (
-                  <div
-                    key={task.taskId}
-                    style={{ ...cardStyle, width: "100%" }}
-                  >
-                    <j-flex direction="column" gap="400">
-                      <j-text variant="heading-sm" nomargin>
-                        Task name: {task.name}
-                      </j-text>
-                      <j-text nomargin>Id: {task.taskId}</j-text>
-                      <j-text nomargin>Prompt: {task.systemPrompt}</j-text>
-                    </j-flex>
-                  </div>
-                ))}
-              </j-flex>
+            {tasks.length === 0 ? (
+              <j-text nomargin>No tasks created yet...</j-text>
+            ) : (
+              <>
+                <j-button onClick={() => setShowTasks(!showTasks)}>
+                  {showTasks ? "Hide" : "Show"} tasks ({tasks.length})
+                </j-button>
+                {showTasks && (
+                  <j-flex gap="300">
+                    {tasks.map((task: any) => (
+                      <div
+                        key={task.taskId}
+                        style={{ ...cardStyle, width: "100%" }}
+                      >
+                        <j-flex direction="column" gap="400">
+                          <j-text variant="heading-sm" nomargin>
+                            Task name: {task.name}
+                          </j-text>
+                          <j-text nomargin>Id: {task.taskId}</j-text>
+                          <j-text nomargin>Prompt: {task.systemPrompt}</j-text>
+                        </j-flex>
+                      </div>
+                    ))}
+                  </j-flex>
+                )}
+              </>
             )}
           </>
         )}
