@@ -15,7 +15,7 @@ use crate::{
     db::Ad4mDb,
     perspectives::perspective_instance::{Command, Parameter, SubjectClassOption},
     runtime_service::RuntimeService,
-    types::{Notification},
+    types::Notification,
 };
 use coasys_juniper::{graphql_object, graphql_value, FieldError, FieldResult};
 

@@ -451,7 +451,7 @@ impl FromStr for ModelApiType {
 impl ToString for ModelApiType {
     fn to_string(&self) -> String {
         match self {
-            ModelApiType::OpenAi => "openAi".to_string()
+            ModelApiType::OpenAi => "openAi".to_string(),
         }
     }
 }

@@ -5,7 +5,7 @@ use crate::graphql::graphql_types::{AIModelLoadingStatus, AITaskInput, Transcrip
 use crate::pubsub::AI_MODEL_LOADING_STATUS;
 #[allow(unused_imports)]
 use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
-use crate::types::{AITask, Model, ModelType, LocalModel};
+use crate::types::{AITask, LocalModel, Model, ModelType};
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use candle_core::Device;
@@ -207,7 +207,7 @@ impl AIService {
 
         let _ = WhisperBuilder::default()
             .with_source(WhisperSource::Base)
-            .with_device(Device::Cpu) 
+            .with_device(Device::Cpu)
             .build_with_loading_handler({
                 let name = name.clone();
                 move |progress| {
@@ -313,7 +313,7 @@ impl AIService {
                         publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
 
                         let bert = Bert::builder()
-                            .with_device(Device::Cpu) 
+                            .with_device(Device::Cpu)
                             .build_with_loading_handler({
                                 let model_id = model_id.clone();
                                 move |progress| {
@@ -323,7 +323,7 @@ impl AIService {
                             .await;
 
                         publish_model_status(model_id.clone(), 100.0, "Loaded", false).await;
-                        
+
                         bert
                     })
                     .expect("couldn't build Bert model");
@@ -703,7 +703,7 @@ impl AIService {
             rt.block_on(async {
                 let maybe_model = WhisperBuilder::default()
                     .with_source(WhisperSource::Base)
-                    .with_device(Device::Cpu) 
+                    .with_device(Device::Cpu)
                     .build()
                     .await;
 

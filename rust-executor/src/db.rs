@@ -1,18 +1,19 @@
 use crate::graphql::graphql_types::{
-    AIModelLoadingStatus, EntanglementProof, LinkStatus, NotificationInput, PerspectiveExpression,
-    PerspectiveHandle, SentMessage, ModelInput,
+    AIModelLoadingStatus, EntanglementProof, LinkStatus, ModelInput, NotificationInput,
+    PerspectiveExpression, PerspectiveHandle, SentMessage,
 };
 use crate::types::{
-    AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model, ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff
+    AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
+    ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff,
 };
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::str::FromStr;
 use url::Url;
 use uuid::Uuid;
-use std::str::FromStr;
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -1071,41 +1072,44 @@ impl Ad4mDb {
 
     pub fn get_model(&self, model_id: String) -> Ad4mDbResult<Option<Model>> {
         let mut stmt = self.conn.prepare("SELECT * FROM models WHERE id = ?1")?;
-        let model = stmt.query_row(params![model_id], |row| {
-            let api = if let (Some(base_url), Some(api_key), Some(api_type)) = (
-                row.get::<_, Option<String>>(2)?.map(|s| s.to_string()),
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-            ) {
-                Some(ModelApi {
-                    base_url: Url::parse(&base_url).unwrap(),
-                    api_key,
-                    api_type: ModelApiType::from_str(&api_type).unwrap(),
-                })
-            } else {
-                None
-            };
+        let model = stmt
+            .query_row(params![model_id], |row| {
+                let api = if let (Some(base_url), Some(api_key), Some(api_type)) = (
+                    row.get::<_, Option<String>>(2)?.map(|s| s.to_string()),
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ) {
+                    Some(ModelApi {
+                        base_url: Url::parse(&base_url).unwrap(),
+                        api_key,
+                        api_type: ModelApiType::from_str(&api_type).unwrap(),
+                    })
+                } else {
+                    None
+                };
 
-            let local = if let (Some(file_name), Some(tokenizer_source), Some(model_parameters)) =
-                (row.get(5)?, row.get(6)?, row.get(7)?)
-            {
-                Some(LocalModel {
-                    file_name,
-                    tokenizer_source,
-                    model_parameters,
-                })
-            } else {
-                None
-            };
+                let local =
+                    if let (Some(file_name), Some(tokenizer_source), Some(model_parameters)) =
+                        (row.get(5)?, row.get(6)?, row.get(7)?)
+                    {
+                        Some(LocalModel {
+                            file_name,
+                            tokenizer_source,
+                            model_parameters,
+                        })
+                    } else {
+                        None
+                    };
 
-            Ok(Model {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                api,
-                local,
-                model_type: serde_json::from_str(&row.get::<_, String>(8)?).unwrap(),
+                Ok(Model {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    api,
+                    local,
+                    model_type: serde_json::from_str(&row.get::<_, String>(8)?).unwrap(),
+                })
             })
-        }).optional()?;
+            .optional()?;
         Ok(model)
     }
 
@@ -1199,9 +1203,10 @@ impl Ad4mDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{graphql::graphql_types::{LocalModelInput, ModelApiInput}, types::{
-        ExpressionProof, Link, LinkExpression, ModelApiType, ModelType,
-    }};
+    use crate::{
+        graphql::graphql_types::{LocalModelInput, ModelApiInput},
+        types::{ExpressionProof, Link, LinkExpression, ModelApiType, ModelType},
+    };
     use chrono::Utc;
     use fake::{Fake, Faker};
     use uuid::Uuid;
@@ -1555,10 +1560,7 @@ mod tests {
         );
         assert_eq!(retrieved_model_api.model_type, ModelType::Llm);
 
-        let retrieved_model_local = models
-            .iter()
-            .find(|m| m.id == id_model_local)
-            .unwrap();
+        let retrieved_model_local = models.iter().find(|m| m.id == id_model_local).unwrap();
         assert_eq!(retrieved_model_local.name, "Test Model Local");
         assert!(retrieved_model_local.api.is_none());
         assert!(retrieved_model_local.local.is_some());
@@ -1744,7 +1746,8 @@ mod tests {
         // Verify default model is set correctly
         let default = db.get_default_model(ModelType::Llm).unwrap();
         assert!(default.is_some());
-        let retrieved_default_model = db.get_model(default.unwrap())
+        let retrieved_default_model = db
+            .get_model(default.unwrap())
             .expect("to get added model")
             .expect("to get added model");
         assert_eq!(retrieved_default_model.name, "test-model");

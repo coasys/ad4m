@@ -567,7 +567,7 @@ impl Query {
 
         Ok(if let Some(id) = default_id {
             Ad4mDb::with_global_instance(|db| db.get_model(id))
-                    .map_err(|e| FieldError::new(e.to_string(), Value::null()))?
+                .map_err(|e| FieldError::new(e.to_string(), Value::null()))?
         } else {
             None
         })
