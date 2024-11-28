@@ -121,6 +121,15 @@ export default class AIResolver {
     }
 
     @Mutation(returns => Boolean)
+    aiUpdateModel(
+        @Arg("modelId", type => String) modelId: string,
+        @Arg("model", type => ModelInput) model: ModelInput
+    ): boolean {
+        // In a real implementation, this would update the model in storage
+        return true
+    }
+
+    @Mutation(returns => Boolean)
     aiRemoveModel(@Arg("modelId", type => String) modelId: string): boolean {
         // In a real implementation, this would remove the model from storage
         return true

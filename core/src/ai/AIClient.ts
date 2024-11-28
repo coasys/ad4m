@@ -49,6 +49,18 @@ export class AIClient {
         return unwrapApolloResult(result).aiAddModel;
     }
 
+    async updateModel(modelId: string, model: ModelInput): Promise<boolean> {
+        const result = await this.#apolloClient.mutate({
+            mutation: gql`
+                mutation($modelId: String!, $model: ModelInput!) {
+                    aiUpdateModel(modelId: $modelId, model: $model)
+                }
+            `,
+            variables: { modelId, model }
+        });
+        return unwrapApolloResult(result).aiUpdateModel;
+    }
+
     async removeModel(modelId: string): Promise<boolean> {
         const result = await this.#apolloClient.mutate({
             mutation: gql`

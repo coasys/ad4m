@@ -1217,6 +1217,15 @@ impl Mutation {
         let id = AIService::global_instance().await?.add_model(model).await?;
         Ok(id)
     }
+
+    async fn ai_update_model(
+        &self,
+        context: &RequestContext,
+        model_id: String,
+        model: ModelInput,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        Ad4mDb::with_global_instance(|db| db.update_model(&model_id, &model)).map_err(|e| e.to_string())?;
         Ok(true)
     }
 

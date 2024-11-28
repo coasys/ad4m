@@ -73,6 +73,60 @@ export default function aiTests(testContext: TestContext) {
                 expect(removedLocalModel).to.be.undefined
             })
 
+            it('can update model', async () => {
+                const ad4mClient = testContext.ad4mClient!
+
+                // Create initial API model
+                const initialModel: ModelInput = {
+                    name: "TestUpdateModel",
+                    api: {
+                        baseUrl: "https://api.example.com/",
+                        apiKey: "initial-key",
+                        apiType: "OPEN_AI"
+                    },
+                    modelType: "LLM"
+                }
+
+                // Add initial model
+                const addResult = await ad4mClient.ai.addModel(initialModel)
+                expect(addResult).to.be.true
+
+                // Get the model to retrieve its ID
+                const models = await ad4mClient.ai.getModels()
+                const addedModel = models.find(model => model.name === "TestUpdateModel")
+                expect(addedModel).to.exist
+
+                // Create updated model data
+                const updatedModel: ModelInput = {
+                    name: "UpdatedModel",
+                    local: {
+                        fileName: "updated_model.bin",
+                        tokenizerSource: "updated_tokenizer.json",
+                        modelParameters: JSON.stringify({ updated: "value" })
+                    },
+                    modelType: "EMBEDDING"
+                }
+
+                // Update the model
+                const updateResult = await ad4mClient.ai.updateModel(addedModel!.id, updatedModel)
+                expect(updateResult).to.be.true
+
+                // Verify the update
+                const updatedModels = await ad4mClient.ai.getModels()
+                const retrievedModel = updatedModels.find(model => model.id === addedModel!.id)
+                expect(retrievedModel).to.exist
+                expect(retrievedModel?.name).to.equal("UpdatedModel")
+                expect(retrievedModel?.api).to.be.undefined
+                expect(retrievedModel?.local?.fileName).to.equal("updated_model.bin")
+                expect(retrievedModel?.local?.tokenizerSource).to.equal("updated_tokenizer.json")
+                expect(retrievedModel?.local?.modelParameters).to.equal(JSON.stringify({ updated: "value" }))
+                expect(retrievedModel?.modelType).to.equal("EMBEDDING")
+
+                // Clean up
+                const removeResult = await ad4mClient.ai.removeModel(addedModel!.id)
+                expect(removeResult).to.be.true
+            })
+
             it ('AI model status', async () => {
                 const ad4mClient = testContext.ad4mClient!
                 const status = await ad4mClient.ai.modelLoadingStatus("bert");

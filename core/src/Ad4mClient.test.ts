@@ -1183,6 +1183,26 @@ describe('Ad4mClient', () => {
             expect(result).toBe(true);
         })
 
+        it('updateModel smoke test', async () => {
+            const modelId = "test-model-id";
+            const updatedModel = {
+                name: "Updated Test Model",
+                api: {
+                    baseUrl: "https://api.updatedexample.com",
+                    apiKey: "updated-test-api-key", 
+                    apiType: "OpenAi"
+                },
+                local: {
+                    fileName: "updated-test-model.bin",
+                    tokenizerSource: "updated-test-tokenizer",
+                    modelParameters: "{}"
+                },
+                modelType: "LLM"
+            };
+            const result = await ad4mClient.ai.updateModel(modelId, updatedModel);
+            expect(result).toBe(true);
+        })
+
         it('removeModel smoke test', async () => {
             const modelName = "Test Model to Remove";
             const result = await ad4mClient.ai.removeModel(modelName);
