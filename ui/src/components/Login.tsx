@@ -113,10 +113,15 @@ const Login = () => {
             gap="300"
             style={{ textAlign: "center", marginBottom: 50 }}
           >
-            <j-text size="900" weight="600" nomargin>
+            <j-text size="900" weight="600" nomargin color="ui-0">
               ADAM Layer
             </j-text>
-            <j-text size="800" nomargin style={{ textWrap: "wrap" }}>
+            <j-text
+              size="800"
+              nomargin
+              color="ui-900"
+              style={{ textWrap: "wrap" }}
+            >
               A social layer for the <i>Wise Web</i>
             </j-text>
           </j-flex>
@@ -141,8 +146,8 @@ const Login = () => {
             gap="400"
             style={{ marginBottom: 30 }}
           >
-            <j-icon name="house-lock" size="xl" color="ui-500" />
-            <j-text size="800" nomargin>
+            <j-icon name="house-lock" size="xl" color="ui-700" />
+            <j-text size="800" nomargin color="ui-0">
               Privacy and Security
             </j-text>
           </j-flex>
@@ -153,11 +158,11 @@ const Login = () => {
             gap="400"
             style={{ textAlign: "center", width: "100%", maxWidth: 500 }}
           >
-            <j-text size="600" nomargin>
+            <j-text size="600" nomargin color="ui-900">
               ADAM generates keys on your device, so only you have access to
               your account and data.
             </j-text>
-            <j-text size="600" nomargin>
+            <j-text size="600" nomargin color="ui-900">
               We will ask for a password used to encrypt your local keys. Don't
               forget it! There is no way to recover it.
             </j-text>
@@ -188,8 +193,8 @@ const Login = () => {
             gap="300"
             style={{ marginBottom: 40 }}
           >
-            <j-icon name="key" size="xl" color="ui-500" />
-            <j-text size="800" nomargin>
+            <j-icon name="key" size="xl" color="ui-700" />
+            <j-text size="800" nomargin color="ui-0">
               Create your password
             </j-text>
           </j-flex>
@@ -254,8 +259,8 @@ const Login = () => {
             gap="300"
             style={{ marginBottom: 30 }}
           >
-            <j-icon name="volume-up" size="xl" color="ui-500" />
-            <j-text size="800" nomargin>
+            <j-icon name="volume-up" size="xl" color="ui-700" />
+            <j-text size="800" nomargin color="ui-0">
               Censorship free
             </j-text>
           </j-flex>
@@ -266,12 +271,12 @@ const Login = () => {
             gap="400"
             style={{ textAlign: "center", width: "100%", maxWidth: 500 }}
           >
-            <j-text size="600" nomargin>
+            <j-text size="600" nomargin color="ui-900">
               ADAM allows you to express yourself without fear of censorship or
               suppression. You can share your thoughts and opinions without
               depending on a central authority or a particular app.
             </j-text>
-            <j-text size="600" nomargin>
+            <j-text size="600" nomargin color="ui-900">
               That includes and starts with your personal profile. In the next
               step you can add optional information about yourself that ADAM
               will make available publicly to other users through any ADAM app.
@@ -303,8 +308,8 @@ const Login = () => {
             gap="300"
             style={{ marginBottom: 30 }}
           >
-            <j-icon name="person" size="xl" color="ui-500" />
-            <j-text size="800" nomargin>
+            <j-icon name="person" size="xl" color="ui-700" />
+            <j-text size="800" nomargin color="ui-0">
               Personal profile
             </j-text>
           </j-flex>
@@ -364,8 +369,8 @@ const Login = () => {
           <Logo style={{ marginBottom: 40 }} />
 
           <j-flex direction="column" gap="400" style={{ marginBottom: 30 }}>
-            <j-icon name="robot" size="xl" color="ui-500" />
-            <j-text size="800" nomargin>
+            <j-icon name="robot" size="xl" color="ui-700" />
+            <j-text size="800" nomargin color="ui-0">
               AI Settings
             </j-text>
           </j-flex>
@@ -381,16 +386,16 @@ const Login = () => {
               marginBottom: 40,
             }}
           >
-            <j-text size="600" nomargin>
+            <j-text size="600" nomargin color="ui-900">
               ADAM allows you to control the AI used for transcription, vector
               embedding, and LLM tasks.
             </j-text>
-            <j-text size="600" nomargin>
+            <j-text size="600" nomargin color="ui-900">
               Select <b>advanced</b> if your device is capable or running large
               models locally. If you're unsure or using a low spec device select{" "}
               <b>basic</b>.
             </j-text>
-            <j-text size="600" nomargin>
+            <j-text size="600" nomargin color="ui-900">
               You can customise these settings later.
             </j-text>
           </j-flex>
@@ -401,7 +406,7 @@ const Login = () => {
               checked={advancedAI}
               onClick={() => setAdvancedAI(true)}
             >
-              <j-text size="600" nomargin>
+              <j-text size="600" nomargin color="ui-0">
                 Advanced
               </j-text>
             </j-radio-button>
@@ -410,7 +415,7 @@ const Login = () => {
               checked={!advancedAI}
               onClick={() => setAdvancedAI(false)}
             >
-              <j-text size="600" nomargin>
+              <j-text size="600" nomargin color="ui-0">
                 Basic
               </j-text>
             </j-radio-button>
@@ -460,8 +465,8 @@ const Login = () => {
           <Logo style={{ marginBottom: 40 }} />
 
           <j-flex direction="column" gap="400" style={{ marginBottom: 30 }}>
-            <j-icon name="person-check-fill" size="xl" color="ui-500" />
-            <j-text size="800" nomargin>
+            <j-icon name="person-check-fill" size="xl" color="ui-700" />
+            <j-text size="800" nomargin color="ui-0">
               Agent centric
             </j-text>
           </j-flex>
@@ -476,11 +481,11 @@ const Login = () => {
               maxWidth: 500,
             }}
           >
-            <j-text size="600" nomargin>
+            <j-text size="600" nomargin color="ui-900">
               With ADAM you own your data and decide what apps get to use it. No
               more app silos with you as the central authority.
             </j-text>
-            <j-text size="600" nomargin>
+            <j-text size="600" nomargin color="ui-900">
               Once agent generation is done, ADAM will run on your device, in
               the background. Open an ADAM app, like{" "}
               <a href="https://fluxsocial.io" target="_blank" rel="noreferrer">
@@ -488,7 +493,7 @@ const Login = () => {
               </a>
               , and connect it to your ADAM agent.
             </j-text>
-            <j-text size="600" nomargin>
+            <j-text size="600" nomargin color="ui-900">
               To interact with ADAM, click the ADAM icon in your system tray
               (next to the clock).
             </j-text>
@@ -520,8 +525,8 @@ const Login = () => {
             gap="300"
             style={{ marginBottom: 40 }}
           >
-            <j-icon name="key" size="xl" color="ui-500" />
-            <j-text size="800" nomargin>
+            <j-icon name="key" size="xl" color="ui-700" />
+            <j-text size="800" nomargin color="ui-0">
               Login
             </j-text>
           </j-flex>

@@ -22,7 +22,7 @@ export default function ModelCard(props: {
   return (
     <j-box className="box">
       <j-flex j="between">
-        <j-text size="700" nomargin>
+        <j-text size="700" nomargin color="ui-0">
           {name}
         </j-text>
         <j-flex gap="300">
@@ -35,8 +35,18 @@ export default function ModelCard(props: {
         </j-flex>
       </j-flex>
       <j-flex direction="column" gap="400">
-        <j-text nomargin>Type: {modelType}</j-text>
-        <j-text nomargin>Status: {statusText()}</j-text>
+        <j-flex gap="300">
+          <j-text nomargin>Type:</j-text>
+          <j-text nomargin color="ui-0">
+            {modelType}
+          </j-text>
+        </j-flex>
+        <j-flex gap="300">
+          <j-text nomargin>Status:</j-text>
+          <j-text nomargin color="ui-0">
+            {statusText()}
+          </j-text>
+        </j-flex>
         {tasks.length === 0 ? (
           <j-text nomargin>No tasks created</j-text>
         ) : (

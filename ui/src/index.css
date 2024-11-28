@@ -41,10 +41,6 @@ a {
   --j-color-primary-500: var(--gradient);
 }
 
-:root j-text::part(base) {
-  color: white;
-}
-
 ::-webkit-scrollbar {
   display: none;
 }
@@ -71,14 +67,29 @@ a {
 }
 
 :root j-menu::part(base) {
-  background-color: var(--j-color-primary-50);
-  border-color: var(--j-color-primary-500);
-  color: var(--j-color-primary-500);
+  background-color: var(--j-color-white);
+  border-color: var(--j-color-ui-800);
+}
+
+:root j-menu-group::part(title) {
+  color: var(--j-color-ui-800);
+}
+
+:root j-menu-group::part(summary) {
+  margin: 5px 0;
+}
+
+:root j-menu-group::part(summary)::after {
+  top: 5px;
 }
 
 :root j-menu-item::part(base):hover {
   background-color: var(--j-color-primary-100);
   color: var(--j-color-primary-500);
+}
+
+:root j-menu-item::part(base) {
+  color: var(--j-color-ui-800);
 }
 
 :root j-avatar::part(base) {
@@ -137,6 +148,10 @@ a {
 
 :root j-toggle[checked]::part(toggle) {
   background: var(--gradient);
+}
+
+:root j-input::part(label) {
+  --j-text-color: var(--j-color-ui-800);
 }
 
 :root j-input::part(input-wrapper) {

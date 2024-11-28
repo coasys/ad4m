@@ -103,7 +103,9 @@ export default function ModelModal(props: {
       }}
     >
       <j-flex direction="column" a="center" gap="700">
-        <j-text size="700">{oldModel ? "Edit" : "Add a new"} model</j-text>
+        <j-text size="700" color="ui-0">
+          {oldModel ? "Edit" : "Add a new"} model
+        </j-text>
 
         <j-flex direction="column" a="center" gap="500">
           <j-input
@@ -121,7 +123,7 @@ export default function ModelModal(props: {
           />
 
           <j-flex a="center" gap="400">
-            <j-text nomargin color="color-white" style={{ flexShrink: 0 }}>
+            <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
               Type:
             </j-text>
             <j-menu style={{ height: 42, zIndex: 3 }}>
@@ -152,7 +154,7 @@ export default function ModelModal(props: {
           </j-flex>
 
           <j-flex a="center" gap="400">
-            <j-text nomargin color="color-white" style={{ flexShrink: 0 }}>
+            <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
               Model:
             </j-text>
             <j-menu style={{ zIndex: 2 }}>
@@ -183,7 +185,7 @@ export default function ModelModal(props: {
           {newModel === "External API" && (
             <>
               <j-flex a="center" gap="400">
-                <j-text nomargin color="color-white" style={{ flexShrink: 0 }}>
+                <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
                   API URL:
                 </j-text>
                 <j-input
@@ -200,7 +202,7 @@ export default function ModelModal(props: {
                 />
               </j-flex>
               <j-flex a="center" gap="400">
-                <j-text nomargin color="color-white" style={{ flexShrink: 0 }}>
+                <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
                   API Key:
                 </j-text>
                 <j-input
