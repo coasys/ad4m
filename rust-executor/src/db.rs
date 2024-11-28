@@ -3,8 +3,7 @@ use crate::graphql::graphql_types::{
     PerspectiveHandle, SentMessage, ModelInput,
 };
 use crate::types::{
-    AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
-    ModelApi, ModelType, Notification, PerspectiveDiff,
+    AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model, ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff
 };
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -13,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use url::Url;
 use uuid::Uuid;
+use std::str::FromStr;
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -1080,7 +1080,7 @@ impl Ad4mDb {
                 Some(ModelApi {
                     base_url: Url::parse(&base_url).unwrap(),
                     api_key,
-                    api_type: serde_json::from_str(&api_type).unwrap(),
+                    api_type: ModelApiType::from_str(&api_type).unwrap(),
                 })
             } else {
                 None
@@ -1120,7 +1120,7 @@ impl Ad4mDb {
                 Some(ModelApi {
                     base_url: Url::parse(&base_url).unwrap(),
                     api_key,
-                    api_type: serde_json::from_str(&api_type).unwrap(),
+                    api_type: ModelApiType::from_str(&api_type).unwrap(),
                 })
             } else {
                 None

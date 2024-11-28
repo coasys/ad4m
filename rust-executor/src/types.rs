@@ -442,6 +442,7 @@ impl FromStr for ModelApiType {
             "openAi" => Ok(ModelApiType::OpenAi),
             "OpenAi" => Ok(ModelApiType::OpenAi),
             "OPEN_AI" => Ok(ModelApiType::OpenAi),
+            "\"OPEN_AI\"" => Ok(ModelApiType::OpenAi),
             _ => Err(format!("Unknown ModelApiType: {}", s)),
         }
     }
