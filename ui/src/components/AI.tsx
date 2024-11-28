@@ -2,8 +2,8 @@ import { Model } from "@coasys/ad4m/lib/src/ai/AIResolver";
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import "../index.css";
+import ModelCard from "./ModelCard";
 import ModelModal from "./ModelModal";
-import { cardStyle } from "./styles";
 
 const AI = () => {
   const {
@@ -35,20 +35,6 @@ const AI = () => {
     console.log("delete model: ", model.name);
     // client!.ai.deleteModel(model.id);
     // getData()
-  }
-
-  function toggleModelTasks(modelName: string) {
-    const newModels = [...models];
-    const match = newModels.find((model) => model.name === modelName);
-    if (match) match.collapsed = !match.collapsed;
-    setModels(newModels);
-  }
-
-  function statusText(model: any) {
-    const { status, downloaded, loaded, progress } = model;
-    if (!status) return "Checking status...";
-    else if (downloaded && loaded) return "Model ready";
-    return `${downloaded ? "Loading" : "Downloading"}: ${progress?.toFixed(2) || 0}%`;
   }
 
   useEffect(() => {
@@ -126,55 +112,11 @@ const AI = () => {
 
           <j-flex direction="column" gap="400">
             {models.map((model) => (
-              <j-box className="box">
-                <j-flex j="between">
-                  <j-text size="700" nomargin>
-                    {model.name}
-                  </j-text>
-                  <j-flex gap="300">
-                    <j-button size="sm" onClick={() => setSelectedModel(model)}>
-                      <j-icon name="pencil-square" size="sm" />
-                    </j-button>
-                    <j-button size="sm" onClick={() => deleteModel(model)}>
-                      <j-icon name="trash" size="sm" />
-                    </j-button>
-                  </j-flex>
-                </j-flex>
-                <j-flex direction="column" gap="400">
-                  <j-text nomargin>Type: {model.modelType}</j-text>
-                  <j-text nomargin>Status: {statusText(model)}</j-text>
-                  {model.tasks.length === 0 ? (
-                    <j-text nomargin>No tasks created</j-text>
-                  ) : (
-                    <>
-                      <j-button onClick={() => toggleModelTasks(model.name)}>
-                        {model.collapsed ? "Show" : "Hide"} tasks (
-                        {model.tasks.length})
-                      </j-button>
-                      {!model.collapsed && (
-                        <j-flex gap="300">
-                          {model.tasks.map((task: any) => (
-                            <div
-                              key={task.taskId}
-                              style={{ ...cardStyle, width: "100%" }}
-                            >
-                              <j-flex direction="column" gap="400">
-                                <j-text variant="heading-sm" nomargin>
-                                  Task name: {task.name}
-                                </j-text>
-                                <j-text nomargin>Id: {task.taskId}</j-text>
-                                <j-text nomargin>
-                                  Prompt: {task.systemPrompt}
-                                </j-text>
-                              </j-flex>
-                            </div>
-                          ))}
-                        </j-flex>
-                      )}
-                    </>
-                  )}
-                </j-flex>
-              </j-box>
+              <ModelCard
+                model={model}
+                editModel={() => setSelectedModel(model)}
+                deleteModel={() => deleteModel(model)}
+              />
             ))}
           </j-flex>
         </div>
