@@ -90,7 +90,7 @@ export default function ModelModal(props: {
 
       if (oldModel.api) {
         setApiUrl(oldModel.api.baseUrl);
-        setApiKey(oldModel.apiKey);
+        setApiKey(oldModel.api.apiKey);
       }
     }
   }, []);
@@ -223,7 +223,7 @@ export default function ModelModal(props: {
         <j-button
           onClick={saveModel}
           variant="primary"
-          style={{ marginTop: 60 }}
+          //   style={{ marginTop: 40 }}
         >
           Save model
         </j-button>
