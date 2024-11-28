@@ -565,20 +565,14 @@ impl Query {
         let default_id = Ad4mDb::with_global_instance(|db| db.get_default_model(model_type))
             .map_err(|e| FieldError::new(e.to_string(), Value::null()))?;
 
-        if let Some(id) = default_id {
-            let models = Ad4mDb::with_global_instance(|db| db.get_models())?;
-            let maybe_model = models.iter().find(|m| m.name == id);
-            if let Some(model) = maybe_model {
-                Ok(Some(model.clone()))
-            } else {
-                Err(FieldError::new(
-                    "Default model ID is set, but a model with that ID does not exist",
-                    Value::null(),
-                ))
-            }
+        Ok(if let Some(id) = default_id {
+            Some(
+                Ad4mDb::with_global_instance(|db| db.get_model(id))
+                    .map_err(|e| FieldError::new(e.to_string(), Value::null()))?
+            )
         } else {
-            Ok(None)
-        }
+            None
+        })
     }
 
     async fn ai_tasks(&self, context: &RequestContext) -> FieldResult<Vec<AITask>> {
