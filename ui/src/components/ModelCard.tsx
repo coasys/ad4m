@@ -60,15 +60,23 @@ export default function ModelCard(props: {
         </j-flex>
         {api && (
           <>
-            <j-flex gap="300">
+            <j-flex gap="300" wrap>
               <j-text nomargin>API URL:</j-text>
-              <j-text nomargin color="ui-0">
+              <j-text
+                nomargin
+                color="ui-0"
+                style={{ maxWidth: "100%", overflowWrap: "break-word" }}
+              >
                 {api.baseUrl}
               </j-text>
             </j-flex>
-            <j-flex gap="300">
+            <j-flex gap="300" wrap>
               <j-text nomargin>API Key:</j-text>
-              <j-text nomargin color="ui-0">
+              <j-text
+                nomargin
+                color="ui-0"
+                style={{ maxWidth: "100%", overflowWrap: "break-word" }}
+              >
                 {api.apiKey}
               </j-text>
             </j-flex>
