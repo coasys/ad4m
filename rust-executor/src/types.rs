@@ -448,6 +448,7 @@ impl FromStr for ModelApiType {
     }
 }
 
+#[allow(clippy::to_string_trait_impl)]
 impl ToString for ModelApiType {
     fn to_string(&self) -> String {
         match self {
