@@ -32,14 +32,14 @@ export default function ModelCard(props: {
     <j-box className="box">
       <j-box pb="300">
         <j-flex j="between">
-          <j-text size="700" nomargin color="ui-0">
+          <j-text variant="heading-sm" size="600" color="primary-800">
             {name}
           </j-text>
           <j-flex gap="300">
-            <j-button size="sm" onClick={editModel}>
+            <j-button variant="subtle" size="sm" onClick={editModel}>
               <j-icon name="pencil-square" size="sm" />
             </j-button>
-            <j-button size="sm" onClick={deleteModel}>
+            <j-button variant="subtle" size="sm" onClick={deleteModel}>
               <j-icon name="trash" size="sm" />
             </j-button>
           </j-flex>

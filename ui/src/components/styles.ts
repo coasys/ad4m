@@ -11,7 +11,7 @@ export const cardStyle = {
   width: "100%",
   border: "1px solid var(--j-color-ui-200)",
   borderRadius: "var(--j-border-radius)",
-  backgroundColor: "var(--j-color-primary-100)",
+  backgroundColor: "rgba(10, 9, 29, 0.8)",
   padding: "var(--j-space-500)",
   marginBottom: "var(--j-space-500)",
   position: "relative",

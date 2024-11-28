@@ -285,10 +285,10 @@ code {
 }
 
 .box {
-  border: 1px solid rgb(200, 200, 200);
+  border: 1px solid var(--j-color-ui-200);
   border-radius: var(--j-border-radius);
+  background-color: rgba(10, 9, 29, 0.8);
   padding: var(--j-space-500);
-  background-color: rgba(164, 164, 164, 0.2);
 }
 
 .logo {
