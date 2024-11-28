@@ -1234,6 +1234,15 @@ impl Mutation {
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
 
+        let maybe_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+            .map_err(|e| e.to_string())?;
+        if maybe_model.is_none() {
+            return Err(FieldError::new(
+                "Model not found",
+                graphql_value!({ "model_id": model_id }),
+            ));
+        };
+
         Ad4mDb::with_global_instance(|db| db.set_default_model(model_type, &model_id))
             .map_err(|e| e.to_string())?;
 
