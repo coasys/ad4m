@@ -121,15 +121,15 @@ export default class AIResolver {
     }
 
     @Mutation(returns => Boolean)
-    aiRemoveModel(@Arg("name", type => String) name: string): boolean {
+    aiRemoveModel(@Arg("modelId", type => String) modelId: string): boolean {
         // In a real implementation, this would remove the model from storage
         return true
     }
 
     @Mutation(returns => Boolean)
     aiSetDefaultModel(
-        @Arg("name", type => String) name: string,
-        @Arg("modelType", type => String) modelType: ModelType
+        @Arg("modelType", type => String) modelType: ModelType,
+        @Arg("modelId", type => String) modelId: string,
     ): boolean {
         // In a real implementation, this would set the default model
         return true

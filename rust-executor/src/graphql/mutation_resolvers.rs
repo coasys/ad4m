@@ -1218,11 +1218,9 @@ impl Mutation {
         Ok(true)
     }
 
-    async fn ai_remove_model(&self, context: &RequestContext, name: String) -> FieldResult<bool> {
+    async fn ai_remove_model(&self, context: &RequestContext, model_id: String) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-
-        Ad4mDb::with_global_instance(|db| db.remove_model(&name)).map_err(|e| e.to_string())?;
-
+        Ad4mDb::with_global_instance(|db| db.remove_model(&model_id)).map_err(|e| e.to_string())?;
         Ok(true)
     }
 
