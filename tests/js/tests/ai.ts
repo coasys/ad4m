@@ -95,10 +95,10 @@ export default function aiTests(testContext: TestContext) {
                     modelType: "LLM"
                 }
 
-                await ad4mClient.ai.addModel(apiModelInput)
+                let id = await ad4mClient.ai.addModel(apiModelInput)
 
                 // Set default model
-                const setResult = await ad4mClient.ai.setDefaultModel("LLM", "TestDefaultApiModel")
+                const setResult = await ad4mClient.ai.setDefaultModel("LLM", id)
                 expect(setResult).to.be.true
 
                 // Verify default model is set correctly
