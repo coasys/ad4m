@@ -1069,7 +1069,7 @@ impl Ad4mDb {
         Ok(id)
     }
 
-    pub fn get_model(&self, model_id: String) -> Ad4mDbResult<Model> {
+    pub fn get_model(&self, model_id: String) -> Ad4mDbResult<Option<Model>> {
         let mut stmt = self.conn.prepare("SELECT * FROM models WHERE id = ?1")?;
         let model = stmt.query_row(params![model_id], |row| {
             let api = if let (Some(base_url), Some(api_key), Some(api_type)) = (
@@ -1105,7 +1105,7 @@ impl Ad4mDb {
                 local,
                 model_type: serde_json::from_str(&row.get::<_, String>(8)?).unwrap(),
             })
-        })?;
+        }).optional()?;
         Ok(model)
     }
 
@@ -1744,7 +1744,9 @@ mod tests {
         // Verify default model is set correctly
         let default = db.get_default_model(ModelType::Llm).unwrap();
         assert!(default.is_some());
-        let retrieved_default_model = db.get_model(default.unwrap()).expect("to get added model");
+        let retrieved_default_model = db.get_model(default.unwrap())
+            .expect("to get added model")
+            .expect("to get added model");
         assert_eq!(retrieved_default_model.name, "test-model");
 
         // Update default model

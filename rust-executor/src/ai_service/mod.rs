@@ -234,7 +234,8 @@ impl AIService {
             db.set_default_model(model.model_type, &id)?;
             db.get_model(id)
         })
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+        .map_err(|e| anyhow::anyhow!("{}", e))?
+        .expect("since we just added it");
         self.init_model(model).await?;
         Ok(())
     }
