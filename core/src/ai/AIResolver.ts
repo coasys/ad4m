@@ -37,6 +37,9 @@ export type ModelType = "LLM" | "EMBEDDING" | "TRANSCRIPTION";
 @ObjectType()
 export class Model {
     @Field()
+    id: string;
+
+    @Field()
     name: string;
 
     @Field(type => ModelApi, { nullable: true })
@@ -94,6 +97,7 @@ export default class AIResolver {
     aiGetModels(): Model[] {
         return [
             {
+                id: "test-id",
                 name: "Test Model",
                 api: {
                     baseUrl: "https://api.example.com",
@@ -111,9 +115,9 @@ export default class AIResolver {
     }
 
     @Mutation(returns => Boolean)
-    aiAddModel(@Arg("model", type => ModelInput) model: ModelInput): boolean {
+    aiAddModel(@Arg("model", type => ModelInput) model: ModelInput): string {
         // In a real implementation, this would add the model to storage
-        return true
+        return "new-model-id"
     }
 
     @Mutation(returns => Boolean)
@@ -135,6 +139,7 @@ export default class AIResolver {
     aiGetDefaultModel(@Arg("modelType", type => String) modelType: ModelType): Model {
         // In a real implementation, this would get the default model for the given type
         return {
+            id: "default-test-id",
             name: "Default Test Model",
             api: {
                 baseUrl: "https://api.example.com", 

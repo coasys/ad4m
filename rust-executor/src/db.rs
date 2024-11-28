@@ -1,6 +1,6 @@
 use crate::graphql::graphql_types::{
     AIModelLoadingStatus, EntanglementProof, LinkStatus, NotificationInput, PerspectiveExpression,
-    PerspectiveHandle, SentMessage,
+    PerspectiveHandle, SentMessage, ModelInput,
 };
 use crate::types::{
     AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
@@ -12,6 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use url::Url;
+use uuid::Uuid;
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -180,7 +181,7 @@ impl Ad4mDb {
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS models (
-                id INTEGER PRIMARY KEY,
+                id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 api_base_url TEXT,
                 api_key TEXT,
@@ -1048,11 +1049,13 @@ impl Ad4mDb {
         Ok(expression.map(|e| serde_json::from_str(&e).unwrap()))
     }
 
-    pub fn add_model(&self, model: &Model) -> Ad4mDbResult<()> {
+    pub fn add_model(&self, model: &ModelInput) -> Ad4mDbResult<String> {
+        let id = Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO models (name, api_base_url, api_key, api_type, local_file_name, local_tokenizer_source, local_model_parameters, type)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO models (id, name, api_base_url, api_key, api_type, local_file_name, local_tokenizer_source, local_model_parameters, type)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
+                id,
                 model.name,
                 model.api.as_ref().map(|api| api.base_url.to_string()),
                 model.api.as_ref().map(|api| api.api_key.clone()),
@@ -1063,7 +1066,47 @@ impl Ad4mDb {
                 serde_json::to_string(&model.model_type).unwrap(),
             ],
         )?;
-        Ok(())
+        Ok(id)
+    }
+
+    pub fn get_model(&self, model_id: String) -> Ad4mDbResult<Model> {
+        let mut stmt = self.conn.prepare("SELECT * FROM models WHERE id = ?1")?;
+        let model = stmt.query_row(params![model_id], |row| {
+            let api = if let (Some(base_url), Some(api_key), Some(api_type)) = (
+                row.get::<_, Option<String>>(2)?.map(|s| s.to_string()),
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ) {
+                Some(ModelApi {
+                    base_url: Url::parse(&base_url).unwrap(),
+                    api_key,
+                    api_type: serde_json::from_str(&api_type).unwrap(),
+                })
+            } else {
+                None
+            };
+
+            let local = if let (Some(file_name), Some(tokenizer_source), Some(model_parameters)) =
+                (row.get(5)?, row.get(6)?, row.get(7)?)
+            {
+                Some(LocalModel {
+                    file_name,
+                    tokenizer_source,
+                    model_parameters,
+                })
+            } else {
+                None
+            };
+
+            Ok(Model {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                api,
+                local,
+                model_type: serde_json::from_str(&row.get::<_, String>(8)?).unwrap(),
+            })
+        })?;
+        Ok(model)
     }
 
     pub fn get_models(&self) -> Ad4mDbResult<Vec<Model>> {
@@ -1096,6 +1139,7 @@ impl Ad4mDb {
             };
 
             Ok(Model {
+                id: row.get(0)?,
                 name: row.get(1)?,
                 api,
                 local,
@@ -1110,9 +1154,9 @@ impl Ad4mDb {
         Ok(models)
     }
 
-    pub fn remove_model(&self, name: &str) -> Ad4mDbResult<()> {
+    pub fn remove_model(&self, id: &str) -> Ad4mDbResult<()> {
         self.conn
-            .execute("DELETE FROM models WHERE name = ?1", params![name])?;
+            .execute("DELETE FROM models WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -1155,9 +1199,9 @@ impl Ad4mDb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{
-        ExpressionProof, Link, LinkExpression, LocalModel, ModelApiType, ModelType,
-    };
+    use crate::{graphql::graphql_types::{LocalModelInput, ModelApiInput}, types::{
+        ExpressionProof, Link, LinkExpression, ModelApiType, ModelType,
+    }};
     use chrono::Utc;
     use fake::{Fake, Faker};
     use uuid::Uuid;
@@ -1461,22 +1505,22 @@ mod tests {
         let db = Ad4mDb::new(":memory:").unwrap();
 
         // Create a test model with ModelApi
-        let test_model_api = Model {
+        let test_model_api = ModelInput {
             name: "Test Model API".to_string(),
-            api: Some(ModelApi {
-                base_url: Url::parse("https://api.example.com").unwrap(),
+            api: Some(ModelApiInput {
+                base_url: "https://api.example.com".to_string(),
                 api_key: "test_api_key".to_string(),
-                api_type: ModelApiType::OpenAi,
+                api_type: ModelApiType::OpenAi.to_string(),
             }),
             local: None,
             model_type: ModelType::Llm,
         };
 
         // Create a test model with LocalModel
-        let test_model_local = Model {
+        let test_model_local = ModelInput {
             name: "Test Model Local".to_string(),
             api: None,
-            local: Some(LocalModel {
+            local: Some(LocalModelInput {
                 file_name: "test_model.bin".to_string(),
                 tokenizer_source: "test_tokenizer".to_string(),
                 model_parameters: "test_parameters".to_string(),
@@ -1485,14 +1529,15 @@ mod tests {
         };
 
         // Add the test models
-        db.add_model(&test_model_api).unwrap();
-        db.add_model(&test_model_local).unwrap();
+        let id_model_api = db.add_model(&test_model_api).unwrap();
+        let id_model_local = db.add_model(&test_model_local).unwrap();
 
         // Get all models
         let models = db.get_models().unwrap();
 
         // Ensure the test models are in the list of models and have all properties set
         let retrieved_model_api = models.iter().find(|m| m.name == "Test Model API").unwrap();
+        assert_eq!(retrieved_model_api.id, id_model_api);
         assert_eq!(retrieved_model_api.name, "Test Model API");
         assert!(retrieved_model_api.api.is_some());
         assert!(retrieved_model_api.local.is_none());
@@ -1512,7 +1557,7 @@ mod tests {
 
         let retrieved_model_local = models
             .iter()
-            .find(|m| m.name == "Test Model Local")
+            .find(|m| m.id == id_model_local)
             .unwrap();
         assert_eq!(retrieved_model_local.name, "Test Model Local");
         assert!(retrieved_model_local.api.is_none());
@@ -1540,8 +1585,8 @@ mod tests {
         assert_eq!(retrieved_model_local.model_type, ModelType::Llm);
 
         // Remove the test models
-        db.remove_model("Test Model API").unwrap();
-        db.remove_model("Test Model Local").unwrap();
+        db.remove_model(&id_model_api).unwrap();
+        db.remove_model(&id_model_local).unwrap();
 
         // Ensure the test models are removed
         let models_after_removal = db.get_models().unwrap();
@@ -1555,20 +1600,20 @@ mod tests {
         let db = Ad4mDb::new(":memory:").unwrap();
 
         // Create three models of different types
-        let model_llm = Model {
+        let model_llm = ModelInput {
             name: "Test LLM Model".to_string(),
-            api: Some(ModelApi {
-                base_url: Url::parse("https://api.example.com").unwrap(),
+            api: Some(ModelApiInput {
+                base_url: "https://api.example.com".to_string(),
                 api_key: "llm_key".to_string(),
-                api_type: ModelApiType::OpenAi,
+                api_type: ModelApiType::OpenAi.to_string(),
             }),
             local: None,
             model_type: ModelType::Llm,
         };
 
-        let model_embedding = Model {
+        let model_embedding = ModelInput {
             name: "Test Embedding Model".to_string(),
-            local: Some(LocalModel {
+            local: Some(LocalModelInput {
                 file_name: "embedding.bin".to_string(),
                 tokenizer_source: "embedding_tokenizer".to_string(),
                 model_parameters: "{}".to_string(),
@@ -1577,12 +1622,12 @@ mod tests {
             model_type: ModelType::Embedding,
         };
 
-        let model_transcription = Model {
+        let model_transcription = ModelInput {
             name: "Test Transcription Model".to_string(),
-            api: Some(ModelApi {
-                base_url: Url::parse("https://api.transcribe.com").unwrap(),
+            api: Some(ModelApiInput {
+                base_url: "https://api.transcribe.com".to_string(),
                 api_key: "transcribe_key".to_string(),
-                api_type: ModelApiType::OpenAi,
+                api_type: ModelApiType::OpenAi.to_string(),
             }),
             local: None,
             model_type: ModelType::Transcription,
@@ -1675,49 +1720,51 @@ mod tests {
         let db = Ad4mDb::new(":memory:").unwrap();
 
         // Create a test model
-        let model = Model {
+        let model = ModelInput {
             name: "test-model".to_string(),
-            api: Some(ModelApi {
-                base_url: Url::parse("https://api.test.com").unwrap(),
+            api: Some(ModelApiInput {
+                base_url: "https://api.test.com".to_string(),
                 api_key: "test-key".to_string(),
-                api_type: ModelApiType::OpenAi,
+                api_type: ModelApiType::OpenAi.to_string(),
             }),
             local: None,
             model_type: ModelType::Llm,
         };
 
         // Add model to DB
-        db.add_model(&model).unwrap();
+        let model_id = db.add_model(&model).unwrap();
 
         // Initially no default model set
         let default = db.get_default_model(ModelType::Llm).unwrap();
         assert!(default.is_none());
 
         // Set default model
-        db.set_default_model(ModelType::Llm, &model.name).unwrap();
+        db.set_default_model(ModelType::Llm, &model_id).unwrap();
 
         // Verify default model is set correctly
         let default = db.get_default_model(ModelType::Llm).unwrap();
-        assert_eq!(default, Some("test-model".to_string()));
+        assert!(default.is_some());
+        let retrieved_default_model = db.get_model(default.unwrap()).expect("to get added model");
+        assert_eq!(retrieved_default_model.name, "test-model");
 
         // Update default model
-        let model2 = Model {
+        let model2 = ModelInput {
             name: "test-model-2".to_string(),
             api: None,
-            local: Some(LocalModel {
+            local: Some(LocalModelInput {
                 file_name: "model.bin".to_string(),
                 tokenizer_source: "tokenizer".to_string(),
                 model_parameters: "{}".to_string(),
             }),
             model_type: ModelType::Transcription,
         };
-        db.add_model(&model2).unwrap();
-        db.set_default_model(ModelType::Transcription, &model2.name)
+        let model2_id = db.add_model(&model2).unwrap();
+        db.set_default_model(ModelType::Transcription, &model2_id)
             .unwrap();
 
         // Verify default was updated
         let default = db.get_default_model(ModelType::Transcription).unwrap();
-        assert_eq!(default, Some("test-model-2".to_string()));
+        assert_eq!(default, Some(model2_id));
 
         // Clean up
         db.remove_model(&model.name).unwrap();

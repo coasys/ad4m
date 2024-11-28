@@ -439,9 +439,18 @@ impl FromStr for ModelApiType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "openai" => Ok(ModelApiType::OpenAi),
+            "openAi" => Ok(ModelApiType::OpenAi),
             "OpenAi" => Ok(ModelApiType::OpenAi),
             "OPEN_AI" => Ok(ModelApiType::OpenAi),
             _ => Err(format!("Unknown ModelApiType: {}", s)),
+        }
+    }
+}
+
+impl ToString for ModelApiType {
+    fn to_string(&self) -> String {
+        match self {
+            ModelApiType::OpenAi => "openAi".to_string()
         }
     }
 }
@@ -484,6 +493,7 @@ impl Display for ModelType {
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
+    pub id: String,
     pub name: String,
     pub api: Option<ModelApi>,
     pub local: Option<LocalModel>,

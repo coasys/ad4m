@@ -1,10 +1,11 @@
 use self::{audio_stream::AudioStream, error::AIServiceError};
+use crate::graphql::graphql_types::ModelInput;
 #[allow(unused_imports)]
 use crate::graphql::graphql_types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
 use crate::pubsub::AI_MODEL_LOADING_STATUS;
 #[allow(unused_imports)]
 use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
-use crate::types::{AITask, LocalModel, Model, ModelType};
+use crate::types::{AITask, Model, ModelType, LocalModel};
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use candle_core::Device;
@@ -164,6 +165,7 @@ impl AIService {
             // for integration tests, make sure we have Bert loaded
             futures.push(Box::pin(
                 self.init_model(Model {
+                    id: "doesn't matter here".to_string(),
                     name: "bert".to_string(),
                     model_type: ModelType::Embedding,
                     local: Some(LocalModel {
@@ -226,13 +228,14 @@ impl AIService {
         Ok(())
     }
 
-    pub async fn add_model(&self, model: crate::types::Model) -> Result<()> {
-        self.init_model(model.clone()).await?;
-        Ad4mDb::with_global_instance(|db| {
-            db.add_model(&model)?;
-            db.set_default_model(model.model_type, &model.name)
+    pub async fn add_model(&self, model: ModelInput) -> Result<()> {
+        let model = Ad4mDb::with_global_instance(|db| {
+            let id = db.add_model(&model)?;
+            db.set_default_model(model.model_type, &id)?;
+            db.get_model(id)
         })
         .map_err(|e| anyhow::anyhow!("{}", e))?;
+        self.init_model(model).await?;
         Ok(())
     }
 
