@@ -33,6 +33,8 @@ export default function ModelModal(props: {
   const [apiKey, setApiKey] = useState("");
   const [apiUrlError, setApiUrlError] = useState(false);
   const [apiKeyError, setApiKeyError] = useState(false);
+  const [apiLoading, setApiLoading] = useState(false);
+  const [apiError, setApiError] = useState("");
 
   function closeMenu(menuId: string) {
     const menu = document.getElementById(menuId);
@@ -40,17 +42,45 @@ export default function ModelModal(props: {
     if (items) items.open = false;
   }
 
-  function saveModel() {
-    // validate model settings
-    const invalidApi = newModel === "External API" && !(apiUrl && apiKey);
-    if (!newModelName || invalidApi) {
-      // display errors
-      setNewModelNameError(true);
-      if (invalidApi) {
+  async function apiValid(): Promise<boolean> {
+    return new Promise(async (resolve) => {
+      if (newModel !== "External API") resolve(true);
+      else if (!(apiUrl && apiKey)) {
+        // missing values
         setApiUrlError(!apiUrl);
         setApiKeyError(!apiKey);
+        resolve(false);
+      } else {
+        // test api
+        setApiLoading(true);
+        try {
+          const response = await fetch(`${apiUrl}/models`, {
+            method: "GET",
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+            },
+          });
+          const { ok, status, statusText } = response;
+          if (ok) resolve(true);
+          else {
+            setApiError(status === 401 ? "Invalid key" : statusText);
+            resolve(false);
+          }
+          setApiLoading(false);
+        } catch {
+          resolve(false);
+          setApiError("Error connecting to API");
+          setApiLoading(false);
+        }
       }
-    } else {
+    });
+  }
+
+  async function saveModel() {
+    // validate model settings
+    if (!newModelName) setNewModelNameError(true);
+    else if (await apiValid()) {
       // create new model
       const model = {
         name: newModelName,
@@ -196,6 +226,7 @@ export default function ModelModal(props: {
                   errortext="Required"
                   onInput={(e: any) => {
                     setApiUrlError(false);
+                    setApiError("");
                     setApiUrl(e.target.value);
                   }}
                   style={{ width: "100%" }}
@@ -213,11 +244,21 @@ export default function ModelModal(props: {
                   errortext="Required"
                   onInput={(e: any) => {
                     setApiKeyError(false);
+                    setApiError("");
                     setApiKey(e.target.value);
                   }}
                   style={{ width: "100%" }}
                 />
               </j-flex>
+              {apiLoading && (
+                <j-flex a="center" gap="400">
+                  <j-text nomargin color="ui-0" size="600">
+                    Testing API...
+                  </j-text>
+                  <j-spinner size="xs" />
+                </j-flex>
+              )}
+              {apiError && <j-text color="danger-500">{apiError}</j-text>}
             </>
           )}
         </j-flex>
