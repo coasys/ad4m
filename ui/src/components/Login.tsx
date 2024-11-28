@@ -7,6 +7,8 @@ import { AgentContext } from "../context/AgentContext";
 import "../index.css";
 import Logo from "./Logo";
 
+const aiModes = ["Local", "Remote", "None"];
+
 const Login = () => {
   const {
     state: { loading, hasLoginError },
@@ -29,9 +31,11 @@ const Login = () => {
   const [lastName, setLastName] = useState("");
   const [clearAgentModalOpen, setClearAgentModalOpen] = useState(false);
   const [holochain, setHolochain] = useState(true);
-  const [advancedAI, setAdvancedAI] = useState(true);
+  const [aiMode, setAIMode] = useState("Local");
   const [apiUrl, setApiUrl] = useState("https://api.openai.com/v1");
   const [apiKey, setApiKey] = useState("");
+  const [apiUrlError, setApiUrlError] = useState(false);
+  const [apiKeyError, setApiKeyError] = useState(false);
 
   if (hasLoginError) setPasswordError("Invalid password");
 
@@ -51,39 +55,45 @@ const Login = () => {
   }
 
   function saveModels() {
-    // add llm model
-    const llm = { name: "LLM Model 1", modelType: "LLM" } as ModelInput;
-    if (advancedAI) {
-      llm.local = {
-        fileName: "llama_7b",
-        tokenizerSource: "",
-        modelParameters: "",
-      };
+    // validate API
+    if (aiMode === "Remote" && !(apiUrl && apiKey)) {
+      setApiUrlError(!apiUrl);
+      setApiKeyError(!apiKey);
     } else {
-      llm.api = { baseUrl: apiUrl, apiKey, apiType: "OPEN_AI" };
+      // add llm model
+      const llm = { name: "LLM Model 1", modelType: "LLM" } as ModelInput;
+      if (aiMode === "Local") {
+        llm.local = {
+          fileName: "llama_7b",
+          tokenizerSource: "",
+          modelParameters: "",
+        };
+      } else {
+        llm.api = { baseUrl: apiUrl, apiKey, apiType: "OPEN_AI" };
+      }
+      client!.ai.addModel(llm);
+      // add embedding model
+      client!.ai.addModel({
+        name: "Embedding Model 1",
+        local: {
+          fileName: "bert",
+          tokenizerSource: "",
+          modelParameters: "",
+        },
+        modelType: "EMBEDDING",
+      });
+      // add transcription model
+      client!.ai.addModel({
+        name: "Transcription Model 1",
+        local: {
+          fileName: "whisper",
+          tokenizerSource: "",
+          modelParameters: "",
+        },
+        modelType: "TRANSCRIPTION",
+      });
+      setCurrentIndex(6);
     }
-    client!.ai.addModel(llm);
-    // add embedding model
-    client!.ai.addModel({
-      name: "Embedding Model 1",
-      local: {
-        fileName: "bert",
-        tokenizerSource: "",
-        modelParameters: "",
-      },
-      modelType: "EMBEDDING",
-    });
-    // add transcription model
-    client!.ai.addModel({
-      name: "Transcription Model 1",
-      local: {
-        fileName: "whisper",
-        tokenizerSource: "",
-        modelParameters: "",
-      },
-      modelType: "TRANSCRIPTION",
-    });
-    setCurrentIndex(6);
   }
 
   useEffect(() => {
@@ -95,9 +105,7 @@ const Login = () => {
   // fix for radio button not being selected by prop on first load
   useEffect(() => {
     if (currentIndex === 5) {
-      const radio = document.getElementById(
-        `advanced-ai-${advancedAI ? "on" : "off"}`
-      ) as any;
+      const radio = document.getElementById(`ai-mode-${aiMode}`) as any;
       if (radio) radio.checked = true;
     }
   }, [currentIndex]);
@@ -390,38 +398,33 @@ const Login = () => {
               ADAM allows you to control the AI used for transcription, vector
               embedding, and LLM tasks.
             </j-text>
-            <j-text size="600" nomargin color="ui-900">
-              Select <b>advanced</b> if your device is capable or running large
-              models locally. If you're unsure or using a low spec device select{" "}
-              <b>basic</b>.
+            <j-text size="500" nomargin color="ui-900">
+              Select <b>Local</b> if your device is capable or running large
+              models locally.
             </j-text>
-            <j-text size="600" nomargin color="ui-900">
-              You can customise these settings later.
+            <j-text size="500" nomargin color="ui-900">
+              Select <b>Remote</b> to use an external API like OpenAI.
+            </j-text>
+            <j-text size="500" nomargin color="ui-900">
+              Or select <b>None</b> if you'd prefer not use AI.
             </j-text>
           </j-flex>
 
           <j-flex direction="column" a="center" gap="400">
-            <j-radio-button
-              id="advanced-ai-on"
-              checked={advancedAI}
-              onClick={() => setAdvancedAI(true)}
-            >
-              <j-text size="600" nomargin color="ui-0">
-                Advanced
-              </j-text>
-            </j-radio-button>
-            <j-radio-button
-              id="advanced-ai-off"
-              checked={!advancedAI}
-              onClick={() => setAdvancedAI(false)}
-            >
-              <j-text size="600" nomargin color="ui-0">
-                Basic
-              </j-text>
-            </j-radio-button>
+            {aiModes.map((mode) => (
+              <j-radio-button
+                id={`ai-mode-${mode}`}
+                checked={aiMode === mode}
+                onClick={() => setAIMode(mode)}
+              >
+                <j-text size="600" nomargin color="ui-0">
+                  {mode}
+                </j-text>
+              </j-radio-button>
+            ))}
           </j-flex>
 
-          {!advancedAI && (
+          {aiMode === "Remote" && (
             <j-flex
               direction="column"
               a="center"
@@ -431,19 +434,27 @@ const Login = () => {
               <j-input
                 size="md"
                 type="text"
-                label="API URL (optional)"
+                label="API URL"
                 value={apiUrl}
+                error={apiUrlError}
                 errortext="Required"
-                onInput={(e: any) => setApiUrl(e.target.value)}
+                onInput={(e: any) => {
+                  setApiUrlError(false);
+                  setApiUrl(e.target.value);
+                }}
                 style={{ width: "100%" }}
               />
               <j-input
                 size="md"
                 type="text"
-                label="API Key (optional)"
+                label="API Key"
                 value={apiKey}
+                error={apiKeyError}
                 errortext="Required"
-                onInput={(e: any) => setApiKey(e.target.value)}
+                onInput={(e: any) => {
+                  setApiKeyError(false);
+                  setApiKey(e.target.value);
+                }}
                 style={{ width: "100%" }}
               />
             </j-flex>
