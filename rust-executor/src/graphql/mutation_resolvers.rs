@@ -1212,9 +1212,11 @@ impl Mutation {
         Ok(true)
     }
 
-    async fn ai_add_model(&self, context: &RequestContext, model: ModelInput) -> FieldResult<bool> {
+    async fn ai_add_model(&self, context: &RequestContext, model: ModelInput) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        AIService::global_instance().await?.add_model(model).await?;
+        let id = AIService::global_instance().await?.add_model(model).await?;
+        Ok(id)
+    }
         Ok(true)
     }
 
