@@ -1158,6 +1158,40 @@ impl Ad4mDb {
         Ok(models)
     }
 
+    pub fn update_model(&self, id: &str, model: &ModelInput) -> Ad4mDbResult<()> {
+        let api_base_url = model.api.as_ref().map(|api| api.base_url.to_string());
+        let api_key = model.api.as_ref().map(|api| api.api_key.clone());
+        let api_type = model.api.as_ref().map(|api| api.api_type.to_string());
+        let local_file_name = model.local.as_ref().map(|local| local.file_name.clone());
+        let local_tokenizer = model.local.as_ref().map(|local| local.tokenizer_source.clone());
+        let local_params = model.local.as_ref().map(|local| local.model_parameters.clone());
+
+        self.conn.execute(
+            "UPDATE models SET 
+                name = ?1,
+                api_base_url = ?2,
+                api_key = ?3,
+                api_type = ?4,
+                local_file_name = ?5,
+                local_tokenizer_source = ?6,
+                local_model_parameters = ?7,
+                type = ?8
+             WHERE id = ?9",
+            params![
+                model.name,
+                api_base_url,
+                api_key,
+                api_type,
+                local_file_name,
+                local_tokenizer,
+                local_params,
+                serde_json::to_string(&model.model_type).unwrap(),
+                id
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn remove_model(&self, id: &str) -> Ad4mDbResult<()> {
         self.conn
             .execute("DELETE FROM models WHERE id = ?1", params![id])?;
@@ -1595,6 +1629,57 @@ mod tests {
         assert!(models_after_removal
             .iter()
             .all(|m| m.name != "Test Model API" && m.name != "Test Model Local"));
+    }
+
+    #[test]
+    fn test_update_model() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create initial model
+        let initial_model = ModelInput {
+            name: "Test Model".to_string(),
+            api: Some(ModelApiInput {
+                base_url: "https://api.example.com".to_string(),
+                api_key: "test_key".to_string(),
+                api_type: ModelApiType::OpenAi.to_string(),
+            }),
+            local: None,
+            model_type: ModelType::Llm,
+        };
+
+        // Add model and get its ID
+        let model_id = db.add_model(&initial_model).unwrap();
+
+        // Create updated model
+        let updated_model = ModelInput {
+            name: "Updated Model".to_string(),
+            api: None,
+            local: Some(LocalModelInput {
+                file_name: "local_model.bin".to_string(),
+                tokenizer_source: "tokenizer.json".to_string(),
+                model_parameters: "{\"param\": \"value\"}".to_string(),
+            }),
+            model_type: ModelType::Embedding,
+        };
+
+        // Update the model
+        db.update_model(&model_id, &updated_model).unwrap();
+
+        // Retrieve and verify the updated model
+        let retrieved_model = db.get_model(model_id.clone()).unwrap().unwrap();
+        
+        assert_eq!(retrieved_model.name, "Updated Model");
+        assert!(retrieved_model.api.is_none());
+        assert!(retrieved_model.local.is_some());
+        
+        let local = retrieved_model.local.unwrap();
+        assert_eq!(local.file_name, "local_model.bin");
+        assert_eq!(local.tokenizer_source, "tokenizer.json");
+        assert_eq!(local.model_parameters, "{\"param\": \"value\"}");
+        assert_eq!(retrieved_model.model_type, ModelType::Embedding);
+
+        // Clean up
+        db.remove_model(&model_id).unwrap();
     }
 
     #[test]
