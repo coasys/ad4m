@@ -399,7 +399,7 @@ jobs:
           deno-version: v1.32.4
 
       - name: Build modules
-        run: pnpm run build-libs
+        run: pnpm run build-npm-packages
 
       - name: Set NPM tag
         run: |
