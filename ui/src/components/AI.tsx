@@ -1,6 +1,9 @@
+import { Model } from "@coasys/ad4m/lib/src/ai/AIResolver";
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
-import { cardStyle, listStyle } from "./styles";
+import "../index.css";
+import ModelCard from "./ModelCard";
+import ModelModal from "./ModelModal";
 
 const AI = () => {
   const {
@@ -9,11 +12,13 @@ const AI = () => {
 
   const [models, setModels] = useState<any[]>([]);
   const modelsRef = useRef<any[]>([]);
+  const [selectedModel, setSelectedModel] = useState(null);
+  const [newModelModalOpen, setNewModelModalOpen] = useState(false);
 
   const getData = useCallback(async () => {
     const modelsInDB = await client!.ai.getModels();
     const tasksInDB = await client!.ai.tasks();
-    console.log("modelsInDB: ", modelsInDB);
+    console.log("modelsInDxB: ", modelsInDB);
     console.log("tasksInDB: ", tasksInDB);
     // attach tasks to models
     const modelsWithTasks = modelsInDB.map((model) => {
@@ -26,18 +31,10 @@ const AI = () => {
     setModels(modelsWithTasks);
   }, [client]);
 
-  function toggleModelTasks(modelName: string) {
-    const newModels = [...models];
-    const match = newModels.find((model) => model.name === modelName);
-    if (match) match.collapsed = !match.collapsed;
-    setModels(newModels);
-  }
-
-  function statusText(model: any) {
-    const { status, downloaded, loaded, progress } = model;
-    if (!status) return "Checking status...";
-    else if (downloaded && loaded) return "Model ready";
-    return `${downloaded ? "Loading" : "Downloading"}: ${progress?.toFixed(2) || 0}%`;
+  function deleteModel(model: Model) {
+    console.log("delete model: ", model.name);
+    // client!.ai.deleteModel(model.id);
+    // getData()
   }
 
   useEffect(() => {
@@ -61,10 +58,7 @@ const AI = () => {
                 new Promise(async (resolve) => {
                   client.ai
                     .modelLoadingStatus(model.name)
-                    .then((status) => {
-                      console.log("model found: ", status);
-                      resolve({ ...model, ...status });
-                    })
+                    .then((status) => resolve({ ...model, ...status }))
                     .catch((error) => {
                       console.log("model not found: ", error, model.name);
                       resolve(model);
@@ -81,47 +75,53 @@ const AI = () => {
   }, [client, models]);
 
   return (
-    <div style={listStyle}>
-      {models.map((model) => (
-        <div key={model.name} style={{ ...cardStyle, width: "100%" }}>
+    <j-box p="400">
+      <j-flex j="center">
+        <div style={{ width: "100%", maxWidth: 900 }}>
+          <j-box pb="400">
+            <j-button
+              onClick={() => setNewModelModalOpen(true)}
+              variant="primary"
+            >
+              <j-icon
+                name="plus-lg"
+                style={{ marginLeft: -4, marginRight: -6 }}
+              />
+              New model
+            </j-button>
+          </j-box>
+
+          {newModelModalOpen && (
+            <ModelModal
+              close={() => {
+                setNewModelModalOpen(false);
+                getData();
+              }}
+            />
+          )}
+
+          {selectedModel && (
+            <ModelModal
+              oldModel={selectedModel}
+              close={() => {
+                setSelectedModel(null);
+                getData();
+              }}
+            />
+          )}
+
           <j-flex direction="column" gap="400">
-            <j-text variant="heading" nomargin>
-              Model name: {model.name}
-            </j-text>
-            <j-text nomargin>Type: {model.modelType}</j-text>
-            <j-text nomargin>Status: {statusText(model)}</j-text>
-            {model.tasks.length === 0 ? (
-              <j-text nomargin>No tasks created</j-text>
-            ) : (
-              <>
-                <j-button onClick={() => toggleModelTasks(model.name)}>
-                  {model.collapsed ? "Show" : "Hide"} tasks (
-                  {model.tasks.length})
-                </j-button>
-                {!model.collapsed && (
-                  <j-flex gap="300">
-                    {model.tasks.map((task: any) => (
-                      <div
-                        key={task.taskId}
-                        style={{ ...cardStyle, width: "100%" }}
-                      >
-                        <j-flex direction="column" gap="400">
-                          <j-text variant="heading-sm" nomargin>
-                            Task name: {task.name}
-                          </j-text>
-                          <j-text nomargin>Id: {task.taskId}</j-text>
-                          <j-text nomargin>Prompt: {task.systemPrompt}</j-text>
-                        </j-flex>
-                      </div>
-                    ))}
-                  </j-flex>
-                )}
-              </>
-            )}
+            {models.map((model) => (
+              <ModelCard
+                model={model}
+                editModel={() => setSelectedModel(model)}
+                deleteModel={() => deleteModel(model)}
+              />
+            ))}
           </j-flex>
         </div>
-      ))}
-    </div>
+      </j-flex>
+    </j-box>
   );
 };
 

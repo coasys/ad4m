@@ -11,7 +11,7 @@ export const cardStyle = {
   width: "100%",
   border: "1px solid var(--j-color-ui-200)",
   borderRadius: "var(--j-border-radius)",
-  backgroundColor: "var(--j-color-primary-100)",
+  backgroundColor: "rgba(10, 9, 29, 0.8)",
   padding: "var(--j-space-500)",
   marginBottom: "var(--j-space-500)",
   position: "relative",
@@ -29,27 +29,3 @@ export const listStyle = {
   overflowX: "hidden",
   marginTop: 10,
 };
-
-export const splashscreenError = {
-  padding: "40px 80px",
-  visibility: "collapse",
-  opacity: 0,
-  transition: "visibility 0s, opacity 0.5s linear, height 1s",
-  height: 0,
-}
-
-export const splashscreenErrorFlex = {
-  display: "flex",
-  flexDirection: "column",
-  alignItems: "center",
-}
-
-export const splashscreenContainer = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  flexDirection: "column",
-  height: "100vh",
-  width: "100vw",
-  color: "white",
-}

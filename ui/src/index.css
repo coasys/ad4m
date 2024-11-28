@@ -21,6 +21,14 @@ html {
   box-sizing: border-box;
 }
 
+i {
+  font-family: "Noto Serif";
+}
+
+a {
+  color: var(--gradient);
+}
+
 :root {
   --j-color-saturation: 50%;
   --j-color-subtractor: 100%;
@@ -42,15 +50,15 @@ html {
   color: var(--j-color-primary-50);
 }
 
-:root j-button[variant="secondary"]::part(base) {
-  background: var(--j-color-primary-50);
-  border-color: var(--gradient);
-  color: var(--gradient);
+:root j-button[variant="subtle"]::part(base) {
+  border: none;
+  background-color: rgba(255, 255, 255, 0.2);
+  color: white;
 }
 
 :root j-button::part(base) {
-  /* background: var(--j-color-primary-50); */
-  /* border-color: var(--gradient); */
+  background: var(--j-color-primary-50);
+  border-color: var(--gradient);
   color: var(--gradient);
 }
 
@@ -58,26 +66,45 @@ html {
   background: var(--gradient);
 }
 
-:root j-modal {
-  padding-bottom: 0;
+:root j-menu::part(base) {
+  background-color: var(--j-color-primary-100);
+  border-color: var(--j-color-ui-800);
 }
 
-:root j-menu::part(base) {
-  background-color: var(--j-color-primary-50);
-  border-color: var(--j-color-primary-500);
-  color: var(--j-color-primary-500);
+:root j-menu-group::part(title) {
+  color: var(--j-color-ui-800);
+}
+
+:root j-menu-group::part(summary) {
+  margin: 5px 0;
+}
+
+:root j-menu-group::part(summary)::after {
+  top: 5px;
 }
 
 :root j-menu-item::part(base):hover {
-  background-color: var(--j-color-primary-100);
+  background-color: var(--j-color-primary-200);
   color: var(--j-color-primary-500);
+}
+
+:root j-menu-item::part(base) {
+  color: var(--j-color-ui-800);
 }
 
 :root j-avatar::part(base) {
   border-radius: 4px;
 }
 
+:root j-modal {
+  align-items: center;
+}
+
 :root j-modal::part(modal) {
+  padding: 40px 30px;
+  align-items: center;
+  border: 1px solid rgb(200, 200, 200);
+  border-radius: var(--j-border-radius);
   background-color: var(--j-color-primary-50);
   box-shadow: 0px 0px 40px 20px
     hsla(var(--j-color-primary-hue), var(--j-color-saturation), 20%, 0.05);
@@ -123,13 +150,14 @@ html {
   background: var(--gradient);
 }
 
-:root j-input::part(base) {
-  font-size: var(--j-font-size-400);
-  border-color: var(--gradient);
+:root j-input::part(label) {
+  --j-text-color: var(--j-color-ui-800);
 }
 
 :root j-input::part(input-wrapper) {
-  border-color: var(--gradient);
+  font-size: medium;
+  border: 1px solid var(--j-color-ui-800);
+  background-color: rgba(0, 0, 0, 0.4);
 }
 
 :root j-input.one-time-pass::part(input-field) {
@@ -193,6 +221,25 @@ code {
     monospace;
 }
 
+.wrapper {
+  width: 100%;
+  height: 100vh;
+  padding: 64px 20px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  position: relative;
+}
+
+.page {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow: scroll;
+  z-index: 1;
+}
+
 .center {
   display: grid;
   place-items: center;
@@ -238,15 +285,10 @@ code {
 }
 
 .box {
-  border: 1px solid rgb(200, 200, 200);
+  border: 1px solid var(--j-color-ui-200);
   border-radius: var(--j-border-radius);
+  background-color: rgba(10, 9, 29, 0.8);
   padding: var(--j-space-500);
-  background-color: rgba(164, 164, 164, 0.2);
-}
-
-.emphasis {
-  font-family: "Noto Serif";
-  font-style: italic;
 }
 
 .logo {

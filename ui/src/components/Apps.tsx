@@ -1,7 +1,7 @@
-import { useState, useContext, useEffect } from "preact/compat";
+import { open } from "@tauri-apps/plugin-shell";
+import { useContext, useEffect, useState } from "preact/compat";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { cardStyle, linkStyle, listStyle } from "./styles";
-import { open } from "@tauri-apps/plugin-shell";
 
 const Apps = () => {
   const {
@@ -15,23 +15,25 @@ const Apps = () => {
   const getApps = async () => {
     const apps = await client!.agent.getApps();
 
-    const newApps: any = {}
+    const newApps: any = {};
 
     for (const app of apps) {
       if (newApps[app.auth.appUrl]) {
-        console.log('whaha', newApps[app.auth.appUrl])
+        console.log("whaha", newApps[app.auth.appUrl]);
         newApps[app.auth.appUrl].token.push({
           revoked: app.revoked,
-          requestId: app.requestId
-        })
+          requestId: app.requestId,
+        });
       } else {
         newApps[app.auth.appUrl] = {
           ...app,
-          token: [{
-            revoked: app.revoked,
-            requestId: app.requestId
-          }]
-        }
+          token: [
+            {
+              revoked: app.revoked,
+              requestId: app.requestId,
+            },
+          ],
+        };
       }
     }
 
@@ -39,23 +41,23 @@ const Apps = () => {
   };
 
   const removeApps = async (appUrl: string) => {
-    const app = apps.find((a: any) => a.auth.appUrl === appUrl)
+    const app = apps.find((a: any) => a.auth.appUrl === appUrl);
     for (const token of app.token) {
       await client!.agent.removeApp(token.requestId);
     }
 
-    await getApps()
+    await getApps();
 
     setShowModal(false);
   };
 
   const revokeToken = async (appUrl: string) => {
-    const app = apps.find((a: any) => a.auth.appUrl === appUrl)
+    const app = apps.find((a: any) => a.auth.appUrl === appUrl);
     for (const token of app.token) {
       await client!.agent.revokeToken(token.requestId);
     }
 
-    await getApps()
+    await getApps();
 
     setShowModal(false);
   };
@@ -64,10 +66,10 @@ const Apps = () => {
     getApps();
 
     client?.agent?.addAppChangedListener(() => {
-      console.log('triggered')
+      console.log("triggered");
       getApps();
-    })
-  }, [client])
+    });
+  }, [client]);
 
   function goToFlux() {
     open("https://app.fluxsocial.io");
@@ -120,15 +122,16 @@ const Apps = () => {
                   </a>
                 </div>
               </j-flex>
-              <div style={{ position: "absolute", top: 0, right: 0 }}>
+              <div style={{ position: "absolute", top: 10, right: 10 }}>
                 <j-button
-                  variant="link"
+                  variant="subtle"
+                  size="xs"
                   onClick={() => {
                     setShowModal(true);
                     setSelectedRequestId(app.auth.appUrl);
                   }}
                 >
-                  <j-icon name="x" />
+                  <j-icon name="x" size="xs" />
                 </j-button>
               </div>
             </div>
