@@ -1212,7 +1212,11 @@ impl Mutation {
         Ok(true)
     }
 
-    async fn ai_add_model(&self, context: &RequestContext, model: ModelInput) -> FieldResult<String> {
+    async fn ai_add_model(
+        &self,
+        context: &RequestContext,
+        model: ModelInput,
+    ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
         let id = AIService::global_instance().await?.add_model(model).await?;
         Ok(id)
@@ -1225,11 +1229,16 @@ impl Mutation {
         model: ModelInput,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        Ad4mDb::with_global_instance(|db| db.update_model(&model_id, &model)).map_err(|e| e.to_string())?;
+        Ad4mDb::with_global_instance(|db| db.update_model(&model_id, &model))
+            .map_err(|e| e.to_string())?;
         Ok(true)
     }
 
-    async fn ai_remove_model(&self, context: &RequestContext, model_id: String) -> FieldResult<bool> {
+    async fn ai_remove_model(
+        &self,
+        context: &RequestContext,
+        model_id: String,
+    ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
         Ad4mDb::with_global_instance(|db| db.remove_model(&model_id)).map_err(|e| e.to_string())?;
         Ok(true)

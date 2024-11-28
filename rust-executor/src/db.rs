@@ -1163,8 +1163,14 @@ impl Ad4mDb {
         let api_key = model.api.as_ref().map(|api| api.api_key.clone());
         let api_type = model.api.as_ref().map(|api| api.api_type.to_string());
         let local_file_name = model.local.as_ref().map(|local| local.file_name.clone());
-        let local_tokenizer = model.local.as_ref().map(|local| local.tokenizer_source.clone());
-        let local_params = model.local.as_ref().map(|local| local.model_parameters.clone());
+        let local_tokenizer = model
+            .local
+            .as_ref()
+            .map(|local| local.tokenizer_source.clone());
+        let local_params = model
+            .local
+            .as_ref()
+            .map(|local| local.model_parameters.clone());
 
         self.conn.execute(
             "UPDATE models SET 
@@ -1667,11 +1673,11 @@ mod tests {
 
         // Retrieve and verify the updated model
         let retrieved_model = db.get_model(model_id.clone()).unwrap().unwrap();
-        
+
         assert_eq!(retrieved_model.name, "Updated Model");
         assert!(retrieved_model.api.is_none());
         assert!(retrieved_model.local.is_some());
-        
+
         let local = retrieved_model.local.unwrap();
         assert_eq!(local.file_name, "local_model.bin");
         assert_eq!(local.tokenizer_source, "tokenizer.json");
