@@ -31,10 +31,10 @@ const AI = () => {
     setModels(modelsWithTasks);
   }, [client]);
 
+  // todo: use id instead of name when set up
   function deleteModel(model: Model) {
-    console.log("delete model: ", model.name);
-    // client!.ai.deleteModel(model.id);
-    // getData()
+    client!.ai.removeModel(model.name);
+    getData();
   }
 
   useEffect(() => {
