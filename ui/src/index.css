@@ -67,7 +67,7 @@ a {
 }
 
 :root j-menu::part(base) {
-  background-color: var(--j-color-white);
+  background-color: var(--j-color-primary-100);
   border-color: var(--j-color-ui-800);
 }
 
@@ -84,7 +84,7 @@ a {
 }
 
 :root j-menu-item::part(base):hover {
-  background-color: var(--j-color-primary-100);
+  background-color: var(--j-color-primary-200);
   color: var(--j-color-primary-500);
 }
 
@@ -156,8 +156,8 @@ a {
 
 :root j-input::part(input-wrapper) {
   font-size: medium;
-  border: 1px solid rgb(200, 200, 200);
-  background-color: rgba(0, 0, 0, 0.5);
+  border: 1px solid var(--j-color-ui-800);
+  background-color: rgba(0, 0, 0, 0.4);
 }
 
 :root j-input.one-time-pass::part(input-field) {

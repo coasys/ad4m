@@ -51,7 +51,7 @@ export default function Splashscreen() {
         </j-box>
       ) : (
         <j-flex a="center" gap="400">
-          <j-text size="700" nomargin>
+          <j-text size="700" nomargin color="ui-0">
             Loading...
           </j-text>
           <j-spinner size="sm" />

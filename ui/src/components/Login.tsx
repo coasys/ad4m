@@ -283,7 +283,7 @@ const Login = () => {
             </j-text>
           </j-flex>
 
-          <j-flex gap="500" j="center" wrap style={{ marginTop: 80 }}>
+          <j-flex gap="500" j="center" wrap style={{ marginTop: 60 }}>
             {/* <j-button size="xl" onClick={() => setCurrentIndex(3)}>
               Previous
             </j-button> */}
