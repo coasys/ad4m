@@ -228,7 +228,7 @@ impl AIService {
         Ok(())
     }
 
-    pub async fn add_model(&self, model: ModelInput) -> Result<()> {
+    pub async fn add_model(&self, model: ModelInput) -> Result<String> {
         let model = Ad4mDb::with_global_instance(|db| {
             let id = db.add_model(&model)?;
             db.set_default_model(model.model_type, &id)?;
@@ -236,8 +236,8 @@ impl AIService {
         })
         .map_err(|e| anyhow::anyhow!("{}", e))?
         .expect("since we just added it");
-        self.init_model(model).await?;
-        Ok(())
+        self.init_model(model.clone()).await?;
+        Ok(model.id)
     }
 
     pub async fn model_status(model_id: String) -> Result<AIModelLoadingStatus> {
