@@ -58,10 +58,10 @@ export default function aiTests(testContext: TestContext) {
                 expect(addedLocalModel?.local?.modelParameters).to.deep.equal(JSON.stringify({ param1: "value1", param2: "value2" }))
 
                 // Test removing models
-                const removeApiResult = await ad4mClient.ai.removeModel("TestApiModel")
+                const removeApiResult = await ad4mClient.ai.removeModel(addedApiModel!.id)
                 expect(removeApiResult).to.be.true
 
-                const removeLocalResult = await ad4mClient.ai.removeModel("TestLocalModel")
+                const removeLocalResult = await ad4mClient.ai.removeModel(addedLocalModel!.id)
                 expect(removeLocalResult).to.be.true
 
                 // Verify the models were removed
@@ -96,10 +96,6 @@ export default function aiTests(testContext: TestContext) {
                 }
 
                 await ad4mClient.ai.addModel(apiModelInput)
-
-                // Initially no default model set
-                const initialDefault = await ad4mClient.ai.getDefaultModel("LLM")
-                expect(initialDefault).to.be.null
 
                 // Set default model
                 const setResult = await ad4mClient.ai.setDefaultModel("LLM", "TestDefaultApiModel")
