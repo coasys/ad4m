@@ -238,6 +238,7 @@ code {
   align-items: center;
   overflow: scroll;
   z-index: 1;
+  padding: 5px;
 }
 
 .center {

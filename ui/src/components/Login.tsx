@@ -102,7 +102,9 @@ const Login = () => {
       } else {
         llm.api = { baseUrl: apiUrl, apiKey, apiType: "OPEN_AI" };
       }
-      client!.ai.addModel(llm);
+      client!.ai
+        .addModel(llm)
+        .then((modelId) => client!.ai.setDefaultModel("LLM", modelId));
       // add embedding model
       client!.ai.addModel({
         name: "Embedding Model 1",
