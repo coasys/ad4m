@@ -91,6 +91,7 @@ export class AIClient {
             query: gql`
                 query($modelType: ModelType!) {
                     aiGetDefaultModel(modelType: $modelType) {
+                        id
                         name
                         api {
                             baseUrl
