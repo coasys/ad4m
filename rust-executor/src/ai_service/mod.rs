@@ -165,7 +165,7 @@ impl AIService {
             // for integration tests, make sure we have Bert loaded
             futures.push(Box::pin(
                 self.init_model(Model {
-                    id: "doesn't matter here".to_string(),
+                    id: "bert-id".to_string(),
                     name: "bert".to_string(),
                     model_type: ModelType::Embedding,
                     local: Some(LocalModel {

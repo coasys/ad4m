@@ -131,9 +131,7 @@ export default function aiTests(testContext: TestContext) {
 
             it ('AI model status', async () => {
                 const ad4mClient = testContext.ad4mClient!
-                const models = await ad4mClient.ai.getModels();
-                let id = models[0].id;
-                const status = await ad4mClient.ai.modelLoadingStatus(id);
+                const status = await ad4mClient.ai.modelLoadingStatus("bert-id");
                 expect(status).to.have.property('model');
                 expect(status).to.have.property('status');
             })
