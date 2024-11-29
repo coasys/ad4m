@@ -7,8 +7,6 @@ import { AgentContext } from "../context/AgentContext";
 import "../index.css";
 import Logo from "./Logo";
 
-const aiModes = ["Local", "Remote", "None"];
-
 const Login = () => {
   const {
     state: { loading, hasLoginError },
@@ -134,14 +132,6 @@ const Login = () => {
     else if (connected && isUnlocked) navigate("/apps");
     else if (isInitialized) setCurrentIndex(7);
   }, [connected, isUnlocked, navigate, isInitialized, connectedLoading]);
-
-  // fix for radio button not being selected by prop on first load
-  useEffect(() => {
-    if (currentIndex === 5) {
-      const radio = document.getElementById(`ai-mode-${aiMode}`) as any;
-      if (radio) radio.checked = true;
-    }
-  }, [currentIndex]);
 
   return (
     <div className="wrapper">
@@ -431,30 +421,63 @@ const Login = () => {
               ADAM allows you to control the AI used for transcription, vector
               embedding, and LLM tasks.
             </j-text>
-            <j-text size="500" nomargin color="ui-900">
-              Select <b>Local</b> if your device is capable or running large
-              models locally.
-            </j-text>
-            <j-text size="500" nomargin color="ui-900">
-              Select <b>Remote</b> to use an external API like OpenAI.
-            </j-text>
-            <j-text size="500" nomargin color="ui-900">
-              Or select <b>None</b> if you'd prefer not use AI.
-            </j-text>
           </j-flex>
 
-          <j-flex direction="column" a="center" gap="400">
-            {aiModes.map((mode) => (
-              <j-radio-button
-                id={`ai-mode-${mode}`}
-                checked={aiMode === mode}
-                onClick={() => setAIMode(mode)}
+          <j-flex gap="400" style={{ padding: "0 10px" }}>
+            <button
+              className={`card ${aiMode === "Local" && "selected"}`}
+              onClick={() => setAIMode("Local")}
+            >
+              <j-icon name="house-fill" size="lg" color="ui-500" />
+              <j-text
+                size="600"
+                color="ui-0"
+                nomargin
+                style={{ marginBottom: 5 }}
               >
-                <j-text size="600" nomargin color="ui-0">
-                  {mode}
-                </j-text>
-              </j-radio-button>
-            ))}
+                Local
+              </j-text>
+              <j-text size="500" nomargin color="ui-800">
+                Select <b>Local</b> if your device is capable or running large
+                models locally.
+              </j-text>
+            </button>
+
+            <button
+              className={`card ${aiMode === "Remote" && "selected"}`}
+              onClick={() => setAIMode("Remote")}
+            >
+              <j-icon name="broadcast-pin" size="lg" color="ui-500" />
+              <j-text
+                size="600"
+                color="ui-0"
+                nomargin
+                style={{ marginBottom: 5 }}
+              >
+                Remote
+              </j-text>
+              <j-text size="500" nomargin color="ui-800">
+                Select <b>Remote</b> to use an external API like OpenAI.
+              </j-text>
+            </button>
+
+            <button
+              className={`card ${aiMode === "None" && "selected"}`}
+              onClick={() => setAIMode("None")}
+            >
+              <j-icon name="x-lg" size="lg" color="ui-500" />
+              <j-text
+                size="600"
+                color="ui-0"
+                nomargin
+                style={{ marginBottom: 5 }}
+              >
+                None
+              </j-text>
+              <j-text size="500" nomargin color="ui-800">
+                Select <b>None</b> if you'd prefer not use AI.
+              </j-text>
+            </button>
           </j-flex>
 
           {aiMode === "Remote" && (
