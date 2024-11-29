@@ -266,6 +266,7 @@ impl AIService {
 
         let llama = match model_size_string.as_str() {
             // Local TinyLlama models
+            "llama_tiny" => Llama::builder().with_source(LlamaSource::tiny_llama_1_1b()),
             "llama_7b" => Llama::builder().with_source(LlamaSource::llama_7b()),
             "llama_8b" => Llama::builder().with_source(LlamaSource::llama_8b()),
             "llama_13b" => Llama::builder().with_source(LlamaSource::llama_13b()),
@@ -568,11 +569,9 @@ impl AIService {
     }
 
     pub async fn delete_task(&self, task_id: String) -> Result<bool> {
-        Ad4mDb::with_global_instance(|db| db.remove_task(task_id.clone()))
+        self.remove_task(task_id.clone()).await?;
+        Ad4mDb::with_global_instance(|db| db.remove_task(task_id))
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
-
-        self.remove_task(task_id).await?;
-
         Ok(true)
     }
 

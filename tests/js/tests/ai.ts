@@ -167,17 +167,33 @@ export default function aiTests(testContext: TestContext) {
 
             it.skip('can do Tasks CRUD', async() => {
                 const ad4mClient = testContext.ad4mClient!
+                const llamaDescription: ModelInput = {
+                    name: "Llama tiny",
+                    local: {
+                        fileName: "llama_tiny",
+                        tokenizerSource: "test_tokenizer.json",
+                        modelParameters: JSON.stringify({ param1: "value1", param2: "value2" })
+                    },
+                    modelType: "LLM"
+                }
+                let llamaId = await ad4mClient.ai.addModel(llamaDescription)
 
+                // Wait for model to be loaded
+                let status;
+                do {
+                    status = await ad4mClient.ai.modelLoadingStatus(llamaId);
+                    await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second between checks
+                } while (status.progress < 100);
                 // Add a task
                 const newTask = await ad4mClient.ai.addTask(
                     "test-name",
-                    "llama",
+                    llamaId,
                     "This is a test system prompt",
                     [{ input: "Test input", output: "Test output" }]
                 );
                 expect(newTask).to.have.property('taskId');
                 expect(newTask.name).to.equal('test-name');
-                expect(newTask.modelId).to.equal("llama");
+                expect(newTask.modelId).to.equal(llamaId);
                 expect(newTask.systemPrompt).to.equal("This is a test system prompt");
                 expect(newTask.promptExamples).to.deep.equal([{ input: "Test input", output: "Test output" }]);
 
@@ -208,11 +224,28 @@ export default function aiTests(testContext: TestContext) {
 
             it.skip('can prompt a task', async () => {
                 const ad4mClient = testContext.ad4mClient!
+                const llamaDescription: ModelInput = {
+                    name: "Llama tiny",
+                    local: {
+                        fileName: "llama_tiny",
+                        tokenizerSource: "test_tokenizer.json",
+                        modelParameters: JSON.stringify({ param1: "value1", param2: "value2" })
+                    },
+                    modelType: "LLM"
+                }
+                let llamaId = await ad4mClient.ai.addModel(llamaDescription)
+
+                // Wait for model to be loaded
+                let status;
+                do {
+                    status = await ad4mClient.ai.modelLoadingStatus(llamaId);
+                    await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second between checks
+                } while (status.progress < 100);
 
                 // Create a new task
                 const newTask = await ad4mClient.ai.addTask(
                     "test-name",
-                    "llama",
+                    llamaId,
                     "You are inside a test. Please ALWAYS respond with 'works', plus something else.",
                     [
                         { input: "What's the capital of France?", output: "works. Also that is Paris" },
