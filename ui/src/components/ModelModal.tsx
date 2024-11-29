@@ -95,7 +95,7 @@ export default function ModelModal(props: {
           modelParameters: "",
         };
       }
-      if (oldModel) client!.ai.updateModel(model.id!, model);
+      if (oldModel) client!.ai.updateModel(oldModel.id, model);
       else client!.ai.addModel(model);
       close();
     }
