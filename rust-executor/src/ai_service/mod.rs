@@ -201,24 +201,6 @@ impl AIService {
         Ok(())
     }
 
-    async fn load_transcriber_model(model: &crate::types::Model) {
-        let name = model.name.clone();
-        publish_model_status(name.clone(), 0.0, "Loading", false).await;
-
-        let _ = WhisperBuilder::default()
-            .with_source(WhisperSource::Base)
-            .with_device(Device::Cpu)
-            .build_with_loading_handler({
-                let name = name.clone();
-                move |progress| {
-                    tokio::spawn(handle_progress(name.clone(), progress));
-                }
-            })
-            .await;
-
-        publish_model_status(name, 100.0, "Loaded", false).await;
-    }
-
     async fn init_model(&self, model: crate::types::Model) -> Result<()> {
         match model.model_type {
             ModelType::Llm => self.spawn_llm_model(model).await?,
@@ -263,85 +245,9 @@ impl AIService {
             .ok_or(anyhow!(AIServiceError::ServiceNotInitialized))
     }
 
-    pub async fn add_task(&self, task: AITaskInput) -> Result<AITask> {
-        let task_id = Ad4mDb::with_global_instance(|db| {
-            db.add_task(
-                task.name.clone(),
-                task.model_id.clone(),
-                task.system_prompt.clone(),
-                task.prompt_examples
-                    .iter()
-                    .map(|p| p.clone().into())
-                    .collect(),
-                task.meta_data.clone(),
-            )
-        })
-        .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
-
-        let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
-            .expect("to get task that we just created");
-
-        self.spawn_task(task.clone()).await?;
-        Ok(task)
-    }
-
-    pub async fn delete_task(&self, task_id: String) -> Result<bool> {
-        Ad4mDb::with_global_instance(|db| db.remove_task(task_id.clone()))
-            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
-
-        self.remove_task(task_id).await?;
-
-        Ok(true)
-    }
-
-    pub fn get_tasks() -> Result<Vec<AITask>> {
-        let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
-            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
-        Ok(tasks)
-    }
-
-    async fn spawn_embedding_model(&self, model_config: crate::types::Model) {
-        let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
-        let model_id = model_config.name.clone();
-        thread::spawn({
-            let model_id = model_config.name.clone();
-            move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-
-                let model = rt
-                    .block_on(async {
-                        publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
-
-                        let bert = Bert::builder()
-                            .with_device(Device::Cpu)
-                            .build_with_loading_handler({
-                                let model_id = model_id.clone();
-                                move |progress| {
-                                    tokio::spawn(handle_progress(model_id.clone(), progress));
-                                }
-                            })
-                            .await;
-
-                        publish_model_status(model_id.clone(), 100.0, "Loaded", false).await;
-
-                        bert
-                    })
-                    .expect("couldn't build Bert model");
-
-                while let Some(request) = rt.block_on(bert_rx.recv()) {
-                    let result: Result<Vec<f32>> = rt
-                        .block_on(async { model.embed(request.prompt).await })
-                        .map(|tensor| tensor.to_vec());
-                    let _ = request.result_sender.send(result);
-                }
-            }
-        });
-
-        self.embedding_channel
-            .lock()
-            .await
-            .insert(model_id, bert_tx);
-    }
+    // -------------------------------------
+    // LLM
+    // -------------------------------------
 
     fn new_candle_device() -> Result<Device> {
         Ok(if cfg!(feature = "cuda") {
@@ -575,6 +481,60 @@ impl AIService {
         Ok(())
     }
 
+    // -------------------------------------
+    // Tasks
+    // -------------------------------------
+
+    pub fn get_tasks() -> Result<Vec<AITask>> {
+        let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
+            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
+        Ok(tasks)
+    }
+
+    pub async fn add_task(&self, task: AITaskInput) -> Result<AITask> {
+        let task_id = Ad4mDb::with_global_instance(|db| {
+            db.add_task(
+                task.name.clone(),
+                task.model_id.clone(),
+                task.system_prompt.clone(),
+                task.prompt_examples
+                    .iter()
+                    .map(|p| p.clone().into())
+                    .collect(),
+                task.meta_data.clone(),
+            )
+        })
+        .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
+
+        let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
+            .expect("to get task that we just created");
+
+        self.spawn_task(task.clone()).await?;
+        Ok(task)
+    }
+
+    async fn spawn_task(&self, task: AITask) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        let llm_channel = self.llm_channel.lock().await;
+        let default_model =
+            Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?;
+        let model = default_model.unwrap_or(task.model_id.clone());
+
+        if let Some(sender) = llm_channel.get(&model) {
+            sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
+                task: task.clone(),
+                result_sender: tx,
+            }))?;
+        } else {
+            return Err(anyhow::anyhow!(
+                "Model '{}' not found in LLM channel",
+                task.model_id
+            ));
+        }
+
+        rx.await?
+    }
+
     pub async fn update_task(&self, task: AITask) -> Result<AITask> {
         let task_id = task.task_id.clone();
         Ad4mDb::with_global_instance(|db| {
@@ -598,6 +558,35 @@ impl AIService {
         self.spawn_task(updated_task.clone()).await?;
 
         Ok(updated_task)
+    }
+
+    pub async fn delete_task(&self, task_id: String) -> Result<bool> {
+        Ad4mDb::with_global_instance(|db| db.remove_task(task_id.clone()))
+            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
+
+        self.remove_task(task_id).await?;
+
+        Ok(true)
+    }
+
+    async fn remove_task(&self, task_id: String) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        let llm_channel = self.llm_channel.lock().await;
+        let default_model =
+            Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?;
+        let model = default_model.ok_or(anyhow!("No default model set - can't remove task"))?;
+
+        if let Some(sender) = llm_channel.get(&model) {
+            sender.send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
+                task_id,
+                result_sender: tx,
+            }))?;
+        } else {
+            return Err(anyhow::anyhow!("Model 'llama' not found in LLM channel"));
+        }
+
+        rx.await?;
+        Ok(())
     }
 
     pub async fn prompt(&self, task_id: String, prompt: String) -> Result<String> {
@@ -629,6 +618,53 @@ impl AIService {
         rx.await?
     }
 
+    // -------------------------------------
+    // Embedding
+    // -------------------------------------
+
+    async fn spawn_embedding_model(&self, model_config: crate::types::Model) {
+        let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
+        let model_id = model_config.name.clone();
+        thread::spawn({
+            let model_id = model_config.name.clone();
+            move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+
+                let model = rt
+                    .block_on(async {
+                        publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
+
+                        let bert = Bert::builder()
+                            .with_device(Device::Cpu)
+                            .build_with_loading_handler({
+                                let model_id = model_id.clone();
+                                move |progress| {
+                                    tokio::spawn(handle_progress(model_id.clone(), progress));
+                                }
+                            })
+                            .await;
+
+                        publish_model_status(model_id.clone(), 100.0, "Loaded", false).await;
+
+                        bert
+                    })
+                    .expect("couldn't build Bert model");
+
+                while let Some(request) = rt.block_on(bert_rx.recv()) {
+                    let result: Result<Vec<f32>> = rt
+                        .block_on(async { model.embed(request.prompt).await })
+                        .map(|tensor| tensor.to_vec());
+                    let _ = request.result_sender.send(result);
+                }
+            }
+        });
+
+        self.embedding_channel
+            .lock()
+            .await
+            .insert(model_id, bert_tx);
+    }
+
     pub async fn embed(&self, text: String) -> Result<Vec<f32>> {
         let (result_sender, rx) = oneshot::channel();
 
@@ -647,47 +683,10 @@ impl AIService {
         rx.await?
     }
 
-    async fn spawn_task(&self, task: AITask) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
-        let llm_channel = self.llm_channel.lock().await;
-        let default_model =
-            Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?;
-        let model = default_model.unwrap_or(task.model_id.clone());
 
-        if let Some(sender) = llm_channel.get(&model) {
-            sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
-                task: task.clone(),
-                result_sender: tx,
-            }))?;
-        } else {
-            return Err(anyhow::anyhow!(
-                "Model '{}' not found in LLM channel",
-                task.model_id
-            ));
-        }
-
-        rx.await?
-    }
-
-    async fn remove_task(&self, task_id: String) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
-        let llm_channel = self.llm_channel.lock().await;
-        let default_model =
-            Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?;
-        let model = default_model.ok_or(anyhow!("No default model set - can't remove task"))?;
-
-        if let Some(sender) = llm_channel.get(&model) {
-            sender.send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
-                task_id,
-                result_sender: tx,
-            }))?;
-        } else {
-            return Err(anyhow::anyhow!("Model 'llama' not found in LLM channel"));
-        }
-
-        rx.await?;
-        Ok(())
-    }
+    // -------------------------------------
+    // Whisper / Transcription
+    // -------------------------------------
 
     pub async fn open_transcription_stream(&self, _model_id: String) -> Result<String> {
         let stream_id = uuid::Uuid::new_v4().to_string();
@@ -793,6 +792,24 @@ impl AIService {
         } else {
             Err(AIServiceError::StreamNotFound.into())
         }
+    }
+
+    async fn load_transcriber_model(model: &crate::types::Model) {
+        let name = model.name.clone();
+        publish_model_status(name.clone(), 0.0, "Loading", false).await;
+
+        let _ = WhisperBuilder::default()
+            .with_source(WhisperSource::Base)
+            .with_device(Device::Cpu)
+            .build_with_loading_handler({
+                let name = name.clone();
+                move |progress| {
+                    tokio::spawn(handle_progress(name.clone(), progress));
+                }
+            })
+            .await;
+
+        publish_model_status(name, 100.0, "Loaded", false).await;
     }
 }
 
