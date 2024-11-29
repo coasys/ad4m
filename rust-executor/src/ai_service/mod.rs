@@ -410,10 +410,10 @@ impl AIService {
         }
 
         let (llama_tx, mut llama_rx) = mpsc::unbounded_channel::<LLMTaskRequest>();
-        let model_id = model_config.name.clone();
+        let model_id = model_config.id.clone();
         thread::spawn({
             move || {
-                let model_id = model_config.name.clone();
+                let model_id = model_config.id.clone();
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let maybe_model = rt
                     .block_on(async {
