@@ -225,7 +225,7 @@ impl AIService {
     pub async fn set_default_model(&self, model_type: ModelType, model_id: String) -> Result<()> {
         if ModelType::Llm == model_type {
             Ad4mDb::with_global_instance(|db| db.set_default_model(model_type, &model_id))?;
-            
+
             // Respawn task on new default model
             let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
                 .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
@@ -289,7 +289,10 @@ impl AIService {
             // Handle unknown models
             _ => {
                 log::error!("Unknown model string: {}", model_size_string);
-                return Err(anyhow::anyhow!("Unknown model string: {}", model_size_string));
+                return Err(anyhow::anyhow!(
+                    "Unknown model string: {}",
+                    model_size_string
+                ));
             }
         };
 
@@ -596,7 +599,7 @@ impl AIService {
         let task = Self::get_tasks()?
             .into_iter()
             .find(|t| t.task_id == task_id)
-            .ok_or_else(||anyhow!("Task with ID {} not found", task_id))?;
+            .ok_or_else(|| anyhow!("Task with ID {} not found", task_id))?;
         let model_id = Self::replace_model_variables(&task.model_id)?;
 
         if let Some(sender) = llm_channel.get(&model_id) {
@@ -703,7 +706,6 @@ impl AIService {
 
         rx.await?
     }
-
 
     // -------------------------------------
     // Whisper / Transcription

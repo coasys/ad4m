@@ -1261,8 +1261,11 @@ impl Mutation {
             ));
         };
 
-        AIService::global_instance().await?.set_default_model(model_type, model_id).await?;
-        
+        AIService::global_instance()
+            .await?
+            .set_default_model(model_type, model_id)
+            .await?;
+
         Ok(true)
     }
 
