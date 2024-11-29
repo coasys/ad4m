@@ -222,6 +222,21 @@ impl AIService {
         Ok(model.id)
     }
 
+    pub async fn set_default_model(&self, model_type: ModelType, model_id: String) -> Result<()> {
+        if ModelType::Llm == model_type {
+            Ad4mDb::with_global_instance(|db| db.set_default_model(model_type, &model_id))?;
+            
+            // Respawn task on new default model
+            let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
+                .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
+
+            for task in tasks.into_iter().filter(|t| t.model_id == "default") {
+                self.spawn_task(task).await?;
+            }
+        };
+        Ok(())
+    }
+
     pub async fn model_status(model_id: String) -> Result<AIModelLoadingStatus> {
         let status = Ad4mDb::with_global_instance(|db| db.get_model_status(&model_id))
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?

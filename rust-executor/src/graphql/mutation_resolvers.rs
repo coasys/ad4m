@@ -1261,9 +1261,8 @@ impl Mutation {
             ));
         };
 
-        Ad4mDb::with_global_instance(|db| db.set_default_model(model_type, &model_id))
-            .map_err(|e| e.to_string())?;
-
+        AIService::global_instance().await?.set_default_model(model_type, model_id).await?;
+        
         Ok(true)
     }
 

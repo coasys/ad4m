@@ -165,6 +165,84 @@ export default function aiTests(testContext: TestContext) {
                 await ad4mClient.ai.removeModel("TestDefaultApiModel")
             })
 
+            it.skip('can use "default" as model_id in tasks and prompting works', async () => {
+                const ad4mClient = testContext.ad4mClient!
+                
+                // Create a test model and set as default
+                const modelInput: ModelInput = {
+                    name: "TestDefaultModel",
+                    local: {
+                        fileName: "llama_tiny",
+                        tokenizerSource: "test_tokenizer.json",
+                        modelParameters: JSON.stringify({ param1: "value1" })
+                    },
+                    modelType: "LLM"
+                }
+                const modelId = await ad4mClient.ai.addModel(modelInput)
+                await ad4mClient.ai.setDefaultModel("LLM", modelId)
+
+                // Wait for model to be loaded
+                let status;
+                do {
+                    status = await ad4mClient.ai.modelLoadingStatus(modelId);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                } while (status.progress < 100);
+
+                // Create task using "default" as model_id
+                const task = await ad4mClient.ai.addTask(
+                    "default-model-task",
+                    "default",
+                    "You are a helpful assistant",
+                    [{ input: "Say hi", output: "Hello!" }]
+                )
+                expect(task).to.have.property('taskId')
+                expect(task.modelId).to.equal("default")
+
+                // Test prompting works with the task
+                const response = await ad4mClient.ai.prompt(task.taskId, "Say hi")
+                expect(response).to.be.a('string')
+                expect(response.toLowerCase()).to.include('hello')
+
+
+                // Create another test model
+                const newModelInput: ModelInput = {
+                    name: "TestDefaultModel2", 
+                    local: {
+                        fileName: "llama_tiny",
+                        tokenizerSource: "test_tokenizer.json",
+                        modelParameters: JSON.stringify({ param1: "value1" })
+                    },
+                    modelType: "LLM"
+                }
+                const newModelId = await ad4mClient.ai.addModel(newModelInput)
+
+                // Wait for new model to be loaded
+                let newModelStatus;
+                do {
+                    newModelStatus = await ad4mClient.ai.modelLoadingStatus(newModelId);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                } while (newModelStatus.progress < 100);
+
+                // Change default model to new one
+                await ad4mClient.ai.setDefaultModel("LLM", newModelId)
+
+                // Verify new default model is set
+                const newDefaultModel = await ad4mClient.ai.getDefaultModel("LLM")
+                expect(newDefaultModel.name).to.equal("TestDefaultModel2")
+
+                // Test that prompting still works with the task using "default"
+                const response2 = await ad4mClient.ai.prompt(task.taskId, "Say hi")
+                expect(response2).to.be.a('string')
+                expect(response2.toLowerCase()).to.include('hello')
+
+                // Clean up new model
+                await ad4mClient.ai.removeModel(newModelId)
+
+                // Clean up
+                await ad4mClient.ai.removeTask(task.taskId)
+                await ad4mClient.ai.removeModel(modelId)
+            })
+
             it.skip('can do Tasks CRUD', async() => {
                 const ad4mClient = testContext.ad4mClient!
                 const llamaDescription: ModelInput = {
