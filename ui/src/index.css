@@ -296,3 +296,29 @@ code {
   height: 80px;
   margin: 0 auto;
 }
+
+.card {
+  all: unset;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+  border: 1px solid var(--j-color-ui-200);
+  border-radius: var(--j-border-radius);
+  background-color: rgba(10, 9, 29, 0.8);
+  padding: var(--j-space-500);
+  max-width: 180px;
+  transition: all 0.3s;
+}
+
+.card:hover {
+  border: 1px solid var(--j-color-ui-500);
+  background-color: rgba(25, 23, 72, 0.8);
+}
+
+.card.selected {
+  border: 1px solid var(--j-color-ui-500);
+  background-color: rgba(25, 23, 72, 0.8);
+}
