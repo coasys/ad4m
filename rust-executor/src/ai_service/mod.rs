@@ -126,14 +126,14 @@ async fn publish_model_status(model_name: String, progress: f32, status: &str, d
         .await;
 }
 
-async fn handle_progress(model_name: String, loading: ModelLoadingProgress) {
+async fn handle_progress(model_id: String, loading: ModelLoadingProgress) {
     let progress = loading.progress();
     let status = if progress < 100.0 {
         "Loading".to_string()
     } else {
         "Loaded".to_string()
     };
-    publish_model_status(model_name.clone(), progress, &status, false).await;
+    publish_model_status(model_id.clone(), progress, &status, false).await;
 }
 
 impl AIService {
@@ -259,10 +259,10 @@ impl AIService {
         })
     }
     async fn build_local_llama_from_string(
-        model_name: String,
+        model_id: String,
         model_size_string: String,
     ) -> Result<Llama> {
-        publish_model_status(model_name.clone(), 0.0, "Loading", false).await;
+        publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
 
         let llama = match model_size_string.as_str() {
             // Local TinyLlama models
@@ -272,8 +272,8 @@ impl AIService {
             "llama_70b" => Llama::builder().with_source(LlamaSource::llama_70b()),
             // Handle unknown models
             _ => {
-                log::error!("Unknown model_id: {}", model_name);
-                return Err(anyhow::anyhow!("Unknown model_id: {}", model_name));
+                log::error!("Unknown model string: {}", model_size_string);
+                return Err(anyhow::anyhow!("Unknown model string: {}", model_size_string));
             }
         };
 
@@ -281,14 +281,14 @@ impl AIService {
         let llama = llama
             .with_device(Self::new_candle_device().expect("Couldn't create new candle device"))
             .build_with_loading_handler({
-                let model_id = model_name.clone();
+                let model_id = model_id.clone();
                 move |progress| {
                     tokio::spawn(handle_progress(model_id.clone(), progress));
                 }
             })
             .await?;
 
-        publish_model_status(model_name.clone(), 100.0, "Loaded", false).await;
+        publish_model_status(model_id.clone(), 100.0, "Loaded", false).await;
 
         Ok(llama)
     }
@@ -624,9 +624,9 @@ impl AIService {
 
     async fn spawn_embedding_model(&self, model_config: crate::types::Model) {
         let (bert_tx, mut bert_rx) = mpsc::unbounded_channel::<EmbeddingRequest>();
-        let model_id = model_config.name.clone();
+        let model_name = model_config.name.clone();
         thread::spawn({
-            let model_id = model_config.name.clone();
+            let model_id = model_config.id.clone();
             move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
 
@@ -662,7 +662,7 @@ impl AIService {
         self.embedding_channel
             .lock()
             .await
-            .insert(model_id, bert_tx);
+            .insert(model_name, bert_tx);
     }
 
     pub async fn embed(&self, text: String) -> Result<Vec<f32>> {
@@ -795,21 +795,21 @@ impl AIService {
     }
 
     async fn load_transcriber_model(model: &crate::types::Model) {
-        let name = model.name.clone();
-        publish_model_status(name.clone(), 0.0, "Loading", false).await;
+        let id = &model.id;
+        publish_model_status(id.clone(), 0.0, "Loading", false).await;
 
         let _ = WhisperBuilder::default()
             .with_source(WhisperSource::Base)
             .with_device(Device::Cpu)
             .build_with_loading_handler({
-                let name = name.clone();
+                let name = id.clone();
                 move |progress| {
                     tokio::spawn(handle_progress(name.clone(), progress));
                 }
             })
             .await;
 
-        publish_model_status(name, 100.0, "Loaded", false).await;
+        publish_model_status(id.clone(), 100.0, "Loaded", false).await;
     }
 }
 
