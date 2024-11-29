@@ -213,7 +213,6 @@ impl AIService {
     pub async fn add_model(&self, model: ModelInput) -> Result<String> {
         let model = Ad4mDb::with_global_instance(|db| {
             let id = db.add_model(&model)?;
-            db.set_default_model(model.model_type, &id)?;
             db.get_model(id)
         })
         .map_err(|e| anyhow::anyhow!("{}", e))?
