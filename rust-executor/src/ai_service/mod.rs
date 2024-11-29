@@ -11,6 +11,7 @@ use anyhow::anyhow;
 use candle_core::Device;
 use deno_core::error::AnyError;
 use futures::{FutureExt, SinkExt};
+use holochain::test_utils::itertools::Itertools;
 use kalosm::sound::TextStream;
 use kalosm::sound::*;
 use kalosm::language::*;
@@ -681,18 +682,19 @@ impl AIService {
             .insert(model_name, bert_tx);
     }
 
-    pub async fn embed(&self, text: String) -> Result<Vec<f32>> {
+    pub async fn embed(&self, model_id: String, text: String) -> Result<Vec<f32>> {
         let (result_sender, rx) = oneshot::channel();
-
         let embedding_channel = self.embedding_channel.lock().await;
-        if let Some(sender) = embedding_channel.get("bert") {
+        if let Some(sender) = embedding_channel.get(&model_id) {
             sender.send(EmbeddingRequest {
                 prompt: text,
                 result_sender,
             })?;
         } else {
             return Err(anyhow::anyhow!(
-                "Model 'bert' not found in embedding channel"
+                "Model '{}' not found in embedding channel. We have: {}",
+                model_id,
+                embedding_channel.keys().join(",")
             ));
         }
 
