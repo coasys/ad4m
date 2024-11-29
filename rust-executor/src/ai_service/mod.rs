@@ -513,14 +513,21 @@ impl AIService {
         Ok(task)
     }
 
+    fn replace_model_variables(model_id: &String) -> Result<String> {
+        Ok(if model_id == "default" {
+            Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?
+                .ok_or_else(|| anyhow::anyhow!("Task needs default model but no default set"))?
+        } else {
+            model_id.clone()
+        })
+    }
+
     async fn spawn_task(&self, task: AITask) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let llm_channel = self.llm_channel.lock().await;
-        let default_model =
-            Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?;
-        let model = default_model.unwrap_or(task.model_id.clone());
+        let model_id = Self::replace_model_variables(&task.model_id)?;
 
-        if let Some(sender) = llm_channel.get(&model) {
+        if let Some(sender) = llm_channel.get(&model_id) {
             sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
                 task: task.clone(),
                 result_sender: tx,
@@ -572,11 +579,13 @@ impl AIService {
     async fn remove_task(&self, task_id: String) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let llm_channel = self.llm_channel.lock().await;
-        let default_model =
-            Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?;
-        let model = default_model.ok_or(anyhow!("No default model set - can't remove task"))?;
+        let task = Self::get_tasks()?
+            .into_iter()
+            .find(|t| t.task_id == task_id)
+            .ok_or_else(||anyhow!("Task with ID {} not found", task_id))?;
+        let model_id = Self::replace_model_variables(&task.model_id)?;
 
-        if let Some(sender) = llm_channel.get(&model) {
+        if let Some(sender) = llm_channel.get(&model_id) {
             sender.send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
                 task_id,
                 result_sender: tx,
@@ -597,12 +606,7 @@ impl AIService {
             .map_err(|e| anyhow::anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow::anyhow!("Task not found for task_id: {}", task_id))?;
 
-        let model_id = if task.model_id == "default" {
-            Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?
-                .ok_or_else(|| anyhow::anyhow!("Task needs default model but no default set"))?
-        } else {
-            task.model_id
-        };
+        let model_id = Self::replace_model_variables(&task.model_id)?;
 
         let llm_channel = self.llm_channel.lock().await;
         if let Some(sender) = llm_channel.get(&model_id) {
