@@ -419,7 +419,7 @@ impl AIService {
                                     let prompt = lines.join("\n");
                                     match rt.block_on(
                                         gpt.stream_text(&prompt)
-                                            .with_max_length(10000)
+                                            .with_max_length(3000)
                                             .into_future(),
                                     ) {
                                         Err(e) => {
