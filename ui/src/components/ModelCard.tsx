@@ -39,7 +39,7 @@ export default function ModelCard(props: {
           {modelType === "LLM" && (
             <j-flex gap="300">
               {model.default ? (
-                <j-button variant="subtle" size="sm">
+                <j-button variant="subtle" size="sm" disabled>
                   Default
                 </j-button>
               ) : (
