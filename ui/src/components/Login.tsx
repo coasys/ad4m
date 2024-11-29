@@ -107,7 +107,7 @@ const Login = () => {
         .then((modelId) => client!.ai.setDefaultModel("LLM", modelId));
       // add embedding model
       client!.ai.addModel({
-        name: "Embedding Model 1",
+        name: "bert",
         local: {
           fileName: "bert",
           tokenizerSource: "",
