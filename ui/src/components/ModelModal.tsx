@@ -95,9 +95,8 @@ export default function ModelModal(props: {
           modelParameters: "",
         };
       }
-      if (oldModel) {
-        // client!.ai.editModel(model.id, model);
-      } else client!.ai.addModel(model);
+      if (oldModel) client!.ai.updateModel(oldModel.id, model);
+      else client!.ai.addModel(model);
       close();
     }
   }
@@ -152,36 +151,38 @@ export default function ModelModal(props: {
             style={{ width: "100%" }}
           />
 
-          <j-flex a="center" gap="400">
-            <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-              Type:
-            </j-text>
-            <j-menu style={{ height: 42, zIndex: 3 }}>
-              <j-menu-group collapsible title={newModelType} id="ai-types">
-                {AITypes.map((type) => (
-                  <j-menu-item
-                    selected={newModelType === type}
-                    onClick={() => {
-                      setNewModelType(type);
-                      if (type === "LLM") {
-                        setNewModels(llmModels);
-                        setNewModel("llama_7b");
-                      } else if (type === "EMBEDDING") {
-                        setNewModels(embeddingModels);
-                        setNewModel("bert");
-                      } else {
-                        setNewModels(transcriptionModels);
-                        setNewModel("whisper");
-                      }
-                      closeMenu("ai-types");
-                    }}
-                  >
-                    {type}
-                  </j-menu-item>
-                ))}
-              </j-menu-group>
-            </j-menu>
-          </j-flex>
+          {!oldModel && (
+            <j-flex a="center" gap="400">
+              <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+                Type:
+              </j-text>
+              <j-menu style={{ height: 42, zIndex: 3 }}>
+                <j-menu-group collapsible title={newModelType} id="ai-types">
+                  {AITypes.map((type) => (
+                    <j-menu-item
+                      selected={newModelType === type}
+                      onClick={() => {
+                        setNewModelType(type);
+                        if (type === "LLM") {
+                          setNewModels(llmModels);
+                          setNewModel("llama_7b");
+                        } else if (type === "EMBEDDING") {
+                          setNewModels(embeddingModels);
+                          setNewModel("bert");
+                        } else {
+                          setNewModels(transcriptionModels);
+                          setNewModel("whisper");
+                        }
+                        closeMenu("ai-types");
+                      }}
+                    >
+                      {type}
+                    </j-menu-item>
+                  ))}
+                </j-menu-group>
+              </j-menu>
+            </j-flex>
+          )}
 
           <j-flex a="center" gap="400">
             <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
@@ -194,14 +195,6 @@ export default function ModelModal(props: {
                     selected={newModel === model}
                     onClick={() => {
                       setNewModel(model);
-                      if (model === "External API") {
-                        setApiUrl("https://api.openai.com/v1");
-                      } else {
-                        setApiUrl("");
-                        setApiKey("");
-                        setApiUrlError(false);
-                        setApiKeyError(false);
-                      }
                       closeMenu("new-models");
                     }}
                   >

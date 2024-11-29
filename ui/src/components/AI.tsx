@@ -18,22 +18,31 @@ const AI = () => {
   const getData = useCallback(async () => {
     const modelsInDB = await client!.ai.getModels();
     const tasksInDB = await client!.ai.tasks();
-    console.log("modelsInDxB: ", modelsInDB);
-    console.log("tasksInDB: ", tasksInDB);
+    const defaultLLM = await client!.ai.getDefaultModel("LLM");
     // attach tasks to models
     const modelsWithTasks = modelsInDB.map((model) => {
       const matchingTasks = tasksInDB.filter(
         (task) => task.modelId === model.name
       );
-      return { ...model, tasks: matchingTasks, collapsed: true };
+      const modelWithTasks = {
+        ...model,
+        tasks: matchingTasks,
+        collapsed: true,
+      } as any;
+      if (model.id === defaultLLM.id) modelWithTasks.default = true;
+      return modelWithTasks;
     });
     modelsRef.current = modelsWithTasks;
     setModels(modelsWithTasks);
   }, [client]);
 
-  // todo: use id instead of name when set up
-  function deleteModel(model: Model) {
-    client!.ai.removeModel(model.name);
+  function removeModel(model: Model) {
+    client!.ai.removeModel(model.id);
+    getData();
+  }
+
+  function setDefaultModel(model: Model) {
+    client!.ai.setDefaultModel(model.modelType, model.id);
     getData();
   }
 
@@ -113,9 +122,11 @@ const AI = () => {
           <j-flex direction="column" gap="400">
             {models.map((model) => (
               <ModelCard
+                key={model.id}
                 model={model}
                 editModel={() => setSelectedModel(model)}
-                deleteModel={() => deleteModel(model)}
+                removeModel={() => removeModel(model)}
+                setDefaultModel={() => setDefaultModel(model)}
               />
             ))}
           </j-flex>
