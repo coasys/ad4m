@@ -13,7 +13,7 @@ pub fn setup_agent() {
     AgentService::global_instance()
         .lock()
         .expect("couldn't get lock on AgentService")
-        .as_mut() 
+        .as_mut()
         .expect("Must be some because was initalized above")
-        .create_new_keys(); 
+        .create_new_keys();
 }
