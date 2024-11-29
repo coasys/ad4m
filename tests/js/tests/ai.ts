@@ -47,12 +47,14 @@ export default function aiTests(testContext: TestContext) {
                 
                 const addedApiModel = models.find(model => model.name === "TestApiModel")
                 expect(addedApiModel).to.exist
+                expect(addedApiModel?.id).to.equal(addApiResult)
                 expect(addedApiModel?.api?.baseUrl).to.equal("https://api.example.com/")
                 expect(addedApiModel?.api?.apiKey).to.equal("test-api-key")
                 expect(addedApiModel?.api?.apiType).to.equal("OPEN_AI")
 
                 const addedLocalModel = models.find(model => model.name === "TestLocalModel")
                 expect(addedLocalModel).to.exist
+                expect(addedLocalModel?.id).to.equal(addLocalResult)
                 expect(addedLocalModel?.local?.fileName).to.equal("test_model.bin")
                 expect(addedLocalModel?.local?.tokenizerSource).to.equal("test_tokenizer.json")
                 expect(addedLocalModel?.local?.modelParameters).to.deep.equal(JSON.stringify({ param1: "value1", param2: "value2" }))
@@ -89,7 +91,7 @@ export default function aiTests(testContext: TestContext) {
 
                 // Add initial model
                 const addResult = await ad4mClient.ai.addModel(initialModel)
-                expect(addResult).to.be.true
+                expect(addResult).to.be.a.string
 
                 // Get the model to retrieve its ID
                 const models = await ad4mClient.ai.getModels()
@@ -116,7 +118,7 @@ export default function aiTests(testContext: TestContext) {
                 const retrievedModel = updatedModels.find(model => model.id === addedModel!.id)
                 expect(retrievedModel).to.exist
                 expect(retrievedModel?.name).to.equal("UpdatedModel")
-                expect(retrievedModel?.api).to.be.undefined
+                expect(retrievedModel?.api).to.be.null
                 expect(retrievedModel?.local?.fileName).to.equal("updated_model.bin")
                 expect(retrievedModel?.local?.tokenizerSource).to.equal("updated_tokenizer.json")
                 expect(retrievedModel?.local?.modelParameters).to.equal(JSON.stringify({ updated: "value" }))
