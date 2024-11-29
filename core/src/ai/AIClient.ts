@@ -18,6 +18,7 @@ export class AIClient {
             query: gql`
                 query {
                     aiGetModels {
+                        id
                         name
                         api {
                             baseUrl
