@@ -597,9 +597,12 @@ impl AIService {
             .map_err(|e| anyhow::anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow::anyhow!("Task not found for task_id: {}", task_id))?;
 
-        let default_model =
-            Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?;
-        let model_id = default_model.unwrap_or(task.model_id.clone());
+        let model_id = if task.model_id == "default" {
+            Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?
+                .ok_or_else(|| anyhow::anyhow!("Task needs default model but no default set"))?
+        } else {
+            task.model_id
+        };
 
         let llm_channel = self.llm_channel.lock().await;
         if let Some(sender) = llm_channel.get(&model_id) {
