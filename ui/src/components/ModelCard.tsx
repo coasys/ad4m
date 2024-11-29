@@ -5,9 +5,10 @@ import { cardStyle } from "./styles";
 export default function ModelCard(props: {
   model: any;
   editModel: () => void;
-  deleteModel: () => void;
+  removeModel: () => void;
+  setDefaultModel: () => void;
 }) {
-  const { model, editModel, deleteModel } = props;
+  const { model, editModel, removeModel, setDefaultModel } = props;
   const {
     name,
     modelType,
@@ -35,16 +36,27 @@ export default function ModelCard(props: {
           <j-text variant="heading-sm" size="600" color="primary-800">
             {name}
           </j-text>
-          <j-flex gap="300">
-            {modelType === "LLM" && (
+          {modelType === "LLM" && (
+            <j-flex gap="300">
+              {model.default ? (
+                <j-button variant="subtle" size="sm">
+                  Default
+                </j-button>
+              ) : (
+                <j-button size="sm" onClick={setDefaultModel}>
+                  Set Default
+                </j-button>
+              )}
+
               <j-button variant="subtle" size="sm" onClick={editModel}>
                 <j-icon name="pencil-square" size="sm" />
               </j-button>
-            )}
-            <j-button variant="subtle" size="sm" onClick={deleteModel}>
-              <j-icon name="trash" size="sm" />
-            </j-button>
-          </j-flex>
+
+              <j-button variant="subtle" size="sm" onClick={removeModel}>
+                <j-icon name="trash" size="sm" />
+              </j-button>
+            </j-flex>
+          )}
         </j-flex>
       </j-box>
       <j-flex direction="column" gap="400">
