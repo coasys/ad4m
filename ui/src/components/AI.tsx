@@ -66,7 +66,7 @@ const AI = () => {
               (model) =>
                 new Promise(async (resolve) => {
                   client.ai
-                    .modelLoadingStatus(model.name)
+                    .modelLoadingStatus(model.id)
                     .then((status) => resolve({ ...model, ...status }))
                     .catch((error) => {
                       console.log("model not found: ", error, model.name);
