@@ -212,8 +212,8 @@ j-tabs {
 
 j-tab-item {
   width: 100%;
-  display: block;
-  flex: 1;
+  display: flex;
+  justify-content: center;
 }
 
 code {
