@@ -404,15 +404,20 @@ export default class Ad4mConnect {
     if (this.isHosting) {
       let token = localStorage.getItem('hosting_token');
 
-      const response = await fetch('https://hosting.ad4m.dev/api/service/checkStatus', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer ' + token
-        },
-      });
-
-      if (response.status !== 200) {
+      let ok = false
+      try {
+        const response = await fetch('https://hosting.ad4m.dev/api/service/checkStatus', {
+          method: 'POST',
+          headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer ' + token
+          },
+        });
+        ok = (200 == response.status)
+      } catch(e) {
+        ok = false
+      }
+      if (!ok) {
         console.error('Looks like the client is not running you might not recieve the mail with the code, please check your dashboard logs.');
       }
     }
