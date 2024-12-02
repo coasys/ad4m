@@ -872,7 +872,7 @@ mod tests {
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
         let service = AIService::new().expect("initialization to work");
         let vector = service
-            .embed("Test string".into())
+            .embed("bert".into(), "Test string".into())
             .await
             .expect("embed to return a result");
         assert!(vector.len() > 300)
