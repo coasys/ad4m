@@ -21,15 +21,20 @@ const AI = () => {
     const defaultLLM = await client!.ai.getDefaultModel("LLM");
     // attach tasks to models
     const modelsWithTasks = modelsInDB.map((model) => {
-      const matchingTasks = tasksInDB.filter(
-        (task) => task.modelId === model.name
-      );
-      const modelWithTasks = {
-        ...model,
-        tasks: matchingTasks,
-        collapsed: true,
-      } as any;
-      if (model.id === defaultLLM.id) modelWithTasks.default = true;
+      const modelWithTasks = { ...model } as any;
+      if (model.id === defaultLLM.id) {
+        modelWithTasks.default = true;
+        // find tasks for default model
+        const matchingTasks = tasksInDB.filter(
+          (task) => task.modelId === "default"
+        );
+        // add collapsed boolean to each task
+        modelWithTasks.tasks = matchingTasks.map((task: any) => {
+          task.collapsed = true;
+          return task;
+        });
+        modelWithTasks.collapsed = true;
+      }
       return modelWithTasks;
     });
     modelsRef.current = modelsWithTasks;
@@ -44,6 +49,21 @@ const AI = () => {
   function setDefaultModel(model: Model) {
     client!.ai.setDefaultModel(model.modelType, model.id);
     getData();
+  }
+
+  function toggleTask(modelId: string, taskId: string) {
+    const newModels = modelsRef.current.map((model) => {
+      if (model.id === modelId) {
+        const newTasks = model.tasks.map((task: any) => {
+          if (task.taskId === taskId) task.collapsed = !task.collapsed;
+          return task;
+        });
+        model.tasks = newTasks;
+      }
+      return model;
+    });
+    modelsRef.current = newModels;
+    setModels(newModels);
   }
 
   useEffect(() => {
@@ -127,6 +147,7 @@ const AI = () => {
                 editModel={() => setSelectedModel(model)}
                 removeModel={() => removeModel(model)}
                 setDefaultModel={() => setDefaultModel(model)}
+                toggleTask={toggleTask}
               />
             ))}
           </j-flex>

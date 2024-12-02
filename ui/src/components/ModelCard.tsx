@@ -1,15 +1,16 @@
 import { useState } from "react";
 import "../index.css";
-import { cardStyle } from "./styles";
 
 export default function ModelCard(props: {
   model: any;
   editModel: () => void;
   removeModel: () => void;
   setDefaultModel: () => void;
+  toggleTask: (modelId: string, taskId: string) => void;
 }) {
-  const { model, editModel, removeModel, setDefaultModel } = props;
+  const { model, editModel, removeModel, setDefaultModel, toggleTask } = props;
   const {
+    id,
     name,
     modelType,
     api,
@@ -108,24 +109,42 @@ export default function ModelCard(props: {
               <j-text nomargin>No tasks created yet...</j-text>
             ) : (
               <>
-                <j-button onClick={() => setShowTasks(!showTasks)}>
-                  {showTasks ? "Hide" : "Show"} tasks ({tasks.length})
+                <j-button
+                  variant="subtle"
+                  onClick={() => setShowTasks(!showTasks)}
+                >
+                  {showTasks ? "Hide" : "Show"} tasks ( {tasks.length} )
+                  <j-icon name={`chevron-${showTasks ? "up" : "down"}`} />
                 </j-button>
                 {showTasks && (
                   <j-flex gap="300">
                     {tasks.map((task: any) => (
-                      <div
-                        key={task.taskId}
-                        style={{ ...cardStyle, width: "100%" }}
-                      >
+                      <j-box className="box light">
                         <j-flex direction="column" gap="400">
                           <j-text variant="heading-sm" nomargin>
-                            Task name: {task.name}
+                            {task.name}
                           </j-text>
                           <j-text nomargin>Id: {task.taskId}</j-text>
-                          <j-text nomargin>Prompt: {task.systemPrompt}</j-text>
+                          <j-text
+                            nomargin
+                            style={{
+                              overflow: "hidden",
+                              maxHeight: task.collapsed ? 60 : "none",
+                            }}
+                          >
+                            {task.systemPrompt}
+                          </j-text>
+                          <j-button
+                            variant="subtle"
+                            onClick={() => toggleTask(id, task.taskId)}
+                          >
+                            Show {task.collapsed ? "more" : "less"}
+                            <j-icon
+                              name={`chevron-${task.collapsed ? "down" : "up"}`}
+                            />
+                          </j-button>
                         </j-flex>
-                      </div>
+                      </j-box>
                     ))}
                   </j-flex>
                 )}
