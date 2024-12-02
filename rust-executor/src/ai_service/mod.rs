@@ -359,7 +359,12 @@ impl AIService {
                 let idle_delay = Duration::from_millis(1);
 
                 loop {
-                    match rt.block_on(tokio::time::timeout(idle_delay, llama_rx.recv())) {
+                    match rt.block_on(async {
+                        tokio::select! {
+                            recv = llama_rx.recv() => Ok(recv),
+                            _ = tokio::time::sleep(idle_delay) => Err("timeout"),
+                        }
+                    }) {
                         Err(_timeout) => std::thread::sleep(idle_delay*5),
                         Ok(None) => break,
                         Ok(Some(task_request)) => {
@@ -676,7 +681,12 @@ impl AIService {
 
                 let idle_delay = Duration::from_millis(1);
                 loop {
-                    match rt.block_on(tokio::time::timeout(idle_delay, bert_rx.recv())) {
+                    match rt.block_on(async {
+                        tokio::select! {
+                            recv = bert_rx.recv() => Ok(recv),
+                            _ = tokio::time::sleep(idle_delay) => Err("timeout"),
+                        }
+                    }) {
                         Err(_timeout) => std::thread::sleep(idle_delay*5),
                         Ok(None) => break,
                         Ok(Some(request)) => {
