@@ -437,13 +437,12 @@ impl AIService {
                                                 .into_future(),
                                         ) {
                                             Err(e) => {
-                                                let _ =
-                                                    prompt_request
-                                                        .result_sender
-                                                        .send(Err(anyhow!(
+                                                let _ = prompt_request.result_sender.send(Err(
+                                                    anyhow!(
                                                         "Error connecting to remote LLM API: {:?}",
                                                         e
-                                                    )));
+                                                    ),
+                                                ));
                                             }
                                             Ok(mut stream) => {
                                                 let response = rt.block_on(stream.all_text());
