@@ -313,7 +313,10 @@ impl PerspectiveInstance {
             if *changed {
                 let after = self.notification_trigger_snapshot().await;
                 let new_matches = Self::subtract_before_notification_matches(&before, &after);
-                Self::publish_notification_matches(uuid.clone(), new_matches).await;
+                tokio::spawn(Self::publish_notification_matches(
+                    uuid.clone(),
+                    new_matches,
+                ));
                 before = after;
                 *changed = false;
             }
@@ -1109,6 +1112,11 @@ impl PerspectiveInstance {
 
                 let message = serde_json::to_string(&payload).unwrap();
 
+                get_global_pubsub()
+                    .await
+                    .publish(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC, &message)
+                    .await;
+
                 if url::Url::parse(&notification.webhook_url).is_ok() {
                     log::info!(
                         "Notification webhook - posting to {:?}",
@@ -1124,11 +1132,6 @@ impl PerspectiveInstance {
                         .await;
                     log::info!("Notification webhook response: {:?}", res);
                 }
-
-                get_global_pubsub()
-                    .await
-                    .publish(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC, &message)
-                    .await;
             }
         }
     }
