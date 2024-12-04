@@ -61,7 +61,7 @@ impl Ad4mConfig {
             self.run_dapp_server = Some(true);
         }
         if self.gql_port.is_none() {
-            self.gql_port = Some(4000);
+            self.gql_port = Some(12000);
         }
         if self.connect_holochain.is_none() {
             self.connect_holochain = Some(false);

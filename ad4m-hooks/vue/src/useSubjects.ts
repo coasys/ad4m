@@ -17,7 +17,7 @@ export function useSubjects<SubjectClass>({
       ? (source as any)
       : ref(source || "ad4m://self");
   const perspectiveRef =
-    typeof perspective === "function" ? (perspective as any) : ref(perspective);
+    typeof perspective === "function" ? (perspective as any) : shallowRef(perspective);
 
   let entries = ref<{ [x: string]: any }[]>([]);
   let repo = shallowRef<SubjectRepository<any> | null>(null);
