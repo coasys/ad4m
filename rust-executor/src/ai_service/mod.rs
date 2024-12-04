@@ -17,7 +17,7 @@ use kalosm::language::*;
 use kalosm::sound::TextStream;
 use kalosm::sound::*;
 use std::collections::HashMap;
-use std::future::{Future};
+use std::future::Future;
 use std::panic::catch_unwind;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -422,12 +422,10 @@ impl AIService {
                                         task_descriptions.get(&prompt_request.task_id)
                                     {
                                         // System prompt
-                                        let mut messages = vec![
-                                            Message {
-                                                role: Role::System,
-                                                content: task.system_prompt.clone(),
-                                            }
-                                        ];
+                                        let mut messages = vec![Message {
+                                            role: Role::System,
+                                            content: task.system_prompt.clone(),
+                                        }];
 
                                         // Examples
                                         for example in task.prompt_examples.iter() {
@@ -446,8 +444,7 @@ impl AIService {
                                             role: Role::User,
                                             content: prompt_request.prompt,
                                         });
-                                        
-                                        
+
                                         let chat_input = ChatInput {
                                             model: chat_gpt_lib_rs::Model::Gpt_4o,
                                             messages,
