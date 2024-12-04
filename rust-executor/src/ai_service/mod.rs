@@ -421,6 +421,7 @@ impl AIService {
                                     if let Some(task) =
                                         task_descriptions.get(&prompt_request.task_id)
                                     {
+                                        // System prompt
                                         let mut messages = vec![
                                             Message {
                                                 role: Role::System,
@@ -428,6 +429,7 @@ impl AIService {
                                             }
                                         ];
 
+                                        // Examples
                                         for example in task.prompt_examples.iter() {
                                             messages.push(Message {
                                                 role: Role::User,
@@ -438,6 +440,13 @@ impl AIService {
                                                 content: example.output.clone(),
                                             })
                                         }
+
+                                        // Prompt
+                                        messages.push(Message {
+                                            role: Role::User,
+                                            content: prompt_request.prompt,
+                                        });
+                                        
                                         
                                         let chat_input = ChatInput {
                                             model: chat_gpt_lib_rs::Model::Gpt_4o,
