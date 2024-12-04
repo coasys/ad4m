@@ -307,8 +307,14 @@ impl AIService {
     }
 
     async fn build_remote_gpt4(model_id: String, api_key: String, base_url: Url) -> ChatGPTClient {
+        let mut url = base_url;
+        if let Some(segments) = url.path_segments() {
+            if segments.clone().next() == Some("v1") {
+                let _ = url.set_path(&segments.skip(1).collect::<Vec<_>>().join("/"));
+            }
+        }
         publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
-        let client = ChatGPTClient::new(&api_key, &base_url.to_string());
+        let client = ChatGPTClient::new(&api_key, &url.to_string());
         publish_model_status(model_id.clone(), 100.0, "Loading", false).await;
         client
     }
