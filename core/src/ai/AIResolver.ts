@@ -114,7 +114,7 @@ export default class AIResolver {
         ]
     }
 
-    @Mutation(returns => Boolean)
+    @Mutation(returns => String)
     aiAddModel(@Arg("model", type => ModelInput) model: ModelInput): string {
         // In a real implementation, this would add the model to storage
         return "new-model-id"
