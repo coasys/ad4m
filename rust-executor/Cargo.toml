@@ -114,6 +114,7 @@ futures-util = "0.3.30"
 futures-channel = "0.3.30"
 rodio = "*"
 libc = "0.2.162"
+chat-gpt-lib-rs = "0.5.1"
 
 [dev-dependencies]
 maplit = "1.0.2"

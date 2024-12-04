@@ -9,6 +9,7 @@ use crate::types::{AITask, LocalModel, Model, ModelType};
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use candle_core::Device;
+use chat_gpt_lib_rs::{ChatGPTClient, ChatInput, Message, Role};
 use deno_core::error::AnyError;
 use futures::{FutureExt, SinkExt};
 use holochain::test_utils::itertools::Itertools;
@@ -16,7 +17,7 @@ use kalosm::language::*;
 use kalosm::sound::TextStream;
 use kalosm::sound::*;
 use std::collections::HashMap;
-use std::future::{Future, IntoFuture};
+use std::future::{Future};
 use std::panic::catch_unwind;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -84,7 +85,7 @@ enum LLMTaskRequest {
 
 enum LlmModel {
     Local(Llama),
-    Remote(Gpt3_5),
+    Remote(ChatGPTClient),
 }
 
 async fn publish_model_status(model_name: String, progress: f32, status: &str, downloaded: bool) {
@@ -305,18 +306,11 @@ impl AIService {
         Ok(llama)
     }
 
-    async fn build_remote_gpt4(model_id: String, api_key: String, base_url: Url) -> Gpt3_5 {
+    async fn build_remote_gpt4(model_id: String, api_key: String, base_url: Url) -> ChatGPTClient {
         publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
-
-        // Build Gpt3_5 using the external API endpoint
-        let gpt4 = Gpt3_5::builder()
-            .with_base_url(base_url.as_str())
-            .with_api_key(&api_key)
-            .build();
-
+        let client = ChatGPTClient::new(&api_key, &base_url.to_string());
         publish_model_status(model_id.clone(), 100.0, "Loading", false).await;
-
-        gpt4
+        client
     }
 
     async fn spawn_llm_model(&self, model_config: crate::types::Model) -> Result<()> {
@@ -417,25 +411,35 @@ impl AIService {
                             },
 
                             LLMTaskRequest::Prompt(prompt_request) => match model {
-                                LlmModel::Remote(ref mut gpt) => {
+                                LlmModel::Remote(ref mut remote_client) => {
                                     if let Some(task) =
                                         task_descriptions.get(&prompt_request.task_id)
                                     {
-                                        let mut lines =
-                                            vec![format!("You are: {}", task.system_prompt)];
-                                        for example in task.prompt_examples.iter() {
-                                            lines.push(format!("Input: {}", example.input));
-                                            lines.push(format!("Output: {}", example.output));
-                                        }
-                                        lines.push(format!("Input: {}", prompt_request.prompt));
-                                        lines.push("Output:".to_string());
+                                        let mut messages = vec![
+                                            Message {
+                                                role: Role::System,
+                                                content: task.system_prompt.clone(),
+                                            }
+                                        ];
 
-                                        let prompt = lines.join("\n");
-                                        match rt.block_on(
-                                            gpt.stream_text(&prompt)
-                                                .with_max_length(1024)
-                                                .into_future(),
-                                        ) {
+                                        for example in task.prompt_examples.iter() {
+                                            messages.push(Message {
+                                                role: Role::User,
+                                                content: example.input.clone(),
+                                            });
+                                            messages.push(Message {
+                                                role: Role::Assistant,
+                                                content: example.output.clone(),
+                                            })
+                                        }
+                                        
+                                        let chat_input = ChatInput {
+                                            model: chat_gpt_lib_rs::Model::Gpt_4o,
+                                            messages,
+                                            ..Default::default()
+                                        };
+
+                                        match rt.block_on(remote_client.chat(chat_input)) {
                                             Err(e) => {
                                                 let _ = prompt_request.result_sender.send(Err(
                                                     anyhow!(
@@ -444,10 +448,14 @@ impl AIService {
                                                     ),
                                                 ));
                                             }
-                                            Ok(mut stream) => {
-                                                let response = rt.block_on(stream.all_text());
-                                                let _ =
-                                                    prompt_request.result_sender.send(Ok(response));
+                                            Ok(response) => {
+                                                let result = response
+                                                    .choices
+                                                    .first()
+                                                    .map(|choice| choice.message.content.clone())
+                                                    .ok_or(anyhow!("Got response with no choice"));
+
+                                                let _ = prompt_request.result_sender.send(result);
                                             }
                                         }
                                     } else {
