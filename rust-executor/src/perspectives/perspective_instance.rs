@@ -417,7 +417,20 @@ impl PerspectiveInstance {
             return Ok(None);
         }
 
-        // ... existing permission checks ...
+        let mut can_commit = false;
+        if !self.created_from_join {
+            can_commit = true;
+        } else if let Some(link_language) = self.link_language.lock().await.as_mut() {
+            if link_language.current_revision().await?.is_some() {
+                can_commit = true;
+            }
+        };
+
+        if !can_commit {
+            return Err(anyhow!(
+                "Cannot commit diff. Not yet synced with neighbourhood..."
+            ));
+        }
 
         let mut timer = self.commit_debounce_timer.lock().await;
         let mut immediate_commits = self.immediate_commits_remaining.lock().await;
