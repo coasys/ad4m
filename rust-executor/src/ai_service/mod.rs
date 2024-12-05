@@ -258,14 +258,23 @@ impl AIService {
     // LLM
     // -------------------------------------
 
-    fn new_candle_device() -> Result<Device> {
-        Ok(if cfg!(feature = "cuda") {
-            Device::new_cuda(0)?
+    fn new_candle_device() -> Device {
+        let non_accelerated_message = "Could not get accelerated Candle device. Defaulting to CPU.";
+        if cfg!(feature = "cuda") {
+            Device::new_cuda(0).unwrap_or_else(|e| {
+                println!("{} {:?}", non_accelerated_message, e);
+                error!("{} {:?}", non_accelerated_message, e);
+                Device::Cpu
+            })
         } else if cfg!(feature = "metal") {
-            Device::new_metal(0)?
+            Device::new_metal(0).unwrap_or_else(|e| {
+                println!("{} {:?}", non_accelerated_message, e);
+                error!("{} {:?}", non_accelerated_message, e);
+                Device::Cpu
+            })
         } else {
             Device::Cpu
-        })
+        }
     }
     async fn build_local_llama_from_string(
         model_id: String,
@@ -292,7 +301,7 @@ impl AIService {
 
         // Build the local Llama model
         let llama = llama
-            .with_device(Self::new_candle_device().expect("Couldn't create new candle device"))
+            .with_device(Self::new_candle_device())
             .build_with_loading_handler({
                 let model_id = model_id.clone();
                 move |progress| {
