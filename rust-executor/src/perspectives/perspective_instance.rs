@@ -145,6 +145,9 @@ pub struct PerspectiveInstance {
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<Mutex<Option<Language>>>,
     links_have_changed: Arc<Mutex<bool>>,
+    commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
+    pending_diffs: Arc<Mutex<Vec<PerspectiveDiff>>>,
+    immediate_commits_remaining: Arc<Mutex<u32>>,
 }
 
 impl PerspectiveInstance {
@@ -162,6 +165,9 @@ impl PerspectiveInstance {
             prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(Mutex::new(None)),
             links_have_changed: Arc::new(Mutex::new(false)),
+            commit_debounce_timer: Arc::new(Mutex::new(None)),
+            pending_diffs: Arc::new(Mutex::new(Vec::new())),
+            immediate_commits_remaining: Arc::new(Mutex::new(3)), // Default to 3 immediate commits
         }
     }
 
@@ -422,15 +428,82 @@ impl PerspectiveInstance {
             }
         };
 
-        if can_commit {
+
+        if !can_commit {
+            return Err(anyhow!("Cannot commit diff. Not yet synced with neighbourhood..."));
+        }
+
+        let mut timer = self.commit_debounce_timer.lock().await;
+        let mut immediate_commits = self.immediate_commits_remaining.lock().await;
+        
+        if *immediate_commits > 0 {
+            // Process immediate commit
+            *immediate_commits -= 1;
             if let Some(link_language) = self.link_language.lock().await.as_mut() {
                 return link_language.commit(diff.clone()).await;
             }
         }
 
-        Err(anyhow!(
-            "Cannot commit diff. Not yet synced with neighbourhood..."
-        ))
+        // Start or extend debounce timer
+        let now = tokio::time::Instant::now();
+        if timer.is_none() || timer.unwrap().elapsed() >= Duration::from_secs(1) {
+            // Start new timer and commit
+            *timer = Some(now);
+            if let Some(link_language) = self.link_language.lock().await.as_mut() {
+                return link_language.commit(diff.clone()).await;
+            }
+        } else {
+            // Add to pending diffs
+            let mut pending = self.pending_diffs.lock().await;
+            pending.push(diff.clone());
+            
+            // Clone what we need for the delayed task
+            let self_clone = self.clone();
+            let timer_clone = *timer.as_ref().unwrap();
+            
+            // Spawn delayed merge-and-commit task
+            tokio::spawn(async move {
+                let wait_duration = Duration::from_secs(1).saturating_sub(timer_clone.elapsed());
+                sleep(wait_duration).await;
+                
+                // Merge and commit pending diffs
+                let mut pending = self_clone.pending_diffs.lock().await;
+                if !pending.is_empty() {
+                    let merged_diff = Self::merge_diffs(pending.drain(..).collect());
+                    if let Some(link_language) = self_clone.link_language.lock().await.as_mut() {
+                        if let Err(e) = link_language.commit(merged_diff).await {
+                            log::error!("Error committing merged diffs: {:?}", e);
+                        }
+                    }
+                }
+            });
+        }
+
+        Ok(None)
+    }
+
+    // Helper method to merge multiple PerspectiveDiffs
+    fn merge_diffs(diffs: Vec<PerspectiveDiff>) -> PerspectiveDiff {
+        let mut merged = PerspectiveDiff {
+            additions: Vec::new(),
+            removals: Vec::new(),
+        };
+
+        for diff in diffs {
+            merged.additions.extend(diff.additions);
+            merged.removals.extend(diff.removals);
+        }
+
+        // Remove duplicates if needed
+        merged.additions.dedup();
+        merged.removals.dedup();
+
+        merged
+    }
+
+    // Add method to configure immediate commits
+    pub async fn set_immediate_commits(&self, count: u32) {
+        *self.immediate_commits_remaining.lock().await = count;
     }
 
     fn spawn_commit_and_handle_error(&self, diff: &PerspectiveDiff) {
