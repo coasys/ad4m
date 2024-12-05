@@ -88,17 +88,13 @@ enum LlmModel {
     Remote(ChatGPTClient),
 }
 
-async fn publish_model_status(model_name: String, progress: f32, status: &str, downloaded: bool) {
+async fn publish_model_status(model_name: String, progress: f32, status: &str, downloaded: bool, loaded: bool) {
     let model = AIModelLoadingStatus {
         model: model_name.clone(),
         progress: progress as f64,
         status: status.to_string(),
-        downloaded: if downloaded { progress == 100.0 } else { true },
-        loaded: if !downloaded {
-            progress == 100.0
-        } else {
-            false
-        },
+        downloaded,
+        loaded,
     };
 
     let _ = Ad4mDb::with_global_instance(|db| {
@@ -122,13 +118,14 @@ async fn publish_model_status(model_name: String, progress: f32, status: &str, d
 }
 
 async fn handle_progress(model_id: String, loading: ModelLoadingProgress) {
-    let progress = loading.progress();
+    let progress = loading.progress() * 100.0;
     let status = if progress < 100.0 {
         "Loading".to_string()
     } else {
         "Loaded".to_string()
     };
-    publish_model_status(model_id.clone(), progress, &status, false).await;
+    println!("Progress update: {}% for model {}", progress, model_id); // Add logging
+    publish_model_status(model_id.clone(), progress, &status, false, false).await;
 }
 
 impl AIService {
@@ -271,7 +268,7 @@ impl AIService {
         model_id: String,
         model_size_string: String,
     ) -> Result<Llama> {
-        publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
+        publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
 
         let llama = match model_size_string.as_str() {
             // Local TinyLlama models
@@ -296,12 +293,14 @@ impl AIService {
             .build_with_loading_handler({
                 let model_id = model_id.clone();
                 move |progress| {
-                    tokio::spawn(handle_progress(model_id.clone(), progress));
+                    println!("progress: {}", progress.progress());
+                    let _ =
+                        futures::executor::block_on(handle_progress(model_id.clone(), progress));
                 }
             })
             .await?;
 
-        publish_model_status(model_id.clone(), 100.0, "Loaded", false).await;
+        publish_model_status(model_id.clone(), 100.0, "Downloaded", true, false).await;
 
         Ok(llama)
     }
@@ -313,9 +312,9 @@ impl AIService {
                 let _ = url.set_path(&segments.skip(1).collect::<Vec<_>>().join("/"));
             }
         }
-        publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
+        publish_model_status(model_id.clone(), 0.0, "Initializing", false, false).await;
         let client = ChatGPTClient::new(&api_key, &url.to_string());
-        publish_model_status(model_id.clone(), 100.0, "Loading", false).await;
+        publish_model_status(model_id.clone(), 100.0, "Initializing", true, false).await;
         client
     }
 
@@ -350,6 +349,13 @@ impl AIService {
                     Ok(m) => m,
                     Err(e) => {
                         error!("Failed to build LLM model: {}", e);
+                        rt.block_on(publish_model_status(
+                            model_config.id,
+                            100.0,
+                            &format!("Failed to build LLM model: {}", e),
+                            true,
+                            false,
+                        ));
                         return;
                     }
                 };
@@ -357,6 +363,8 @@ impl AIService {
                 let mut tasks = HashMap::<String, Task>::new();
                 let mut task_descriptions = HashMap::<String, AITask>::new();
                 let idle_delay = Duration::from_millis(1);
+
+                rt.block_on(publish_model_status(model_config.id.clone(), 100.0, "Ready", true, true));
 
                 loop {
                     match rt.block_on(async {
@@ -376,6 +384,7 @@ impl AIService {
                                     );
                                 }
                                 LlmModel::Local(ref mut llama) => {
+                                    rt.block_on(publish_model_status(model_config.id.clone(), 100.0, "Spawning task...", true, true));
                                     let task_description = spawn_request.task;
                                     let task =
                                         Task::builder(task_description.system_prompt.clone())
@@ -410,9 +419,10 @@ impl AIService {
                                         let _ = spawn_request.result_sender.send(Ok(()));
                                     } else {
                                         let _ = spawn_request.result_sender.send(Err(anyhow!(
-                                            "Couldn't run task without panicks"
+                                            "Couldn't run task without panics"
                                         )));
                                     }
+                                    rt.block_on(publish_model_status(model_config.id.clone(), 100.0, "Ready", true, true));
                                 }
                             },
 
@@ -686,7 +696,7 @@ impl AIService {
 
                 let model = rt
                     .block_on(async {
-                        publish_model_status(model_id.clone(), 0.0, "Loading", false).await;
+                        publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
 
                         let bert = Bert::builder()
                             .with_device(Device::Cpu)
@@ -698,7 +708,7 @@ impl AIService {
                             })
                             .await;
 
-                        publish_model_status(model_id.clone(), 100.0, "Loaded", false).await;
+                        publish_model_status(model_id.clone(), 100.0, "Loaded", true, false).await;
 
                         bert
                     })
@@ -862,7 +872,7 @@ impl AIService {
 
     async fn load_transcriber_model(model: &crate::types::Model) {
         let id = &model.id;
-        publish_model_status(id.clone(), 0.0, "Loading", false).await;
+        publish_model_status(id.clone(), 0.0, "Loading", false, false).await;
 
         let _ = WhisperBuilder::default()
             .with_source(WhisperSource::Base)
@@ -875,7 +885,7 @@ impl AIService {
             })
             .await;
 
-        publish_model_status(id.clone(), 100.0, "Loaded", false).await;
+        publish_model_status(id.clone(), 100.0, "Loaded", true, false).await;
     }
 }
 

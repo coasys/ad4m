@@ -26,8 +26,27 @@ export default function ModelCard(props: {
 
   function statusText() {
     if (!status) return "Checking status...";
-    else if (downloaded && loaded) return "Ready";
-    return `${downloaded ? "Loading" : "Downloading"}: ${progress?.toFixed(2) || 0}%`;
+    
+    let result = ""
+    try {
+      
+
+      if (!downloaded) {
+        result += `Downloading ${progress?.toFixed(2) || 0}% `
+      }
+
+      if (loaded) {
+        result += "Loaded! "
+      }
+
+      result += `${status}`
+      
+      return result
+    } catch(e){
+      alert(e)
+      result += `${e}`
+    }
+    return result
   }
 
   return (
