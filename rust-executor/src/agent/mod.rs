@@ -40,7 +40,8 @@ pub fn signing_key_id() -> String {
 }
 
 pub fn did() -> String {
-    did_document().id.clone()
+    AgentService::with_global_instance(|a| a.did.clone())
+        .expect("DID requested but not yet set in AgentService")
 }
 
 pub fn check_keys_and_create(did: String) -> did_key::Document {
@@ -159,7 +160,9 @@ impl AgentService {
         let global_instance_arc = AgentService::global_instance();
         let lock_result = global_instance_arc.lock();
         let agent_service_lock = lock_result.expect("Couldn't get lock on Ad4mDb");
-        let agent_service_ref = agent_service_lock.as_ref().expect("Ad4mDb not initialized");
+        let agent_service_ref = agent_service_lock
+            .as_ref()
+            .expect("AgentService not initialized");
         func(agent_service_ref)
     }
 
@@ -170,7 +173,9 @@ impl AgentService {
         let global_instance_arc = AgentService::global_instance();
         let lock_result = global_instance_arc.lock();
         let mut agent_service_lock = lock_result.expect("Couldn't get lock on Ad4mDb");
-        let agent_service_mut = agent_service_lock.as_mut().expect("Ad4mDb not initialized");
+        let agent_service_mut = agent_service_lock
+            .as_mut()
+            .expect("AgentService not initialized");
         func(agent_service_mut)
     }
 
@@ -232,16 +237,20 @@ impl AgentService {
 
     pub fn create_new_keys(&mut self) {
         let wallet_instance = Wallet::instance();
-        {
+        let did = {
             let mut wallet = wallet_instance.lock().expect("wallet lock");
             let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
             wallet_ref.generate_keypair("main".to_string());
-        }
+            wallet_ref
+                .get_did_document(&"main".to_string())
+                .expect("couldn't get DID document for keys that were just generated above")
+                .id
+        };
 
         self.did_document = Some(serde_json::to_string(&did_document()).unwrap());
-        self.did = Some(did());
+        self.did = Some(did.clone());
         self.agent = Some(Agent {
-            did: did(),
+            did,
             perspective: Some(Perspective { links: vec![] }),
             direct_message_language: None,
         });
@@ -341,12 +350,23 @@ mod tests {
 
     use super::*;
     use crate::agent::signatures::verify_string_signed_by_did;
-    use crate::test_utils::setup_wallet;
+    use crate::test_utils::{setup_agent, setup_wallet};
     use itertools::Itertools;
+
+    use once_cell::sync::OnceCell;
+
+    static SETUP: OnceCell<()> = OnceCell::new();
+
+    fn ensure_setup() {
+        SETUP.get_or_init(|| {
+            setup_wallet();
+            setup_agent();
+        });
+    }
 
     #[test]
     fn test_sign_and_verify_string_hex_roundtrip() {
-        setup_wallet();
+        ensure_setup();
         let test_message = "Hello, World!".to_string();
         let signature = sign_string_hex(test_message.clone()).expect("Failed to sign message");
         let did = did();
@@ -360,7 +380,7 @@ mod tests {
 
     #[test]
     fn test_create_signed_expression() {
-        setup_wallet();
+        ensure_setup();
         let signed_expression = create_signed_expression(json!({"test": "data"}))
             .expect("Failed to create signed expression");
         assert!(
@@ -387,7 +407,7 @@ mod tests {
 
     #[test]
     fn test_agent_signature_roundtrip() {
-        setup_wallet();
+        ensure_setup();
         let test_message = "Agent signature test".to_string();
         let agent_signature = AgentSignature::from_message(test_message.clone())
             .expect("Failed to create agent signature");
@@ -402,7 +422,7 @@ mod tests {
 
     //#[test]
     fn _test_create_signed_expression_and_verify_with_changed_sorting() {
-        setup_wallet();
+        ensure_setup();
         let json_value = json!({"key2": "value1", "key1": "value2"});
         let signed_expression =
             create_signed_expression(json_value).expect("Failed to create signed expression");
@@ -426,7 +446,7 @@ mod tests {
 
     #[test]
     fn test_create_signed_expression_with_data_string() {
-        setup_wallet();
+        ensure_setup();
         let json_value =
             serde_json::Value::String(r#"{"key2": "value1", "key1": "value2"}"#.to_string());
         let signed_expression =

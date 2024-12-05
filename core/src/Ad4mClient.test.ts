@@ -1153,6 +1153,87 @@ describe('Ad4mClient', () => {
         })
     })
     describe('.ai', () => {
+        it('getModels smoke test', async () => {
+            const models = await ad4mClient.ai.getModels();
+            expect(models).toBeDefined();
+            expect(Array.isArray(models)).toBe(true);
+            if (models.length > 0) {
+                expect(models[0]).toHaveProperty('name');
+                expect(models[0]).toHaveProperty('api');
+                expect(models[0]).toHaveProperty('local');
+            }
+        })
+
+        it('addModel smoke test', async () => {
+            const newModel = {
+                name: "New Test Model",
+                api: {
+                    baseUrl: "https://api.newexample.com",
+                    apiKey: "new-test-api-key",
+                    apiType: "OpenAi"
+                },
+                local: {
+                    fileName: "new-test-model.bin",
+                    tokenizerSource: "new-test-tokenizer",
+                    modelParameters: "{}"
+                },
+                modelType: "LLM"
+            };
+            const result = await ad4mClient.ai.addModel(newModel);
+            expect(result).toBe("new-model-id");
+        })
+
+        it('updateModel smoke test', async () => {
+            const modelId = "test-model-id";
+            const updatedModel = {
+                name: "Updated Test Model",
+                api: {
+                    baseUrl: "https://api.updatedexample.com",
+                    apiKey: "updated-test-api-key", 
+                    apiType: "OpenAi"
+                },
+                local: {
+                    fileName: "updated-test-model.bin",
+                    tokenizerSource: "updated-test-tokenizer",
+                    modelParameters: "{}"
+                },
+                modelType: "LLM"
+            };
+            const result = await ad4mClient.ai.updateModel(modelId, updatedModel);
+            expect(result).toBe(true);
+        })
+
+        it('removeModel smoke test', async () => {
+            const modelName = "Test Model to Remove";
+            const result = await ad4mClient.ai.removeModel(modelName);
+            expect(result).toBe(true);
+        })
+
+        // skip this because ModelType is a string enum that can't be annotated for
+        // TypeGraphQL without changing it to a real enum.
+        // This all works with the Rust resolvers in AD4M,
+        // as the intergration tests demonstrate.
+        it.skip('setDefaultModel and getDefaultModel smoke test', async () => {
+            const modelName = "Test Model";
+            const modelType = "LLM";
+            
+            const setResult = await ad4mClient.ai.setDefaultModel(modelType, modelName);
+            expect(setResult).toBe(true);
+
+            const model = await ad4mClient.ai.getDefaultModel(modelType);
+            expect(model).toBeDefined();
+            expect(model.name).toBe("Default Test Model");
+            expect(model.api).toBeDefined();
+            expect(model.api.baseUrl).toBe("https://api.example.com");
+            expect(model.api.apiKey).toBe("test-api-key");
+            expect(model.api.apiType).toBe("OpenAi");
+            expect(model.local).toBeDefined();
+            expect(model.local.fileName).toBe("test-model.bin");
+            expect(model.local.tokenizerSource).toBe("test-tokenizer");
+            expect(model.local.modelParameters).toBe("{}");
+            expect(model.modelType).toBe(modelType);
+        })
+
         it('embed()', async () => {
             const vector = await ad4mClient.ai.embed("model", "test ets")
             expect(vector[0]).toEqual(0)

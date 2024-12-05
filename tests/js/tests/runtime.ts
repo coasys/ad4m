@@ -1,7 +1,7 @@
 import { TestContext } from './integration.test'
 import fs from "fs";
 import { expect } from "chai";
-import { Notification, NotificationInput, TriggeredNotification } from '@coasys/ad4m/lib/src/runtime/RuntimeResolver';
+import { NotificationInput, TriggeredNotification } from '@coasys/ad4m/lib/src/runtime/RuntimeResolver';
 import sinon from 'sinon';
 import { sleep } from '../utils/utils';
 import { ExceptionType, Link } from '@coasys/ad4m';

@@ -1,4 +1,5 @@
 #![allow(non_snake_case)]
+
 use crate::{
     agent::create_signed_expression,
     ai_service::AIService,
@@ -8,7 +9,7 @@ use crate::{
         perspective_instance::{PerspectiveInstance, SdnaType},
         remove_perspective, update_perspective,
     },
-    types::{AITask, DecoratedLinkExpression, Link, LinkExpression},
+    types::{AITask, DecoratedLinkExpression, Link, LinkExpression, ModelType},
 };
 use crate::{
     db::Ad4mDb,
@@ -16,7 +17,6 @@ use crate::{
     runtime_service::RuntimeService,
     types::Notification,
 };
-
 use coasys_juniper::{graphql_object, graphql_value, FieldError, FieldResult};
 
 use super::graphql_types::*;
@@ -1212,6 +1212,63 @@ impl Mutation {
         Ok(true)
     }
 
+    async fn ai_add_model(
+        &self,
+        context: &RequestContext,
+        model: ModelInput,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        let id = AIService::global_instance().await?.add_model(model).await?;
+        Ok(id)
+    }
+
+    async fn ai_update_model(
+        &self,
+        context: &RequestContext,
+        model_id: String,
+        model: ModelInput,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        Ad4mDb::with_global_instance(|db| db.update_model(&model_id, &model))
+            .map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
+    async fn ai_remove_model(
+        &self,
+        context: &RequestContext,
+        model_id: String,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        Ad4mDb::with_global_instance(|db| db.remove_model(&model_id)).map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
+    async fn ai_set_default_model(
+        &self,
+        context: &RequestContext,
+        model_type: ModelType,
+        model_id: String,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+
+        let maybe_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+            .map_err(|e| e.to_string())?;
+        if maybe_model.is_none() {
+            return Err(FieldError::new(
+                "Model not found",
+                graphql_value!({ "model_id": model_id }),
+            ));
+        };
+
+        AIService::global_instance()
+            .await?
+            .set_default_model(model_type, model_id)
+            .await?;
+
+        Ok(true)
+    }
+
     async fn ai_add_task(
         &self,
         context: &RequestContext,
@@ -1278,11 +1335,14 @@ impl Mutation {
     async fn ai_embed(
         &self,
         context: &RequestContext,
-        _model_id: String,
+        model_id: String,
         text: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
-        let vector = AIService::global_instance().await?.embed(text).await?;
+        let vector = AIService::global_instance()
+            .await?
+            .embed(model_id, text)
+            .await?;
         let json_string = serde_json::to_string(&vector)
             .map_err(|e| FieldError::from(format!("Failed to serialize vector: {}", e)))?;
 

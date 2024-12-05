@@ -26,7 +26,7 @@ dependencies = [
  "ad4m-executor",
  "anyhow",
  "chrono",
- "clap 4.5.16",
+ "clap 4.5.11",
  "colour",
  "ctrlc",
  "dirs 4.0.0",
@@ -51,7 +51,7 @@ dependencies = [
  "anyhow",
  "async-tungstenite",
  "chrono",
- "clap 4.5.16",
+ "clap 4.5.11",
  "dirs 4.0.0",
  "futures",
  "graphql-ws-client",
@@ -75,9 +75,11 @@ dependencies = [
  "ad4m-client",
  "argon2",
  "base64 0.21.7",
+ "candle-core",
+ "chat-gpt-lib-rs",
  "chrono",
  "cid",
- "clap 4.5.16",
+ "clap 4.5.11",
  "coasys_juniper",
  "coasys_juniper_graphql_transport_ws",
  "coasys_juniper_subscriptions",
@@ -556,15 +558,16 @@ dependencies = [
 
 [[package]]
 name = "arroy"
-version = "0.3.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73897699bf04bac935c0b120990d2a511e91e563e0f9769f9c8bb983d98dfbc9"
+checksum = "dfc5f272f38fa063bbff0a7ab5219404e221493de005e2b4078c62d626ef567e"
 dependencies = [
  "bytemuck",
  "byteorder",
  "heed",
  "log",
  "memmap2 0.9.4",
+ "nohash",
  "ordered-float 4.2.2",
  "rand 0.8.5",
  "rayon",
@@ -967,9 +970,9 @@ checksum = "8b75356056920673b02621b35afd0f7dda9306d03c79a30f5c56c44cf256e3de"
 
 [[package]]
 name = "async-trait"
-version = "0.1.82"
+version = "0.1.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a27b8a3a6e1a44fa4c8baf1f653e4172e81486d4941f2237e20dc2d0cf4ddff1"
+checksum = "721cae7de5c34fbb2acd27e21e6d2cf7b886dce0c27388d46c4e6c47ea4318dd"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1676,18 +1679,18 @@ dependencies = [
 
 [[package]]
 name = "bytemuck"
-version = "1.17.1"
+version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "773d90827bc3feecfb67fab12e24de0749aad83c74b9504ecde46237b5cd24e2"
+checksum = "8334215b81e418a0a7bdb8ef0849474f40bb10c8b71f1c4ed315cff49f32494d"
 dependencies = [
  "bytemuck_derive",
 ]
 
 [[package]]
 name = "bytemuck_derive"
-version = "1.7.1"
+version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cc8b54b395f2fcfbb3d90c47b01c7f444d94d05bdeb775811dec868ac3bbc26"
+checksum = "bcfcc3cd946cb52f0bbfdbbcfa2f4e24f75ebb6c0e1002f7c25904fada18b9ec"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1793,9 +1796,9 @@ dependencies = [
 
 [[package]]
 name = "candle-core"
-version = "0.6.0"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5b18de020c2729dbf7ac390325312644808b6ba9b7962f1f724e9185b1d53c7"
+checksum = "7e1a39b963e261c58017edf2007e5b63425ad21538aaaf51fe23d1da41703701"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -1820,18 +1823,18 @@ dependencies = [
 
 [[package]]
 name = "candle-kernels"
-version = "0.6.0"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bc0a71be8b2f0950b63fd602a5e10a74a4f94a5fd63059ae455e96163389488"
+checksum = "539cbfbf2d1d68a6ed97115e579c77c98f8ed0cfe7edbc6d7d30d2ac0c9e3d50"
 dependencies = [
  "bindgen_cuda",
 ]
 
 [[package]]
 name = "candle-metal-kernels"
-version = "0.6.0"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f889aacd02fd999620a0435133d7cf3b58c81ef9dd5e47c38939b7a72345ea86"
+checksum = "166a92826d615d98b205e346e52128fa0439f2ab3302587403fdc558b4219e19"
 dependencies = [
  "metal 0.27.0",
  "once_cell",
@@ -1841,9 +1844,9 @@ dependencies = [
 
 [[package]]
 name = "candle-nn"
-version = "0.6.0"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b006b30f66a0d94fc9cef0ac4de6ce510565f35ae2c6c35ce5d4aacfb0fc8eeb"
+checksum = "898f8d21b8bdf559a1c8635e2db8386b2134015cd3003c18c1a30a22a67daec6"
 dependencies = [
  "accelerate-src",
  "candle-core",
@@ -1859,9 +1862,9 @@ dependencies = [
 
 [[package]]
 name = "candle-transformers"
-version = "0.6.0"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f0d4eb6a0d9279d5829b06b2bf3caa117904eefd6dcf879d16e687c4a84034c"
+checksum = "06b8a130a8ac1d1e20696d89f7a52948902e037ad0eec085fceb77021007cfee"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -2029,6 +2032,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "chat-gpt-lib-rs"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81c82355896912eee45db33600f8ad976ad813f17bcf0cff58467225a1fe5c9c"
+dependencies = [
+ "env_logger 0.11.5",
+ "log",
+ "reqwest 0.12.9",
+ "rustls 0.23.12",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2111,9 +2129,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.5.16"
+version = "4.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed6719fffa43d0d87e5fd8caeab59be1554fb028cd30edc88fc4369b17971019"
+checksum = "35723e6a11662c2afb578bcf0b88bf6ea8e21282a953428f240574fcc3a2b5b3"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -2121,9 +2139,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.5.15"
+version = "4.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "216aec2b177652e3846684cbfe25c9964d18ec45234f0f5da5157b207ed1aab6"
+checksum = "49eb96cbfa7cfa35017b7cd548c75b14c3118c98b423041d70562665e07fb0fa"
 dependencies = [
  "anstream",
  "anstyle",
@@ -2134,9 +2152,9 @@ dependencies = [
 
 [[package]]
 name = "clap_derive"
-version = "4.5.13"
+version = "4.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "501d359d5f3dcaf6ecdeee48833ae73ec6e42723a1e52419c79abf9507eec0a0"
+checksum = "5d029b67f89d30bbb547c89fd5161293c0aec155fc691d7924b64550662db93e"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -3085,9 +3103,9 @@ dependencies = [
 
 [[package]]
 name = "cudarc"
-version = "0.11.9"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a5bd4d1eee570c3b2ac64ed114125517dd1e541d88dd28fc259f1de4dba8d60"
+checksum = "38cd60a9a42ec83a2ed7effb0b1f073270264ea99da7acfc44f7e8d74dee0384"
 dependencies = [
  "half 2.4.1",
  "libloading 0.8.5",
@@ -5128,6 +5146,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f2c92ceda6ceec50f43169f9ee8424fe2db276791afde7b2cd8bc084cb376ab"
 dependencies = [
  "log",
+ "regex",
 ]
 
 [[package]]
@@ -5149,7 +5168,10 @@ version = "0.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13fa619b91fb2381732789fc5de83b45675e882f66623b7d8cb4f643017018d"
 dependencies = [
+ "anstream",
+ "anstyle",
  "env_filter",
+ "humantime",
  "log",
 ]
 
@@ -5547,9 +5569,9 @@ dependencies = [
 
 [[package]]
 name = "flume"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55ac459de2512911e4b674ce33cf20befaba382d05b62b008afc1c8b57cbf181"
+checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
 dependencies = [
  "spin 0.9.8",
 ]
@@ -5567,7 +5589,7 @@ source = "git+https://github.com/pdf-rs/font#78a8d9c58b4aafddd309ab7bbefd3bb5c34
 dependencies = [
  "decorum",
  "indexmap 1.9.3",
- "istring 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "istring 0.3.4",
  "itertools 0.10.5",
  "log",
  "nom 5.1.3",
@@ -6399,10 +6421,12 @@ dependencies = [
 
 [[package]]
 name = "globalcache"
-version = "0.2.4"
-source = "git+https://github.com/s3bk/cachelib#276f40d00528001bdcd1e1ed594157bd82c7c503"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f07c02868ebe3ffab0c273801b815f19a9fc05743b5b9da971449dd40604fe30"
 dependencies = [
  "async-trait",
+ "rustc-hash 2.0.0",
  "tuple 0.5.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "web-time",
 ]
@@ -6446,7 +6470,7 @@ version = "0.1.0"
 source = "git+https://github.com/s3bk/glyphmatcher#7bd5d40aaa8893fa4f2e07c758fa34127e176c8c"
 dependencies = [
  "font",
- "istring 0.3.4 (git+https://github.com/s3bk/istring)",
+ "istring 0.4.1",
  "itertools 0.13.0",
  "pathfinder_content",
  "pathfinder_geometry",
@@ -7324,7 +7348,7 @@ version = "0.3.2-rc.1"
 source = "git+https://github.com/coasys/holochain.git?rev=10841e49b28c17c3cb428680e2bc9259bf4ec739#10841e49b28c17c3cb428680e2bc9259bf4ec739"
 dependencies = [
  "anyhow",
- "clap 4.5.16",
+ "clap 4.5.11",
  "futures",
  "holochain_serialized_bytes",
  "holochain_types",
@@ -7343,7 +7367,7 @@ name = "holochain_cli_run_local_services"
 version = "0.3.2-rc.0"
 source = "git+https://github.com/coasys/holochain.git?rev=10841e49b28c17c3cb428680e2bc9259bf4ec739#10841e49b28c17c3cb428680e2bc9259bf4ec739"
 dependencies = [
- "clap 4.5.16",
+ "clap 4.5.11",
  "futures",
  "holochain_trace",
  "if-addrs 0.12.0",
@@ -8477,7 +8501,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "232929e1d75fe899576a3d5c7416ad0d88dbfbb3c3d6aa00873a7408a50ddb88"
 dependencies = [
  "ahash 0.8.11",
- "clap 4.5.16",
+ "clap 4.5.11",
  "crossbeam-channel 0.5.13",
  "crossbeam-utils 0.8.20",
  "dashmap 6.0.1",
@@ -8755,8 +8779,8 @@ dependencies = [
 
 [[package]]
 name = "istring"
-version = "0.3.4"
-source = "git+https://github.com/s3bk/istring#b9424bb1e291388f145a06558c15639dc87f3058"
+version = "0.4.1"
+source = "git+https://github.com/s3bk/istring#ac7b821c94cf5a1295b4712e60b65419e4c05352"
 dependencies = [
  "serde",
 ]
@@ -8883,9 +8907,9 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.70"
+version = "0.3.72"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1868808506b929d7b0cfa8f75951347aa71bb21144b7791bae35d9bccfcfe37a"
+checksum = "6a88f1bda2bd75b0452a14784937d796722fdebfe50df998aeb3f0b7603019a9"
 dependencies = [
  "wasm-bindgen",
 ]
@@ -8975,14 +8999,17 @@ dependencies = [
 [[package]]
 name = "kalosm"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
+ "arroy",
  "async-trait",
+ "candle-core",
  "comfy-table",
  "ego-tree",
  "futures-util",
  "hdrhistogram",
+ "heed",
  "image 0.24.9",
  "kalosm-common",
  "kalosm-language",
@@ -8994,6 +9021,7 @@ dependencies = [
  "once_cell",
  "rand 0.8.5",
  "serde",
+ "thiserror 2.0.3",
  "tokio",
  "tracing",
 ]
@@ -9001,7 +9029,7 @@ dependencies = [
 [[package]]
 name = "kalosm-common"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -9020,7 +9048,7 @@ dependencies = [
 [[package]]
 name = "kalosm-language"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "arroy",
@@ -9053,6 +9081,7 @@ dependencies = [
  "rbert",
  "readability",
  "reqwest 0.11.20",
+ "roaring",
  "rphi",
  "rss",
  "rustc-hash 1.1.0",
@@ -9063,6 +9092,7 @@ dependencies = [
  "srx",
  "tempfile",
  "texting_robots",
+ "thiserror 2.0.3",
  "tokenizers",
  "tokio",
  "tokio-util",
@@ -9074,7 +9104,7 @@ dependencies = [
 [[package]]
 name = "kalosm-language-model"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9101,7 +9131,7 @@ dependencies = [
 [[package]]
 name = "kalosm-llama"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9124,7 +9154,7 @@ dependencies = [
 [[package]]
 name = "kalosm-ocr"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -9143,7 +9173,7 @@ dependencies = [
 [[package]]
 name = "kalosm-parse-macro"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9153,7 +9183,7 @@ dependencies = [
 [[package]]
 name = "kalosm-sample"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "kalosm-parse-macro",
@@ -9163,7 +9193,7 @@ dependencies = [
 [[package]]
 name = "kalosm-sound"
 version = "0.3.4"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9181,6 +9211,7 @@ dependencies = [
  "kalosm-streams",
  "nnnoiseless",
  "ort",
+ "ort-sys",
  "rand 0.8.5",
  "rodio",
  "rwhisper",
@@ -9194,7 +9225,7 @@ dependencies = [
 [[package]]
 name = "kalosm-streams"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "futures-util",
  "image 0.24.9",
@@ -9205,7 +9236,7 @@ dependencies = [
 [[package]]
 name = "kalosm-vision"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "image 0.24.9",
  "kalosm-ocr",
@@ -9329,7 +9360,7 @@ name = "kitsune_p2p_bootstrap"
 version = "0.2.2-rc.0"
 source = "git+https://github.com/coasys/holochain.git?rev=10841e49b28c17c3cb428680e2bc9259bf4ec739#10841e49b28c17c3cb428680e2bc9259bf4ec739"
 dependencies = [
- "clap 4.5.16",
+ "clap 4.5.11",
  "futures",
  "kitsune_p2p_bin_data",
  "kitsune_p2p_types",
@@ -9790,9 +9821,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.162"
+version = "0.2.164"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18d287de67fe55fd7e1581fe933d965a5a9477b38e949cfa9f8574ef01506398"
+checksum = "433bfe06b8c75da9b2e3fbea6e5329ff87748f0b144ef75306e674c3f6f7c13f"
 
 [[package]]
 name = "libffi"
@@ -11064,6 +11095,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72ef4a56884ca558e5ddb05a1d1e7e1bfd9a68d9ed024c21704cc98872dae1bb"
 
 [[package]]
+name = "nohash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0f889fb66f7acdf83442c35775764b51fed3c606ab9cee51500dbde2cf528ca"
+
+[[package]]
 name = "nom"
 version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11334,7 +11371,7 @@ version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af1844ef2428cc3e1cb900be36181049ef3d3193c63e43026cfe202983b27a56"
 dependencies = [
- "proc-macro-crate 3.2.0",
+ "proc-macro-crate 3.1.0",
  "proc-macro2",
  "quote",
  "syn 2.0.87",
@@ -11858,9 +11895,9 @@ dependencies = [
 
 [[package]]
 name = "ort-sys"
-version = "2.0.0-rc.5"
+version = "2.0.0-rc.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec6fe264a9467cd0c19cbee07afe689fae9480c4706c4a1a00b5e64ff99ea83a"
+checksum = "0f2f6427193c808010b126bef45ebd33f8dee43770223a1200f84d3734d6c656"
 dependencies = [
  "flate2",
  "pkg-config",
@@ -12139,7 +12176,7 @@ checksum = "8835116a5c179084a830efb3adc117ab007512b535bc1a21c991d3b32a6b44dd"
 [[package]]
 name = "pathfinder_color"
 version = "0.5.0"
-source = "git+https://github.com/servo/pathfinder#45b7a89449d1ebc12da870d1914e1b85c6b475d0"
+source = "git+https://github.com/servo/pathfinder#1b7c8bcdaf9da3f045af6a650b5f5c00f0c5a7eb"
 dependencies = [
  "pathfinder_simd",
 ]
@@ -12147,7 +12184,7 @@ dependencies = [
 [[package]]
 name = "pathfinder_content"
 version = "0.5.0"
-source = "git+https://github.com/servo/pathfinder#45b7a89449d1ebc12da870d1914e1b85c6b475d0"
+source = "git+https://github.com/servo/pathfinder#1b7c8bcdaf9da3f045af6a650b5f5c00f0c5a7eb"
 dependencies = [
  "arrayvec 0.5.2",
  "bitflags 1.3.2",
@@ -12162,7 +12199,7 @@ dependencies = [
 [[package]]
 name = "pathfinder_geometry"
 version = "0.5.1"
-source = "git+https://github.com/servo/pathfinder#45b7a89449d1ebc12da870d1914e1b85c6b475d0"
+source = "git+https://github.com/servo/pathfinder#1b7c8bcdaf9da3f045af6a650b5f5c00f0c5a7eb"
 dependencies = [
  "log",
  "pathfinder_simd",
@@ -12171,7 +12208,7 @@ dependencies = [
 [[package]]
 name = "pathfinder_gpu"
 version = "0.5.0"
-source = "git+https://github.com/servo/pathfinder#45b7a89449d1ebc12da870d1914e1b85c6b475d0"
+source = "git+https://github.com/servo/pathfinder#1b7c8bcdaf9da3f045af6a650b5f5c00f0c5a7eb"
 dependencies = [
  "bitflags 1.3.2",
  "fxhash",
@@ -12188,7 +12225,7 @@ dependencies = [
 [[package]]
 name = "pathfinder_renderer"
 version = "0.5.0"
-source = "git+https://github.com/servo/pathfinder#45b7a89449d1ebc12da870d1914e1b85c6b475d0"
+source = "git+https://github.com/servo/pathfinder#1b7c8bcdaf9da3f045af6a650b5f5c00f0c5a7eb"
 dependencies = [
  "bitflags 1.3.2",
  "byte-slice-cast",
@@ -12216,12 +12253,12 @@ dependencies = [
 [[package]]
 name = "pathfinder_resources"
 version = "0.5.0"
-source = "git+https://github.com/servo/pathfinder#45b7a89449d1ebc12da870d1914e1b85c6b475d0"
+source = "git+https://github.com/servo/pathfinder#1b7c8bcdaf9da3f045af6a650b5f5c00f0c5a7eb"
 
 [[package]]
 name = "pathfinder_simd"
 version = "0.5.4"
-source = "git+https://github.com/servo/pathfinder#45b7a89449d1ebc12da870d1914e1b85c6b475d0"
+source = "git+https://github.com/servo/pathfinder#1b7c8bcdaf9da3f045af6a650b5f5c00f0c5a7eb"
 dependencies = [
  "rustc_version 0.4.1",
 ]
@@ -12229,7 +12266,7 @@ dependencies = [
 [[package]]
 name = "pathfinder_ui"
 version = "0.5.0"
-source = "git+https://github.com/servo/pathfinder#45b7a89449d1ebc12da870d1914e1b85c6b475d0"
+source = "git+https://github.com/servo/pathfinder#1b7c8bcdaf9da3f045af6a650b5f5c00f0c5a7eb"
 dependencies = [
  "hashbrown 0.7.2",
  "pathfinder_color",
@@ -12267,7 +12304,7 @@ dependencies = [
 [[package]]
 name = "pdf"
 version = "0.9.0"
-source = "git+https://github.com/pdf-rs/pdf#a94544dd6668f4c9b0d0037b2f3474c4d7e896aa"
+source = "git+https://github.com/pdf-rs/pdf#b69e0753c9d6adff567b911494309798e0954e6a"
 dependencies = [
  "aes",
  "bitflags 2.6.0",
@@ -12275,9 +12312,9 @@ dependencies = [
  "datasize",
  "deflate 1.0.0",
  "fax",
- "globalcache 0.2.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "globalcache 0.2.4",
  "indexmap 2.5.0",
- "istring 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "istring 0.3.4",
  "itertools 0.13.0",
  "jpeg-decoder",
  "libflate",
@@ -12295,7 +12332,7 @@ dependencies = [
 [[package]]
 name = "pdf_derive"
 version = "0.2.0"
-source = "git+https://github.com/pdf-rs/pdf#a94544dd6668f4c9b0d0037b2f3474c4d7e896aa"
+source = "git+https://github.com/pdf-rs/pdf#b69e0753c9d6adff567b911494309798e0954e6a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -12322,15 +12359,15 @@ dependencies = [
 [[package]]
 name = "pdf_render"
 version = "0.1.0"
-source = "git+https://github.com/pdf-rs/pdf_render#39a877d3dde5105ffff8f116a4dd5ae325c02867"
+source = "git+https://github.com/pdf-rs/pdf_render#24d48551c546ac285e8582a27b0ab2753eaf6a45"
 dependencies = [
  "custom_debug_derive",
  "font",
- "globalcache 0.2.4 (git+https://github.com/s3bk/cachelib)",
+ "globalcache 0.3.2",
  "glyphmatcher",
  "image 0.24.9",
  "instant",
- "istring 0.3.4 (git+https://github.com/s3bk/istring)",
+ "istring 0.4.1",
  "itertools 0.13.0",
  "log",
  "once_cell",
@@ -12988,11 +13025,11 @@ dependencies = [
 
 [[package]]
 name = "proc-macro-crate"
-version = "3.2.0"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ecf48c7ca261d60b74ab1a7b20da18bede46776b2e55535cb958eb595c5fa7b"
+checksum = "6d37c51ca738a55da99dc0c4a34860fd675453b8b36209178c2249bb13651284"
 dependencies = [
- "toml_edit 0.22.20",
+ "toml_edit 0.21.1",
 ]
 
 [[package]]
@@ -13757,7 +13794,7 @@ dependencies = [
 [[package]]
 name = "rbert"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14386,7 +14423,7 @@ dependencies = [
 [[package]]
 name = "rphi"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -14803,7 +14840,7 @@ dependencies = [
 [[package]]
 name = "rwhisper"
 version = "0.3.5"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "accelerate-src",
  "anyhow",
@@ -14830,7 +14867,7 @@ dependencies = [
 [[package]]
 name = "rwuerstchen"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15178,7 +15215,7 @@ dependencies = [
 [[package]]
 name = "segment-anything-rs"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?rev=44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75#44e05c5fe6fc72eaeaf6ccefbf8269cda54aca75"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -18036,7 +18073,7 @@ dependencies = [
  "serde",
  "serde_spanned",
  "toml_datetime",
- "toml_edit 0.22.20",
+ "toml_edit 0.22.22",
 ]
 
 [[package]]
@@ -18074,9 +18111,20 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.22.20"
+version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "583c44c02ad26b0c3f3066fe629275e50627026c51ac2e595cca4c230ce1ce1d"
+checksum = "6a8534fd7f78b5405e860340ad6575217ce99f38d4d5c8f2442cb5ecb50090e1"
+dependencies = [
+ "indexmap 2.5.0",
+ "toml_datetime",
+ "winnow 0.5.40",
+]
+
+[[package]]
+name = "toml_edit"
+version = "0.22.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ae48d6208a266e853d946088ed816055e556cc6028c5e8e2b84d9fa5dd7c7f5"
 dependencies = [
  "indexmap 2.5.0",
  "serde",
@@ -18572,7 +18620,7 @@ version = "0.0.14-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "afa882b51d1c4b4e86c9a43134674b856a8248c147d889c70c6d0f9d88541012"
 dependencies = [
- "clap 4.5.16",
+ "clap 4.5.11",
  "dirs 5.0.1",
  "futures",
  "if-addrs 0.10.2",
@@ -18987,7 +19035,7 @@ dependencies = [
 [[package]]
 name = "v8"
 version = "0.92.0"
-source = "git+https://github.com/coasys/rusty_v8.git?branch=v0.92-dll#30a2496d83f459b4d85c13c9d90e028527754ced"
+source = "git+https://github.com/coasys/rusty_v8.git?branch=v0.92-dll#4a13d4083e0abe291c2b1c769b7b612e26f6ab5d"
 dependencies = [
  "bitflags 2.6.0",
  "fslock",
@@ -19199,9 +19247,9 @@ checksum = "b8dad83b4f25e74f184f64c43b150b91efe7647395b42289f38e50566d82855b"
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.93"
+version = "0.2.95"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a82edfc16a6c469f5f44dc7b571814045d60404b55a0ee849f9bcfa2e63dd9b5"
+checksum = "128d1e363af62632b8eb57219c8fd7877144af57558fb2ef0368d0087bddeb2e"
 dependencies = [
  "cfg-if 1.0.0",
  "once_cell",
@@ -19210,9 +19258,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-backend"
-version = "0.2.93"
+version = "0.2.95"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9de396da306523044d3302746f1208fa71d7532227f15e347e2d93e4145dd77b"
+checksum = "cb6dd4d3ca0ddffd1dd1c9c04f94b868c37ff5fac97c30b97cff2d74fce3a358"
 dependencies = [
  "bumpalo",
  "log",
@@ -19237,9 +19285,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.93"
+version = "0.2.95"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "585c4c91a46b072c92e908d99cb1dcdf95c5218eeb6f3bf1efa991ee7a68cccf"
+checksum = "e79384be7f8f5a9dd5d7167216f022090cf1f9ec128e6e6a482a2cb5c5422c56"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -19247,9 +19295,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.93"
+version = "0.2.95"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afc340c74d9005395cf9dd098506f7f44e38f2b4a21c6aaacf9a105ea5e1e836"
+checksum = "26c6ab57572f7a24a4985830b120de1594465e5d500f24afe89e16b4e833ef68"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -19260,9 +19308,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.93"
+version = "0.2.95"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c62a0a307cb4a311d3a07867860911ca130c3494e8c2719593806c08bc5d0484"
+checksum = "65fc09f10666a9f147042251e0dda9c18f166ff7de300607007e96bdebc1068d"
 
 [[package]]
 name = "wasm-encoder"
@@ -19563,9 +19611,9 @@ dependencies = [
 
 [[package]]
 name = "web-sys"
-version = "0.3.70"
+version = "0.3.72"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26fdeaafd9bd129f65e7c031593c24d62186301e0c72c8978fa1678be7d532c0"
+checksum = "f6488b90108c040df0fe62fa815cbdee25124641df01814dd7282749234c6112"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -20498,9 +20546,9 @@ checksum = "1e9df38ee2d2c3c5948ea468a8406ff0db0b29ae1ffde1bcf20ef305bcc95c51"
 
 [[package]]
 name = "wry"
-version = "0.47.0"
+version = "0.47.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "553ca1ce149982123962fac2506aa75b8b76288779a77e72b12fa2fc34938647"
+checksum = "8055a1afbf8c8cbeefbd7ae209b534e92334665460c0b876188c5deb37f3be4d"
 dependencies = [
  "base64 0.22.1",
  "block2",
@@ -20661,9 +20709,9 @@ dependencies = [
 
 [[package]]
 name = "xml-rs"
-version = "0.8.21"
+version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "539a77ee7c0de333dcc6da69b177380a0b81e0dacfa4f7344c465a36871ee601"
+checksum = "af310deaae937e48a26602b730250b4949e125f468f11e6990be3e5304ddd96f"
 
 [[package]]
 name = "xml5ever"
@@ -20815,7 +20863,7 @@ version = "4.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "267db9407081e90bbfa46d841d3cbc60f59c0351838c4bc65199ecd79ab1983e"
 dependencies = [
- "proc-macro-crate 3.2.0",
+ "proc-macro-crate 3.1.0",
  "proc-macro2",
  "quote",
  "syn 2.0.87",
@@ -21041,7 +21089,7 @@ version = "4.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73e2ba546bda683a90652bac4a279bc146adad1386f25379cf73200d2002c449"
 dependencies = [
- "proc-macro-crate 3.2.0",
+ "proc-macro-crate 3.1.0",
  "proc-macro2",
  "quote",
  "syn 2.0.87",

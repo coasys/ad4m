@@ -1,23 +1,23 @@
-import Login from "./components/Login";
-import "./App.css";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useContext, useEffect, useState } from "react";
-import TrustAgent from "./components/TrustAgent";
-import Navigation from "./components/Navigation";
+import { Route, Routes } from "react-router-dom";
+import "./App.css";
+import AI from "./components/AI";
+import Apps from "./components/Apps";
 import Auth from "./components/Auth";
+import { Connect } from "./components/Connect";
+import Language from "./components/Language";
+import Login from "./components/Login";
+import Navigation from "./components/Navigation";
 import Notification from "./components/Notification";
+import Perspectives from "./components/Perspectives";
+import Settings from "./components/Settings";
+import Splashscreen from "./components/Splashscreen";
+import TrayMessage from "./components/TrayMessage";
+import TrustAgent from "./components/TrustAgent";
 import { Ad4minContext } from "./context/Ad4minContext";
 import { AgentProvider } from "./context/AgentContext";
-import { Route, Routes } from "react-router-dom";
-import Splashscreen from "./components/Splashscreen";
-import Perspectives from "./components/Perspectives";
-import Language from "./components/Language";
-import Settings from "./components/Settings";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { Connect } from "./components/Connect";
-import Apps from "./components/Apps";
-import TrayMessage from "./components/TrayMessage";
-import Tasks from "./components/Tasks";
-const appWindow = getCurrentWebviewWindow()
+const appWindow = getCurrentWebviewWindow();
 
 const App = () => {
   const [opened, setOpened] = useState(false);
@@ -73,9 +73,7 @@ const App = () => {
             path="perspective"
             element={<Perspectives setOpened={setOpened} opened={opened} />}
           />
-          <Route path="tasks" element={
-            <Tasks />
-          } />
+          <Route path="ai" element={<AI />} />
           <Route
             path="settings"
             element={
@@ -91,7 +89,9 @@ const App = () => {
         <TrustAgent candidate={candidate} handleTrustAgent={handleTrustAgent} />
       )}
       {auth && <Auth />}
-      {notifications.map((notification) => (<Notification key={notification.id} notification={notification} />))}
+      {notifications.map((notification) => (
+        <Notification key={notification.id} notification={notification} />
+      ))}
     </div>
   );
 };

@@ -5,7 +5,7 @@
   "dependencies": {
     "@apollo/client": "3.7.10",
     "@coasys/ad4m": "link:../core",
-    "@junto-foundation/junto-elements": "^0.5.5",
+    "@coasys/flux-ui": "^0.9.0",
     "@preact/preset-vite": "^2.4.0",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-clipboard-manager": "^2.0.0",
@@ -34,6 +34,7 @@
   },
   "scripts": {
     "start": "vite --host 127.0.0.1",
+    "dev": "vite --host 127.0.0.1",
     "tauri": "tauri",
     "eject": "vite eject",
     "build": "vite build",

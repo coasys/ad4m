@@ -1,11 +1,11 @@
+import "@coasys/flux-ui";
+import "@coasys/flux-ui/dist/main.css";
 import { render } from "preact";
-import App from "./App";
-import reportWebVitals from "./reportWebVitals";
-import { Ad4minProvider } from "./context/Ad4minContext";
 import { BrowserRouter as Router } from "react-router-dom";
-import "@junto-foundation/junto-elements";
-import "@junto-foundation/junto-elements/dist/main.css";
+import App from "./App";
+import { Ad4minProvider } from "./context/Ad4minContext";
 import "./index.css";
+import reportWebVitals from "./reportWebVitals";
 
 const Main = () => {
   return (
