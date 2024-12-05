@@ -1,11 +1,11 @@
-import { useContext, useState, useEffect } from "react";
+import { useContext, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { buildAd4mClient } from "../util";
 
 export function Connect() {
   const {
-    state: { connectedLaoding, connected, isUnlocked },
+    state: { connectedLoading, connected, isUnlocked },
     methods: { configureEndpoint },
   } = useContext(Ad4minContext);
 
@@ -74,7 +74,7 @@ export function Connect() {
 
   return (
     <j-flex direction="column" a="center" gap="500" style={{ margin: "auto" }}>
-      {connectedLaoding ? (
+      {connectedLoading ? (
         <j-spinner size="lg"></j-spinner>
       ) : (
         <>

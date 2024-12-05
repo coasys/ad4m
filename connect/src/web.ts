@@ -1,30 +1,27 @@
-import { html, css, LitElement } from "lit";
-import { customElement, property, state } from "lit/decorators.js";
 import { BarcodeDetectorPolyfill } from "@undecaf/barcode-detector-polyfill";
+import { css, html, LitElement } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 
 import Ad4mConnect, {
+  Ad4mConnectOptions,
   AuthStates,
   ConnectionStates,
-  Ad4mConnectOptions,
-  ConfigStates,
 } from "./core";
 
+import autoBind from "auto-bind";
+import AgentLocked from "./components/AgentLocked";
+import CouldNotMakeRequest from "./components/CouldNotMakeRequest";
+import Disconnected from "./components/Disconnected";
+import Header from "./components/Header";
+import Hosting from "./components/Hosting";
 import Loading from "./components/Loading";
+import MobileAppLogoButton from "./components/MobileAppLogoButton";
+import RequestCapability from "./components/RequestCapability";
+import ScanQRCode from "./components/ScanQRCode";
 import Settings from "./components/Settings";
 import Start from "./components/Start";
-import Disconnected from "./components/Disconnected";
-import AgentLocked from "./components/AgentLocked";
-import RequestCapability from "./components/RequestCapability";
 import VerifyCode from "./components/VerifyCode";
-import CouldNotMakeRequest from "./components/CouldNotMakeRequest";
-import ScanQRCode from "./components/ScanQRCode";
-import Header from "./components/Header";
-import autoBind from "auto-bind";
 import { getForVersion, removeForVersion, setForVersion } from "./utils";
-import Hosting from "./components/Hosting";
-import Logo from "./components/Logo";
-import AppLogo from "./components/AppLogo";
-import MobileAppLogoButton from "./components/MobileAppLogoButton";
 
 export { getAd4mClient } from "./utils";
 
@@ -48,12 +45,12 @@ const styles = css`
   :host {
     --primary-color: #fff;
     --heading-color: #fff;
-    --body-color: #FFFFFF;
-    --success-color: #88F3B4;
+    --body-color: #ffffff;
+    --success-color: #88f3b4;
     --background-color: #131533;
     --start-color: #a4adff;
     --end-color: #d273ff;
-    --gradient: #91E3FD;
+    --gradient: #91e3fd;
   }
 
   .wrapper {
@@ -66,6 +63,7 @@ const styles = css`
     color: var(--body-color);
     height: 100vh;
     width: 100vw;
+    z-index: 100;
   }
 
   .mainlogo {
@@ -446,7 +444,6 @@ const styles = css`
   }
 `;
 
-
 @customElement("ad4m-connect")
 export class Ad4mConnectElement extends LitElement {
   static styles = [styles];
@@ -543,7 +540,7 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private injectFont() {
-    const link = document.createElement('link');
+    const link = document.createElement("link");
     link.setAttribute("rel", "stylesheet");
     link.setAttribute(
       "href",
@@ -586,14 +583,14 @@ export class Ad4mConnectElement extends LitElement {
     try {
       const exist = await this._client.checkEmail(this._email);
 
-        if (exist) {
-          this._hostingStep = 1;
-        } else {
-          this._hostingStep = 2;
-        }
-      } catch (e) {
-        console.log(e)
+      if (exist) {
+        this._hostingStep = 1;
+      } else {
+        this._hostingStep = 2;
       }
+    } catch (e) {
+      console.log(e);
+    }
   }
 
   private async loginToHosting() {
@@ -605,7 +602,7 @@ export class Ad4mConnectElement extends LitElement {
       if (e.message.includes("Passwords did not match")) {
         this._passwordError = "Passwords did not match";
       } else {
-        this._hostingNotRunningError = 'Hosting is not running';
+        this._hostingNotRunningError = "Hosting is not running";
       }
     }
   }
@@ -632,7 +629,7 @@ export class Ad4mConnectElement extends LitElement {
 
   private changeUrl(url) {
     if (url !== this._client.url) {
-      removeForVersion("ad4mtoken")
+      removeForVersion("ad4mtoken");
       this._client.setToken(null);
     }
 
@@ -688,9 +685,9 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private handleConnectionChange(event: ConnectionStates) {
-   console.log(event);
-  //  this._isOpen = true;
-   if (event === "connected") {
+    console.log(event);
+    //  this._isOpen = true;
+    if (event === "connected") {
       if (this.authState !== "authenticated") {
         this.changeUIState("requestcap");
       } else {
@@ -771,14 +768,14 @@ export class Ad4mConnectElement extends LitElement {
       const client = await this._client.connect(url);
       const status = await client.agent.status();
       if (status.isUnlocked && status.isInitialized) {
-        return client
+        return client;
       }
 
       this.changeUIState("requestcap");
       return client;
     } catch (e) {
-        this.changeUIState("requestcap");
-        this._isOpen = true;
+      this.changeUIState("requestcap");
+      this._isOpen = true;
     }
   }
 
@@ -804,15 +801,15 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   clearState() {
-    this.handleConfigChange("port", null)
-    this.handleConfigChange("url", null)
-    this.handleConfigChange("token", null)
+    this.handleConfigChange("port", null);
+    this.handleConfigChange("url", null);
+    this.handleConfigChange("token", null);
     // this._isOpen = false;
-    this.handleConnectionChange("not_connected")
-    this.handleAuthChange("unauthenticated")
-    this.changeUIState("start")
+    this.handleConnectionChange("not_connected");
+    this.handleAuthChange("unauthenticated");
+    this.changeUIState("start");
 
-    this._client.clearState()
+    this._client.clearState();
   }
 
   renderViews() {
@@ -842,7 +839,7 @@ export class Ad4mConnectElement extends LitElement {
         changeState: this.changeUIState,
         onSuccess: (url) => {
           this.changeUrl(url);
-          this._client.connect(url)
+          this._client.connect(url);
         },
         uiState: this.uiState,
       });
@@ -878,7 +875,7 @@ export class Ad4mConnectElement extends LitElement {
         hasClickedDownload: this._hasClickedDownload,
         onDownloaded: this.onDownloaded,
         changeState: this.changeUIState,
-        hosting: this.hosting
+        hosting: this.hosting,
       });
     }
 
@@ -890,7 +887,7 @@ export class Ad4mConnectElement extends LitElement {
           changeState: this.changeUIState,
           verifyCode: this.verifyCode,
           isHosting: this._client.isHosting,
-          verifyCodeError: this._verifyCodeError
+          verifyCodeError: this._verifyCodeError,
         });
       }
 
@@ -917,26 +914,31 @@ export class Ad4mConnectElement extends LitElement {
 
   mobileView() {
     if (this.mobile) {
-      return MobileAppLogoButton(({
+      return MobileAppLogoButton({
         openModal: () => {
           this.changeUIState("settings");
           this._isOpen = !this._isOpen;
-        }
-      }))
+        },
+      });
     }
 
     return null;
   }
 
   render() {
-    console.log(this.authState,  this.connectionState, this.uiState, this._isOpen);
+    console.log(
+      this.authState,
+      this.connectionState,
+      this.uiState,
+      this._isOpen
+    );
     if (this._isOpen === false) {
       if (this.authState === "authenticated") {
         return this.mobileView();
       }
 
-      return null
-    };
+      return null;
+    }
 
     return html`
       <div class="wrapper">

@@ -214,7 +214,9 @@ pub fn run() {
     };
 
     let builder_result = tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_positioner::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(state)
         .manage(ProxyState(Default::default()))
         .invoke_handler(tauri::generate_handler![

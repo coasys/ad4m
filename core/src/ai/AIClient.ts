@@ -3,6 +3,7 @@ import unwrapApolloResult from "../unwrapApolloResult";
 import base64js from 'base64-js';
 import pako from 'pako'
 import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
+import { ModelInput, Model, ModelType } from "./AIResolver"
 
 export class AIClient {
     #apolloClient: ApolloClient<any>;
@@ -10,6 +11,105 @@ export class AIClient {
 
     constructor(apolloClient: ApolloClient<any>, subscribe: boolean = true) {
         this.#apolloClient = apolloClient;
+    }
+
+    async getModels(): Promise<Model[]> {
+        const result = await this.#apolloClient.query({
+            query: gql`
+                query {
+                    aiGetModels {
+                        id
+                        name
+                        api {
+                            baseUrl
+                            apiKey
+                            apiType
+                        }
+                        local {
+                            fileName
+                            tokenizerSource
+                            modelParameters
+                        }
+                        modelType
+                    }
+                }
+            `
+        });
+        return unwrapApolloResult(result).aiGetModels;
+    }
+
+    async addModel(model: ModelInput): Promise<string> {
+        const result = await this.#apolloClient.mutate({
+            mutation: gql`
+                mutation($model: ModelInput!) {
+                    aiAddModel(model: $model)
+                }
+            `,
+            variables: { model }
+        });
+        return unwrapApolloResult(result).aiAddModel;
+    }
+
+    async updateModel(modelId: string, model: ModelInput): Promise<boolean> {
+        const result = await this.#apolloClient.mutate({
+            mutation: gql`
+                mutation($modelId: String!, $model: ModelInput!) {
+                    aiUpdateModel(modelId: $modelId, model: $model)
+                }
+            `,
+            variables: { modelId, model }
+        });
+        return unwrapApolloResult(result).aiUpdateModel;
+    }
+
+    async removeModel(modelId: string): Promise<boolean> {
+        const result = await this.#apolloClient.mutate({
+            mutation: gql`
+                mutation($modelId: String!) {
+                    aiRemoveModel(modelId: $modelId)
+                }
+            `,
+            variables: { modelId }
+        });
+        return unwrapApolloResult(result).aiRemoveModel;
+    }
+
+    async setDefaultModel(modelType: ModelType, modelId: string): Promise<boolean> {
+        const result = await this.#apolloClient.mutate({
+            mutation: gql`
+                mutation($modelType: ModelType!, $modelId: String!) {
+                    aiSetDefaultModel(modelType: $modelType modelId: $modelId)
+                }
+            `,
+            variables: { modelId, modelType }
+        });
+        return unwrapApolloResult(result).aiSetDefaultModel;
+    }
+
+    async getDefaultModel(modelType: ModelType): Promise<Model> {
+        const result = await this.#apolloClient.query({
+            query: gql`
+                query($modelType: ModelType!) {
+                    aiGetDefaultModel(modelType: $modelType) {
+                        id
+                        name
+                        api {
+                            baseUrl
+                            apiKey
+                            apiType
+                        }
+                        local {
+                            fileName
+                            tokenizerSource
+                            modelParameters
+                        }
+                        modelType
+                    }
+                }
+            `,
+            variables: { modelType }
+        });
+        return unwrapApolloResult(result).aiGetDefaultModel;
     }
 
     async tasks(): Promise<AITask[]> {

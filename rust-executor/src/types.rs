@@ -1,7 +1,9 @@
-use coasys_juniper::{GraphQLObject, GraphQLValue};
+use coasys_juniper::{GraphQLEnum, GraphQLObject, GraphQLValue};
 use deno_core::{anyhow::anyhow, error::AnyError};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
+use std::str::FromStr;
+use url::Url;
 
 use crate::{
     agent::signatures::verify,
@@ -423,4 +425,80 @@ pub struct TriggeredNotification {
     pub notification: Notification,
     pub perspective_id: String,
     pub trigger_match: String,
+}
+
+#[derive(GraphQLEnum, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelApiType {
+    OpenAi,
+}
+
+impl FromStr for ModelApiType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim_matches('"');
+        match s {
+            "openai" => Ok(ModelApiType::OpenAi),
+            "openAi" => Ok(ModelApiType::OpenAi),
+            "OpenAi" => Ok(ModelApiType::OpenAi),
+            "OPEN_AI" => Ok(ModelApiType::OpenAi),
+            _ => Err(format!("Unknown ModelApiType: {}", s)),
+        }
+    }
+}
+
+#[allow(clippy::to_string_trait_impl)]
+impl ToString for ModelApiType {
+    fn to_string(&self) -> String {
+        match self {
+            ModelApiType::OpenAi => "openAi".to_string(),
+        }
+    }
+}
+
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelApi {
+    pub base_url: Url,
+    pub api_key: String,
+    pub api_type: ModelApiType,
+}
+
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModel {
+    pub file_name: String,
+    pub tokenizer_source: String,
+    pub model_parameters: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, GraphQLEnum, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelType {
+    #[default]
+    Llm,
+    Embedding,
+    Transcription,
+}
+
+impl Display for ModelType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ModelType::Llm => write!(f, "LLM"),
+            ModelType::Embedding => write!(f, "EMBEDDING"),
+            ModelType::Transcription => write!(f, "TRANSCRIPTION"),
+        }
+    }
+}
+
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Model {
+    pub id: String,
+    pub name: String,
+    pub api: Option<ModelApi>,
+    pub local: Option<LocalModel>,
+    #[serde(rename = "type")]
+    pub model_type: ModelType,
 }
