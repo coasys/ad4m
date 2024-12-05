@@ -124,7 +124,7 @@ export default function ModelCard(props: {
         </j-flex>
         {modelType === "LLM" && (
           <>
-            {tasks.length === 0 ? (
+            {!tasks || tasks.length === 0 ? (
               <j-text nomargin>No tasks created yet...</j-text>
             ) : (
               <>
