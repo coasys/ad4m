@@ -88,7 +88,13 @@ enum LlmModel {
     Remote(ChatGPTClient),
 }
 
-async fn publish_model_status(model_name: String, progress: f32, status: &str, downloaded: bool, loaded: bool) {
+async fn publish_model_status(
+    model_name: String,
+    progress: f32,
+    status: &str,
+    downloaded: bool,
+    loaded: bool,
+) {
     let model = AIModelLoadingStatus {
         model: model_name.clone(),
         progress: progress as f64,
@@ -372,7 +378,13 @@ impl AIService {
                 let mut task_descriptions = HashMap::<String, AITask>::new();
                 let idle_delay = Duration::from_millis(1);
 
-                rt.block_on(publish_model_status(model_config.id.clone(), 100.0, "Ready", true, true));
+                rt.block_on(publish_model_status(
+                    model_config.id.clone(),
+                    100.0,
+                    "Ready",
+                    true,
+                    true,
+                ));
 
                 loop {
                     match rt.block_on(async {
@@ -392,7 +404,13 @@ impl AIService {
                                     );
                                 }
                                 LlmModel::Local(ref mut llama) => {
-                                    rt.block_on(publish_model_status(model_config.id.clone(), 100.0, "Spawning task...", true, true));
+                                    rt.block_on(publish_model_status(
+                                        model_config.id.clone(),
+                                        100.0,
+                                        "Spawning task...",
+                                        true,
+                                        true,
+                                    ));
                                     let task_description = spawn_request.task;
                                     let task =
                                         Task::builder(task_description.system_prompt.clone())
@@ -426,11 +444,17 @@ impl AIService {
                                         tasks.insert(task_description.task_id.clone(), task);
                                         let _ = spawn_request.result_sender.send(Ok(()));
                                     } else {
-                                        let _ = spawn_request.result_sender.send(Err(anyhow!(
-                                            "Couldn't run task without panics"
-                                        )));
+                                        let _ = spawn_request
+                                            .result_sender
+                                            .send(Err(anyhow!("Couldn't run task without panics")));
                                     }
-                                    rt.block_on(publish_model_status(model_config.id.clone(), 100.0, "Ready", true, true));
+                                    rt.block_on(publish_model_status(
+                                        model_config.id.clone(),
+                                        100.0,
+                                        "Ready",
+                                        true,
+                                        true,
+                                    ));
                                 }
                             },
 
