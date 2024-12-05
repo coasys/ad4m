@@ -302,7 +302,6 @@ impl AIService {
             .build_with_loading_handler({
                 let model_id = model_id.clone();
                 move |progress| {
-                    println!("progress: {}", progress.progress());
                     let _ =
                         futures::executor::block_on(handle_progress(model_id.clone(), progress));
                 }
