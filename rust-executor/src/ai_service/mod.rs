@@ -308,8 +308,7 @@ impl AIService {
             .build_with_loading_handler({
                 let model_id = model_id.clone();
                 move |progress| {
-                    let _ =
-                        futures::executor::block_on(handle_progress(model_id.clone(), progress));
+                    futures::executor::block_on(handle_progress(model_id.clone(), progress));
                 }
             })
             .await?;
@@ -323,11 +322,11 @@ impl AIService {
         let mut url = base_url;
         if let Some(segments) = url.path_segments() {
             if segments.clone().next() == Some("v1") {
-                let _ = url.set_path(&segments.skip(1).collect::<Vec<_>>().join("/"));
+                url.set_path(&segments.skip(1).collect::<Vec<_>>().join("/"));
             }
         }
         publish_model_status(model_id.clone(), 0.0, "Initializing", false, false).await;
-        let client = ChatGPTClient::new(&api_key, &url.to_string());
+        let client = ChatGPTClient::new(&api_key, url.as_ref());
         publish_model_status(model_id.clone(), 100.0, "Initializing", true, false).await;
         client
     }
