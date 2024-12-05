@@ -146,7 +146,6 @@ pub struct PerspectiveInstance {
     link_language: Arc<Mutex<Option<Language>>>,
     links_have_changed: Arc<Mutex<bool>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
-    pending_diffs: Arc<Mutex<Vec<PerspectiveDiff>>>,
     immediate_commits_remaining: Arc<Mutex<u32>>,
 }
 
@@ -166,7 +165,6 @@ impl PerspectiveInstance {
             link_language: Arc::new(Mutex::new(None)),
             links_have_changed: Arc::new(Mutex::new(false)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
-            pending_diffs: Arc::new(Mutex::new(Vec::new())),
             immediate_commits_remaining: Arc::new(Mutex::new(3)), // Default to 3 immediate commits
         }
     }
@@ -419,19 +417,7 @@ impl PerspectiveInstance {
             return Ok(None);
         }
 
-        let mut can_commit = false;
-        if !self.created_from_join {
-            can_commit = true;
-        } else if let Some(link_language) = self.link_language.lock().await.as_mut() {
-            if link_language.current_revision().await?.is_some() {
-                can_commit = true;
-            }
-        };
-
-
-        if !can_commit {
-            return Err(anyhow!("Cannot commit diff. Not yet synced with neighbourhood..."));
-        }
+        // ... existing permission checks ...
 
         let mut timer = self.commit_debounce_timer.lock().await;
         let mut immediate_commits = self.immediate_commits_remaining.lock().await;
@@ -444,61 +430,73 @@ impl PerspectiveInstance {
             }
         }
 
-        // Start or extend debounce timer
+        // Store diff in DB
+        Ad4mDb::with_global_instance(|db| 
+            db.add_pending_diff(&handle.uuid, diff)
+        )?;
+
+        // Update or start timer
         let now = tokio::time::Instant::now();
-        if timer.is_none() || timer.unwrap().elapsed() >= Duration::from_secs(1) {
-            // Start new timer and commit
+        let should_spawn_task = if let Some(_existing_timer) = *timer {
+            // If timer exists but hasn't triggered yet, extend it
             *timer = Some(now);
-            if let Some(link_language) = self.link_language.lock().await.as_mut() {
-                return link_language.commit(diff.clone()).await;
-            }
+            false
         } else {
-            // Add to pending diffs
-            let mut pending = self.pending_diffs.lock().await;
-            pending.push(diff.clone());
-            
+            // No timer exists, start a new one
+            *timer = Some(now);
+            true
+        };
+        
+        if should_spawn_task {
             // Clone what we need for the delayed task
             let self_clone = self.clone();
-            let timer_clone = *timer.as_ref().unwrap();
+            let uuid = handle.uuid.clone();
             
-            // Spawn delayed merge-and-commit task
             tokio::spawn(async move {
-                let wait_duration = Duration::from_secs(1).saturating_sub(timer_clone.elapsed());
-                sleep(wait_duration).await;
+                let start_time = tokio::time::Instant::now();
                 
-                // Merge and commit pending diffs
-                let mut pending = self_clone.pending_diffs.lock().await;
-                if !pending.is_empty() {
-                    let merged_diff = Self::merge_diffs(pending.drain(..).collect());
-                    if let Some(link_language) = self_clone.link_language.lock().await.as_mut() {
-                        if let Err(e) = link_language.commit(merged_diff).await {
-                            log::error!("Error committing merged diffs: {:?}", e);
+                loop {
+                    sleep(Duration::from_millis(100)).await; // Check more frequently
+                    
+                    let should_commit = {
+                        let timer_guard = self_clone.commit_debounce_timer.lock().await;
+                        let last_commit_time = timer_guard.unwrap();
+                        
+                        // Commit if either:
+                        // 1. No new commits for 1 second
+                        // 2. Maximum wait time of 10 seconds reached
+                        last_commit_time.elapsed() >= Duration::from_secs(1) || 
+                            start_time.elapsed() >= Duration::from_secs(10)
+                    };
+
+                    if should_commit {
+                        if let Ok(pending_diffs) = Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid)) {
+                            if let Some(link_language) = self_clone.link_language.lock().await.as_mut() {
+                                match link_language.commit(pending_diffs).await {
+                                    Ok(Some(_)) => {
+                                        // Clear pending diffs and timer on successful commit
+                                        let _ = Ad4mDb::with_global_instance(|db| db.clear_pending_diffs(&uuid));
+                                        *self_clone.commit_debounce_timer.lock().await = None;
+                                        
+                                        // Log the reason for commit
+                                        if start_time.elapsed() >= Duration::from_secs(10) {
+                                            log::info!("Committing due to maximum wait time reached (10s)");
+                                        } else {
+                                            log::info!("Committing due to 1s of inactivity");
+                                        }
+                                    }
+                                    Ok(None) => log::error!("Error committing pending diffs. No diff returned."),
+                                    Err(e) => log::error!("Error committing pending diffs: {:?}", e),
+                                }
+                            }
                         }
+                        break;
                     }
                 }
             });
         }
 
         Ok(None)
-    }
-
-    // Helper method to merge multiple PerspectiveDiffs
-    fn merge_diffs(diffs: Vec<PerspectiveDiff>) -> PerspectiveDiff {
-        let mut merged = PerspectiveDiff {
-            additions: Vec::new(),
-            removals: Vec::new(),
-        };
-
-        for diff in diffs {
-            merged.additions.extend(diff.additions);
-            merged.removals.extend(diff.removals);
-        }
-
-        // Remove duplicates if needed
-        merged.additions.dedup();
-        merged.removals.dedup();
-
-        merged
     }
 
     // Add method to configure immediate commits
