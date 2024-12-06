@@ -5,7 +5,7 @@ pub fn prolog_value_to_json_string(value: Value) -> String {
         Value::Integer(i) => format!("{}", i),
         Value::Float(f) => format!("{}", f),
         Value::Rational(r) => format!("{}", r),
-        Value::Atom(a) => format!("{}", a.as_str()),
+        Value::Atom(a) => format!("\"{}\"", a.as_str()),
         Value::String(s) => {
             match s.as_str() {
                 "true" => String::from("true"),
