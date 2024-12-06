@@ -145,6 +145,8 @@ pub struct PerspectiveInstance {
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<Mutex<Option<Language>>>,
     links_have_changed: Arc<Mutex<bool>>,
+    commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
+    immediate_commits_remaining: Arc<Mutex<u32>>,
 }
 
 impl PerspectiveInstance {
@@ -162,6 +164,8 @@ impl PerspectiveInstance {
             prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(Mutex::new(None)),
             links_have_changed: Arc::new(Mutex::new(false)),
+            commit_debounce_timer: Arc::new(Mutex::new(None)),
+            immediate_commits_remaining: Arc::new(Mutex::new(3)), // Default to 3 immediate commits
         }
     }
 
@@ -422,15 +426,105 @@ impl PerspectiveInstance {
             }
         };
 
-        if can_commit {
+        if !can_commit {
+            return Err(anyhow!(
+                "Cannot commit diff. Not yet synced with neighbourhood..."
+            ));
+        }
+
+        let mut timer = self.commit_debounce_timer.lock().await;
+        let mut immediate_commits = self.immediate_commits_remaining.lock().await;
+
+        if *immediate_commits > 0 {
+            // Process immediate commit
+            *immediate_commits -= 1;
             if let Some(link_language) = self.link_language.lock().await.as_mut() {
                 return link_language.commit(diff.clone()).await;
             }
         }
 
-        Err(anyhow!(
-            "Cannot commit diff. Not yet synced with neighbourhood..."
-        ))
+        // Store diff in DB
+        Ad4mDb::with_global_instance(|db| db.add_pending_diff(&handle.uuid, diff))?;
+
+        // Update or start timer
+        let now = tokio::time::Instant::now();
+        let should_spawn_task = if let Some(_existing_timer) = *timer {
+            // If timer exists but hasn't triggered yet, extend it
+            *timer = Some(now);
+            false
+        } else {
+            // No timer exists, start a new one
+            *timer = Some(now);
+            true
+        };
+
+        if should_spawn_task {
+            // Clone what we need for the delayed task
+            let self_clone = self.clone();
+            let uuid = handle.uuid.clone();
+
+            tokio::spawn(async move {
+                let start_time = tokio::time::Instant::now();
+
+                loop {
+                    sleep(Duration::from_millis(100)).await; // Check more frequently
+
+                    let should_commit = {
+                        let timer_guard = self_clone.commit_debounce_timer.lock().await;
+                        let last_commit_time = timer_guard.unwrap();
+
+                        // Commit if either:
+                        // 1. No new commits for 1 second
+                        // 2. Maximum wait time of 10 seconds reached
+                        last_commit_time.elapsed() >= Duration::from_secs(1)
+                            || start_time.elapsed() >= Duration::from_secs(10)
+                    };
+
+                    if should_commit {
+                        if let Ok(pending_diffs) =
+                            Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid))
+                        {
+                            if let Some(link_language) =
+                                self_clone.link_language.lock().await.as_mut()
+                            {
+                                match link_language.commit(pending_diffs).await {
+                                    Ok(Some(_)) => {
+                                        // Clear pending diffs and timer on successful commit
+                                        let _ = Ad4mDb::with_global_instance(|db| {
+                                            db.clear_pending_diffs(&uuid)
+                                        });
+                                        *self_clone.commit_debounce_timer.lock().await = None;
+
+                                        // Log the reason for commit
+                                        if start_time.elapsed() >= Duration::from_secs(10) {
+                                            log::info!(
+                                                "Committing due to maximum wait time reached (10s)"
+                                            );
+                                        } else {
+                                            log::info!("Committing due to 1s of inactivity");
+                                        }
+                                    }
+                                    Ok(None) => log::error!(
+                                        "Error committing pending diffs. No diff returned."
+                                    ),
+                                    Err(e) => {
+                                        log::error!("Error committing pending diffs: {:?}", e)
+                                    }
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            });
+        }
+
+        Ok(None)
+    }
+
+    // Add method to configure immediate commits
+    pub async fn set_immediate_commits(&self, count: u32) {
+        *self.immediate_commits_remaining.lock().await = count;
     }
 
     fn spawn_commit_and_handle_error(&self, diff: &PerspectiveDiff) {
