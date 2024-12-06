@@ -1,4 +1,4 @@
-use scryer_prolog::machine::parsed_results::{QueryMatch, QueryResolution, Value};
+use scryer_prolog::{QueryMatch, QueryResolution, Value};
 
 pub fn prolog_value_to_json_string(value: Value) -> String {
     match value {
@@ -111,7 +111,7 @@ pub fn prolog_get_all_string_bindings(
             .iter()
             .filter_map(|m| m.bindings.get(variable_name))
             .filter_map(|value| match value {
-                scryer_prolog::machine::parsed_results::Value::String(s) => Some(s),
+                scryer_prolog::Value::String(s) => Some(s),
                 _ => None,
             })
             .cloned()
@@ -124,7 +124,7 @@ pub fn prolog_get_all_string_bindings(
 pub fn prolog_get_first_binding(
     result: &QueryResolution,
     variable_name: &str,
-) -> Option<scryer_prolog::machine::parsed_results::Value> {
+) -> Option<scryer_prolog::Value> {
     prolog_get_all_bindings(result, variable_name)
         .into_iter()
         .next()
@@ -133,7 +133,7 @@ pub fn prolog_get_first_binding(
 pub fn prolog_get_all_bindings(
     result: &QueryResolution,
     variable_name: &str,
-) -> Vec<scryer_prolog::machine::parsed_results::Value> {
+) -> Vec<scryer_prolog::Value> {
     if let QueryResolution::Matches(matches) = result {
         matches
             .iter()

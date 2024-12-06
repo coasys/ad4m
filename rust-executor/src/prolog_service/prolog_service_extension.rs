@@ -1,5 +1,5 @@
 use deno_core::{anyhow::bail, error::AnyError, op2};
-use scryer_prolog::machine::parsed_results::{QueryMatch, QueryResolution, Value};
+use scryer_prolog::{QueryMatch, QueryResolution, Value};
 
 use super::get_prolog_service;
 
