@@ -13,7 +13,7 @@ by linking them together.
 Creating a new Perspective is easy:
 
 ```ts
-const myNotes = ad4m.perspective.add("My private notes");
+const myNotes = await ad4m.perspective.add("My private notes");
 ```
 
 The returning object will be an instance of [PerspectiveProxy](/jsdoc/classes/PerspectiveProxy/)
@@ -24,13 +24,13 @@ The returning object will be an instance of [PerspectiveProxy](/jsdoc/classes/Pe
 Perspectives only consist of a collection of **links**, which connect
 three Expression URLs:
 
-- **Subject**: The Expression that you want to store or retrieve information about.
-- **Predicate**: Describes the relationship between the subject and the target.
-- **Target**: The Expression that is connected to the subject.
+- **Source**: The Expression that you want to store or retrieve information about.
+- **Predicate**: Describes the relationship between the source and the target.
+- **Target**: The Expression that is connected to the source.
 
 ```ts
 const link = {
-  subject: "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
+  source: "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
   predicate: "sioc://likes",
   target: "literal://ad4m",
 };
@@ -58,7 +58,7 @@ What you get back will be an array of [LinkExpressions](/jsdoc/classes/LinkExpre
     "author": "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
     "timestamp": "2023-06-21T14:47:48.935Z",
     "data": {
-      "subject": "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
+      "source": "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
       "predicate": "sioc://likes",
       "target": "literal://ad4m"
     },
