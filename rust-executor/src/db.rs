@@ -1411,20 +1411,22 @@ mod tests {
         )
         .unwrap();
 
-        let get = db.get_pending_diffs(&p_uuid).unwrap();
-        assert_eq!(get.additions.len(), 1);
-        assert_eq!(get.removals.len(), 1);
+        let (diff, ids) = db.get_pending_diffs(&p_uuid).unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(diff.additions.len(), 1);
+        assert_eq!(diff.removals.len(), 1);
         assert_eq!(
-            get,
+            diff,
             PerspectiveDiff {
                 additions: vec![addition],
                 removals: vec![removal],
             }
         );
 
-        db.clear_pending_diffs(&p_uuid).unwrap();
-        let get2 = db.get_pending_diffs(&p_uuid).unwrap();
-        assert_eq!(get2.additions.len(), 0);
+        db.clear_pending_diffs(&p_uuid, ids).unwrap();
+        let (diff, ids) = db.get_pending_diffs(&p_uuid).unwrap();
+        assert_eq!(ids.len(), 0);
+        assert_eq!(diff.additions.len(), 0);
     }
 
     #[test]
