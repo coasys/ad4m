@@ -328,15 +328,18 @@ impl PerspectiveInstance {
     async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
         let uuid = self.persisted.lock().await.uuid.clone();
 
-        Ad4mDb::with_global_instance_async(|db| async move {
+        Ad4mDb::with_global_instance(|db| {
             let pending_diffs = db.get_pending_diffs(&uuid)?;
             if !pending_diffs.additions.is_empty() || !pending_diffs.removals.is_empty() {
-                if let Some(link_language) = self.link_language.lock().await.as_mut() {
-                    match link_language.commit(pending_diffs).await {
+                let mut link_language_lock = futures::executor::block_on(self.link_language.lock());
+                if let Some(link_language) = link_language_lock.as_mut() {
+                    let commit_result = futures::executor::block_on(link_language.commit(pending_diffs));
+                    match commit_result {
                         Ok(Some(_)) => {
                             db.clear_pending_diffs(&uuid)?;
                             // Reset immediate commits counter after successful commit
-                            *self.immediate_commits_remaining.lock().await = 3; // Or whatever the default should be
+                            let mut immediate_commits_remaining = futures::executor::block_on(self.immediate_commits_remaining.lock());
+                            *immediate_commits_remaining = 3; // Or whatever the default should be
                             log::info!("Successfully committed pending diffs");
                             Ok(())
                         }
@@ -349,7 +352,7 @@ impl PerspectiveInstance {
             } else {
                 Ok(())
             }
-        }).await
+        })
     }
 
     async fn notification_check_loop(&self) {
