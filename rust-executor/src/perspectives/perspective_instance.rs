@@ -259,13 +259,21 @@ impl PerspectiveInstance {
     }
 
     async fn pending_diffs_loop(&self) {
+        let uuid = self.persisted.lock().await.uuid.clone();
         let mut interval = time::interval(Duration::from_secs(1));
         let mut last_diff_time = None;
     
         while !*self.is_teardown.lock().await {
             interval.tick().await;
 
-            if self.has_link_language().await && self.has_pending_diffs().await {
+            if self.has_link_language().await {
+                let (_, ids) = Ad4mDb::with_global_instance(|db| {
+                    db.get_pending_diffs(&uuid)
+                }).unwrap_or((PerspectiveDiff::empty(), Vec::new()));
+
+                if ids.len() == 0 {
+                    continue;
+                }
     
                 if last_diff_time.is_none() {
                     // First diff in a burst - start timer
@@ -273,20 +281,24 @@ impl PerspectiveInstance {
                 }
 
                 // Commit if either:
-                // 1. It's been 1s since last new diff
-                // 2. It's been 10s since first diff in burst
+                // 1. It's been 10s since first diff in burst (don't collect longer than 10s)
                 if last_diff_time.unwrap().elapsed() >= Duration::from_secs(10) {
                     if let Ok(_) = self.commit_pending_diffs().await {
                         last_diff_time = None;
                         log::info!("Committed diffs after reaching 10s maximum wait time");
                     }
+                // 2. It's been > 1s since last new diff (burst is over)
                 } else if !self.has_new_diffs_in_last_second().await {
                     if let Ok(_) = self.commit_pending_diffs().await {
                         last_diff_time = None;
                         log::info!("Committed diffs after 1s of inactivity");
                     }
-                } else {
-                    println!("PENDING DIFFS LOOP neither");
+                // 3. We have collected more than 100 diffs
+                } else if ids.len() > 100 {
+                    if let Ok(_) = self.commit_pending_diffs().await {
+                        last_diff_time = None;
+                        log::info!("Committed diffs after collecting 100");
+                    }
                 }
             }   
         }
@@ -300,15 +312,6 @@ impl PerspectiveInstance {
     async fn has_link_language(&self) -> bool {
         let link_language_guard = self.link_language.lock().await;
         link_language_guard.is_some()
-    }
-
-    async fn has_pending_diffs(&self) -> bool {
-        let uuid = self.persisted.lock().await.uuid.clone();
-        Ad4mDb::with_global_instance(|db| {
-            db.get_pending_diffs(&uuid).map(|(diffs, _)| 
-                !diffs.additions.is_empty() || !diffs.removals.is_empty()
-            )
-        }).unwrap_or(false)
     }
     
     async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
