@@ -259,100 +259,89 @@ impl PerspectiveInstance {
     }
 
     async fn pending_diffs_loop(&self) {
-        let uuid = self.persisted.lock().await.uuid.clone();
-        let mut interval = time::interval(Duration::from_millis(100));
+        let mut interval = time::interval(Duration::from_secs(1));
         let mut last_diff_time = None;
     
         while !*self.is_teardown.lock().await {
             interval.tick().await;
+
+            if self.has_link_language().await && self.has_pending_diffs().await {
     
-            let mut link_language_guard = self.link_language.lock().await;
-            if let Some(link_language) = link_language_guard.as_mut() {
-                // Check if link language is ready
-                if let Ok(Some(_)) = link_language.current_revision().await {
-                    // Check if we have any pending diffs
-                    let has_diffs = Ad4mDb::with_global_instance(|db| {
-                        db.get_pending_diffs(&uuid).map(|diffs| 
-                            !diffs.additions.is_empty() || !diffs.removals.is_empty()
-                        )
-                    }).unwrap_or(false);
-    
-                    if has_diffs {
-                        if last_diff_time.is_none() {
-                            // First diff in a burst - start timer
-                            last_diff_time = Some(tokio::time::Instant::now());
-                        }
-    
-                        // Commit if either:
-                        // 1. It's been 1s since last new diff
-                        // 2. It's been 10s since first diff in burst
-                        if last_diff_time.unwrap().elapsed() >= Duration::from_secs(10) {
-                            if let Ok(_) = self.commit_pending_diffs().await {
-                                last_diff_time = None;
-                                log::info!("Committed diffs after reaching 10s maximum wait time");
-                            }
-                        } else if !self.has_new_diffs_in_last_second().await {
-                            if let Ok(_) = self.commit_pending_diffs().await {
-                                last_diff_time = None;
-                                log::info!("Committed diffs after 1s of inactivity");
-                            }
-                        }
-                    }
+                if last_diff_time.is_none() {
+                    // First diff in a burst - start timer
+                    last_diff_time = Some(tokio::time::Instant::now());
                 }
-            }
+
+                // Commit if either:
+                // 1. It's been 1s since last new diff
+                // 2. It's been 10s since first diff in burst
+                if last_diff_time.unwrap().elapsed() >= Duration::from_secs(10) {
+                    if let Ok(_) = self.commit_pending_diffs().await {
+                        last_diff_time = None;
+                        log::info!("Committed diffs after reaching 10s maximum wait time");
+                    }
+                } else if !self.has_new_diffs_in_last_second().await {
+                    if let Ok(_) = self.commit_pending_diffs().await {
+                        last_diff_time = None;
+                        log::info!("Committed diffs after 1s of inactivity");
+                    }
+                } else {
+                    println!("PENDING DIFFS LOOP neither");
+                }
+            }   
         }
     }
 
     async fn has_new_diffs_in_last_second(&self) -> bool {
+        let timer = self.commit_debounce_timer.lock().await;
+        timer.map(|instant| instant.elapsed() < tokio::time::Duration::from_secs(1)).unwrap_or(false)
+    }
+
+    async fn has_link_language(&self) -> bool {
+        let link_language_guard = self.link_language.lock().await;
+        link_language_guard.is_some()
+    }
+
+    async fn has_pending_diffs(&self) -> bool {
         let uuid = self.persisted.lock().await.uuid.clone();
-        // Compare timestamps of latest diffs with current time
         Ad4mDb::with_global_instance(|db| {
-            let pending_diffs = db.get_pending_diffs(&uuid)?;
-            
-            // Get the most recent timestamp from both additions and removals
-            let latest_timestamp = pending_diffs.additions.iter()
-                .chain(pending_diffs.removals.iter())
-                .map(|link| DateTime::parse_from_rfc3339(&link.timestamp).unwrap())
-                .max();
-                
-            if let Some(timestamp) = latest_timestamp {
-                let now = chrono::Utc::now();
-                let age = now.signed_duration_since(timestamp);
-                Ok::<bool, AnyError>(age.num_seconds() < 1)
-            } else {
-                Ok(false)
-            }
+            db.get_pending_diffs(&uuid).map(|(diffs, _)| 
+                !diffs.additions.is_empty() || !diffs.removals.is_empty()
+            )
         }).unwrap_or(false)
     }
     
     async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
         let uuid = self.persisted.lock().await.uuid.clone();
 
-        Ad4mDb::with_global_instance(|db| {
-            let pending_diffs = db.get_pending_diffs(&uuid)?;
-            if !pending_diffs.additions.is_empty() || !pending_diffs.removals.is_empty() {
-                let mut link_language_lock = futures::executor::block_on(self.link_language.lock());
-                if let Some(link_language) = link_language_lock.as_mut() {
-                    let commit_result = futures::executor::block_on(link_language.commit(pending_diffs));
-                    match commit_result {
-                        Ok(Some(_)) => {
-                            db.clear_pending_diffs(&uuid)?;
-                            // Reset immediate commits counter after successful commit
-                            let mut immediate_commits_remaining = futures::executor::block_on(self.immediate_commits_remaining.lock());
-                            *immediate_commits_remaining = 3; // Or whatever the default should be
-                            log::info!("Successfully committed pending diffs");
-                            Ok(())
-                        }
-                        Ok(None) => Err(anyhow!("No diff returned from commit")),
-                        Err(e) => Err(e),
+        let (pending_diffs, pending_ids) = Ad4mDb::with_global_instance(|db| {
+            db.get_pending_diffs(&uuid)
+        })?;
+
+        if !pending_ids.is_empty() {
+            let mut link_language_lock = self.link_language.lock().await;
+            if let Some(link_language) = link_language_lock.as_mut() {
+                let commit_result = link_language.commit(pending_diffs).await;
+                match commit_result {
+                    Ok(Some(_)) => {
+                        Ad4mDb::with_global_instance(|db| {
+                            db.clear_pending_diffs(&uuid, pending_ids)
+                        })?;
+                        // Reset immediate commits counter after successful commit
+                        let mut immediate_commits_remaining = self.immediate_commits_remaining.lock().await;
+                        *immediate_commits_remaining = 3; // Or whatever the default should be
+                        log::info!("Successfully committed pending diffs");
+                        Ok(())
                     }
-                } else {
-                    Ok(()) // Keep diffs if no link language
+                    Ok(None) => Err(anyhow!("No diff returned from commit")),
+                    Err(e) => Err(e),
                 }
             } else {
-                Ok(())
+                Ok(()) // Keep diffs if no link language
             }
-        })
+        } else {
+            Ok(())
+        }
     }
 
     async fn notification_check_loop(&self) {
@@ -492,7 +481,10 @@ impl PerspectiveInstance {
 
         // Store diff in DB
         Ad4mDb::with_global_instance(|db| db.add_pending_diff(&handle.uuid, diff))?;
-
+        // Update or start timer
+        let mut timer = self.commit_debounce_timer.lock().await;
+        *timer = Some(tokio::time::Instant::now());
+        
         Ok(None)
     }
 
