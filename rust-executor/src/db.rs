@@ -984,23 +984,27 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn get_pending_diffs(&self, perspective_uuid: &str) -> Ad4mDbResult<PerspectiveDiff> {
+    pub fn get_pending_diffs(&self, perspective_uuid: &str) -> Ad4mDbResult<(PerspectiveDiff, Vec<u64>)> {
         let mut stmt = self.conn.prepare(
-            "SELECT additions, removals FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2",
+            "SELECT additions, removals, id FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2",
         )?;
         let diffs_iter = stmt.query_map(params![perspective_uuid, true], |row| {
             let additions: Vec<LinkExpression> =
                 serde_json::from_str(&row.get::<_, String>(0).unwrap()).unwrap();
             let removals: Vec<LinkExpression> =
                 serde_json::from_str(&row.get::<_, String>(1).unwrap()).unwrap();
-            Ok(PerspectiveDiff {
+            let id = row.get::<_, u64>(2).unwrap();
+            Ok((PerspectiveDiff {
                 additions,
                 removals,
-            })
+            }, id))
         })?;
         let mut diffs = Vec::new();
-        for diff in diffs_iter {
-            diffs.push(diff?);
+        let mut ids = Vec::new();
+        for diff_result in diffs_iter {
+            let (diff, id) = diff_result?;
+            diffs.push(diff);
+            ids.push(id)
         }
         // Assuming we want to concatenate all additions and removals from different diffs
         let mut all_additions = Vec::new();
@@ -1009,16 +1013,21 @@ impl Ad4mDb {
             all_additions.extend(diff.additions);
             all_removals.extend(diff.removals);
         }
-        Ok(PerspectiveDiff {
+        Ok((PerspectiveDiff {
             additions: all_additions,
             removals: all_removals,
-        })
+        }, ids))
     }
 
-    pub fn clear_pending_diffs(&self, perspective_uuid: &str) -> Ad4mDbResult<()> {
+    pub fn clear_pending_diffs(&self, perspective_uuid: &str, ids: Vec<u64>) -> Ad4mDbResult<()> {
+        let id_list = ids.iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<String>>()
+            .join(",");
+        
         self.conn.execute(
-            "DELETE FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2",
-            params![perspective_uuid, true],
+            &format!("DELETE FROM perspective_diff WHERE perspective = ?1 AND id IN ({})", id_list),
+            params![perspective_uuid],
         )?;
         Ok(())
     }
