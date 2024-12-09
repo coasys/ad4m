@@ -11,6 +11,7 @@ use deno_core::error::AnyError;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::future::Future;
 use std::str::FromStr;
 use url::Url;
 use uuid::Uuid;
@@ -1237,6 +1238,18 @@ impl Ad4mDb {
         let ad4m_db_lock = lock_result.expect("Couldn't get lock on Ad4mDb");
         let ad4m_db_ref = ad4m_db_lock.as_ref().expect("Ad4mDb not initialized");
         func(ad4m_db_ref)
+    }
+
+    pub async fn with_global_instance_async<F, Fut, T>(f: F) -> Result<T, AnyError>
+    where
+        F: FnOnce(&'a Ad4mDb) -> Fut,
+        Fut: Future<Output = Result<T, AnyError>> + 'a,
+    {
+        let global_instance_arc = Ad4mDb::global_instance();
+        let lock_result = global_instance_arc.lock();
+        let ad4m_db_lock = lock_result.expect("Couldn't get lock on Ad4mDb");
+        let ad4m_db_ref = ad4m_db_lock.as_ref().expect("Ad4mDb not initialized");
+        f(ad4m_db_ref).await
     }
 }
 

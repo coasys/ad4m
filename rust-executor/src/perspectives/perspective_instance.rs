@@ -259,52 +259,97 @@ impl PerspectiveInstance {
     }
 
     async fn pending_diffs_loop(&self) {
-        let mut interval = time::interval(Duration::from_secs(10));
         let uuid = self.persisted.lock().await.uuid.clone();
+        let mut interval = time::interval(Duration::from_millis(100));
+        let mut last_diff_time = None;
+    
         while !*self.is_teardown.lock().await {
-            if let Err(e) = async {
-                let mut link_language_guard = self.link_language.lock().await;
-                if let Some(link_language) = link_language_guard.as_mut() {
-                    // We have a link language.
-                    // Let's see if we have a revision yet (otherwise we're not synced yet and should keep our diffs pending)
-                    if link_language
-                        .current_revision()
-                        .await
-                        .map_err(|e| anyhow!("current_revision error: {}", e))?
-                        .is_some()
-                    {
-                        // Ok, we are synced and have a revision. Let's commit our pending diffs.
-                        let pending_diffs =
-                            Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid))
-                                .map_err(|e| anyhow!("get_pending_diffs error: {}", e))?;
-
-                        if pending_diffs.additions.is_empty() && pending_diffs.removals.is_empty() {
-                            return Ok(());
+            interval.tick().await;
+    
+            let mut link_language_guard = self.link_language.lock().await;
+            if let Some(link_language) = link_language_guard.as_mut() {
+                // Check if link language is ready
+                if let Ok(Some(_)) = link_language.current_revision().await {
+                    // Check if we have any pending diffs
+                    let has_diffs = Ad4mDb::with_global_instance(|db| {
+                        db.get_pending_diffs(&uuid).map(|diffs| 
+                            !diffs.additions.is_empty() || !diffs.removals.is_empty()
+                        )
+                    }).unwrap_or(false);
+    
+                    if has_diffs {
+                        if last_diff_time.is_none() {
+                            // First diff in a burst - start timer
+                            last_diff_time = Some(tokio::time::Instant::now());
                         }
-                        log::info!("Found pending diffs: {:?}\n Committing...", pending_diffs);
-                        let commit_result = link_language.commit(pending_diffs).await;
-                        log::info!("Pending diffs commit result: {:?}", commit_result);
-                        return match commit_result {
-                            Ok(Some(_)) => {
-                                Ad4mDb::with_global_instance(|db| db.clear_pending_diffs(&uuid))
-                                    .map_err(|e| anyhow!("clear_pending_diffs error: {}", e))?;
-                                Ok(())
+    
+                        // Commit if either:
+                        // 1. It's been 1s since last new diff
+                        // 2. It's been 10s since first diff in burst
+                        if last_diff_time.unwrap().elapsed() >= Duration::from_secs(10) {
+                            if let Ok(_) = self.commit_pending_diffs().await {
+                                last_diff_time = None;
+                                log::info!("Committed diffs after reaching 10s maximum wait time");
                             }
-                            Ok(None) => {
-                                Err(anyhow!("Error committing pending diffs. No diff returned."))
+                        } else if !self.has_new_diffs_in_last_second().await {
+                            if let Ok(_) = self.commit_pending_diffs().await {
+                                last_diff_time = None;
+                                log::info!("Committed diffs after 1s of inactivity");
                             }
-                            Err(e) => Err(anyhow!("Error committing pending diffs: {:?}", e)),
-                        };
+                        }
                     }
                 }
+            }
+        }
+    }
+
+    async fn has_new_diffs_in_last_second(&self) -> bool {
+        let uuid = self.persisted.lock().await.uuid.clone();
+        // Compare timestamps of latest diffs with current time
+        Ad4mDb::with_global_instance(|db| {
+            let pending_diffs = db.get_pending_diffs(&uuid)?;
+            
+            // Get the most recent timestamp from both additions and removals
+            let latest_timestamp = pending_diffs.additions.iter()
+                .chain(pending_diffs.removals.iter())
+                .map(|link| DateTime::parse_from_rfc3339(&link.timestamp).unwrap())
+                .max();
+                
+            if let Some(timestamp) = latest_timestamp {
+                let now = chrono::Utc::now();
+                let age = now.signed_duration_since(timestamp);
+                Ok::<bool, AnyError>(age.num_seconds() < 1)
+            } else {
+                Ok(false)
+            }
+        }).unwrap_or(false)
+    }
+    
+    async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
+        let uuid = self.persisted.lock().await.uuid.clone();
+
+        Ad4mDb::with_global_instance_async(|db| async move {
+            let pending_diffs = db.get_pending_diffs(&uuid)?;
+            if !pending_diffs.additions.is_empty() || !pending_diffs.removals.is_empty() {
+                if let Some(link_language) = self.link_language.lock().await.as_mut() {
+                    match link_language.commit(pending_diffs).await {
+                        Ok(Some(_)) => {
+                            db.clear_pending_diffs(&uuid)?;
+                            // Reset immediate commits counter after successful commit
+                            *self.immediate_commits_remaining.lock().await = 3; // Or whatever the default should be
+                            log::info!("Successfully committed pending diffs");
+                            Ok(())
+                        }
+                        Ok(None) => Err(anyhow!("No diff returned from commit")),
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    Ok(()) // Keep diffs if no link language
+                }
+            } else {
                 Ok(())
             }
-            .await
-            {
-                log::error!("Error in pending_diffs_loop: {:?}", e);
-            }
-            interval.tick().await;
-        }
+        }).await
     }
 
     async fn notification_check_loop(&self) {
@@ -432,7 +477,6 @@ impl PerspectiveInstance {
             ));
         }
 
-        let mut timer = self.commit_debounce_timer.lock().await;
         let mut immediate_commits = self.immediate_commits_remaining.lock().await;
 
         if *immediate_commits > 0 {
@@ -445,79 +489,6 @@ impl PerspectiveInstance {
 
         // Store diff in DB
         Ad4mDb::with_global_instance(|db| db.add_pending_diff(&handle.uuid, diff))?;
-
-        // Update or start timer
-        let now = tokio::time::Instant::now();
-        let should_spawn_task = if let Some(_existing_timer) = *timer {
-            // If timer exists but hasn't triggered yet, extend it
-            *timer = Some(now);
-            false
-        } else {
-            // No timer exists, start a new one
-            *timer = Some(now);
-            true
-        };
-
-        if should_spawn_task {
-            // Clone what we need for the delayed task
-            let self_clone = self.clone();
-            let uuid = handle.uuid.clone();
-
-            tokio::spawn(async move {
-                let start_time = tokio::time::Instant::now();
-
-                loop {
-                    sleep(Duration::from_millis(100)).await; // Check more frequently
-
-                    let should_commit = {
-                        let timer_guard = self_clone.commit_debounce_timer.lock().await;
-                        let last_commit_time = timer_guard.unwrap();
-
-                        // Commit if either:
-                        // 1. No new commits for 1 second
-                        // 2. Maximum wait time of 10 seconds reached
-                        last_commit_time.elapsed() >= Duration::from_secs(1)
-                            || start_time.elapsed() >= Duration::from_secs(10)
-                    };
-
-                    if should_commit {
-                        if let Ok(pending_diffs) =
-                            Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid))
-                        {
-                            if let Some(link_language) =
-                                self_clone.link_language.lock().await.as_mut()
-                            {
-                                match link_language.commit(pending_diffs).await {
-                                    Ok(Some(_)) => {
-                                        // Clear pending diffs and timer on successful commit
-                                        let _ = Ad4mDb::with_global_instance(|db| {
-                                            db.clear_pending_diffs(&uuid)
-                                        });
-                                        *self_clone.commit_debounce_timer.lock().await = None;
-
-                                        // Log the reason for commit
-                                        if start_time.elapsed() >= Duration::from_secs(10) {
-                                            log::info!(
-                                                "Committing due to maximum wait time reached (10s)"
-                                            );
-                                        } else {
-                                            log::info!("Committing due to 1s of inactivity");
-                                        }
-                                    }
-                                    Ok(None) => log::error!(
-                                        "Error committing pending diffs. No diff returned."
-                                    ),
-                                    Err(e) => {
-                                        log::error!("Error committing pending diffs: {:?}", e)
-                                    }
-                                }
-                            }
-                        }
-                        break;
-                    }
-                }
-            });
-        }
 
         Ok(None)
     }
