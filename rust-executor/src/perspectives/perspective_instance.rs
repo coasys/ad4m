@@ -262,19 +262,18 @@ impl PerspectiveInstance {
         let uuid = self.persisted.lock().await.uuid.clone();
         let mut interval = time::interval(Duration::from_secs(1));
         let mut last_diff_time = None;
-    
+
         while !*self.is_teardown.lock().await {
             interval.tick().await;
 
             if self.has_link_language().await {
-                let (_, ids) = Ad4mDb::with_global_instance(|db| {
-                    db.get_pending_diffs(&uuid)
-                }).unwrap_or((PerspectiveDiff::empty(), Vec::new()));
+                let (_, ids) = Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid))
+                    .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
 
                 if ids.len() == 0 {
                     continue;
                 }
-    
+
                 if last_diff_time.is_none() {
                     // First diff in a burst - start timer
                     last_diff_time = Some(tokio::time::Instant::now());
@@ -300,26 +299,27 @@ impl PerspectiveInstance {
                         log::info!("Committed diffs after collecting 100");
                     }
                 }
-            }   
+            }
         }
     }
 
     async fn has_new_diffs_in_last_second(&self) -> bool {
         let timer = self.commit_debounce_timer.lock().await;
-        timer.map(|instant| instant.elapsed() < tokio::time::Duration::from_secs(1)).unwrap_or(false)
+        timer
+            .map(|instant| instant.elapsed() < tokio::time::Duration::from_secs(1))
+            .unwrap_or(false)
     }
 
     async fn has_link_language(&self) -> bool {
         let link_language_guard = self.link_language.lock().await;
         link_language_guard.is_some()
     }
-    
+
     async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
         let uuid = self.persisted.lock().await.uuid.clone();
 
-        let (pending_diffs, pending_ids) = Ad4mDb::with_global_instance(|db| {
-            db.get_pending_diffs(&uuid)
-        })?;
+        let (pending_diffs, pending_ids) =
+            Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid))?;
 
         if !pending_ids.is_empty() {
             let mut link_language_lock = self.link_language.lock().await;
@@ -331,7 +331,8 @@ impl PerspectiveInstance {
                             db.clear_pending_diffs(&uuid, pending_ids)
                         })?;
                         // Reset immediate commits counter after successful commit
-                        let mut immediate_commits_remaining = self.immediate_commits_remaining.lock().await;
+                        let mut immediate_commits_remaining =
+                            self.immediate_commits_remaining.lock().await;
                         *immediate_commits_remaining = 3; // Or whatever the default should be
                         log::info!("Successfully committed pending diffs");
                         Ok(())
@@ -487,7 +488,7 @@ impl PerspectiveInstance {
         // Update or start timer
         let mut timer = self.commit_debounce_timer.lock().await;
         *timer = Some(tokio::time::Instant::now());
-        
+
         Ok(None)
     }
 

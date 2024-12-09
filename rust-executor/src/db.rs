@@ -984,7 +984,10 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn get_pending_diffs(&self, perspective_uuid: &str) -> Ad4mDbResult<(PerspectiveDiff, Vec<u64>)> {
+    pub fn get_pending_diffs(
+        &self,
+        perspective_uuid: &str,
+    ) -> Ad4mDbResult<(PerspectiveDiff, Vec<u64>)> {
         let mut stmt = self.conn.prepare(
             "SELECT additions, removals, id FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2",
         )?;
@@ -994,10 +997,13 @@ impl Ad4mDb {
             let removals: Vec<LinkExpression> =
                 serde_json::from_str(&row.get::<_, String>(1).unwrap()).unwrap();
             let id = row.get::<_, u64>(2).unwrap();
-            Ok((PerspectiveDiff {
-                additions,
-                removals,
-            }, id))
+            Ok((
+                PerspectiveDiff {
+                    additions,
+                    removals,
+                },
+                id,
+            ))
         })?;
         let mut diffs = Vec::new();
         let mut ids = Vec::new();
@@ -1013,20 +1019,27 @@ impl Ad4mDb {
             all_additions.extend(diff.additions);
             all_removals.extend(diff.removals);
         }
-        Ok((PerspectiveDiff {
-            additions: all_additions,
-            removals: all_removals,
-        }, ids))
+        Ok((
+            PerspectiveDiff {
+                additions: all_additions,
+                removals: all_removals,
+            },
+            ids,
+        ))
     }
 
     pub fn clear_pending_diffs(&self, perspective_uuid: &str, ids: Vec<u64>) -> Ad4mDbResult<()> {
-        let id_list = ids.iter()
+        let id_list = ids
+            .iter()
             .map(|id| id.to_string())
             .collect::<Vec<String>>()
             .join(",");
-        
+
         self.conn.execute(
-            &format!("DELETE FROM perspective_diff WHERE perspective = ?1 AND id IN ({})", id_list),
+            &format!(
+                "DELETE FROM perspective_diff WHERE perspective = ?1 AND id IN ({})",
+                id_list
+            ),
             params![perspective_uuid],
         )?;
         Ok(())
