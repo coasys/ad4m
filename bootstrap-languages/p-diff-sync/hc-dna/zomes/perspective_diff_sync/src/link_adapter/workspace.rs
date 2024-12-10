@@ -122,7 +122,7 @@ impl Workspace {
         &mut self,
         latest: Hash,
     ) -> SocialContextResult<()> {
-        debug!("===Workspace.collect_only_from_latest(): Function start");
+        //debug!("===Workspace.collect_only_from_latest(): Function start");
         let fn_start = get_now()?.time();
 
         // Initializing with only one branch starting from the given hash.
@@ -184,7 +184,7 @@ impl Workspace {
         }
 
         let fn_end = get_now()?.time();
-        debug!("===Workspace.collect_only_from_latest() - Profiling: Took: {} to complete collect_only_from_latest() function", (fn_end - fn_start).num_milliseconds());
+        //debug!("===Workspace.collect_only_from_latest() - Profiling: Took: {} to complete collect_only_from_latest() function", (fn_end - fn_start).num_milliseconds());
 
         Ok(())
     }
@@ -300,7 +300,7 @@ impl Workspace {
         theirs: Hash,
         ours: Hash,
     ) -> SocialContextResult<()> {
-        debug!("===Workspace.build_diffs(): Function start");
+        //debug!("===Workspace.build_diffs(): Function start");
         let fn_start = get_now()?.time();
 
         let common_ancestor = self.collect_until_common_ancestor::<Retriever>(theirs, ours)?;
@@ -341,10 +341,10 @@ impl Workspace {
         self.print_graph_debug();
 
         let fn_end = get_now()?.time();
-        debug!(
-            "===Workspace.build_diffs() - Profiling: Took: {} to complete build_diffs() function",
-            (fn_end - fn_start).num_milliseconds()
-        );
+        //debug!(
+        //    "===Workspace.build_diffs() - Profiling: Took: {} to complete build_diffs() function",
+        //    (fn_end - fn_start).num_milliseconds()
+        //);
 
         Ok(())
     }
@@ -604,7 +604,7 @@ impl Workspace {
     // }
 
     pub fn build_graph(&mut self) -> SocialContextResult<()> {
-        debug!("===Workspace.build_graph(): Function start");
+        //debug!("===Workspace.build_graph(): Function start");
         let fn_start = get_now()?.time();
 
         match self.sorted_diffs.clone() {
@@ -635,7 +635,7 @@ impl Workspace {
                 }
 
                 let fn_end = get_now()?.time();
-                debug!("===Workspace.build_graph() - Profiling: Took: {} to complete build_graph() function", (fn_end - fn_start).num_milliseconds());
+                //debug!("===Workspace.build_graph() - Profiling: Took: {} to complete build_graph() function", (fn_end - fn_start).num_milliseconds());
 
                 Ok(())
             }
@@ -759,7 +759,7 @@ impl Workspace {
     pub fn squashed_diff<Retriever: PerspectiveDiffRetreiver>(
         &self,
     ) -> SocialContextResult<PerspectiveDiff> {
-        debug!("===Workspace.squashed_diff(): Function start");
+        //debug!("===Workspace.squashed_diff(): Function start");
         let fn_start = get_now()?.time();
 
         let mut out = PerspectiveDiff {
@@ -776,7 +776,7 @@ impl Workspace {
         }
 
         let fn_end = get_now()?.time();
-        debug!("===Workspace.squashed_diff() - Profiling: Took: {} to complete squashed_diff() function", (fn_end - fn_start).num_milliseconds());
+        //debug!("===Workspace.squashed_diff() - Profiling: Took: {} to complete squashed_diff() function", (fn_end - fn_start).num_milliseconds());
 
         Ok(out)
     }
@@ -842,15 +842,15 @@ impl Workspace {
                 "Directed: {:?}\n",
                 Dot::with_config(&self.graph, &[Config::NodeIndexLabel])
             );
-            debug!(
-                "Undirected: {:?}\n",
-                Dot::with_config(&self.undirected_graph, &[])
-            );
+            //debug!(
+            //    "Undirected: {:?}\n",
+            //    Dot::with_config(&self.undirected_graph, &[])
+            //);
         }
     }
 
     pub fn all_ancestors(&self, child: &Hash) -> SocialContextResult<Vec<Hash>> {
-        debug!("===Workspace.all_ancestors(): Function start");
+        //debug!("===Workspace.all_ancestors(): Function start");
         let fn_start = get_now()?.time();
 
         let child_node = self
@@ -875,7 +875,7 @@ impl Workspace {
         }
 
         let fn_end = get_now()?.time();
-        debug!("===Workspace.all_ancestors() - Profiling: Took: {} to complete all_ancestors() function", (fn_end - fn_start).num_milliseconds());
+        //debug!("===Workspace.all_ancestors() - Profiling: Took: {} to complete all_ancestors() function", (fn_end - fn_start).num_milliseconds());
 
         Ok(ancestors)
     }
