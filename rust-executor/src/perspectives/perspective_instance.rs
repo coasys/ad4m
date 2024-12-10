@@ -275,7 +275,7 @@ impl PerspectiveInstance {
                 })
                 .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
 
-                if ids.len() == 0 {
+                if ids.is_empty() {
                     continue;
                 }
 
@@ -287,22 +287,20 @@ impl PerspectiveInstance {
                 // Commit if either:
                 // 1. It's been 10s since first diff in burst (don't collect longer than 10s)
                 if last_diff_time.unwrap().elapsed() >= Duration::from_secs(10) {
-                    if let Ok(_) = self.commit_pending_diffs().await {
+                    if self.commit_pending_diffs().await.is_ok() {
                         last_diff_time = None;
                         log::info!("Committed diffs after reaching 10s maximum wait time");
                     }
                 // 2. It's been > 1s since last new diff (burst is over)
                 } else if !self.has_new_diffs_in_last_second().await {
-                    if let Ok(_) = self.commit_pending_diffs().await {
+                    if self.commit_pending_diffs().await.is_ok() {
                         last_diff_time = None;
                         log::info!("Committed diffs after 1s of inactivity");
                     }
                 // 3. We have collected more than 100 diffs
-                } else if ids.len() >= MAX_PENDING_DIFFS_COUNT {
-                    if let Ok(_) = self.commit_pending_diffs().await {
-                        last_diff_time = None;
-                        log::info!("Committed diffs after collecting 100");
-                    }
+                } else if ids.len() >= MAX_PENDING_DIFFS_COUNT && self.commit_pending_diffs().await.is_ok() {
+                    last_diff_time = None;
+                    log::info!("Committed diffs after collecting 100");
                 }
             }
         }
@@ -468,7 +466,7 @@ impl PerspectiveInstance {
             Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&handle.uuid, Some(1)))
                 .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
 
-        let commit_result = if pending_ids.len() == 0 {
+        let commit_result = if pending_ids.is_empty() {
             // No pending diffs, let's try
             if let Some(link_language) = self.link_language.lock().await.as_mut() {
                 // Got lock on Link Language, no other commit running

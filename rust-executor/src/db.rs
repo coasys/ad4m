@@ -1008,12 +1008,10 @@ impl Ad4mDb {
         })?;
         let mut diffs = Vec::new();
         let mut ids = Vec::new();
-        let mut count: usize = 0;
-        for diff_result in diffs_iter {
+        for (count, diff_result) in diffs_iter.enumerate() {
             let (diff, id) = diff_result?;
             diffs.push(diff);
             ids.push(id);
-            count += 1;
             if max_count.map(|max| count >= max).unwrap_or(false) {
                 break;
             }
