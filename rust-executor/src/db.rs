@@ -1012,7 +1012,7 @@ impl Ad4mDb {
             let (diff, id) = diff_result?;
             diffs.push(diff);
             ids.push(id);
-            if max_count.map(|max| count >= max).unwrap_or(false) {
+            if max_count.map(|max| count >= max-1).unwrap_or(false) {
                 break;
             }
         }
