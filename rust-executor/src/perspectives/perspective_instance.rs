@@ -270,8 +270,10 @@ impl PerspectiveInstance {
             interval.tick().await;
 
             if self.has_link_language().await {
-                let (_, ids) = Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT)))
-                    .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
+                let (_, ids) = Ad4mDb::with_global_instance(|db| {
+                    db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
+                })
+                .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
 
                 if ids.len() == 0 {
                     continue;
@@ -321,8 +323,9 @@ impl PerspectiveInstance {
     async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
         let uuid = self.persisted.lock().await.uuid.clone();
 
-        let (pending_diffs, pending_ids) =
-            Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT)))?;
+        let (pending_diffs, pending_ids) = Ad4mDb::with_global_instance(|db| {
+            db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
+        })?;
 
         if !pending_ids.is_empty() {
             let mut link_language_lock = self.link_language.lock().await;
@@ -461,7 +464,9 @@ impl PerspectiveInstance {
         }
 
         // Seeing if we already have pending diffs, to not overtake older commits but instead add this one to the queue
-        let (_, pending_ids) = Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&handle.uuid, Some(1))).unwrap_or((PerspectiveDiff::empty(), Vec::new()));
+        let (_, pending_ids) =
+            Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&handle.uuid, Some(1)))
+                .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
 
         let commit_result = if pending_ids.len() == 0 {
             // No pending diffs, let's try
@@ -471,7 +476,8 @@ impl PerspectiveInstance {
                     // Revision set, we are synced
                     // we are in a healthy Neighbourhood state and should be able to commit
                     // but let's make sure we're not DoS'ing the link language in bursts
-                    let mut immediate_commits_remaining = self.immediate_commits_remaining.lock().await;
+                    let mut immediate_commits_remaining =
+                        self.immediate_commits_remaining.lock().await;
                     if *immediate_commits_remaining > 0 {
                         *immediate_commits_remaining -= 1;
                         link_language.commit(diff.clone()).await
@@ -492,7 +498,10 @@ impl PerspectiveInstance {
             Ok(Some(rev)) => log::info!("Committed to revision: {}", rev),
             Ok(None) => log::warn!("Committed but got now revision from LinkLanguage!"),
             Err(e) => {
-                log::warn!("Error trying to commit diff: {:?}\nStoring in pending diffs for later", e);
+                log::warn!(
+                    "Error trying to commit diff: {:?}\nStoring in pending diffs for later",
+                    e
+                );
                 // Store diff in DB
                 Ad4mDb::with_global_instance(|db| db.add_pending_diff(&handle.uuid, diff))?;
                 // Update or start timer

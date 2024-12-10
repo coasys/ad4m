@@ -1015,7 +1015,7 @@ impl Ad4mDb {
             ids.push(id);
             count += 1;
             if max_count.map(|max| count >= max).unwrap_or(false) {
-                break
+                break;
             }
         }
         // Assuming we want to concatenate all additions and removals from different diffs
@@ -1468,7 +1468,7 @@ mod tests {
 
         // Get only 2 diffs using max_count
         let (diff, ids) = db.get_pending_diffs(&p_uuid, Some(2)).unwrap();
-        
+
         // Assert we only got 2 diffs
         assert_eq!(ids.len(), 2);
         assert_eq!(diff.additions.len(), 2);
