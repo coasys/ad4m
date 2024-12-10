@@ -987,6 +987,7 @@ impl Ad4mDb {
     pub fn get_pending_diffs(
         &self,
         perspective_uuid: &str,
+        max_count: Option<usize>,
     ) -> Ad4mDbResult<(PerspectiveDiff, Vec<u64>)> {
         let mut stmt = self.conn.prepare(
             "SELECT additions, removals, id FROM perspective_diff WHERE perspective = ?1 AND is_pending = ?2",
@@ -1007,10 +1008,15 @@ impl Ad4mDb {
         })?;
         let mut diffs = Vec::new();
         let mut ids = Vec::new();
+        let mut count: usize = 0;
         for diff_result in diffs_iter {
             let (diff, id) = diff_result?;
             diffs.push(diff);
-            ids.push(id)
+            ids.push(id);
+            count += 1;
+            if max_count.map(|max| count >= max).unwrap_or(false) {
+                break
+            }
         }
         // Assuming we want to concatenate all additions and removals from different diffs
         let mut all_additions = Vec::new();
@@ -1424,7 +1430,7 @@ mod tests {
         )
         .unwrap();
 
-        let (diff, ids) = db.get_pending_diffs(&p_uuid).unwrap();
+        let (diff, ids) = db.get_pending_diffs(&p_uuid, None).unwrap();
         assert_eq!(ids.len(), 1);
         assert_eq!(diff.additions.len(), 1);
         assert_eq!(diff.removals.len(), 1);
@@ -1437,9 +1443,36 @@ mod tests {
         );
 
         db.clear_pending_diffs(&p_uuid, ids).unwrap();
-        let (diff, ids) = db.get_pending_diffs(&p_uuid).unwrap();
+        let (diff, ids) = db.get_pending_diffs(&p_uuid, None).unwrap();
         assert_eq!(ids.len(), 0);
         assert_eq!(diff.additions.len(), 0);
+
+        // Create 3 different diffs
+        let diff1 = PerspectiveDiff {
+            additions: vec![construct_dummy_link_expression(LinkStatus::Shared)],
+            removals: vec![],
+        };
+        let diff2 = PerspectiveDiff {
+            additions: vec![construct_dummy_link_expression(LinkStatus::Shared)],
+            removals: vec![],
+        };
+        let diff3 = PerspectiveDiff {
+            additions: vec![construct_dummy_link_expression(LinkStatus::Shared)],
+            removals: vec![],
+        };
+
+        // Add all 3 diffs
+        db.add_pending_diff(&p_uuid, &diff1).unwrap();
+        db.add_pending_diff(&p_uuid, &diff2).unwrap();
+        db.add_pending_diff(&p_uuid, &diff3).unwrap();
+
+        // Get only 2 diffs using max_count
+        let (diff, ids) = db.get_pending_diffs(&p_uuid, Some(2)).unwrap();
+        
+        // Assert we only got 2 diffs
+        assert_eq!(ids.len(), 2);
+        assert_eq!(diff.additions.len(), 2);
+        assert_eq!(diff.removals.len(), 0);
     }
 
     #[test]
