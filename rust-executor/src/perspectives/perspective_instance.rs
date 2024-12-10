@@ -34,8 +34,8 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 use tokio::{join, time};
 
-static MAX_PENDING_DIFFS_COUNT: usize = 100;
-static IMMEDIATE_COMMITS_COUNT: usize = 5;
+static MAX_PENDING_DIFFS_COUNT: usize = 150;
+static IMMEDIATE_COMMITS_COUNT: usize = 20;
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub enum SdnaType {
