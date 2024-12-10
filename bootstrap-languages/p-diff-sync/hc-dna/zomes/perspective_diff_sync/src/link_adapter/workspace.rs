@@ -123,7 +123,7 @@ impl Workspace {
         latest: Hash,
     ) -> SocialContextResult<()> {
         //debug!("===Workspace.collect_only_from_latest(): Function start");
-        let fn_start = get_now()?.time();
+        //let fn_start = get_now()?.time();
 
         // Initializing with only one branch starting from the given hash.
         let mut unprocessed_branches = VecDeque::new();
@@ -183,7 +183,7 @@ impl Workspace {
             }
         }
 
-        let fn_end = get_now()?.time();
+        //let fn_end = get_now()?.time();
         //debug!("===Workspace.collect_only_from_latest() - Profiling: Took: {} to complete collect_only_from_latest() function", (fn_end - fn_start).num_milliseconds());
 
         Ok(())
@@ -301,7 +301,7 @@ impl Workspace {
         ours: Hash,
     ) -> SocialContextResult<()> {
         //debug!("===Workspace.build_diffs(): Function start");
-        let fn_start = get_now()?.time();
+        //let fn_start = get_now()?.time();
 
         let common_ancestor = self.collect_until_common_ancestor::<Retriever>(theirs, ours)?;
         self.common_ancestors.push(common_ancestor);
@@ -340,7 +340,7 @@ impl Workspace {
         self.build_graph()?;
         self.print_graph_debug();
 
-        let fn_end = get_now()?.time();
+        //let fn_end = get_now()?.time();
         //debug!(
         //    "===Workspace.build_diffs() - Profiling: Took: {} to complete build_diffs() function",
         //    (fn_end - fn_start).num_milliseconds()
@@ -407,7 +407,7 @@ impl Workspace {
         ours: Hash,
     ) -> SocialContextResult<Hash> {
         //debug!("===Workspace.collect_until_common_ancestor(): Function start");
-        let fn_start = get_now()?.time();
+        //let fn_start = get_now()?.time();
 
         let mut common_ancestor: Option<Hash> = None;
 
@@ -557,11 +557,11 @@ impl Workspace {
             }
         }
 
-        let fn_end = get_now()?.time();
-        let ms_spent = (fn_end - fn_start).num_milliseconds();
-        if ms_spent > 1000 {
-            debug!("===Workspace.collect_until_common_ancestor() - Profiling: Took: {} to complete collect_until_common_ancestor() function", ms_spent);
-        }
+        //let fn_end = get_now()?.time();
+        //let ms_spent = (fn_end - fn_start).num_milliseconds();
+        //if ms_spent > 1000 {
+        //    debug!("===Workspace.collect_until_common_ancestor() - Profiling: Took: {} to complete collect_until_common_ancestor() function", ms_spent);
+        //}
 
         if common_ancestor.is_none() {
             return Err(SocialContextError::NoCommonAncestorFound);
@@ -605,7 +605,7 @@ impl Workspace {
 
     pub fn build_graph(&mut self) -> SocialContextResult<()> {
         //debug!("===Workspace.build_graph(): Function start");
-        let fn_start = get_now()?.time();
+        //let fn_start = get_now()?.time();
 
         match self.sorted_diffs.clone() {
             None => Err(SocialContextError::InternalError(
@@ -634,7 +634,7 @@ impl Workspace {
                     }
                 }
 
-                let fn_end = get_now()?.time();
+                //let fn_end = get_now()?.time();
                 //debug!("===Workspace.build_graph() - Profiling: Took: {} to complete build_graph() function", (fn_end - fn_start).num_milliseconds());
 
                 Ok(())
@@ -760,7 +760,7 @@ impl Workspace {
         &self,
     ) -> SocialContextResult<PerspectiveDiff> {
         //debug!("===Workspace.squashed_diff(): Function start");
-        let fn_start = get_now()?.time();
+        //let fn_start = get_now()?.time();
 
         let mut out = PerspectiveDiff {
             additions: vec![],
@@ -775,7 +775,7 @@ impl Workspace {
             out.removals.append(&mut diff_entry.removals.clone());
         }
 
-        let fn_end = get_now()?.time();
+        //let fn_end = get_now()?.time();
         //debug!("===Workspace.squashed_diff() - Profiling: Took: {} to complete squashed_diff() function", (fn_end - fn_start).num_milliseconds());
 
         Ok(out)
@@ -851,7 +851,7 @@ impl Workspace {
 
     pub fn all_ancestors(&self, child: &Hash) -> SocialContextResult<Vec<Hash>> {
         //debug!("===Workspace.all_ancestors(): Function start");
-        let fn_start = get_now()?.time();
+        //let fn_start = get_now()?.time();
 
         let child_node = self
             .get_node_index(child)
@@ -874,7 +874,7 @@ impl Workspace {
             ancestors.push(self.graph.node_weight(current).unwrap().to_owned());
         }
 
-        let fn_end = get_now()?.time();
+        //let fn_end = get_now()?.time();
         //debug!("===Workspace.all_ancestors() - Profiling: Took: {} to complete all_ancestors() function", (fn_end - fn_start).num_milliseconds());
 
         Ok(ancestors)
