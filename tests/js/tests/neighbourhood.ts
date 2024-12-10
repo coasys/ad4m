@@ -176,6 +176,41 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 bobLinks.forEach(link => {
                     expect(link.proof.valid).to.be.true
                 })
+                
+                // make sure we're getting out of burst mode again
+                await sleep(11000)
+
+                // Alice creates some links
+                console.log("Alice creating links...")
+                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'alice', target: 'test://alice/1'})
+                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'alice', target: 'test://alice/2'})
+                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'alice', target: 'test://alice/3'})
+
+                // Wait for sync
+                await sleep(5000)
+
+                // Verify Bob received Alice's links
+                bobLinks = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'alice'}))
+                expect(bobLinks.length).to.equal(3)
+                expect(bobLinks.some(link => link.data.target === 'test://alice/1')).to.be.true
+                expect(bobLinks.some(link => link.data.target === 'test://alice/2')).to.be.true
+                expect(bobLinks.some(link => link.data.target === 'test://alice/3')).to.be.true
+
+                // Bob creates some links
+                console.log("Bob creating links...")
+                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'bob', target: 'test://bob/1'})
+                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'bob', target: 'test://bob/2'}) 
+                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'bob', target: 'test://bob/3'})
+
+                // Wait for sync
+                await sleep(5000)
+
+                // Verify Alice received Bob's links
+                let aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'bob'}))
+                expect(aliceLinks.length).to.equal(3)
+                expect(aliceLinks.some(link => link.data.target === 'test://bob/1')).to.be.true
+                expect(aliceLinks.some(link => link.data.target === 'test://bob/2')).to.be.true
+                expect(aliceLinks.some(link => link.data.target === 'test://bob/3')).to.be.true
             })
 
             it('can delete neighbourhood', async () => {
