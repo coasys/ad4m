@@ -298,7 +298,9 @@ impl PerspectiveInstance {
                         log::info!("Committed diffs after 1s of inactivity");
                     }
                 // 3. We have collected more than 100 diffs
-                } else if ids.len() >= MAX_PENDING_DIFFS_COUNT && self.commit_pending_diffs().await.is_ok() {
+                } else if ids.len() >= MAX_PENDING_DIFFS_COUNT
+                    && self.commit_pending_diffs().await.is_ok()
+                {
                     last_diff_time = None;
                     log::info!("Committed diffs after collecting 100");
                 }
