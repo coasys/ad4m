@@ -363,6 +363,13 @@ impl PerspectiveDiff {
             removals,
         }
     }
+
+    pub fn empty() -> PerspectiveDiff {
+        PerspectiveDiff {
+            additions: vec![],
+            removals: vec![],
+        }
+    }
 }
 
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
