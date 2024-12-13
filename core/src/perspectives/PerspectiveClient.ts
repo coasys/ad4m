@@ -141,7 +141,6 @@ export class PerspectiveClient {
             variables: { uuid, query }
         }))
 
-        console.log("PRE parse:", perspectiveQueryProlog)
         return JSON.parse(perspectiveQueryProlog)
     }
 
