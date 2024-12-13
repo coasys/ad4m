@@ -86,7 +86,7 @@ pub async fn get_prolog_service() -> PrologService {
 #[cfg(test)]
 mod prolog_test {
     use maplit::btreemap;
-    use scryer_prolog::parsed_results::{QueryMatch, QueryResolution, Value};
+    use scryer_prolog::{QueryMatch, QueryResolution, Value};
 
     use super::*;
 
