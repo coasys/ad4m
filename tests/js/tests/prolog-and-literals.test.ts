@@ -770,7 +770,8 @@ describe("Prolog + Literals", () => {
 
                     let linksResolve = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://resolve"}))
                     expect(linksResolve.length).to.equal(1)
-                    expect(linksResolve[0].data.target).to.equal(Literal.from(longName).toUrl())
+                    let expression = Literal.fromUrl(linksResolve[0].data.target).get()
+                    expect(expression.data).to.equal(longName)
 
                     const recipe2 = new Recipe(perspective!, root)
                     await recipe2.get()
