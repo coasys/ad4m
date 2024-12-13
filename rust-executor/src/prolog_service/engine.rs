@@ -1,7 +1,7 @@
 use std::panic::AssertUnwindSafe;
 
 use deno_core::anyhow::Error;
-use scryer_prolog::{QueryResult, Machine};
+use scryer_prolog::{Machine, QueryResult};
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug)]
