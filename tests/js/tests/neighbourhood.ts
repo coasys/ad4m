@@ -131,6 +131,88 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(bobLinks.length).to.be.equal(0)
             })
 
+            it('stress test - Bob receives 1500 links created rapidly by Alice', async () => {
+                const alice = testContext.alice
+                const bob = testContext.bob
+
+                aliceP1 = await alice.perspective.add("friends")
+                const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob stress test"}));
+                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
+                console.log("neighbourhoodUrl", neighbourhoodUrl);
+                bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+
+                await testContext.makeAllNodesKnown()
+
+                await sleep(1000)
+
+                // Create 1500 links as fast as possible
+                //const linkPromises = []
+                for(let i = 0; i < 1500; i++) {
+                    console.log("Alice adding link ", i)
+                    const link = await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: `test://test/${i}`})
+                    console.log("Link expression:", link)
+                }
+                //await Promise.all(linkPromises)
+
+                console.log("wait 10s")
+                await sleep(10000)
+
+                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                let tries = 1
+                const maxTries = 120 // 2 minutes with 1 second sleep
+
+                while(bobLinks.length < 1500 && tries < maxTries) {
+                    console.log(`Bob retrying getting links... Got ${bobLinks.length}/1500`);
+                    await sleep(1000)
+                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                    tries++
+                }
+
+                expect(bobLinks.length).to.be.equal(1500)
+                // Verify a few random links to ensure data integrity
+                expect(bobLinks.some(link => link.data.target === 'test://test/0')).to.be.true
+                expect(bobLinks.some(link => link.data.target === 'test://test/749')).to.be.true
+                expect(bobLinks.some(link => link.data.target === 'test://test/1499')).to.be.true
+                bobLinks.forEach(link => {
+                    expect(link.proof.valid).to.be.true
+                })
+                
+                // make sure we're getting out of burst mode again
+                await sleep(11000)
+
+                // Alice creates some links
+                console.log("Alice creating links...")
+                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'alice', target: 'test://alice/1'})
+                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'alice', target: 'test://alice/2'})
+                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'alice', target: 'test://alice/3'})
+
+                // Wait for sync
+                await sleep(5000)
+
+                // Verify Bob received Alice's links
+                bobLinks = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'alice'}))
+                expect(bobLinks.length).to.equal(3)
+                expect(bobLinks.some(link => link.data.target === 'test://alice/1')).to.be.true
+                expect(bobLinks.some(link => link.data.target === 'test://alice/2')).to.be.true
+                expect(bobLinks.some(link => link.data.target === 'test://alice/3')).to.be.true
+
+                // Bob creates some links
+                console.log("Bob creating links...")
+                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'bob', target: 'test://bob/1'})
+                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'bob', target: 'test://bob/2'}) 
+                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'bob', target: 'test://bob/3'})
+
+                // Wait for sync
+                await sleep(5000)
+
+                // Verify Alice received Bob's links
+                let aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'bob'}))
+                expect(aliceLinks.length).to.equal(3)
+                expect(aliceLinks.some(link => link.data.target === 'test://bob/1')).to.be.true
+                expect(aliceLinks.some(link => link.data.target === 'test://bob/2')).to.be.true
+                expect(aliceLinks.some(link => link.data.target === 'test://bob/3')).to.be.true
+            })
+
             it('can delete neighbourhood', async () => {
                 const alice = testContext.alice;
                 const bob = testContext.bob;

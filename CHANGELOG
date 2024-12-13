@@ -16,6 +16,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Make new Rust create_subject() implementation wait for Prolog engine to be updated, reflecting the new instance to avoid race conditions [PR#520](https://github.com/coasys/ad4m/pull/520)
 - Fix problems with Subject Classes created by other non-progenitor agents, and make isSubjectInstance() more stable agains race conditions [PR#521](https://github.com/coasys/ad4m/pull/521)
 - Avoid high CPU load when idling by deactivating V8's code optimization [PR#531](https://github.com/coasys/ad4m/pull/531)
+- Enable high-throughput of perspective mutations by debouncing commits to link languages and coalesce them into aggregated perspective diffs [PR#533](https://github.com/coasys/ad4m/pull/533)
 - Fix for long Flux messages (and too long subject class properties in general) being broken [PR#538](https://github.com/coasys/ad4m/pull/538)
 
 ### Added
