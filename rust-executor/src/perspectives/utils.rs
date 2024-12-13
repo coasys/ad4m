@@ -110,6 +110,7 @@ pub fn prolog_get_all_string_bindings(
             .filter_map(|m| m.bindings.get(variable_name))
             .filter_map(|value| match value {
                 scryer_prolog::Value::String(s) => Some(s),
+                scryer_prolog::Value::Atom(s) => Some(s),
                 _ => None,
             })
             .cloned()
