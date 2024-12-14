@@ -34,6 +34,9 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 use tokio::{join, time};
 
+static MAX_PENDING_DIFFS_COUNT: usize = 150;
+static IMMEDIATE_COMMITS_COUNT: usize = 20;
+
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub enum SdnaType {
     SubjectClass,
@@ -146,7 +149,7 @@ pub struct PerspectiveInstance {
     link_language: Arc<Mutex<Option<Language>>>,
     links_have_changed: Arc<Mutex<bool>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
-    immediate_commits_remaining: Arc<Mutex<u32>>,
+    immediate_commits_remaining: Arc<Mutex<usize>>,
 }
 
 impl PerspectiveInstance {
@@ -165,7 +168,7 @@ impl PerspectiveInstance {
             link_language: Arc::new(Mutex::new(None)),
             links_have_changed: Arc::new(Mutex::new(false)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
-            immediate_commits_remaining: Arc::new(Mutex::new(3)), // Default to 3 immediate commits
+            immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)), // Default to 3 immediate commits
         }
     }
 
@@ -259,51 +262,94 @@ impl PerspectiveInstance {
     }
 
     async fn pending_diffs_loop(&self) {
-        let mut interval = time::interval(Duration::from_secs(10));
         let uuid = self.persisted.lock().await.uuid.clone();
-        while !*self.is_teardown.lock().await {
-            if let Err(e) = async {
-                let mut link_language_guard = self.link_language.lock().await;
-                if let Some(link_language) = link_language_guard.as_mut() {
-                    // We have a link language.
-                    // Let's see if we have a revision yet (otherwise we're not synced yet and should keep our diffs pending)
-                    if link_language
-                        .current_revision()
-                        .await
-                        .map_err(|e| anyhow!("current_revision error: {}", e))?
-                        .is_some()
-                    {
-                        // Ok, we are synced and have a revision. Let's commit our pending diffs.
-                        let pending_diffs =
-                            Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid))
-                                .map_err(|e| anyhow!("get_pending_diffs error: {}", e))?;
+        let mut interval = time::interval(Duration::from_millis(100));
+        let mut last_diff_time = None;
 
-                        if pending_diffs.additions.is_empty() && pending_diffs.removals.is_empty() {
-                            return Ok(());
-                        }
-                        log::info!("Found pending diffs: {:?}\n Committing...", pending_diffs);
-                        let commit_result = link_language.commit(pending_diffs).await;
-                        log::info!("Pending diffs commit result: {:?}", commit_result);
-                        return match commit_result {
-                            Ok(Some(_)) => {
-                                Ad4mDb::with_global_instance(|db| db.clear_pending_diffs(&uuid))
-                                    .map_err(|e| anyhow!("clear_pending_diffs error: {}", e))?;
-                                Ok(())
-                            }
-                            Ok(None) => {
-                                Err(anyhow!("Error committing pending diffs. No diff returned."))
-                            }
-                            Err(e) => Err(anyhow!("Error committing pending diffs: {:?}", e)),
-                        };
-                    }
-                }
-                Ok(())
-            }
-            .await
-            {
-                log::error!("Error in pending_diffs_loop: {:?}", e);
-            }
+        while !*self.is_teardown.lock().await {
             interval.tick().await;
+
+            if self.has_link_language().await {
+                let (_, ids) = Ad4mDb::with_global_instance(|db| {
+                    db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
+                })
+                .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
+
+                if ids.is_empty() {
+                    continue;
+                }
+
+                if last_diff_time.is_none() {
+                    // First diff in a burst - start timer
+                    last_diff_time = Some(tokio::time::Instant::now());
+                }
+
+                // Commit if either:
+                // 1. It's been 10s since first diff in burst (don't collect longer than 10s)
+                if last_diff_time.unwrap().elapsed() >= Duration::from_secs(10) {
+                    if self.commit_pending_diffs().await.is_ok() {
+                        last_diff_time = None;
+                        log::info!("Committed diffs after reaching 10s maximum wait time");
+                    }
+                // 2. It's been > 1s since last new diff (burst is over)
+                } else if !self.has_new_diffs_in_last_second().await {
+                    if self.commit_pending_diffs().await.is_ok() {
+                        last_diff_time = None;
+                        log::info!("Committed diffs after 1s of inactivity");
+                    }
+                // 3. We have collected more than 100 diffs
+                } else if ids.len() >= MAX_PENDING_DIFFS_COUNT
+                    && self.commit_pending_diffs().await.is_ok()
+                {
+                    last_diff_time = None;
+                    log::info!("Committed diffs after collecting 100");
+                }
+            }
+        }
+    }
+
+    async fn has_new_diffs_in_last_second(&self) -> bool {
+        let timer = self.commit_debounce_timer.lock().await;
+        timer
+            .map(|instant| instant.elapsed() < tokio::time::Duration::from_secs(1))
+            .unwrap_or(false)
+    }
+
+    async fn has_link_language(&self) -> bool {
+        let link_language_guard = self.link_language.lock().await;
+        link_language_guard.is_some()
+    }
+
+    async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
+        let uuid = self.persisted.lock().await.uuid.clone();
+
+        let (pending_diffs, pending_ids) = Ad4mDb::with_global_instance(|db| {
+            db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
+        })?;
+
+        if !pending_ids.is_empty() {
+            let mut link_language_lock = self.link_language.lock().await;
+            if let Some(link_language) = link_language_lock.as_mut() {
+                log::info!("Committing {} pending diffs...", pending_ids.len());
+                let commit_result = link_language.commit(pending_diffs).await;
+                match commit_result {
+                    Ok(Some(_)) => {
+                        Ad4mDb::with_global_instance(|db| {
+                            db.clear_pending_diffs(&uuid, pending_ids)
+                        })?;
+                        // Reset immediate commits counter after successful commit
+                        self.set_immediate_commits(IMMEDIATE_COMMITS_COUNT).await;
+                        log::info!("Successfully committed pending diffs");
+                        Ok(())
+                    }
+                    Ok(None) => Err(anyhow!("No diff returned from commit")),
+                    Err(e) => Err(e),
+                }
+            } else {
+                Ok(()) // Keep diffs if no link language
+            }
+        } else {
+            Ok(())
         }
     }
 
@@ -411,119 +457,64 @@ impl PerspectiveInstance {
         *self.persisted.lock().await = handle;
     }
 
-    pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<Option<String>, AnyError> {
+    pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
         let handle = self.persisted.lock().await.clone();
         if handle.neighbourhood.is_none() {
-            return Ok(None);
+            return Ok(());
         }
 
-        let mut can_commit = false;
-        if !self.created_from_join {
-            can_commit = true;
-        } else if let Some(link_language) = self.link_language.lock().await.as_mut() {
-            if link_language.current_revision().await?.is_some() {
-                can_commit = true;
-            }
-        };
+        // Seeing if we already have pending diffs, to not overtake older commits but instead add this one to the queue
+        let (_, pending_ids) =
+            Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&handle.uuid, Some(1)))
+                .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
 
-        if !can_commit {
-            return Err(anyhow!(
-                "Cannot commit diff. Not yet synced with neighbourhood..."
-            ));
-        }
-
-        let mut timer = self.commit_debounce_timer.lock().await;
-        let mut immediate_commits = self.immediate_commits_remaining.lock().await;
-
-        if *immediate_commits > 0 {
-            // Process immediate commit
-            *immediate_commits -= 1;
+        let commit_result = if pending_ids.is_empty() {
+            // No pending diffs, let's try
             if let Some(link_language) = self.link_language.lock().await.as_mut() {
-                return link_language.commit(diff.clone()).await;
+                // Got lock on Link Language, no other commit running
+                if link_language.current_revision().await?.is_some() {
+                    // Revision set, we are synced
+                    // we are in a healthy Neighbourhood state and should be able to commit
+                    // but let's make sure we're not DoS'ing the link language in bursts
+                    let mut immediate_commits_remaining =
+                        self.immediate_commits_remaining.lock().await;
+                    if *immediate_commits_remaining > 0 {
+                        *immediate_commits_remaining -= 1;
+                        link_language.commit(diff.clone()).await
+                    } else {
+                        Err(anyhow!("Debouncing commit burst"))
+                    }
+                } else {
+                    Err(anyhow!("Link Language not synced"))
+                }
+            } else {
+                Err(anyhow!("LinkLanguage not available"))
+            }
+        } else {
+            Err(anyhow!("Other pending diffs already in queue"))
+        };
+
+        match commit_result {
+            Ok(Some(rev)) => log::info!("Committed to revision: {}", rev),
+            Ok(None) => log::warn!("Committed but got now revision from LinkLanguage!"),
+            Err(e) => {
+                log::warn!(
+                    "Error trying to commit diff: {:?}\nStoring in pending diffs for later",
+                    e
+                );
+                // Store diff in DB
+                Ad4mDb::with_global_instance(|db| db.add_pending_diff(&handle.uuid, diff))?;
+                // Update or start timer
+                let mut timer = self.commit_debounce_timer.lock().await;
+                *timer = Some(tokio::time::Instant::now());
             }
         }
 
-        // Store diff in DB
-        Ad4mDb::with_global_instance(|db| db.add_pending_diff(&handle.uuid, diff))?;
-
-        // Update or start timer
-        let now = tokio::time::Instant::now();
-        let should_spawn_task = if let Some(_existing_timer) = *timer {
-            // If timer exists but hasn't triggered yet, extend it
-            *timer = Some(now);
-            false
-        } else {
-            // No timer exists, start a new one
-            *timer = Some(now);
-            true
-        };
-
-        if should_spawn_task {
-            // Clone what we need for the delayed task
-            let self_clone = self.clone();
-            let uuid = handle.uuid.clone();
-
-            tokio::spawn(async move {
-                let start_time = tokio::time::Instant::now();
-
-                loop {
-                    sleep(Duration::from_millis(100)).await; // Check more frequently
-
-                    let should_commit = {
-                        let timer_guard = self_clone.commit_debounce_timer.lock().await;
-                        let last_commit_time = timer_guard.unwrap();
-
-                        // Commit if either:
-                        // 1. No new commits for 1 second
-                        // 2. Maximum wait time of 10 seconds reached
-                        last_commit_time.elapsed() >= Duration::from_secs(1)
-                            || start_time.elapsed() >= Duration::from_secs(10)
-                    };
-
-                    if should_commit {
-                        if let Ok(pending_diffs) =
-                            Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid))
-                        {
-                            if let Some(link_language) =
-                                self_clone.link_language.lock().await.as_mut()
-                            {
-                                match link_language.commit(pending_diffs).await {
-                                    Ok(Some(_)) => {
-                                        // Clear pending diffs and timer on successful commit
-                                        let _ = Ad4mDb::with_global_instance(|db| {
-                                            db.clear_pending_diffs(&uuid)
-                                        });
-                                        *self_clone.commit_debounce_timer.lock().await = None;
-
-                                        // Log the reason for commit
-                                        if start_time.elapsed() >= Duration::from_secs(10) {
-                                            log::info!(
-                                                "Committing due to maximum wait time reached (10s)"
-                                            );
-                                        } else {
-                                            log::info!("Committing due to 1s of inactivity");
-                                        }
-                                    }
-                                    Ok(None) => log::error!(
-                                        "Error committing pending diffs. No diff returned."
-                                    ),
-                                    Err(e) => {
-                                        log::error!("Error committing pending diffs: {:?}", e)
-                                    }
-                                }
-                            }
-                        }
-                        break;
-                    }
-                }
-            });
-        }
-
-        Ok(None)
+        Ok(())
     }
 
     // Add method to configure immediate commits
-    pub async fn set_immediate_commits(&self, count: u32) {
+    pub async fn set_immediate_commits(&self, count: usize) {
         *self.immediate_commits_remaining.lock().await = count;
     }
 
@@ -532,7 +523,8 @@ impl PerspectiveInstance {
         let diff_clone = diff.clone();
 
         tokio::spawn(async move {
-            if (self_clone.commit(&diff_clone).await).is_err() {
+            if let Err(e) = self_clone.commit(&diff_clone).await {
+                log::error!("PerspectiveInstance::commit() returned error: {:?}\nStoring in pending diffs for later", e);
                 let handle_clone = self_clone.persisted.lock().await.clone();
                 Ad4mDb::with_global_instance(|db|
                     db.add_pending_diff(&handle_clone.uuid, &diff_clone)
