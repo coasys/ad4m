@@ -301,7 +301,7 @@ impl AIService {
             "llama_13b_code" => Llama::builder().with_source(LlamaSource::llama_13b_code()),
             "llama_34b_code" => Llama::builder().with_source(LlamaSource::llama_34b_code()),
             "llama_70b" => Llama::builder().with_source(LlamaSource::llama_70b()),
-            
+
             // Handle unknown models
             _ => {
                 log::error!("Unknown model string: {}", model_size_string);
