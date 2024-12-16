@@ -35,7 +35,7 @@ export default function ModelModal(props: {
   const [newModelNameError, setNewModelNameError] = useState(false);
   const [newModelType, setNewModelType] = useState("LLM");
   const [newModels, setNewModels] = useState<any[]>(llmModels);
-  const [newModel, setNewModel] = useState("llama_8b");
+  const [newModel, setNewModel] = useState("llama_13b_code");
   const [apiUrl, setApiUrl] = useState("https://api.openai.com/v1");
   const [apiKey, setApiKey] = useState("");
   const [apiUrlError, setApiUrlError] = useState(false);
@@ -172,7 +172,7 @@ export default function ModelModal(props: {
                         setNewModelType(type);
                         if (type === "LLM") {
                           setNewModels(llmModels);
-                          setNewModel("llama_8b");
+                          setNewModel("llama_13b_code");
                         } else if (type === "EMBEDDING") {
                           setNewModels(embeddingModels);
                           setNewModel("bert");
