@@ -137,7 +137,7 @@ impl std::fmt::Display for ExternWrapper {
 
 impl JsCore {
     pub fn new() -> Self {
-        deno_core::v8::V8::set_flags_from_string("--no-opt --turbo-disable-all");
+        deno_core::v8::V8::set_flags_from_string("--no-opt");
         JsCore {
             #[allow(clippy::arc_with_non_send_sync)]
             worker: Arc::new(TokioMutex::new(MainWorker::from_options(
