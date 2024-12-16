@@ -72,7 +72,7 @@ coasys_juniper = { version="0.16.0", features = ["chrono"] }
 coasys_juniper_subscriptions = { version="0.17.0" }
 coasys_juniper_graphql_transport_ws = { version="0.4.0" }
 coasys_juniper_warp = { version="0.8.0", features = ["subscriptions"] }
-warp = "0.3.4"
+warp = "0.3"
 
 jsonwebtoken = "8.3.0"
 
@@ -89,7 +89,7 @@ holochain_types = { version = "0.3.2-rc.1", git = "https://github.com/coasys/hol
 holochain_cli_run_local_services = { version = "0.3.2-rc.0", git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739" }
 kitsune_p2p_types = { version = "0.3.2-rc.0", git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739" }
 
-scryer-prolog = { version = "0.9.4" }
+scryer-prolog = { version = "0.9.4", git = "https://github.com/coasys/scryer-prolog" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
 ad4m-client = { path = "../rust-client", version="0.10.0-rc10" }

@@ -753,6 +753,35 @@ describe("Prolog + Literals", () => {
                     let literal = Literal.fromUrl(links[0].data.target).get()
                     expect(literal.data).to.equal(recipe.resolve)
                 })
+
+                it("works with very long property values", async() => {
+                    let root = Literal.from("Active record implementation test long value").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    const longName = "This is a very long recipe name that goes on and on with many many characters to test that we can handle long property values without any issues whatsoever and keep going even longer to make absolutely sure we hit at least 300 characters in this test string that just keeps getting longer and longer until we are completely satisfied that it works properly with such lengthy content. But wait, there's more! We need to make this string even longer to properly test the system's ability to handle extremely long property values. Let's add some more meaningful content about recipes - ingredients like flour, sugar, eggs, milk, butter, vanilla extract, baking powder, salt, and detailed instructions for mixing them together in just the right way to create the perfect baked goods. We could go on about preheating the oven to the right temperature, greasing the pans properly, checking for doneness with a toothpick, and letting things cool completely before frosting. The possibilities are endless when it comes to recipe details and instructions that could make this string longer and longer. We want to be absolutely certain that our system can handle property values of any reasonable length without truncating or corrupting the data in any way. This is especially important for recipes where precise instructions and ingredient amounts can make the difference between success and failure in the kitchen. Testing with realistically long content helps ensure our system works reliably in real-world usage scenarios where users might enter detailed information that extends well beyond a few simple sentences."
+                    recipe.name = longName
+                    recipe.resolve = longName
+
+                    await recipe.save()
+
+                    let linksName = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://name"}))
+                    expect(linksName.length).to.equal(1)
+                    expect(linksName[0].data.target).to.equal(longName)
+
+                    let linksResolve = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://resolve"}))
+                    expect(linksResolve.length).to.equal(1)
+                    let expression = Literal.fromUrl(linksResolve[0].data.target).get()
+                    expect(expression.data).to.equal(longName)
+
+                    const recipe2 = new Recipe(perspective!, root)
+                    await recipe2.get()
+
+                    expect(recipe2.name.length).to.equal(longName.length)
+                    expect(recipe2.name).to.equal(longName)
+
+                    expect(recipe2.resolve.length).to.equal(longName.length)
+                    expect(recipe2.resolve).to.equal(longName)
+                })
             })
         })
     })

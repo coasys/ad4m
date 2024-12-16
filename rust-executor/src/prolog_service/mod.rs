@@ -1,6 +1,6 @@
 use deno_core::anyhow::Error;
 use lazy_static::lazy_static;
-use scryer_prolog::machine::parsed_results::QueryResult;
+use scryer_prolog::QueryResult;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -86,7 +86,7 @@ pub async fn get_prolog_service() -> PrologService {
 #[cfg(test)]
 mod prolog_test {
     use maplit::btreemap;
-    use scryer_prolog::machine::parsed_results::{QueryMatch, QueryResolution, Value};
+    use scryer_prolog::{QueryMatch, QueryResolution, Value};
 
     use super::*;
 
