@@ -32,6 +32,8 @@ use log::error;
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
+static WHISPER_MODEL: WhisperSource = WhisperSource::Medium;
+
 lazy_static! {
     static ref AI_SERVICE: Arc<Mutex<Option<AIService>>> = Arc::new(Mutex::new(None));
 }
@@ -808,7 +810,7 @@ impl AIService {
 
             rt.block_on(async {
                 let maybe_model = WhisperBuilder::default()
-                    .with_source(WhisperSource::Base)
+                    .with_source(WHISPER_MODEL)
                     .with_device(Device::Cpu)
                     .build()
                     .await;
@@ -906,7 +908,7 @@ impl AIService {
         publish_model_status(id.clone(), 0.0, "Loading", false, false).await;
 
         let _ = WhisperBuilder::default()
-            .with_source(WhisperSource::Base)
+            .with_source(WHISPER_MODEL)
             .with_device(Device::Cpu)
             .build_with_loading_handler({
                 let name = id.clone();
