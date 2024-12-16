@@ -32,7 +32,7 @@ use log::error;
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
-static WHISPER_MODEL: WhisperSource = WhisperSource::Medium;
+static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
 
 lazy_static! {
     static ref AI_SERVICE: Arc<Mutex<Option<AIService>>> = Arc::new(Mutex::new(None));
