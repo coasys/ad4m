@@ -132,7 +132,7 @@ async fn handle_progress(model_id: String, loading: ModelLoadingProgress) {
     } else {
         "Loaded".to_string()
     };
-    println!("Progress update: {}% for model {}", progress, model_id); // Add logging
+    //println!("Progress update: {}% for model {}", progress, model_id); // Add logging
     publish_model_status(model_id.clone(), progress, &status, false, false).await;
 }
 
