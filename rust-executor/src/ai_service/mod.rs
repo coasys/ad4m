@@ -291,9 +291,17 @@ impl AIService {
             // Local TinyLlama models
             "llama_tiny" => Llama::builder().with_source(LlamaSource::tiny_llama_1_1b()),
             "llama_7b" => Llama::builder().with_source(LlamaSource::llama_7b()),
+            "llama_7b_chat" => Llama::builder().with_source(LlamaSource::llama_7b_chat()),
+            "llama_7b_code" => Llama::builder().with_source(LlamaSource::llama_7b_code()),
             "llama_8b" => Llama::builder().with_source(LlamaSource::llama_8b()),
+            "llama_8b_chat" => Llama::builder().with_source(LlamaSource::llama_8b_chat()),
+            "llama_3_1_8b_chat" => Llama::builder().with_source(LlamaSource::llama_3_1_8b_chat()),
             "llama_13b" => Llama::builder().with_source(LlamaSource::llama_13b()),
+            "llama_13b_chat" => Llama::builder().with_source(LlamaSource::llama_13b_chat()),
+            "llama_13b_code" => Llama::builder().with_source(LlamaSource::llama_13b_code()),
+            "llama_34b_code" => Llama::builder().with_source(LlamaSource::llama_34b_code()),
             "llama_70b" => Llama::builder().with_source(LlamaSource::llama_70b()),
+            
             // Handle unknown models
             _ => {
                 log::error!("Unknown model string: {}", model_size_string);
