@@ -318,7 +318,7 @@ impl AIService {
             .build_with_loading_handler({
                 let model_id = model_id.clone();
                 move |progress| {
-                    futures::executor::block_on(handle_progress(model_id.clone(), progress));
+                    tokio::spawn(handle_progress(model_id.clone(), progress));
                 }
             })
             .await?;
