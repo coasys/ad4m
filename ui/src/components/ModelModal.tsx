@@ -7,6 +7,11 @@ const AITypes = ["LLM", "EMBEDDING", "TRANSCRIPTION"];
 const llmModels = [
   "External API",
   // "tiny_llama_1_1b",
+  "mistral_7b",
+  "mistral_7b_instruct",
+  "mistral_7b_instruct_2",
+  "solar_10_7b",
+  "solar_10_7b_instruct",
   "llama_7b",
   "llama_7b_chat",
   "llama_7b_code",
@@ -35,7 +40,7 @@ export default function ModelModal(props: {
   const [newModelNameError, setNewModelNameError] = useState(false);
   const [newModelType, setNewModelType] = useState("LLM");
   const [newModels, setNewModels] = useState<any[]>(llmModels);
-  const [newModel, setNewModel] = useState("llama_13b_code");
+  const [newModel, setNewModel] = useState("llama_8b");
   const [apiUrl, setApiUrl] = useState("https://api.openai.com/v1");
   const [apiKey, setApiKey] = useState("");
   const [apiUrlError, setApiUrlError] = useState(false);
@@ -172,7 +177,7 @@ export default function ModelModal(props: {
                         setNewModelType(type);
                         if (type === "LLM") {
                           setNewModels(llmModels);
-                          setNewModel("llama_13b_code");
+                          setNewModel("llama_8b");
                         } else if (type === "EMBEDDING") {
                           setNewModels(embeddingModels);
                           setNewModel("bert");
