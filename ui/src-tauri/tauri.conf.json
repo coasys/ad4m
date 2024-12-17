@@ -1,7 +1,7 @@
 {
   "productName": "ADAM Launcher",
   "mainBinaryName": "ADAM Launcher",
-  "version": "0.10.0-rc10",
+  "version": "0.10.0-rc11",
   "identifier": "dev.ad4m.ad4min",
   "app": {
     "security": {
@@ -32,7 +32,13 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage", "deb", "msi", "dmg", "app"],
+    "targets": [
+      "appimage",
+      "deb",
+      "msi",
+      "dmg",
+      "app"
+    ],
     "windows": {
       "certificateThumbprint": null,
       "digestAlgorithm": "sha256",
