@@ -32,6 +32,8 @@ use log::error;
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
+static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
+
 lazy_static! {
     static ref AI_SERVICE: Arc<Mutex<Option<AIService>>> = Arc::new(Mutex::new(None));
 }
@@ -130,7 +132,7 @@ async fn handle_progress(model_id: String, loading: ModelLoadingProgress) {
     } else {
         "Loaded".to_string()
     };
-    println!("Progress update: {}% for model {}", progress, model_id); // Add logging
+    //println!("Progress update: {}% for model {}", progress, model_id); // Add logging
     publish_model_status(model_id.clone(), progress, &status, false, false).await;
 }
 
@@ -289,9 +291,28 @@ impl AIService {
             // Local TinyLlama models
             "llama_tiny" => Llama::builder().with_source(LlamaSource::tiny_llama_1_1b()),
             "llama_7b" => Llama::builder().with_source(LlamaSource::llama_7b()),
+            "llama_7b_chat" => Llama::builder().with_source(LlamaSource::llama_7b_chat()),
+            "llama_7b_code" => Llama::builder().with_source(LlamaSource::llama_7b_code()),
             "llama_8b" => Llama::builder().with_source(LlamaSource::llama_8b()),
+            "llama_8b_chat" => Llama::builder().with_source(LlamaSource::llama_8b_chat()),
+            "llama_3_1_8b_chat" => Llama::builder().with_source(LlamaSource::llama_3_1_8b_chat()),
             "llama_13b" => Llama::builder().with_source(LlamaSource::llama_13b()),
+            "llama_13b_chat" => Llama::builder().with_source(LlamaSource::llama_13b_chat()),
+            "llama_13b_code" => Llama::builder().with_source(LlamaSource::llama_13b_code()),
+            "llama_34b_code" => Llama::builder().with_source(LlamaSource::llama_34b_code()),
             "llama_70b" => Llama::builder().with_source(LlamaSource::llama_70b()),
+            "mistral_7b" => Llama::builder().with_source(LlamaSource::mistral_7b()),
+            "mistral_7b_instruct" => {
+                Llama::builder().with_source(LlamaSource::mistral_7b_instruct())
+            }
+            "mistral_7b_instruct_2" => {
+                Llama::builder().with_source(LlamaSource::mistral_7b_instruct_2())
+            }
+            "solar_10_7b" => Llama::builder().with_source(LlamaSource::solar_10_7b()),
+            "solar_10_7b_instruct" => {
+                Llama::builder().with_source(LlamaSource::solar_10_7b_instruct())
+            }
+
             // Handle unknown models
             _ => {
                 log::error!("Unknown model string: {}", model_size_string);
@@ -308,7 +329,7 @@ impl AIService {
             .build_with_loading_handler({
                 let model_id = model_id.clone();
                 move |progress| {
-                    futures::executor::block_on(handle_progress(model_id.clone(), progress));
+                    tokio::spawn(handle_progress(model_id.clone(), progress));
                 }
             })
             .await?;
@@ -520,6 +541,13 @@ impl AIService {
                                 }
                                 LlmModel::Local(ref mut llama) => {
                                     if let Some(task) = tasks.get(&prompt_request.task_id) {
+                                        rt.block_on(publish_model_status(
+                                            model_config.id.clone(),
+                                            100.0,
+                                            "Running inference...",
+                                            true,
+                                            true,
+                                        ));
                                         let mut maybe_result: Option<String> = None;
                                         let mut tries = 0;
                                         while maybe_result.is_none() && tries < 20 {
@@ -536,11 +564,26 @@ impl AIService {
                                                     log::error!(
                                                         "Llama panicked with: {:?}. Trying again..",
                                                         e
-                                                    )
+                                                    );
+                                                    rt.block_on(publish_model_status(
+                                                        model_config.id.clone(),
+                                                        100.0,
+                                                        "Panicked while running inference - trying again...",
+                                                        true,
+                                                        true,
+                                                    ));
                                                 }
                                                 Ok(result) => maybe_result = Some(result),
                                             }
                                         }
+
+                                        rt.block_on(publish_model_status(
+                                            model_config.id.clone(),
+                                            100.0,
+                                            "Ready",
+                                            true,
+                                            true,
+                                        ));
 
                                         if let Some(result) = maybe_result {
                                             let _ = prompt_request.result_sender.send(Ok(result));
@@ -808,7 +851,7 @@ impl AIService {
 
             rt.block_on(async {
                 let maybe_model = WhisperBuilder::default()
-                    .with_source(WhisperSource::Base)
+                    .with_source(WHISPER_MODEL)
                     .with_device(Device::Cpu)
                     .build()
                     .await;
@@ -906,7 +949,7 @@ impl AIService {
         publish_model_status(id.clone(), 0.0, "Loading", false, false).await;
 
         let _ = WhisperBuilder::default()
-            .with_source(WhisperSource::Base)
+            .with_source(WHISPER_MODEL)
             .with_device(Device::Cpu)
             .build_with_loading_handler({
                 let name = id.clone();

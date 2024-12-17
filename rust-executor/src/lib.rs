@@ -42,7 +42,7 @@ use libc::{sigaction, sigemptyset, sighandler_t, SA_ONSTACK, SIGURG};
 use std::ptr;
 
 extern "C" fn handle_sigurg(_: libc::c_int) {
-    println!("Received SIGURG signal, but ignoring it.");
+    //println!("Received SIGURG signal, but ignoring it.");
 }
 
 /// Runs the GraphQL server and the deno core runtime

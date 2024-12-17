@@ -41,7 +41,7 @@
     "change-ui-version": "powershell -ExecutionPolicy Bypass -File ./scripts/patch-prerelease-tags.ps1",
     "package-ad4m": "run-script-os",
     "package-ad4m:windows": "cargo clean && pnpm run build && pnpm tauri build --verbose",
-    "package-ad4m:macos": "pnpm run build && pnpm tauri build --verbose",
+    "package-ad4m:macos": "pnpm run build && pnpm tauri build --verbose --features metal",
     "package-ad4m:linux": "pnpm run build && pnpm tauri build --verbose"
   },
   "eslintConfig": {
