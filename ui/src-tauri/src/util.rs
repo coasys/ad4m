@@ -37,7 +37,7 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
     let new_ad4m_window = WebviewWindowBuilder::new(app, "AD4M", WebviewUrl::App(url.into()))
         .center()
         .focused(true)
-        .inner_size(1000.0, 700.0)
+        .inner_size(1000.0, 1200.0)
         .title("ADAM Launcher");
 
     let _ = new_ad4m_window.build();
