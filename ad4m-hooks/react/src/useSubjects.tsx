@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import {
   getCache,
   setCache,
@@ -24,6 +24,7 @@ export function useSubjects<SubjectClass>(props: Props<SubjectClass>) {
   const [error, setError] = useState<string | undefined>(undefined);
   const [isLoading, setIsLoading] = useState(false);
   const { perspective, source, subject } = props;
+  const timeout = useRef<any>(null);
 
   // Create cache key for entry
   const cacheKey = `${perspective.uuid}/${source || ""}/${
@@ -92,7 +93,9 @@ export function useSubjects<SubjectClass>(props: Props<SubjectClass>) {
   }
 
   async function linkAdded(link: LinkExpression) {
-    const allEntries = (getCache(cacheKey) || []) as SubjectClass[];
+    if (timeout.current) clearTimeout(timeout.current);
+    timeout.current = setTimeout(getData, 1000);
+
     const isNewEntry = link.data.source === source;
     // @ts-ignore
     const isUpdated = allEntries?.find((e) => e.id === link.data.source);
