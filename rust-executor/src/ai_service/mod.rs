@@ -530,6 +530,13 @@ impl AIService {
                                 }
                                 LlmModel::Local(ref mut llama) => {
                                     if let Some(task) = tasks.get(&prompt_request.task_id) {
+                                        rt.block_on(publish_model_status(
+                                            model_config.id.clone(),
+                                            100.0,
+                                            "Running inference...",
+                                            true,
+                                            true,
+                                        ));
                                         let mut maybe_result: Option<String> = None;
                                         let mut tries = 0;
                                         while maybe_result.is_none() && tries < 20 {
@@ -546,11 +553,26 @@ impl AIService {
                                                     log::error!(
                                                         "Llama panicked with: {:?}. Trying again..",
                                                         e
-                                                    )
+                                                    );
+                                                    rt.block_on(publish_model_status(
+                                                        model_config.id.clone(),
+                                                        100.0,
+                                                        "Panicked while running inference - trying again...",
+                                                        true,
+                                                        true,
+                                                    ));
                                                 }
                                                 Ok(result) => maybe_result = Some(result),
                                             }
                                         }
+
+                                        rt.block_on(publish_model_status(
+                                            model_config.id.clone(),
+                                            100.0,
+                                            "Ready",
+                                            true,
+                                            true,
+                                        ));
 
                                         if let Some(result) = maybe_result {
                                             let _ = prompt_request.result_sender.send(Ok(result));
