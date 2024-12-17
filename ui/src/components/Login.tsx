@@ -95,7 +95,7 @@ const Login = () => {
       const llm = { name: "LLM Model 1", modelType: "LLM" } as ModelInput;
       if (aiMode === "Local") {
         llm.local = {
-          fileName: "llama_7b",
+          fileName: "llama_13b_code",
           tokenizerSource: "",
           modelParameters: "",
         };
