@@ -302,10 +302,16 @@ impl AIService {
             "llama_34b_code" => Llama::builder().with_source(LlamaSource::llama_34b_code()),
             "llama_70b" => Llama::builder().with_source(LlamaSource::llama_70b()),
             "mistral_7b" => Llama::builder().with_source(LlamaSource::mistral_7b()),
-            "mistral_7b_instruct" => Llama::builder().with_source(LlamaSource::mistral_7b_instruct()),
-            "mistral_7b_instruct_2" => Llama::builder().with_source(LlamaSource::mistral_7b_instruct_2()),
+            "mistral_7b_instruct" => {
+                Llama::builder().with_source(LlamaSource::mistral_7b_instruct())
+            }
+            "mistral_7b_instruct_2" => {
+                Llama::builder().with_source(LlamaSource::mistral_7b_instruct_2())
+            }
             "solar_10_7b" => Llama::builder().with_source(LlamaSource::solar_10_7b()),
-            "solar_10_7b_instruct" => Llama::builder().with_source(LlamaSource::solar_10_7b_instruct()),
+            "solar_10_7b_instruct" => {
+                Llama::builder().with_source(LlamaSource::solar_10_7b_instruct())
+            }
 
             // Handle unknown models
             _ => {
