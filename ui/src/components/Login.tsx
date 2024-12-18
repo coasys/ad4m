@@ -92,19 +92,19 @@ const Login = () => {
   async function saveModels() {
     if (await apiValid()) {
       // add llm model
-      const llm = { name: "LLM Model 1", modelType: "LLM" } as ModelInput;
-      if (aiMode === "Local") {
-        llm.local = {
-          fileName: "solar_10_7b_instruct",
-          tokenizerSource: "",
-          modelParameters: "",
-        };
-      } else {
-        llm.api = { baseUrl: apiUrl, apiKey, apiType: "OPEN_AI" };
+      if (aiMode !== "None") {
+        const llm = { name: "LLM Model 1", modelType: "LLM" } as ModelInput;
+        if (aiMode === "Local") {
+          llm.local = {
+            fileName: "solar_10_7b_instruct",
+            tokenizerSource: "",
+            modelParameters: "",
+          };
+        } else {
+          llm.api = { baseUrl: apiUrl, apiKey, apiType: "OPEN_AI" };
+        }
+        client!.ai.addModel(llm).then((modelId) => client!.ai.setDefaultModel("LLM", modelId));
       }
-      client!.ai
-        .addModel(llm)
-        .then((modelId) => client!.ai.setDefaultModel("LLM", modelId));
       // add embedding model
       client!.ai.addModel({
         name: "bert",
