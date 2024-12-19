@@ -15,11 +15,11 @@ function replaceVersionLine(content, version, prefix = 'version = ', suffix = ''
 
 let isPreRelease = false;
 
-const answer = readline.question('Is this a pre-release version? (y/n) ');
-isPreRelease = answer === 'y' || answer === 'Y';
-if (isPreRelease) {
-    console.log('Setting versions for pre-release (will not add pre-release prefix to launcher version)');
-}
+//const answer = readline.question('Is this a pre-release version? (y/n) ');
+//isPreRelease = answer === 'y' || answer === 'Y';
+//if (isPreRelease) {
+//    console.log('Setting versions for pre-release (will not add pre-release prefix to launcher version)');
+//}
 
 let VERSION = process.argv[2]
 let RUST_VERSION = process.argv[2]
