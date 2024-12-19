@@ -729,8 +729,8 @@ importers:
         specifier: 3.7.10
         version: 3.7.10(graphql-ws@5.12.0(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
       '@coasys/ad4m':
-        specifier: 0.10.0-rc12
-        version: 0.10.0-rc12(graphql-ws@5.12.0(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+        specifier: workspace:0.10.0-rc13
+        version: link:../core
       '@types/node':
         specifier: ^16.11.11
         version: 16.18.76
@@ -2278,9 +2278,6 @@ packages:
 
   '@coasys/ad4m-executor@0.10.0-rc12':
     resolution: {integrity: sha512-+NcB07rH0dU/+gcS6Zyuedi433r1nq3WxtbA0ltBIjTlI7It9r5YLncTN1a4lFzYSDuFD/3KwuHVRAiy9iPHcw==}
-
-  '@coasys/ad4m@0.10.0-rc12':
-    resolution: {integrity: sha512-wwimMrFo2oq7pB5IshZkAn7d3maHGnauZKXHW4Pbbt9AJAnZ5joPguBMl9Y0+8J98pjaLRzBc6Y4fCi0PwQ4MQ==}
 
   '@coasys/ad4m@0.8.1':
     resolution: {integrity: sha512-2or0Ykc+F+geDumBABYD/us5Iu9Se2xVRdVcj4h0l7etd9Zx3u5m/Q32YHywJz61DbPQV8Q+zTkYiqF54y9GrA==}
@@ -15761,27 +15758,6 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
       - ws
-
-  '@coasys/ad4m@0.10.0-rc12(graphql-ws@5.12.0(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)':
-    dependencies:
-      '@apollo/client': 3.7.10(graphql-ws@5.12.0(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
-      '@holochain/client': 0.16.0(bufferutil@4.0.8)(utf-8-validate@5.0.10)
-      '@types/jest': 26.0.24
-      base64-js: 1.5.1
-      class-validator: 0.13.2
-      express: 4.18.2
-      graphql: 15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)
-      pako: 2.1.0
-      reflect-metadata: 0.1.14
-      type-graphql: 1.1.1(class-validator@0.13.2)(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))
-    transitivePeerDependencies:
-      - bufferutil
-      - graphql-ws
-      - react
-      - react-dom
-      - subscriptions-transport-ws
-      - supports-color
-      - utf-8-validate
 
   '@coasys/ad4m@0.8.1(bufferutil@4.0.8)(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)(utf-8-validate@5.0.10)':
     dependencies:
