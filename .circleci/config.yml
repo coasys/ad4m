@@ -128,6 +128,9 @@ jobs:
             - p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
             - p-diff-sync-socket-signaling-rust-cache-
       - run:
+          name: Install specific pnpm version
+          command: npm install -g pnpm@9.15.0
+      - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
       - run:
