@@ -106,11 +106,10 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
       }
       if (oldModel) client!.ai.updateModel(oldModel.id, model);
       else {
-        client!.ai.addModel(model).then(async (newModelId) => {
-          // if no default LLM set, mark new model as default
-          const defaultLLM = await client!.ai.getDefaultModel("LLM");
-          if (!defaultLLM) client!.ai.setDefaultModel("LLM", newModelId);
-        });
+        const newModelId = await client!.ai.addModel(model);
+        // if no default LLM set, mark new model as default
+        const defaultLLM = await client!.ai.getDefaultModel("LLM");
+        if (!defaultLLM) client!.ai.setDefaultModel("LLM", newModelId);
       }
       close();
     }
