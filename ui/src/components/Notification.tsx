@@ -10,6 +10,7 @@ const Notification = ({ notification }: { notification: NotificationType }) => {
   } = useContext(Ad4minContext);
 
   const [requestModalOpened, setRequestModalOpened] = useState(true);
+  const [showInfo, setShowInfo] = useState(false);
   const [perspectives, setPerspectives] = useState<PerspectiveProxy[]>([]);
 
   useEffect(() => {
@@ -49,10 +50,10 @@ const Notification = ({ notification }: { notification: NotificationType }) => {
           onToggle={(e: any) => setRequestModalOpened(e.target.open)}
         >
           <j-box px="500" py="600">
-            <j-flex gap="200" direction="column">
-              <j-box pb="900">
+            <j-flex direction="column">
+              <j-box pb="400">
                 <j-text nomargin size="600" color="black" weight="600">
-                  Authorize Notification
+                  App wants to register a Notification trigger
                 </j-text>
               </j-box>
 
@@ -67,46 +68,34 @@ const Notification = ({ notification }: { notification: NotificationType }) => {
                   </j-text>
                 </div>
               </j-flex>
-              <j-flex gap="200" direction="column">
-                <div>
-                  <j-text nomargin size="500">
-                    Perspectives:
-                  </j-text>
-                  <ul>
-                    {perspectives?.map((perspective) => (
-                      <li key={perspective.uuid}>
-                        <j-text nomargin size="500">
-                          {perspective.name}
-                        </j-text>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-                <div>
-                  <j-flex>
-                    <j-text>
-                      Notification Trigger: {notification?.trigger}
-                    </j-text>
-                  </j-flex>
-                </div>
-                {
-                  notification?.webhookUrl && (
-                    <div>
-                      <j-flex>
-                        <j-text>
-                          Webhook URL: {notification?.webhookUrl}
-                        </j-text>
-                      </j-flex>
-                      <j-text color="danger" variant="caption">
 
-                      </j-text>
-                      <p style="height: 60px; color: red; font-size: 14px; margin: 0; ">
-                        Caution: This notification will be sent to the above URL and the data can be leaked outside of the app. Please make sure you trust the app.
+              <j-box>
+              <br></br>
+              <j-text nomargin>ADAM will monitor trigger condition and issue:</j-text>
+              <ul>
+                <li>Desktop notifications</li>
+                {notification?.webhookUrl && 
+                  <li>
+                    Push notifications
+                    {notification?.webhookUrl.startsWith("http://push-notifications.ad4m.dev") ? (
+                      <p style="height: 60px; color: green; font-size: 14px; margin: 0; ">
+                        Through trusted AD4M Push Notification relay
                       </p>
-                    </div>
-                  )
-                }
-              </j-flex>
+                    ) : (
+                      <>
+                        <p style="height: 50px; color: red; font-size: 14px; margin: 0; ">
+                          Caution: Push notifications will be sent through the following URL:
+                        </p>
+                        <j-box px="200">
+                          <j-text color="blue">{notification?.webhookUrl}</j-text>
+                        </j-box>
+                        <j-text>Only confirm if you trust this app!</j-text>
+                      </>
+                    )
+                    }
+                  </li>}
+              </ul>
+              </j-box>
 
               <j-flex gap="300">
                 <j-button variant="link" onClick={closeRequestModal}>
@@ -115,8 +104,44 @@ const Notification = ({ notification }: { notification: NotificationType }) => {
                 <j-button variant="primary" onClick={permitNotification}>
                   Confirm
                 </j-button>
-              </j-flex>
+              </j-flex>            
             </j-flex>
+            <br></br>
+            <j-flex gap="200" direction="column">
+                <j-box pb="100" style={{ cursor: 'pointer' }} onClick={() => setShowInfo(!showInfo)}>
+                  <j-flex a="center" gap="200">
+                    <j-text>
+                    {showInfo ? "Hide" : "Show"} Notification Details
+                    </j-text>
+                    <j-icon name={showInfo ? "chevron-down" : "chevron-right"} size="sm" />
+                  </j-flex>
+                  {showInfo && (
+                    <>
+                      <j-box pl="400" pt="200">
+                        <j-text>Perspectives / Neighbourhoods:</j-text>
+                        <ul>
+                          {!perspectives?.length && <li>None</li>}
+                          {perspectives?.map((perspective) => (
+                            <li key={perspective.uuid}>
+                              <j-text nomargin size="500">
+                                {perspective.name}
+                              </j-text>
+                            </li>
+                          ))}
+                        </ul>
+                      </j-box>
+                      <j-box pl="400" pt="200">
+                        <j-text>
+                          Notification trigger Prolog code:
+                        </j-text>
+                        <j-text color="black">
+                          {notification?.trigger}
+                        </j-text>
+                      </j-box>
+                    </>
+                  )}
+                </j-box>
+              </j-flex>
           </j-box>
         </j-modal>
       )}
