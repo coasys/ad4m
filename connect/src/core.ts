@@ -326,7 +326,7 @@ export default class Ad4mConnect {
         },
         connected: () => {
           this.notifyConnectionChange("connected");
-          this.notifyAuthChange("authenticated");
+          this.checkAuth();
         },
         closed: async () => {
           if (!this.requestedRestart) {
