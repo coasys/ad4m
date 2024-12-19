@@ -55,6 +55,7 @@ fs.writeFileSync('cli/Cargo.toml', cli.newContent)
 const connect = JSON.parse(fs.readFileSync('connect/package.json', 'utf8'))
 console.log("Connect version: " + connect.version + " -> " + VERSION)
 connect.version = VERSION
+connect.devDependencies["@coasys/ad4m"] = VERSION
 fs.writeFileSync('connect/package.json', JSON.stringify(connect, null, 2) + '\n')
 
 const core = JSON.parse(fs.readFileSync('core/package.json', 'utf8'))
