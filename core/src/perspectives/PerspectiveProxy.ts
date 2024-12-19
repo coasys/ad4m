@@ -317,14 +317,19 @@ export class PerspectiveProxy {
      */
     async createSubject<T>(subjectClass: T, exprAddr: string): Promise<T> {
         let className: string;
+        console.log("createSubject")
 
         if(typeof subjectClass === "string") {
             className = subjectClass
-
+            console.log("createSubject string:", className)
             await this.#client.createSubject(this.#handle.uuid, JSON.stringify({className}), exprAddr);
+            console.log("createSubject createSubject string done")
         } else {
+            console.log("createSubject non-string")
             let query = this.buildQueryFromTemplate(subjectClass as object)
+            console.log("createSubject query", query)
             await this.#client.createSubject(this.#handle.uuid, JSON.stringify({query}), exprAddr);
+            console.log("createSubject createSubject query done")
         }
 
         return this.getSubjectProxy(exprAddr, subjectClass)
@@ -457,12 +462,16 @@ export class PerspectiveProxy {
                 properties.push(...Object.keys(obj).filter(key => !Array.isArray(obj[key])))
             }
 
+            console.log("COLLECTIONS getPrototypeOf:", Object.getPrototypeOf(obj).__collections)
+            console.log("COLLECTIONS getPrototypeOf:", Object.keys(obj))
             // Collect all collections of the object in a list
             if (Object.getPrototypeOf(obj).__collections) {
                 Object.keys(Object.getPrototypeOf(obj).__collections).filter(key => key !== 'isSubjectInstance').forEach(c => !collections.includes(c) ?? collections.push(c))
             } else {
-                collections.push(...Object.keys(obj).filter(key => Array.isArray(obj[key])).filter(key => key !== 'isSubjectInstance'))
+                //collections.push(...Object.keys(obj).filter(key => Array.isArray(obj[key])).filter(key => key !== 'isSubjectInstance'))
             }
+
+            console.log("collections:", collections)
 
             // Collect all set functions of the object in a list
             let setFunctions = Object.getOwnPropertyNames(obj).filter(key => (typeof obj[key] === "function") && key.startsWith("set") && !key.startsWith("setCollection"))

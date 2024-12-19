@@ -50,6 +50,7 @@ export class SubjectEntity {
   }
 
   private async setProperty(key: string, value: any) {
+    console.log("setProperty", key, value)
     const setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_setter(C, "${key}", Setter)`)
     if (setters && setters.length > 0) {
       const actions = eval(setters[0].Setter)
@@ -59,8 +60,11 @@ export class SubjectEntity {
         resolveLanguage = resolveLanguageResults[0].Language
       }
 
+      console.log("setProperty resolve language:", resolveLanguage)
+
       if (resolveLanguage) {
         value = await this.#perspective.createExpression(value, resolveLanguage)
+        console.log("setProperty new value:", value)
       }
       await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }])
     }
@@ -127,9 +131,13 @@ export class SubjectEntity {
    * @throws Will throw an error if the subject entity cannot be converted to a subject class, or if the subject cannot be created, or if the link cannot be added, or if the subject entity cannot be updated.
    */
   async save() {
+    console.log("subject entity save 1")
     this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
+    console.log("subject entity save 2")
+    console.log("subject entity save:", this.#subjectClass)
 
     await this.#perspective.createSubject(this, this.#baseExpression);
+    console.log("subject entity save 3")
 
     await this.#perspective.add(
       new Link({
@@ -139,7 +147,10 @@ export class SubjectEntity {
       })
     );
 
+    console.log("subject entity save 4")
+
     await this.update()
+    console.log("subject entity save 5")
   }
 
   /**
@@ -159,6 +170,7 @@ export class SubjectEntity {
     const entries = Object.entries(this);
 
     for (const [key, value] of entries) {
+      console.log("subject entity update", key, value)
       if (value !== undefined && value !== null) {
         if (value?.action) {
           switch (value.action) {
@@ -180,6 +192,7 @@ export class SubjectEntity {
           await this.setProperty(key, value);
         }
       }
+      console.log("subject entity update", key, "DONE")
     }
 
     await this.getData();
