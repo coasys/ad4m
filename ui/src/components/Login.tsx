@@ -4,6 +4,7 @@ import { useContext, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { AgentContext } from "../context/AgentContext";
+import { open } from "@tauri-apps/plugin-shell";
 import "../index.css";
 import Logo from "./Logo";
 
@@ -92,19 +93,19 @@ const Login = () => {
   async function saveModels() {
     if (await apiValid()) {
       // add llm model
-      const llm = { name: "LLM Model 1", modelType: "LLM" } as ModelInput;
-      if (aiMode === "Local") {
-        llm.local = {
-          fileName: "solar_10_7b_instruct",
-          tokenizerSource: "",
-          modelParameters: "",
-        };
-      } else {
-        llm.api = { baseUrl: apiUrl, apiKey, apiType: "OPEN_AI" };
+      if (aiMode !== "None") {
+        const llm = { name: "LLM Model 1", modelType: "LLM" } as ModelInput;
+        if (aiMode === "Local") {
+          llm.local = {
+            fileName: "solar_10_7b_instruct",
+            tokenizerSource: "",
+            modelParameters: "",
+          };
+        } else {
+          llm.api = { baseUrl: apiUrl, apiKey, apiType: "OPEN_AI" };
+        }
+        client!.ai.addModel(llm).then((modelId) => client!.ai.setDefaultModel("LLM", modelId));
       }
-      client!.ai
-        .addModel(llm)
-        .then((modelId) => client!.ai.setDefaultModel("LLM", modelId));
       // add embedding model
       client!.ai.addModel({
         name: "bert",
@@ -415,13 +416,33 @@ const Login = () => {
             style={{
               textAlign: "center",
               width: "100%",
-              maxWidth: 500,
+              maxWidth: 570,
               marginBottom: 40,
             }}
           >
-            <j-text size="600" nomargin color="ui-900">
-              ADAM allows you to control the AI used for transcription, vector
-              embedding, and LLM tasks.
+
+            <j-text size="800" nomargin color="ui-900">
+              Is your computer capabale of running Large Language Models locally?
+            </j-text>
+            <j-text>
+            Regardless of your choice here, we will always download and use small AI models 
+              (such as <a 
+                onClick={() => open("https://huggingface.co/openai/whisper-small")} 
+                style={{cursor: "pointer"}}
+              >Whisper small</a> and an <a 
+                onClick={() => open("https://huggingface.co/Snowflake/snowflake-arctic-embed-xs")} 
+                style={{cursor: "pointer"}}
+              >Embedding model</a>)
+              to handle basic tasks on all devices.
+              <br></br>
+              <br></br>
+              When it comes to LLMs, it depends on you having either an Apple Silicon mac (M1 or better)
+              or an nVidia GPU.
+              <br></br>
+              <br></br>
+              Alternatively, you can configure ADAM to out-source LLM tasks to a remote API.
+              If you unsure, you can select "None" now and add, remove or change model settings
+              later-on in the <b>AI tab</b>.
             </j-text>
           </j-flex>
 
@@ -440,8 +461,8 @@ const Login = () => {
                 Local
               </j-text>
               <j-text size="500" nomargin color="ui-800">
-                Select <b>Local</b> if your device is capable or running large
-                models locally.
+                Select Local if you have an <b>M1 mac</b> (or better)
+                or an <b>nVidia GPU</b>
               </j-text>
             </button>
 
@@ -459,7 +480,7 @@ const Login = () => {
                 Remote
               </j-text>
               <j-text size="500" nomargin color="ui-800">
-                Select <b>Remote</b> to use an external API like OpenAI.
+                Select to use an external API like <b>OpenAI</b> or your own <b>Ollama</b> server.
               </j-text>
             </button>
 
@@ -477,10 +498,26 @@ const Login = () => {
                 None
               </j-text>
               <j-text size="500" nomargin color="ui-800">
-                Select <b>None</b> if you'd prefer not use AI.
+                Select if you'd prefer <b>NOT to use LLMs</b> at all.
               </j-text>
             </button>
           </j-flex>
+
+          {aiMode === "Local" && (
+            <j-flex
+              direction="column"
+              a="center"
+              gap="400"
+              style={{ marginTop: 30, maxWidth: 350 }}
+            >
+              <j-text>
+                This will download <a 
+                  onClick={() => open("https://huggingface.co/TheBloke/SOLAR-10.7B-Instruct-v1.0-GGUF")} 
+                  style={{cursor: "pointer"}}
+                >SOLAR 10.7b instruct</a>
+              </j-text>
+            </j-flex>
+          )}
 
           {aiMode === "Remote" && (
             <j-flex
@@ -526,6 +563,20 @@ const Login = () => {
                 </j-flex>
               )}
               {apiError && <j-text color="danger-500">{apiError}</j-text>}
+            </j-flex>
+          )}
+
+          {aiMode === "None" && (
+            <j-flex
+              direction="column"
+              a="center"
+              gap="400"
+              style={{ marginTop: 30, maxWidth: 350 }}
+            >
+              <j-text>
+                Selecting <b>None</b> here and not having any LLM configured
+                might result in new Synergy features not working in Flux...
+              </j-text>
             </j-flex>
           )}
 
