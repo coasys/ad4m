@@ -14,5 +14,5 @@ serde = "1.0.198"
 chrono = { version = "0.4.38", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
 
 holo_hash =  { version = "0.3.6", git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
-hdi = { version = "0.3.6", git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
+hdi = { version = "0.4.6", git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
 hdk = { version = "0.3.6", git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
