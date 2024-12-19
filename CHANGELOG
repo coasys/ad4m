@@ -44,7 +44,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - ad4m.expression.get() handles literal values client-side to avoid roundtrips, can be overridden with optional flag [PR#498](https://github.com/coasys/ad4m/pull/498)
 - Update to Holochain 0.3.2-rc1 [PR#506](https://github.com/coasys/ad4m/pull/506)
 - Make Prolog engine update O(1) in case of only having link additions [PR#510](https://github.com/coasys/ad4m/pull/510)
-- Have Ad4mConnect set `authState` to `authenticated` on successful connection [PR#532](https://github.com/coasys/ad4m/pull/532)
+- Have Ad4mConnect set `authState` to `authenticated` on successful connection [PR#532](https://github.com/coasys/ad4m/pull/532) & [PR#543](https://github.com/coasys/ad4m/pull/543)
 
 ## [0.9.0] - 23/03/2024
 
