@@ -65,10 +65,10 @@ jobs:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
           no_output_timeout: 30m
-      #- run:
-      #    name: cargo clippy
-      #    no_output_timeout: 30m
-      #    command: cargo clippy --all --exclude ad4m-launcher
+      - run:
+          name: cargo clippy
+          no_output_timeout: 30m
+          command: cargo clippy --all --exclude ad4m-launcher
       - save_cache:
           key: rust-cache-{{ checksum "Cargo.lock" }}-v2
           paths:
