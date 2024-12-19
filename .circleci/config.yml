@@ -65,6 +65,10 @@ jobs:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
           no_output_timeout: 30m
+      - run:
+          name: cargo clippy
+          no_output_timeout: 30m
+          command: cargo clippy --all --exclude ad4m-launcher
       - save_cache:
           key: rust-cache-{{ checksum "Cargo.lock" }}-v2
           paths:
@@ -77,10 +81,6 @@ jobs:
           paths:
             - ./target/release/ad4m
             - ./target/release/ad4m-executor
-      - run:
-          name: cargo clippy
-          no_output_timeout: 30m
-          command: cargo clippy --all --exclude ad4m-launcher
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
@@ -127,6 +127,9 @@ jobs:
           keys:
             - p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
             - p-diff-sync-socket-signaling-rust-cache-
+      - run:
+          name: Install specific pnpm version
+          command: npm install -g pnpm@9.15.0
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
