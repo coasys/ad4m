@@ -27,10 +27,7 @@ const llmModels = [
 const transcriptionModels = ["whisper"];
 const embeddingModels = ["bert"];
 
-export default function ModelModal(props: {
-  close: () => void;
-  oldModel?: any;
-}) {
+export default function ModelModal(props: { close: () => void; oldModel?: any }) {
   const { close, oldModel } = props;
   const {
     state: { client },
@@ -108,7 +105,7 @@ export default function ModelModal(props: {
         };
       }
       if (oldModel) client!.ai.updateModel(oldModel.id, model);
-      else client!.ai.addModel(model);
+      else client!.ai.addModel(model).then((modelId) => client!.ai.setDefaultModel("LLM", modelId));
       close();
     }
   }
