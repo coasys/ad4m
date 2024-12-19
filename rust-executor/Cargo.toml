@@ -83,11 +83,11 @@ webbrowser = "0.8.12"
 # holochain_types = { version = "0.3.1-rc.0" }
 # holochain_cli_run_local_services = { version = "0.3.1-rc.0" }
 # kitsune_p2p_types = { version = "0.3.1-rc.0" }
-holochain = { version = "0.3.2-rc.1", features = ["test_utils", "default"], git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739" }
-holochain_cli_bundle = { version = "0.3.2-rc.1", git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739" }
-holochain_types = { version = "0.3.2-rc.1", git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739" }
-holochain_cli_run_local_services = { version = "0.3.2-rc.0", git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739" }
-kitsune_p2p_types = { version = "0.3.2-rc.0", git = "https://github.com/coasys/holochain.git", rev = "10841e49b28c17c3cb428680e2bc9259bf4ec739" }
+holochain = { version = "0.3.6", features = ["test_utils", "default"], git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
+holochain_cli_bundle = { version = "0.3.6", git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
+holochain_types = { version = "0.3.6", git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
+holochain_cli_run_local_services = { version = "0.3.6", git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
+kitsune_p2p_types = { version = "0.3.6", git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
 
 scryer-prolog = { version = "0.9.4", git = "https://github.com/coasys/scryer-prolog" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
@@ -113,7 +113,7 @@ futures-core = "0.3.30"
 futures-util = "0.3.30"
 futures-channel = "0.3.30"
 rodio = "*"
-libc = "0.2.162"
+libc = "0.2"
 chat-gpt-lib-rs = "0.5.1"
 
 [dev-dependencies]
