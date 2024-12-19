@@ -22,7 +22,7 @@ const AI = () => {
     // attach tasks to models
     const modelsWithTasks = modelsInDB.map((model) => {
       const modelWithTasks = { ...model } as any;
-      if (model.id === defaultLLM.id) {
+      if (model.id === defaultLLM?.id) {
         modelWithTasks.default = true;
         // find tasks for default model
         const matchingTasks = tasksInDB.filter(
