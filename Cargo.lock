@@ -1995,8 +1995,6 @@ dependencies = [
 [[package]]
 name = "chat-gpt-lib-rs"
 version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81c82355896912eee45db33600f8ad976ad813f17bcf0cff58467225a1fe5c9c"
 dependencies = [
  "env_logger 0.11.5",
  "log",
@@ -2004,6 +2002,7 @@ dependencies = [
  "rustls 0.23.12",
  "serde",
  "serde_json",
+ "thiserror 1.0.63",
  "tokio",
 ]
 
