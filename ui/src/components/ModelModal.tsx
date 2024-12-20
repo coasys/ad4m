@@ -133,7 +133,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
         modelType: newModelType,
       } as ModelInput;
       if (newModel === "External API") {
-        model.api = { baseUrl: apiUrl, apiKey, apiType: "OPEN_AI" };
+        model.api = { baseUrl: apiUrl, apiKey, apiType: "OPEN_AI", model: apiModel };
       } else {
         model.local = {
           fileName: newModel,
