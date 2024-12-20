@@ -18,6 +18,7 @@ export default function aiTests(testContext: TestContext) {
                     api: {
                         baseUrl: "https://api.example.com/",
                         apiKey: "test-api-key",
+                        model: "llama",
                         apiType: "OPEN_AI"
                     },
                     modelType: "LLM"
@@ -50,6 +51,7 @@ export default function aiTests(testContext: TestContext) {
                 expect(addedApiModel?.id).to.equal(addApiResult)
                 expect(addedApiModel?.api?.baseUrl).to.equal("https://api.example.com/")
                 expect(addedApiModel?.api?.apiKey).to.equal("test-api-key")
+                expect(addedApiModel?.api?.model).to.equal("llama")
                 expect(addedApiModel?.api?.apiType).to.equal("OPEN_AI")
 
                 const addedLocalModel = models.find(model => model.name === "TestLocalModel")
@@ -84,6 +86,7 @@ export default function aiTests(testContext: TestContext) {
                     api: {
                         baseUrl: "https://api.example.com/",
                         apiKey: "initial-key",
+                        model: "llama",
                         apiType: "OPEN_AI"
                     },
                     modelType: "LLM"
@@ -145,6 +148,7 @@ export default function aiTests(testContext: TestContext) {
                     api: {
                         baseUrl: "https://api.example.com/",
                         apiKey: "test-api-key",
+                        model: "llama",
                         apiType: "OPEN_AI"
                     },
                     modelType: "LLM"

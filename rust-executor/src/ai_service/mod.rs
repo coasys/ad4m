@@ -509,7 +509,9 @@ impl AIService {
 
                                         let chat_input = ChatInput {
                                             //model: chat_gpt_lib_rs::Model::Gpt_4o,
-                                            model: chat_gpt_lib_rs::Model::Custom(String::from("llama3.2:1b")),
+                                            model: chat_gpt_lib_rs::Model::Custom(String::from(
+                                                "llama3.2:1b",
+                                            )),
                                             messages,
                                             ..Default::default()
                                         };

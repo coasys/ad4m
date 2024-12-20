@@ -23,6 +23,7 @@ export class AIClient {
                         api {
                             baseUrl
                             apiKey
+                            model
                             apiType
                         }
                         local {
@@ -96,6 +97,7 @@ export class AIClient {
                         api {
                             baseUrl
                             apiKey
+                            model
                             apiType
                         }
                         local {
