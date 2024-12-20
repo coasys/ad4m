@@ -482,7 +482,7 @@ impl AIService {
                             },
 
                             LLMTaskRequest::Prompt(prompt_request) => match model {
-                                LlmModel::Remote((ref mut remote_client, model_string)) => {
+                                LlmModel::Remote((ref mut remote_client, ref model_string)) => {
                                     if let Some(task) =
                                         task_descriptions.get(&prompt_request.task_id)
                                     {
@@ -511,7 +511,7 @@ impl AIService {
                                         });
 
                                         let chat_input = ChatInput {
-                                            model: chat_gpt_lib_rs::Model::Custom(model_string),
+                                            model: chat_gpt_lib_rs::Model::Custom(model_string.clone()),
                                             messages,
                                             ..Default::default()
                                         };
