@@ -83,7 +83,7 @@ export function useSubjects<SubjectClass>(props: Props<SubjectClass>) {
 
     const newEntries = isOldEntry
       ? oldEntries?.map((oldEntry) => {
-        // @ts-ignore
+          // @ts-ignore
           const isUpdatedEntry = id === oldEntry.id;
           return isUpdatedEntry ? entry : oldEntry;
         })
@@ -97,8 +97,8 @@ export function useSubjects<SubjectClass>(props: Props<SubjectClass>) {
     timeout.current = setTimeout(getData, 1000);
 
     const isNewEntry = link.data.source === source;
-    // @ts-ignore
-    const isUpdated = allEntries?.find((e) => e.id === link.data.source);
+    const allEntries = (getCache(cacheKey) || []) as SubjectClass[];
+    const isUpdated = allEntries?.find((e: any) => e.id === link.data.source);
 
     const id = isNewEntry
       ? link.data.target
