@@ -437,7 +437,7 @@ const Login = () => {
               <br></br>
               <br></br>
               When it comes to LLMs, it depends on you having either an Apple Silicon mac (M1 or better)
-              or an nVidia GPU.
+              or an nVidia GPU (with enough vRAM).
               <br></br>
               <br></br>
               Alternatively, you can configure ADAM to out-source LLM tasks to a remote API.
@@ -462,7 +462,7 @@ const Login = () => {
               </j-text>
               <j-text size="500" nomargin color="ui-800">
                 Select Local if you have an <b>M1 mac</b> (or better)
-                or an <b>nVidia GPU</b>
+                or an <b>nVidia GPU</b> with 8Gb of RAM or more!
               </j-text>
             </button>
 
