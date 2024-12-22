@@ -42,13 +42,15 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
   const [apiKey, setApiKey] = useState("");
   const [apiUrlError, setApiUrlError] = useState(false);
   const [apiKeyError, setApiKeyError] = useState(false);
-  const [apiLoading, setApiLoading] = useState(false);
+  const [apiModelError, setApiModelError] = useState(false);
+  const [apiLoading, setApiLoading] = useState(false); // needed?
   const [apiErrorMessage, setApiErrorMessage] = useState("");
   const [apiModel, setApiModel] = useState("");
   const [apiModels, setApiModels] = useState<string[]>([]);
   const [apiModelsLoading, setApiModelsLoading] = useState(false);
   const apiUrlRef = useRef("https://api.openai.com/v1");
   const apiKeyRef = useRef("");
+  const [saving, setSaving] = useState(false);
 
   function closeMenu(menuId: string) {
     const menu = document.getElementById(menuId);
@@ -100,7 +102,10 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
           const body = await response.json();
           const models = body.data.map((e: any) => e.id);
           setApiModels(models);
-          if (apiUrlRef.current === "https://api.openai.com/v1") setApiModel("gpt-4o");
+          if (apiUrlRef.current === "https://api.openai.com/v1") {
+            setApiModel("gpt-4o");
+            setApiModelError(false);
+          }
         }
       } catch {}
     } else {
@@ -118,12 +123,19 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
         setApiUrlError(!apiUrl);
         setApiKeyError(!apiKey);
         return false;
-      } else return true;
+      } else if (!apiModel) {
+        // missing model
+        setApiModelError(true);
+        setApiErrorMessage("Model required");
+        return false;
+      }
     }
+    setApiModelError(false);
     return true;
   }
 
   async function saveModel() {
+    setSaving(true);
     // validate model settings
     if (!newModelName) setNewModelNameError(true);
     else if (apiValid()) {
@@ -150,6 +162,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
       }
       close();
     }
+    setSaving(false);
   }
 
   useEffect(() => {
@@ -184,195 +197,199 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
         if (!e.target.open) close();
       }}
     >
-      <j-flex direction="column" a="center" gap="700">
-        <j-text size="700" color="ui-0">
-          {oldModel ? "Edit" : "Add a new"} model
-        </j-text>
+      <j-box px="100">
+        <j-flex direction="column" a="center" gap="700">
+          <j-text size="700" color="ui-0">
+            {oldModel ? "Edit" : "Add a new"} model
+          </j-text>
 
-        <j-flex direction="column" a="center" gap="500">
-          <j-input
-            size="md"
-            type="text"
-            label="Name"
-            value={newModelName}
-            error={newModelNameError}
-            errortext="Required"
-            onInput={(e: any) => {
-              setNewModelNameError(false);
-              setNewModelName(e.target.value);
-            }}
-            style={{ width: "100%" }}
-          />
+          <j-flex direction="column" a="center" gap="500">
+            <j-input
+              size="md"
+              type="text"
+              label="Name"
+              value={newModelName}
+              error={newModelNameError}
+              errortext="Required"
+              onInput={(e: any) => {
+                setNewModelNameError(false);
+                setNewModelName(e.target.value);
+              }}
+            />
 
-          {!oldModel && (
+            {!oldModel && (
+              <j-flex a="center" gap="400">
+                <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+                  Type:
+                </j-text>
+                <j-menu style={{ height: 42, zIndex: 3 }}>
+                  <j-menu-group collapsible title={newModelType} id="ai-types">
+                    {AITypes.map((type) => (
+                      <j-menu-item
+                        selected={newModelType === type}
+                        onClick={() => {
+                          setNewModelType(type);
+                          if (type === "LLM") {
+                            setNewModels(llmModels);
+                            setNewModel("llama_8b");
+                          } else if (type === "EMBEDDING") {
+                            setNewModels(embeddingModels);
+                            setNewModel("bert");
+                          } else {
+                            setNewModels(transcriptionModels);
+                            setNewModel("whisper");
+                          }
+                          closeMenu("ai-types");
+                        }}
+                      >
+                        {type}
+                      </j-menu-item>
+                    ))}
+                  </j-menu-group>
+                </j-menu>
+              </j-flex>
+            )}
+
             <j-flex a="center" gap="400">
               <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                Type:
+                Model:
               </j-text>
-              <j-menu style={{ height: 42, zIndex: 3 }}>
-                <j-menu-group collapsible title={newModelType} id="ai-types">
-                  {AITypes.map((type) => (
+              <j-menu style={{ zIndex: 2 }}>
+                <j-menu-group collapsible title={newModel} id="new-models">
+                  {newModels.map((model) => (
                     <j-menu-item
-                      selected={newModelType === type}
+                      selected={newModel === model}
                       onClick={() => {
-                        setNewModelType(type);
-                        if (type === "LLM") {
-                          setNewModels(llmModels);
-                          setNewModel("llama_8b");
-                        } else if (type === "EMBEDDING") {
-                          setNewModels(embeddingModels);
-                          setNewModel("bert");
-                        } else {
-                          setNewModels(transcriptionModels);
-                          setNewModel("whisper");
-                        }
-                        closeMenu("ai-types");
+                        setNewModel(model);
+                        closeMenu("new-models");
                       }}
                     >
-                      {type}
+                      {model}
                     </j-menu-item>
                   ))}
                 </j-menu-group>
               </j-menu>
             </j-flex>
-          )}
 
-          <j-flex a="center" gap="400">
-            <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-              Model:
-            </j-text>
-            <j-menu style={{ zIndex: 2 }}>
-              <j-menu-group collapsible title={newModel} id="new-models">
-                {newModels.map((model) => (
-                  <j-menu-item
-                    selected={newModel === model}
+            {newModel === "External API" && (
+              <>
+                <j-flex a="center" gap="400">
+                  <j-button
                     onClick={() => {
-                      setNewModel(model);
-                      closeMenu("new-models");
+                      setApiUrl("https://api.openai.com/v1");
+                      apiUrlRef.current = "https://api.openai.com/v1";
+                      if (apiKeyRef.current) checkApi();
+                      else setApiKeyError(false);
                     }}
                   >
-                    {model}
-                  </j-menu-item>
-                ))}
-              </j-menu-group>
-            </j-menu>
+                    OpenAI
+                  </j-button>
+                  <j-button
+                    onClick={() => {
+                      setApiUrl("http://localhost:11434/v1");
+                      apiUrlRef.current = "http://localhost:11434/v1";
+                      if (apiKeyRef.current) checkApi();
+                      else setApiKeyError(false);
+                    }}
+                  >
+                    Ollama
+                  </j-button>
+                </j-flex>
+
+                <j-flex a="center" gap="400">
+                  <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+                    API URL:
+                  </j-text>
+                  <j-input
+                    size="md"
+                    type="text"
+                    value={apiUrl}
+                    error={apiUrlError && !apiErrorMessage}
+                    errortext="Required"
+                    onInput={(e: any) => {
+                      setApiUrl(e.target.value);
+                      apiUrlRef.current = e.target.value;
+                      checkApi();
+                    }}
+                    style={{ width: "100%" }}
+                  />
+                  {apiUrlError && <j-icon name="x-circle" color="danger-500" />}
+                </j-flex>
+
+                {apiUrl !== "http://localhost:11434/v1" && (
+                  <j-flex a="center" gap="400">
+                    <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+                      API Key:
+                    </j-text>
+                    <j-input
+                      size="md"
+                      type="text"
+                      value={apiKey}
+                      error={apiKeyError && !apiErrorMessage}
+                      errortext="Required"
+                      onInput={(e: any) => {
+                        setApiKey(e.target.value);
+                        apiKeyRef.current = e.target.value;
+                        checkApi();
+                      }}
+                      style={{ width: "100%" }}
+                    />
+                    {apiKey && !apiUrlError && (
+                      <>
+                        {apiLoading ? (
+                          <div style={{ marginRight: 10 }}>
+                            <j-spinner size="xs" />
+                          </div>
+                        ) : (
+                          <j-icon
+                            name={apiKeyError ? "x-circle" : "check-circle"}
+                            color={apiKeyError ? "danger-500" : "success-500"}
+                          />
+                        )}
+                      </>
+                    )}
+                  </j-flex>
+                )}
+
+                <j-flex a="center" gap="400">
+                  <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+                    API Model:
+                  </j-text>
+                  <j-menu style={{ zIndex: 2 }}>
+                    <j-menu-group collapsible title={apiModel || "None selected"} id="api-models">
+                      {apiModels.map((model) => (
+                        <j-menu-item
+                          selected={model === apiModel}
+                          onClick={() => {
+                            setApiModelError(false);
+                            setApiErrorMessage("");
+                            setApiModel(model);
+                            closeMenu("api-models");
+                          }}
+                        >
+                          {model}
+                        </j-menu-item>
+                      ))}
+                    </j-menu-group>
+                  </j-menu>
+                  {apiModelsLoading && <j-spinner size="xs" style={{ marginLeft: "8px" }} />}
+                  {apiModelError && <j-icon name="x-circle" color="danger-500" />}
+                </j-flex>
+
+                {apiErrorMessage && (
+                  <j-text color="danger-500" nomargin>
+                    {apiErrorMessage}
+                  </j-text>
+                )}
+              </>
+            )}
           </j-flex>
 
-          {newModel === "External API" && (
-            <>
-              <j-flex a="center" gap="400">
-                <j-button
-                  onClick={() => {
-                    setApiUrl("https://api.openai.com/v1");
-                    apiUrlRef.current = "https://api.openai.com/v1";
-                    if (apiKeyRef.current) checkApi();
-                    else setApiKeyError(false);
-                  }}
-                >
-                  OpenAI
-                </j-button>
-                <j-button
-                  onClick={() => {
-                    setApiUrl("http://localhost:11434/v1");
-                    apiUrlRef.current = "http://localhost:11434/v1";
-                    if (apiKeyRef.current) checkApi();
-                    else setApiKeyError(false);
-                  }}
-                >
-                  Ollama
-                </j-button>
-              </j-flex>
-
-              <j-flex a="center" gap="400">
-                <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                  API URL:
-                </j-text>
-                <j-input
-                  size="md"
-                  type="text"
-                  value={apiUrl}
-                  error={apiUrlError && !apiErrorMessage}
-                  errortext="Required"
-                  onInput={(e: any) => {
-                    setApiUrl(e.target.value);
-                    apiUrlRef.current = e.target.value;
-                    checkApi();
-                  }}
-                  style={{ width: "100%" }}
-                />
-                {apiUrlError && <j-icon name="x-circle" color="danger-500" />}
-              </j-flex>
-
-              <j-flex a="center" gap="400">
-                <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                  API Key:
-                </j-text>
-                <j-input
-                  size="md"
-                  type="text"
-                  value={apiKey}
-                  error={apiKeyError && !apiErrorMessage}
-                  errortext="Required"
-                  onInput={(e: any) => {
-                    setApiKey(e.target.value);
-                    apiKeyRef.current = e.target.value;
-                    checkApi();
-                  }}
-                  style={{ width: "100%" }}
-                />
-                {apiKey && !apiUrlError && (
-                  <>
-                    {apiLoading ? (
-                      <j-spinner size="xs" />
-                    ) : (
-                      <j-icon
-                        name={apiKeyError ? "x-circle" : "check-circle"}
-                        color={apiKeyError ? "danger-500" : "success-500"}
-                      />
-                    )}
-                  </>
-                )}
-              </j-flex>
-
-              {apiErrorMessage && (
-                <j-text color="danger-500" nomargin>
-                  {apiErrorMessage}
-                </j-text>
-              )}
-
-              <j-flex a="center" gap="400">
-                <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
-                  API Model:
-                </j-text>
-                <j-menu style={{ zIndex: 2 }}>
-                  <j-menu-group collapsible title={apiModel || "None selected"} id="api-models">
-                    {apiModels.map((model) => (
-                      <j-menu-item
-                        selected={model === apiModel}
-                        onClick={() => {
-                          setApiModel(model);
-                          closeMenu("api-models");
-                        }}
-                      >
-                        {model}
-                      </j-menu-item>
-                    ))}
-                  </j-menu-group>
-                </j-menu>
-                {apiModelsLoading && <j-spinner size="xs" style={{ marginLeft: "8px" }} />}
-              </j-flex>
-            </>
-          )}
+          <j-button onClick={saveModel} variant="primary" loading={saving}>
+            Save model
+          </j-button>
         </j-flex>
-
-        <j-button
-          onClick={saveModel}
-          variant="primary"
-          //   style={{ marginTop: 40 }}
-        >
-          Save model
-        </j-button>
-      </j-flex>
+      </j-box>
     </j-modal>
   );
 }
