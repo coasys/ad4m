@@ -87,6 +87,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
       // get models
       setApiModels([]);
       setApiModel("");
+      setApiModelValid(false)
       try {
         const response = await fetch(`${apiUrlRef.current}/models`, {
           method: "GET",
@@ -112,10 +113,42 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
   async function checkModel() {
     console.log("check model");
     setLoading(true);
-    if (apiModel) {
-      // test model
-      // setApiModelError("");
-      setApiModelValid(true);
+    if (apiModel && apiModel != "") {
+      try {
+        const response = await fetch(`${apiUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: apiModel,
+            messages: [
+              {
+                role: "user",
+                content: "Hi"
+              }
+            ],
+            max_tokens: 5
+          })
+        });
+  
+        setLoading(false);
+        const { ok, status, statusText } = response;
+        if (ok) {
+          console.log("API test run successful!")
+          setApiModelValid(true);
+        } else {
+          if(status === 401) {
+            setApiKeyError("Invalid Key")
+          } else {
+            setApiModelError(statusText)
+          }
+          return false
+        }
+      } catch (e) {
+        setApiModelError(`Error testing API completion: ${e}`);
+      }        
     } else {
       setApiModelError("Model required");
     }
@@ -123,53 +156,8 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
   }
 
 
-  async function testRun(): Promise<boolean> {
-    setLoading(true);
-    try {
-      const response = await fetch(`${apiUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: apiModel,
-          messages: [
-            {
-              role: "user",
-              content: "Hi"
-            }
-          ],
-          max_tokens: 5
-        })
-      });
-
-      setLoading(false);
-      const { ok, status, statusText } = response;
-      if (ok) {
-        console.log("API test run successful!")
-        return true
-      } else {
-        if(status === 401) {
-          setApiKeyError("Invalid Key")
-        } else {
-          setApiModelError(statusText)
-        }
-        return false
-      }
-    } catch (e) {
-      setApiModel(`Error testing API completion: ${e}`);
-    }
-    return false;
-  }
-
-
   async function saveModel() {
     setLoading(true);
-    if(!await testRun()){
-      setLoading(false)
-      return;
-    } 
     // validate model settings
     if (!newModelName) setNewModelNameError(true);
     else {
@@ -426,7 +414,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
             )}
           </j-flex>
 
-          {newModel === "External API" && !apiModelValid ? (
+          {newModel === "External API" && (!apiModelValid || !apiValid) ? (
             <>
               {!apiValid ? (
                 <j-button onClick={checkApi} variant="primary" loading={loading}>
