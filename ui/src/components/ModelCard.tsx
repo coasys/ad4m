@@ -83,13 +83,16 @@ export default function ModelCard(props: {
         <j-flex gap="300">
           <j-text nomargin>Type:</j-text>
           <j-text nomargin color="ui-0">
-            {modelType}
+            {modelType === "LLM" ? 
+              (api ? "Remote" : "Local")
+              : "" 
+            } {modelType} 
           </j-text>
         </j-flex>
         <j-flex gap="300">
           <j-text nomargin>Model:</j-text>
           <j-text nomargin color="ui-0">
-            {api ? "External API" : local.fileName}
+            {api ? api.model : local.fileName}
           </j-text>
         </j-flex>
         {api && (
@@ -104,24 +107,16 @@ export default function ModelCard(props: {
                 {api.baseUrl}
               </j-text>
             </j-flex>
-            <j-flex gap="300" wrap>
-              <j-text nomargin>API Key:</j-text>
-              <j-text
-                nomargin
-                color="ui-0"
-                style={{ maxWidth: "100%", overflowWrap: "break-word" }}
-              >
-                {api.apiKey}
-              </j-text>
-            </j-flex>
           </>
         )}
-        <j-flex gap="300">
-          <j-text nomargin>Status:</j-text>
-          <j-text nomargin color="ui-0">
-            {statusText()}
-          </j-text>
-        </j-flex>
+        {!api && (
+          <j-flex gap="300">
+            <j-text nomargin>Status:</j-text>
+            <j-text nomargin color="ui-0">
+              {statusText()}
+            </j-text>
+          </j-flex>
+        )}
         {modelType === "LLM" && (
           <>
             {!tasks || tasks.length === 0 ? (
