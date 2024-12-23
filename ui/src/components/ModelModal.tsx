@@ -43,7 +43,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
   const [apiUrlError, setApiUrlError] = useState(false);
   const [apiKeyError, setApiKeyError] = useState(false);
   const [apiModelError, setApiModelError] = useState(false);
-  const [apiLoading, setApiLoading] = useState(false); // needed?
+  const [apiLoading, setApiLoading] = useState(false);
   const [apiErrorMessage, setApiErrorMessage] = useState("");
   const [apiModel, setApiModel] = useState("");
   const [apiModels, setApiModels] = useState<string[]>([]);
@@ -79,12 +79,11 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
         setApiKeyError(true);
         setApiErrorMessage(status === 401 ? "Invalid key" : statusText);
       }
-      setApiLoading(false);
     } catch {
       setApiUrlError(true);
       setApiErrorMessage("Error connecting to API");
-      setApiLoading(false);
     }
+    setApiLoading(false);
     if (apiValid) {
       // get models
       setApiModels([]);
