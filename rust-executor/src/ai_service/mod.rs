@@ -511,7 +511,9 @@ impl AIService {
                                         });
 
                                         let chat_input = ChatInput {
-                                            model: chat_gpt_lib_rs::Model::Custom(model_string.clone()),
+                                            model: chat_gpt_lib_rs::Model::Custom(
+                                                model_string.clone(),
+                                            ),
                                             messages,
                                             ..Default::default()
                                         };
