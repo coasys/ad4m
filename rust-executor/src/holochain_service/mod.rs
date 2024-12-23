@@ -328,7 +328,12 @@ impl HolochainService {
             _ => unreachable!(),
         };
 
-        inteface.add_agent_infos(agent_infos_from_str(COASYS_BOOTSTRAP_AGENT_INFO).expect("Couldn't deserialize hard-wired AgentInfo")).await?;
+        inteface
+            .add_agent_infos(
+                agent_infos_from_str(COASYS_BOOTSTRAP_AGENT_INFO)
+                    .expect("Couldn't deserialize hard-wired AgentInfo"),
+            )
+            .await?;
 
         set_holochain_service(inteface).await;
 
