@@ -20,7 +20,7 @@ Use rustup to install the latest stable Rust version.
 
 ADAM currently needs at least Rust version:
 ```
-1.77.0
+1.81.0
 ```
 
 #### Rust WASM target for Holochain based Languages
