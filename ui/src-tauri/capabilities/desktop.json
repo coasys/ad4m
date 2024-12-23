@@ -10,7 +10,7 @@
     "AD4M"
   ],
   "remote": {
-    "urls": ["http://127.0.0.1:3000", "http://localhost:11434"]
+    "urls": ["http://127.0.0.1:3000", "http://localhost:11434", "http://127.0.0.1", "https://127.0.0.1", "http://localhost", "https://localhost"]
   },
   "permissions": [
     "updater:default",
