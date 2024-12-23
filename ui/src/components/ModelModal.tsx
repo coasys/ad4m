@@ -58,7 +58,6 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
   }
 
   async function checkApi() {
-    console.log("check api", apiUrlRef.current, apiKeyRef.current);
     setLoading(true);
     setApiKeyError("");
     setApiUrlError("");
@@ -87,7 +86,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
       // get models
       setApiModels([]);
       setApiModel("");
-      setApiModelValid(false)
+      setApiModelValid(false);
       try {
         const response = await fetch(`${apiUrlRef.current}/models`, {
           method: "GET",
@@ -111,9 +110,8 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
   }
 
   async function checkModel() {
-    console.log("check model");
     setLoading(true);
-    if (apiModel && apiModel != "") {
+    if (apiModel) {
       try {
         const response = await fetch(`${apiUrl}/chat/completions`, {
           method: "POST",
@@ -123,38 +121,27 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
           },
           body: JSON.stringify({
             model: apiModel,
-            messages: [
-              {
-                role: "user",
-                content: "Hi"
-              }
-            ],
-            max_tokens: 5
-          })
+            messages: [{ role: "user", content: "Hi" }],
+            max_tokens: 5,
+          }),
         });
-  
         setLoading(false);
         const { ok, status, statusText } = response;
         if (ok) {
-          console.log("API test run successful!")
           setApiModelValid(true);
         } else {
-          if(status === 401) {
-            setApiKeyError("Invalid Key")
-          } else {
-            setApiModelError(statusText)
-          }
-          return false
+          if (status === 401) setApiKeyError("Invalid Key");
+          else setApiModelError(statusText);
+          return false;
         }
       } catch (e) {
         setApiModelError(`Error testing API completion: ${e}`);
-      }        
+      }
     } else {
       setApiModelError("Model required");
     }
     setLoading(false);
   }
-
 
   async function saveModel() {
     setLoading(true);
@@ -167,7 +154,12 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
         modelType: newModelType,
       } as ModelInput;
       if (newModel === "External API") {
-        model.api = { baseUrl: apiUrl, apiKey, apiType: "OPEN_AI", model: apiModel };
+        model.api = {
+          baseUrl: apiUrl,
+          apiKey,
+          apiType: "OPEN_AI",
+          model: apiModel,
+        };
       } else {
         model.local = {
           fileName: newModel,
