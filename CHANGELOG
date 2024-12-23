@@ -32,6 +32,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - App notifications implemented. ADAM apps can register Prolog queries with the executor which will be checked on every perspective change. If the change adds a new match, it will trigger the publishing of a notifications via subscriptions in client interface [PR#475](https://github.com/coasys/ad4m/pull/475), as well as calling a web hook if given [PR#482](https://github.com/coasys/ad4m/pull/482)
 - Support ADAM executor hosting service alpha [PR#474](https://github.com/coasys/ad4m/pull/474)
 - Complete instructions in README [PR#473](https://github.com/coasys/ad4m/pull/473)
+- TLS encryption for ADAM executor app interface [PR#489](https://github.com/coasys/ad4m/pull/489)
 - Local AI inference for LLMs, embedding models and Whisper audio transcription [PR#522](https://github.com/coasys/ad4m/pull/522)
 - Full CRUD systems for choosing AI models, remote models through API calls and UI in ADAM Launcher for setup and managing of models [PR#504](https://github.com/coasys/ad4m/pull/504)
 - Add remote AI API model picking, to enable Ollama use-case [PR#547](https://github.com/coasys/ad4m/pull/547)
