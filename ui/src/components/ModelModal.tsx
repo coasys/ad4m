@@ -133,8 +133,55 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
     return true;
   }
 
+
+  async function testRun(): Promise<boolean> {
+    setApiLoading(true);
+    try {
+      const response = await fetch(`${apiUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: apiModel,
+          messages: [
+            {
+              role: "user",
+              content: "Hi"
+            }
+          ],
+          max_tokens: 5
+        })
+      });
+
+      setApiLoading(false);
+      const { ok, status, statusText } = response;
+      if (ok) {
+        console.log("API test run successful!")
+        return true
+      } else {
+        if(status === 401) {
+          setApiErrorMessage("Invalid Key")
+          setApiKeyError(true)
+        } else {
+          setApiErrorMessage(statusText)
+        }
+        return false
+      }
+    } catch (e) {
+      setApiErrorMessage(`Error testing API completion: ${e}`);
+    }
+    return false;
+  }
+
+
   async function saveModel() {
     setSaving(true);
+    if(!await testRun()){
+      setSaving(false)
+      return;
+    } 
     // validate model settings
     if (!newModelName) setNewModelNameError(true);
     else if (apiValid()) {
