@@ -9,24 +9,6 @@
                 "possibleTemplateParams": ["uid", "name", "description"]
             },
             "resource": "../bootstrap-languages/p-diff-sync/build/bundle.js"
-        },
-        {
-            "meta": {
-                "name": "perspectiveDiffSync-socket",
-                "description": "Holochain based Perspective link sharing language, with revision signals sent with socket.io through a centralized server",
-                "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/p-diff-sync-socket-signaling",
-                "possibleTemplateParams": ["uid", "name", "description"]
-            },
-            "resource": "../bootstrap-languages/p-diff-sync-socket-signaling/build/bundle.js"
-        },
-        {
-            "meta": {
-                "name": "CloudLinks",
-                "description": "Centralized link language",
-                "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/p-diff-sync-socket-signaling",
-                "possibleTemplateParams": ["uid", "name", "description"]
-            },
-            "resource": "../bootstrap-languages/centralized-p-diff-sync/build/bundle.js"
         }
     ],
     "agentLanguage": {
