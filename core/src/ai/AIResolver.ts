@@ -17,6 +17,9 @@ export class ModelApi {
     apiKey: string;
 
     @Field()
+    model: string;
+
+    @Field()
     apiType: String;
 }
 
@@ -61,6 +64,9 @@ export class ModelApiInput {
     apiKey: string;
 
     @Field()
+    model: string;
+
+    @Field()
     apiType: string;
 }
 
@@ -102,6 +108,7 @@ export default class AIResolver {
                 api: {
                     baseUrl: "https://api.example.com",
                     apiKey: "test-api-key",
+                    model: "gpt4o",
                     apiType: "OpenAi"
                 },
                 local: {
@@ -153,6 +160,7 @@ export default class AIResolver {
             api: {
                 baseUrl: "https://api.example.com", 
                 apiKey: "test-api-key",
+                model: "gpt4o",
                 apiType: "OpenAi"
             },
             local: {

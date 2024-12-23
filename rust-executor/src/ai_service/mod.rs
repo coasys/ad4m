@@ -87,7 +87,7 @@ enum LLMTaskRequest {
 
 enum LlmModel {
     Local(Llama),
-    Remote(ChatGPTClient),
+    Remote((ChatGPTClient, String)),
 }
 
 async fn publish_model_status(
@@ -373,7 +373,10 @@ impl AIService {
                                 .await
                                 .map(LlmModel::Local)
                         } else if let Some(api) = model_config.api {
-                            Ok(LlmModel::Remote(Self::build_remote_gpt4(model_id, api.api_key, api.base_url).await))
+                            Ok(LlmModel::Remote((
+                                Self::build_remote_gpt4(model_id, api.api_key, api.base_url).await,
+                                api.model
+                            )))
                         } else {
                             Err(anyhow!("AI model definition {} doesn't have a body, and this error should have been caught above", model_config.name))
                         }
@@ -479,7 +482,7 @@ impl AIService {
                             },
 
                             LLMTaskRequest::Prompt(prompt_request) => match model {
-                                LlmModel::Remote(ref mut remote_client) => {
+                                LlmModel::Remote((ref mut remote_client, ref model_string)) => {
                                     if let Some(task) =
                                         task_descriptions.get(&prompt_request.task_id)
                                     {
@@ -508,7 +511,9 @@ impl AIService {
                                         });
 
                                         let chat_input = ChatInput {
-                                            model: chat_gpt_lib_rs::Model::Gpt_4o,
+                                            model: chat_gpt_lib_rs::Model::Custom(
+                                                model_string.clone(),
+                                            ),
                                             messages,
                                             ..Default::default()
                                         };

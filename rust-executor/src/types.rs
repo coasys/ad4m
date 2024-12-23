@@ -469,6 +469,7 @@ impl ToString for ModelApiType {
 pub struct ModelApi {
     pub base_url: Url,
     pub api_key: String,
+    pub model: String,
     pub api_type: ModelApiType,
 }
 

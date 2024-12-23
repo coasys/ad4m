@@ -1170,7 +1170,8 @@ describe('Ad4mClient', () => {
                 api: {
                     baseUrl: "https://api.newexample.com",
                     apiKey: "new-test-api-key",
-                    apiType: "OpenAi"
+                    apiType: "OpenAi",
+                    model: "gpt-4o"
                 },
                 local: {
                     fileName: "new-test-model.bin",
@@ -1190,7 +1191,8 @@ describe('Ad4mClient', () => {
                 api: {
                     baseUrl: "https://api.updatedexample.com",
                     apiKey: "updated-test-api-key", 
-                    apiType: "OpenAi"
+                    apiType: "OpenAi",
+                    model: "gpt-4o"
                 },
                 local: {
                     fileName: "updated-test-model.bin",

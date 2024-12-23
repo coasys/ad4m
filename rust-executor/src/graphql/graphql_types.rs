@@ -598,6 +598,7 @@ pub struct PerspectiveStateFilter {
 pub struct ModelApiInput {
     pub base_url: String,
     pub api_key: String,
+    pub model: String,
     pub api_type: String,
 }
 
