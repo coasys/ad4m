@@ -58,10 +58,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/perspect3vism/ad4m-test.git"
+    "url": "git+https://github.com/coasys/ad4m.git"
   },
   "bugs": {
-    "url": "https://github.com/perspect3vism/ad4m-test/issues"
+    "url": "https://github.com/coasys/ad4m/issues"
   },
   "version": "0.10.0"
 }
