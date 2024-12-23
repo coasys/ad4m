@@ -186,6 +186,7 @@ impl Ad4mDb {
                 name TEXT NOT NULL,
                 api_base_url TEXT,
                 api_key TEXT,
+                model TEXT,
                 api_type TEXT,
                 local_file_name TEXT,
                 local_tokenizer_source TEXT,
@@ -1079,13 +1080,14 @@ impl Ad4mDb {
     pub fn add_model(&self, model: &ModelInput) -> Ad4mDbResult<String> {
         let id = Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO models (id, name, api_base_url, api_key, api_type, local_file_name, local_tokenizer_source, local_model_parameters, type)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO models (id, name, api_base_url, api_key, model, api_type, local_file_name, local_tokenizer_source, local_model_parameters, type)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 id,
                 model.name,
                 model.api.as_ref().map(|api| api.base_url.to_string()),
                 model.api.as_ref().map(|api| api.api_key.clone()),
+                model.api.as_ref().map(|api| api.model.clone()),
                 model.api.as_ref().map(|api| serde_json::to_string(&api.api_type).unwrap()),
                 model.local.as_ref().map(|local| local.file_name.clone()),
                 model.local.as_ref().map(|local| local.tokenizer_source.clone()),
@@ -1100,14 +1102,16 @@ impl Ad4mDb {
         let mut stmt = self.conn.prepare("SELECT * FROM models WHERE id = ?1")?;
         let model = stmt
             .query_row(params![model_id], |row| {
-                let api = if let (Some(base_url), Some(api_key), Some(api_type)) = (
+                let api = if let (Some(base_url), Some(api_key), Some(model), Some(api_type)) = (
                     row.get::<_, Option<String>>(2)?.map(|s| s.to_string()),
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ) {
                     Some(ModelApi {
                         base_url: Url::parse(&base_url).unwrap(),
                         api_key,
+                        model,
                         api_type: ModelApiType::from_str(&api_type).unwrap(),
                     })
                 } else {
@@ -1116,7 +1120,7 @@ impl Ad4mDb {
 
                 let local =
                     if let (Some(file_name), Some(tokenizer_source), Some(model_parameters)) =
-                        (row.get(5)?, row.get(6)?, row.get(7)?)
+                        (row.get(6)?, row.get(7)?, row.get(8)?)
                     {
                         Some(LocalModel {
                             file_name,
@@ -1132,7 +1136,7 @@ impl Ad4mDb {
                     name: row.get(1)?,
                     api,
                     local,
-                    model_type: serde_json::from_str(&row.get::<_, String>(8)?).unwrap(),
+                    model_type: serde_json::from_str(&row.get::<_, String>(9)?).unwrap(),
                 })
             })
             .optional()?;
@@ -1142,14 +1146,16 @@ impl Ad4mDb {
     pub fn get_models(&self) -> Ad4mDbResult<Vec<Model>> {
         let mut stmt = self.conn.prepare("SELECT * FROM models")?;
         let model_iter = stmt.query_map([], |row| {
-            let api = if let (Some(base_url), Some(api_key), Some(api_type)) = (
+            let api = if let (Some(base_url), Some(api_key), Some(model), Some(api_type)) = (
                 row.get::<_, Option<String>>(2)?.map(|s| s.to_string()),
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ) {
                 Some(ModelApi {
                     base_url: Url::parse(&base_url).unwrap(),
                     api_key,
+                    model,
                     api_type: ModelApiType::from_str(&api_type).unwrap(),
                 })
             } else {
@@ -1157,7 +1163,7 @@ impl Ad4mDb {
             };
 
             let local = if let (Some(file_name), Some(tokenizer_source), Some(model_parameters)) =
-                (row.get(5)?, row.get(6)?, row.get(7)?)
+                (row.get(6)?, row.get(7)?, row.get(8)?)
             {
                 Some(LocalModel {
                     file_name,
@@ -1173,7 +1179,7 @@ impl Ad4mDb {
                 name: row.get(1)?,
                 api,
                 local,
-                model_type: serde_json::from_str(&row.get::<_, String>(8)?).unwrap(),
+                model_type: serde_json::from_str(&row.get::<_, String>(9)?).unwrap(),
             })
         })?;
 
@@ -1187,6 +1193,7 @@ impl Ad4mDb {
     pub fn update_model(&self, id: &str, model: &ModelInput) -> Ad4mDbResult<()> {
         let api_base_url = model.api.as_ref().map(|api| api.base_url.to_string());
         let api_key = model.api.as_ref().map(|api| api.api_key.clone());
+        let api_model = model.api.as_ref().map(|api| api.model.clone());
         let api_type = model.api.as_ref().map(|api| api.api_type.to_string());
         let local_file_name = model.local.as_ref().map(|local| local.file_name.clone());
         let local_tokenizer = model
@@ -1203,16 +1210,18 @@ impl Ad4mDb {
                 name = ?1,
                 api_base_url = ?2,
                 api_key = ?3,
-                api_type = ?4,
-                local_file_name = ?5,
-                local_tokenizer_source = ?6,
-                local_model_parameters = ?7,
-                type = ?8
-             WHERE id = ?9",
+                model = ?4,
+                api_type = ?5,
+                local_file_name = ?6,
+                local_tokenizer_source = ?7,
+                local_model_parameters = ?8,
+                type = ?9
+             WHERE id = ?10",
             params![
                 model.name,
                 api_base_url,
                 api_key,
+                api_model,
                 api_type,
                 local_file_name,
                 local_tokenizer,
@@ -1610,6 +1619,7 @@ mod tests {
             api: Some(ModelApiInput {
                 base_url: "https://api.example.com".to_string(),
                 api_key: "test_api_key".to_string(),
+                model: "llama3".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
             }),
             local: None,
@@ -1649,6 +1659,7 @@ mod tests {
             retrieved_model_api.api.as_ref().unwrap().api_key,
             "test_api_key"
         );
+        assert_eq!(retrieved_model_api.api.as_ref().unwrap().model, "llama3");
         assert_eq!(
             retrieved_model_api.api.as_ref().unwrap().api_type,
             ModelApiType::OpenAi
@@ -1702,6 +1713,7 @@ mod tests {
             api: Some(ModelApiInput {
                 base_url: "https://api.example.com".to_string(),
                 api_key: "test_key".to_string(),
+                model: "llama3".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
             }),
             local: None,
@@ -1714,12 +1726,13 @@ mod tests {
         // Create updated model
         let updated_model = ModelInput {
             name: "Updated Model".to_string(),
-            api: None,
-            local: Some(LocalModelInput {
-                file_name: "local_model.bin".to_string(),
-                tokenizer_source: "tokenizer.json".to_string(),
-                model_parameters: "{\"param\": \"value\"}".to_string(),
+            api: Some(ModelApiInput {
+                base_url: "https://api.example.org".to_string(),
+                api_key: "test_key".to_string(),
+                model: "llama4".to_string(),
+                api_type: ModelApiType::OpenAi.to_string(),
             }),
+            local: None,
             model_type: ModelType::Embedding,
         };
 
@@ -1730,14 +1743,14 @@ mod tests {
         let retrieved_model = db.get_model(model_id.clone()).unwrap().unwrap();
 
         assert_eq!(retrieved_model.name, "Updated Model");
-        assert!(retrieved_model.api.is_none());
-        assert!(retrieved_model.local.is_some());
+        assert!(retrieved_model.api.is_some());
+        assert!(retrieved_model.local.is_none());
 
-        let local = retrieved_model.local.unwrap();
-        assert_eq!(local.file_name, "local_model.bin");
-        assert_eq!(local.tokenizer_source, "tokenizer.json");
-        assert_eq!(local.model_parameters, "{\"param\": \"value\"}");
-        assert_eq!(retrieved_model.model_type, ModelType::Embedding);
+        let api = retrieved_model.api.unwrap();
+        assert_eq!(api.base_url, Url::parse("https://api.example.org").unwrap());
+        assert_eq!(api.api_key, "test_key");
+        assert_eq!(api.model, "llama4");
+        assert_eq!(api.api_type, ModelApiType::OpenAi);
 
         // Clean up
         db.remove_model(&model_id).unwrap();
@@ -1753,6 +1766,7 @@ mod tests {
             api: Some(ModelApiInput {
                 base_url: "https://api.example.com".to_string(),
                 api_key: "llm_key".to_string(),
+                model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
             }),
             local: None,
@@ -1775,6 +1789,7 @@ mod tests {
             api: Some(ModelApiInput {
                 base_url: "https://api.transcribe.com".to_string(),
                 api_key: "transcribe_key".to_string(),
+                model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
             }),
             local: None,
@@ -1873,6 +1888,7 @@ mod tests {
             api: Some(ModelApiInput {
                 base_url: "https://api.test.com".to_string(),
                 api_key: "test-key".to_string(),
+                model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
             }),
             local: None,

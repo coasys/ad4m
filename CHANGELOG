@@ -34,6 +34,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Complete instructions in README [PR#473](https://github.com/coasys/ad4m/pull/473)
 - Local AI inference for LLMs, embedding models and Whisper audio transcription [PR#522](https://github.com/coasys/ad4m/pull/522)
 - Full CRUD systems for choosing AI models, remote models through API calls and UI in ADAM Launcher for setup and managing of models [PR#504](https://github.com/coasys/ad4m/pull/504)
+- Add remote AI API model picking, to enable Ollama use-case [PR#547](https://github.com/coasys/ad4m/pull/547)
 
 ### Changed
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
