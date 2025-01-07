@@ -43,6 +43,40 @@ export const fetchProfile = async (agent: Agent) => {
   return tempProfile;
 };
 
+const Branch = (props: { link: any; index: string }) => {
+  const { link, index } = props;
+  const { data, children } = link;
+  const { source, predicate, target } = data;
+
+  const [collapsed, setCollapsed] = useState(true);
+
+  return (
+    <div style={{ padding: 5, borderTop: "1px solid rgba(255, 255, 255, 0.3)" }}>
+      <j-flex gap="300" a="center">
+        <j-text nomargin>{index} |</j-text>
+        <j-text nomargin color="black">
+          {predicate}
+        </j-text>
+        {children.length > 0 && (
+          <>
+            <j-text nomargin>({children.length})</j-text>
+            <j-button size="xs" variant="subtle" onClick={() => setCollapsed(!collapsed)}>
+              <j-icon size="xs" name={collapsed ? "chevron-right" : "chevron-down"} />
+            </j-button>
+          </>
+        )}
+      </j-flex>
+      {!collapsed && (
+        <div style={{ marginLeft: 20, marginTop: 5 }}>
+          {children.map((child: any, childIndex: number) => (
+            <Branch link={child} index={`${index}.${childIndex}`} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const Profile = (props: Props) => {
   const {
     state: { loading },
@@ -240,6 +274,39 @@ const Profile = (props: Props) => {
     getAppState();
   };
 
+  // Link Tree
+  const [perspectiveUUID, setPerspectiveUUID] = useState("879d33d1-db1f-46ad-be7f-b3d95603d357");
+  const [linksLoading, setLinksLoading] = useState(false);
+  const [links, setLinks] = useState<any[]>([]);
+
+  function findChildren(allLinks: any[], link: any, visited = new Set()) {
+    const { target } = link.data;
+    if (visited.has(target)) return [];
+    visited.add(target);
+    const children = allLinks.filter((l) => l.data.source === target);
+    for (const child of children) child.children = findChildren(allLinks, child, visited);
+    return children.sort((a, b) => b.children.length - a.children.length);
+  }
+
+  async function getLinks() {
+    setLinksLoading(true);
+    try {
+      const snapshot = await client!.perspective.snapshotByUUID(perspectiveUUID);
+      const allLinks = snapshot?.links || [];
+      console.log(`All links in perspective: ${perspectiveUUID} `, allLinks);
+      // construct tree
+      const rootLinks = allLinks.filter((link: any) => link.data.source === "ad4m://self");
+      for (const link of rootLinks) link.children = findChildren(allLinks, link);
+      rootLinks.sort((a, b) => b.children.length - a.children.length);
+      console.log("Link tree: ", rootLinks);
+      setLinks(rootLinks);
+    } catch (e) {
+      console.log("no links found");
+      setLinks([]);
+    }
+    setLinksLoading(false);
+  }
+
   return (
     <div>
       <j-box px="500" my="500">
@@ -292,7 +359,11 @@ const Profile = (props: Props) => {
               full
               variant="secondary"
             >
-              <j-icon size="sm" slot="start" name={!copied ? "clipboard" : "clipboard-check"}></j-icon>
+              <j-icon
+                size="sm"
+                slot="start"
+                name={!copied ? "clipboard" : "clipboard-check"}
+              ></j-icon>
               Copy Holochain Agent Info(s)
             </j-button>
           </j-box>
@@ -333,8 +404,37 @@ const Profile = (props: Props) => {
         </j-button>
       </j-box>
 
+      <j-box px="500" my="500">
+        <j-flex direction="column" gap="400">
+          <j-text size="600" nomargin color="black">
+            Perspective Link Tree
+          </j-text>
+          <j-flex a="center" gap="400">
+            <j-input
+              size="md"
+              type="text"
+              placeholder="Perspective UUID..."
+              value={perspectiveUUID}
+              onInput={(e: any) => setPerspectiveUUID(e.target.value)}
+              style={{ width: "100%" }}
+            />
+            <j-button onClick={getLinks} loading={linksLoading}>
+              Generate Tree
+            </j-button>
+          </j-flex>
+          <j-flex direction="column">
+            {links.map((link, index) => (
+              <Branch link={link} index={`${index}`} />
+            ))}
+          </j-flex>
+        </j-flex>
+      </j-box>
+
       {showAddHcAgentInfos && (
-        <j-modal open={showAddHcAgentInfos} onToggle={(e: any) => setAddHcAgentInfos(e.target.open)}>
+        <j-modal
+          open={showAddHcAgentInfos}
+          onToggle={(e: any) => setAddHcAgentInfos(e.target.open)}
+        >
           <j-box px="400" py="600">
             <j-box pb="500">
               <j-text nomargin size="600" color="black" weight="600">
@@ -422,8 +522,8 @@ const Profile = (props: Props) => {
               </j-text>
             </j-box>
             <j-text>
-              Disclaimer: After changing the agent you will have to restart the launcher for it to start using the new
-              agent
+              Disclaimer: After changing the agent you will have to restart the launcher for it to
+              start using the new agent
             </j-text>
             <j-box p="200"></j-box>
             {appState.agent_list.map((agent: any) => (
@@ -494,7 +594,8 @@ const Profile = (props: Props) => {
               </j-text>
             </j-box>
             <j-text>
-              Warning: by clearing the agent you will loose all the data and will have to start with a fresh agent
+              Warning: by clearing the agent you will loose all the data and will have to start with
+              a fresh agent
             </j-text>
             <j-box p="200"></j-box>
             <j-input
@@ -507,7 +608,12 @@ const Profile = (props: Props) => {
               onKeyDown={onKeyDown}
               autovalidate
             >
-              <j-button onClick={() => setShowPassword(!showPassword)} slot="end" variant="link" square>
+              <j-button
+                onClick={() => setShowPassword(!showPassword)}
+                slot="end"
+                variant="link"
+                square
+              >
                 <j-icon name={showPassword ? "eye-slash" : "eye"} size="sm"></j-icon>
               </j-button>
             </j-input>
