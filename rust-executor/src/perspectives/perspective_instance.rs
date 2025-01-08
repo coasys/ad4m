@@ -489,7 +489,7 @@ impl PerspectiveInstance {
                 }
             } else {
                 Err(anyhow!("LinkLanguage not available"))
-            }
+            };
         //} else {
         //    Err(anyhow!("Other pending diffs already in queue"))
         //};
