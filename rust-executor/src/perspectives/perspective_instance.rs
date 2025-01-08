@@ -470,7 +470,7 @@ impl PerspectiveInstance {
 
         //let commit_result = if pending_ids.is_empty() {
             // No pending diffs, let's try
-            if let Some(link_language) = self.link_language.lock().await.as_mut() {
+            let commit_result = if let Some(link_language) = self.link_language.lock().await.as_mut() {
                 // Got lock on Link Language, no other commit running
                 if link_language.current_revision().await?.is_some() {
                     // Revision set, we are synced
