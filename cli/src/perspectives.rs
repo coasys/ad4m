@@ -166,8 +166,8 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
                 .perspectives
                 .query_links(
                     args.id,
-                    args.source,
-                    args.target,
+                    args.source.filter(|s| s != "_"),
+                    args.target.filter(|s| s != "_"),
                     args.predicate,
                     from_date,
                     until_date,
