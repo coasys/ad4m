@@ -323,9 +323,26 @@ impl PerspectiveInstance {
     async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
         let uuid = self.persisted.lock().await.uuid.clone();
 
-        let (pending_diffs, pending_ids) = Ad4mDb::with_global_instance(|db| {
-            db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
-        })?;
+        let mut count = MAX_PENDING_DIFFS_COUNT;
+        let pending_diffs;
+        let pending_ids;
+        
+        // Keep reducing count until serialized size is under 3MB
+        loop {
+            let (diffs, ids) = Ad4mDb::with_global_instance(|db| {
+                db.get_pending_diffs(&uuid, Some(count))
+            })?;
+
+            // Check serialized size
+            let serialized = serde_json::to_vec(&diffs)?;
+            if serialized.len() <= 3_000_000 || count == 1 {
+                pending_diffs = diffs;
+                pending_ids = ids;
+                break;
+            }
+            
+            count = count / 2;
+        }
 
         if !pending_ids.is_empty() {
             let mut link_language_lock = self.link_language.lock().await;
