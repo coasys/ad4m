@@ -1,10 +1,10 @@
 //use chrono::Timelike;
 use hdk::prelude::*;
 use perspective_diff_sync_integrity::{
-    EntryTypes, HashBroadcast, LinkTypes, PerspectiveDiff, PerspectiveDiffEntryReference,
+    EntryTypes, HashBroadcast, LinkTypes, LocalHashReference, PerspectiveDiff, PerspectiveDiffEntryReference,
 };
 
-use crate::errors::SocialContextResult;
+use crate::errors::{SocialContextResult, SocialContextError};
 use crate::link_adapter::revisions::{current_revision, update_current_revision};
 use crate::link_adapter::snapshots::generate_snapshot;
 use crate::retriever::holochain::{get_active_agent_anchor, get_active_agents};
@@ -18,12 +18,12 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
 ) -> SocialContextResult<HoloHash<holo_hash::hash_type::Action>> {
     debug!("===PerspectiveDiffSync.commit(): Function start");
     let now_fn_start = get_now()?.time();
-    let current_revision = current_revision::<Retriever>()?;
+    let initial_current_revision: Option<LocalHashReference> = current_revision::<Retriever>()?;
 
     let mut entries_since_snapshot = 0;
-    if current_revision.is_some() {
+    if initial_current_revision.is_some() {
         let current = Retriever::get::<PerspectiveDiffEntryReference>(
-            current_revision.clone().unwrap().hash,
+            initial_current_revision.clone().unwrap().hash,
         )?;
         entries_since_snapshot = current.diffs_since_snapshot;
     };
@@ -45,7 +45,7 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     let diff_entry_create = Retriever::create_entry(EntryTypes::PerspectiveDiff(diff.clone()))?;
     let diff_entry_ref_entry = PerspectiveDiffEntryReference {
         diff: diff_entry_create.clone(),
-        parents: current_revision.map(|val| vec![val.hash]),
+        parents: initial_current_revision.clone().map(|val| vec![val.hash]),
         diffs_since_snapshot: entries_since_snapshot,
     };
     let diff_entry_reference = Retriever::create_entry(EntryTypes::PerspectiveDiffEntryReference(
@@ -86,17 +86,26 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
         "===PerspectiveDiffSync.commit() - Profiling: Took {} to update the latest revision",
         (after - now_profile).num_milliseconds()
     );
-    update_current_revision::<Retriever>(diff_entry_reference.clone(), now)?;
 
-    if *ENABLE_SIGNALS {
-        // let signal_data = PerspectiveDiffReference {
-        //     diff,
-        //     reference: diff_entry_ref_entry,
-        //     reference_hash: diff_entry_reference.clone(),
-        // };
-        // send_revision_signal(signal_data)?;
-        broadcast_current::<Retriever>()?;
-    };
+    let latest_current_revision: Option<LocalHashReference> = current_revision::<Retriever>()?;
+    
+    if initial_current_revision.map(|r| format!("{:?}", r)) == latest_current_revision.map(|r| format!("{:?}", r)) {
+        update_current_revision::<Retriever>(diff_entry_reference.clone(), now)?;
+
+        if *ENABLE_SIGNALS {
+            // let signal_data = PerspectiveDiffReference {
+            //     diff,
+            //     reference: diff_entry_ref_entry,
+            //     reference_hash: diff_entry_reference.clone(),
+            // };
+            // send_revision_signal(signal_data)?;
+            broadcast_current::<Retriever>()?;
+        };
+    } else {
+        // Concurrent update detected; decide how to handle it
+        debug!("Concurrent update detected in commit. Aborting commit without updating current revision.");
+        return Err(SocialContextError::InternalError("Concurrent update detected in commit"));
+    }
 
     let after_fn_end = get_now()?.time();
     debug!(
