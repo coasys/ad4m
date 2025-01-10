@@ -211,8 +211,14 @@ export class LinkAdapter implements LinkSyncAdapter {
       while (attempts < maxAttempts) {
         try {
           let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "commit", prep_diff);
-          if (!res || !Buffer.isBuffer(res) || res.length === 0) {
-            throw new Error("Got no revision from Holochain commit zome function")
+          if(!res){
+            throw new Error("Got undefined from Holochain commit zome function")
+          }          
+          if (!(Buffer.isBuffer(res) || res instanceof Uint8Array)) {
+            throw new Error("Did not get a buffer from Holochain commit zome function")
+          }
+          if (!(res.length || res.byteLength)) {
+            throw new Error("Got an empty buffer from Holochain commit zome function")
           }
           this.myCurrentRevision = res;
           //@ts-ignore
