@@ -481,35 +481,35 @@ impl PerspectiveInstance {
         }
 
         // Seeing if we already have pending diffs, to not overtake older commits but instead add this one to the queue
-        //let (_, pending_ids) =
-        //    Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&handle.uuid, Some(1)))
-        //        .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
+        let (_, pending_ids) =
+            Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&handle.uuid, Some(1)))
+                .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
 
-        //let commit_result = if pending_ids.is_empty() {
+        let commit_result = if pending_ids.is_empty() {
             // No pending diffs, let's try
-            let commit_result = if let Some(link_language) = self.link_language.lock().await.as_mut() {
+            if let Some(link_language) = self.link_language.lock().await.as_mut() {
                 // Got lock on Link Language, no other commit running
                 if link_language.current_revision().await?.is_some() {
                     // Revision set, we are synced
                     // we are in a healthy Neighbourhood state and should be able to commit
                     // but let's make sure we're not DoS'ing the link language in bursts
-                    //let mut immediate_commits_remaining =
-                    //    self.immediate_commits_remaining.lock().await;
-                    //if *immediate_commits_remaining > 0 {
-                    //    *immediate_commits_remaining -= 1;
+                    let mut immediate_commits_remaining =
+                        self.immediate_commits_remaining.lock().await;
+                    if *immediate_commits_remaining > 0 {
+                        *immediate_commits_remaining -= 1;
                         link_language.commit(diff.clone()).await
-                    //} else {
-                    //    Err(anyhow!("Debouncing commit burst"))
-                    //}
+                    } else {
+                        Err(anyhow!("Debouncing commit burst"))
+                    }
                 } else {
                     Err(anyhow!("Link Language not synced"))
                 }
             } else {
                 Err(anyhow!("LinkLanguage not available"))
-            };
-        //} else {
-        //    Err(anyhow!("Other pending diffs already in queue"))
-        //};
+            }
+        } else {
+            Err(anyhow!("Other pending diffs already in queue"))
+        };
 
         let ok = match commit_result {
             Ok(Some(rev)) => {
