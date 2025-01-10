@@ -513,8 +513,13 @@ impl PerspectiveInstance {
 
         let ok = match commit_result {
             Ok(Some(rev)) => {
-                log::info!("Committed to revision: {}", rev);
-                true
+                if rev.trim().len() == 0 {
+                    log::warn!("Committed but got no revision from LinkLanguage!\nStoring in pending diffs for later");
+                    false
+                } else {
+                    log::info!("Committed to revision: {}", rev);
+                    true    
+                }
             }
             Ok(None) => {
                 log::warn!("Committed but got no revision from LinkLanguage!\nStoring in pending diffs for later");
