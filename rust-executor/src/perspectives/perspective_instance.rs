@@ -326,12 +326,11 @@ impl PerspectiveInstance {
         let mut count = MAX_PENDING_DIFFS_COUNT;
         let pending_diffs;
         let pending_ids;
-        
+
         // Keep reducing count until serialized size is under 3MB
         loop {
-            let (diffs, ids) = Ad4mDb::with_global_instance(|db| {
-                db.get_pending_diffs(&uuid, Some(count))
-            })?;
+            let (diffs, ids) =
+                Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid, Some(count)))?;
 
             // Check serialized size
             let serialized = serde_json::to_vec(&diffs)?;
@@ -340,7 +339,7 @@ impl PerspectiveInstance {
                 pending_ids = ids;
                 break;
             }
-            
+
             count = count / 2;
         }
 
@@ -518,7 +517,7 @@ impl PerspectiveInstance {
                     false
                 } else {
                     log::info!("Committed to revision: {}", rev);
-                    true    
+                    true
                 }
             }
             Ok(None) => {
