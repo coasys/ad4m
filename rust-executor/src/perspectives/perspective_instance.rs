@@ -511,20 +511,30 @@ impl PerspectiveInstance {
         //    Err(anyhow!("Other pending diffs already in queue"))
         //};
 
-        match commit_result {
-            Ok(Some(rev)) => log::info!("Committed to revision: {}", rev),
-            Ok(None) => log::warn!("Committed but got now revision from LinkLanguage!"),
+        let ok = match commit_result {
+            Ok(Some(rev)) => {
+                log::info!("Committed to revision: {}", rev);
+                true
+            }
+            Ok(None) => {
+                log::warn!("Committed but got no revision from LinkLanguage!\nStoring in pending diffs for later");
+                false
+            }
             Err(e) => {
                 log::warn!(
                     "Error trying to commit diff: {:?}\nStoring in pending diffs for later",
                     e
                 );
-                // Store diff in DB
-                Ad4mDb::with_global_instance(|db| db.add_pending_diff(&handle.uuid, diff))?;
-                // Update or start timer
-                let mut timer = self.commit_debounce_timer.lock().await;
-                *timer = Some(tokio::time::Instant::now());
+                false
             }
+        };
+
+        if !ok {
+            // Store diff in DB
+            Ad4mDb::with_global_instance(|db| db.add_pending_diff(&handle.uuid, diff))?;
+            // Update or start timer
+            let mut timer = self.commit_debounce_timer.lock().await;
+            *timer = Some(tokio::time::Instant::now());
         }
 
         Ok(())
