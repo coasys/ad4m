@@ -68,8 +68,8 @@ export function useSubjects<SubjectClass>({
       const isUpdated = entries.value.find((e) => e.id === link.data.source);
 
       // @ts-ignore
-      const propertyValues = Object.values(subject.prototype.__properties);
-      const includedInSubjectClassDefinition = !!propertyValues.find((p: any) => p.through === link.data.predicate);
+      const propertyValues = typeof subject === "string" ? false : Object.values(subject.prototype.__properties);
+      const includedInSubjectClassDefinition = !propertyValues || propertyValues.find((p: any) => p.through === link.data.predicate);
 
       const id = isNewEntry
         ? link.data.target
