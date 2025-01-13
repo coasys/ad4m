@@ -67,9 +67,13 @@ export function useSubjects<SubjectClass>({
       const isNewEntry = link.data.source === s;
       const isUpdated = entries.value.find((e) => e.id === link.data.source);
 
+      // @ts-ignore
+      const propertyValues = Object.values(subject.prototype.__properties);
+      const includedInSubjectClassDefinition = !!propertyValues.find((p: any) => p.through === link.data.predicate);
+
       const id = isNewEntry
         ? link.data.target
-        : isUpdated
+        : isUpdated && includedInSubjectClassDefinition
           ? link.data.source
           : false;
 
