@@ -93,16 +93,17 @@ export function useSubjects<SubjectClass>(props: Props<SubjectClass>) {
   }
 
   async function linkAdded(link: LinkExpression) {
-    if (timeout.current) clearTimeout(timeout.current);
-    timeout.current = setTimeout(getData, 1000);
-
     const isNewEntry = link.data.source === source;
     const allEntries = (getCache(cacheKey) || []) as SubjectClass[];
     const isUpdated = allEntries?.find((e: any) => e.id === link.data.source);
 
+    // @ts-ignore
+    const propertyValues = typeof subject === "string" ? false : Object.values(subject.prototype.__properties);
+    const includedInSubjectClassDefinition = !propertyValues || propertyValues.find((p: any) => p.through === link.data.predicate);
+
     const id = isNewEntry
       ? link.data.target
-      : isUpdated
+      : isUpdated && includedInSubjectClassDefinition
         ? link.data.source
         : false;
 
