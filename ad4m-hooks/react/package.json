@@ -15,8 +15,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@coasys/ad4m": "0.10",
-    "@coasys/ad4m-connect": "0.10",
+    "@coasys/ad4m": "*",
+    "@coasys/ad4m-connect": "*",
     "@coasys/hooks-helpers": "*",
     "@types/react": "^18.2.55",
     "@types/react-dom": "^18.2.19"
