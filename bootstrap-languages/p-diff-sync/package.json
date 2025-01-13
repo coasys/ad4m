@@ -38,5 +38,5 @@
   "devDependencies": {
     "run-script-os": "^1.1.6"
   },
-  "version": "0.10.0"
+  "version": "0.10.1-rc1"
 }

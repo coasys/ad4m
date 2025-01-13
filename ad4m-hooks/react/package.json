@@ -1,6 +1,6 @@
 {
   "name": "@coasys/ad4m-react-hooks",
-  "version": "0.10.0",
+  "version": "0.10.1-rc1",
   "description": "",
   "main": "./src/index.ts",
   "module": "./src/index.ts",

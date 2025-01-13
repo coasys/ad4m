@@ -64,7 +64,7 @@
     "react-dom": "*"
   },
   "patchedDependencies": {},
-  "version": "0.10.0",
+  "version": "0.10.1-rc1",
   "pnpm": {
     "patchedDependencies": {
       "graphql@15.7.2": "patches/graphql@15.7.2.patch"
