@@ -57,3 +57,5 @@ test-runner/.ad4m-test
 temp
 
 !removePnpm.js
+
+.aider*

@@ -74,7 +74,7 @@ pub fn pull(args: PullArguments) -> ExternResult<PullResult> {
     debug!("pull");
     let pull_result = link_adapter::pull::pull::<retriever::HolochainRetreiver>(true, args.hash, args.is_scribe)
         .map_err(|error| utils::err(&format!("{}", error)));
-    debug!("pull_result: {:?}", pull_result);
+    //debug!("pull_result: {:?}", pull_result);
     pull_result
 }
 

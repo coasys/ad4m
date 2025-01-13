@@ -203,13 +203,38 @@ export class LinkAdapter implements LinkSyncAdapter {
         additions: diff.additions.map((diff) => prepareLinkExpression(diff)),
         removals: diff.removals.map((diff) => prepareLinkExpression(diff))
       }
-      let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "commit", prep_diff);
-      if (res && Buffer.isBuffer(res)) {
-        this.myCurrentRevision = res;
+
+      let attempts = 0;
+      const maxAttempts = 5;
+      let lastError;
+
+      while (attempts < maxAttempts) {
+        try {
+          let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "commit", prep_diff);
+          if(!res){
+            throw new Error("Got undefined from Holochain commit zome function")
+          }          
+          if (!(Buffer.isBuffer(res) || res instanceof Uint8Array)) {
+            throw new Error("Did not get a buffer from Holochain commit zome function")
+          }
+          if (!(res.length || res.byteLength)) {
+            throw new Error("Got an empty buffer from Holochain commit zome function")
+          }
+          this.myCurrentRevision = res;
+          //@ts-ignore
+          return res
+        } catch (e) {
+          lastError = e;
+          attempts++;
+          if (attempts < maxAttempts) {
+            console.warn(`PerspectiveDiffSync.commit(); attempt ${attempts} failed, retrying...`, e);
+            // Wait a small amount before retrying
+            await new Promise(resolve => setTimeout(resolve, 100 * attempts));
+          }
+        }
       }
-      return res as string;
-    } catch (e) {
-      console.error("PerspectiveDiffSync.commit(); got error", e);
+      
+      console.error(`PerspectiveDiffSync.commit(); failed after ${maxAttempts} attempts`, lastError);
     } finally {
       release();
     }
