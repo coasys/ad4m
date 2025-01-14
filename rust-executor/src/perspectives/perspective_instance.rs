@@ -34,6 +34,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 use tokio::{join, time};
 
+static MAX_COMMIT_BYTES: usize = 3_000_000;
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static IMMEDIATE_COMMITS_COUNT: usize = 20;
 
@@ -327,21 +328,9 @@ impl PerspectiveInstance {
         let pending_diffs;
         let pending_ids;
 
-        // Keep reducing count until serialized size is under 3MB
-        loop {
-            let (diffs, ids) =
-                Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid, Some(count)))?;
-
-            // Check serialized size
-            let serialized = serde_json::to_vec(&diffs)?;
-            if serialized.len() <= 3_000_000 || count == 1 {
-                pending_diffs = diffs;
-                pending_ids = ids;
-                break;
-            }
-
-            count = count / 2;
-        }
+        let (pending_diffs, pending_ids) = Ad4mDb::with_global_instance(|db| {
+            db.get_pending_diffs_by_size(&uuid, MAX_COMMIT_BYTES, Some(count))
+        })?;
 
         if !pending_ids.is_empty() {
             let mut link_language_lock = self.link_language.lock().await;
