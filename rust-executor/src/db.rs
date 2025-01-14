@@ -1033,17 +1033,22 @@ impl Ad4mDb {
         ))
     }
 
-    pub fn get_pending_diffs_by_size(&self, perspective_uuid: &str, max_bytes: usize, initial_count: Option<usize>) -> Ad4mDbResult<(PerspectiveDiff, Vec<u64>)> {
+    pub fn get_pending_diffs_by_size(
+        &self,
+        perspective_uuid: &str,
+        max_bytes: usize,
+        initial_count: Option<usize>,
+    ) -> Ad4mDbResult<(PerspectiveDiff, Vec<u64>)> {
         let mut count = initial_count.unwrap_or(100); // Start with provided count or default to 100
         loop {
             let (diffs, ids) = self.get_pending_diffs(perspective_uuid, Some(count))?;
-            
+
             // Check serialized size
             let serialized = serde_json::to_string(&diffs)?;
             if serialized.len() <= max_bytes || count == 1 {
                 return Ok((diffs, ids));
             }
-            
+
             // Reduce count and try again
             count = count / 2;
         }
@@ -1983,23 +1988,27 @@ mod tests {
         // Get all diffs first to calculate total size
         let (all_diffs, all_ids) = db.get_pending_diffs(&p_uuid, None).unwrap();
         assert_eq!(all_ids.len(), 10);
-        
+
         let total_serialized = serde_json::to_string(&all_diffs).unwrap();
         let total_size = total_serialized.len();
-        
+
         // Use half of total size as limit - should get roughly half the diffs
         let half_size = total_size / 2;
-        let (half_diffs, half_ids) = db.get_pending_diffs_by_size(&p_uuid, half_size, Some(10)).unwrap();
-        
+        let (half_diffs, half_ids) = db
+            .get_pending_diffs_by_size(&p_uuid, half_size, Some(10))
+            .unwrap();
+
         // Verify we got fewer diffs than total
         assert!(half_ids.len() < all_ids.len());
-        
+
         // Verify the serialized size is under our limit
         let half_serialized = serde_json::to_string(&half_diffs).unwrap();
         assert!(half_serialized.len() <= half_size || half_ids.len() == 1);
 
         // Test with size bigger than total - should get all diffs
-        let (full_diffs, full_ids) = db.get_pending_diffs_by_size(&p_uuid, total_size * 2, Some(10)).unwrap();
+        let (full_diffs, full_ids) = db
+            .get_pending_diffs_by_size(&p_uuid, total_size * 2, Some(10))
+            .unwrap();
         assert_eq!(full_ids.len(), 10);
         assert_eq!(full_diffs.additions.len(), 50); // 10 diffs * 5 additions
         assert_eq!(full_diffs.removals.len(), 50); // 10 diffs * 5 removals
