@@ -323,13 +323,9 @@ impl PerspectiveInstance {
 
     async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
         let uuid = self.persisted.lock().await.uuid.clone();
-
-        let mut count = MAX_PENDING_DIFFS_COUNT;
-        let pending_diffs;
-        let pending_ids;
-
+        
         let (pending_diffs, pending_ids) = Ad4mDb::with_global_instance(|db| {
-            db.get_pending_diffs_by_size(&uuid, MAX_COMMIT_BYTES, Some(count))
+            db.get_pending_diffs_by_size(&uuid, MAX_COMMIT_BYTES, Some(MAX_PENDING_DIFFS_COUNT))
         })?;
 
         if !pending_ids.is_empty() {
