@@ -34,8 +34,9 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 use tokio::{join, time};
 
-static MAX_COMMIT_BYTES: usize = 3_000_000;
+static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
+static MAX_PENDING_SECONDS: u64 = 3;
 static IMMEDIATE_COMMITS_COUNT: usize = 20;
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -286,8 +287,8 @@ impl PerspectiveInstance {
                 }
 
                 // Commit if either:
-                // 1. It's been 10s since first diff in burst (don't collect longer than 10s)
-                if last_diff_time.unwrap().elapsed() >= Duration::from_secs(10) {
+                // 1. It's been MAX_PENDING_SECONDS since first diff in burst (don't collect longer than MAX_PENDING_SECONDS)
+                if last_diff_time.unwrap().elapsed() >= Duration::from_secs(MAX_PENDING_SECONDS) {
                     if self.commit_pending_diffs().await.is_ok() {
                         last_diff_time = None;
                         log::info!("Committed diffs after reaching 10s maximum wait time");
