@@ -173,6 +173,7 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
           const mainQuery = `findall([Timestamp, Base], (subject_class("${this.className}", C), instance(C, Base), link("${tempSource}", Predicate, Base, Timestamp, Author)), AllData), sort(AllData, SortedData), reverse(SortedData, ReverseSortedData), paginate(ReverseSortedData, ${query.page}, ${newPageSize}, PageData).`;
           res = await this.perspective.infer(mainQuery);
 
+          //@ts-ignore
           res = res[0].PageData.map((r) => ({
             Base: r[1],
             Timestamp: r[0],
@@ -195,6 +196,7 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
       res &&
       res.filter(
         (obj, index, self) =>
+          //@ts-ignore
           index === self.findIndex((t) => t.Base === obj.Base)
       );
 
@@ -204,6 +206,7 @@ export class SubjectRepository<SubjectClass extends { [x: string]: any }> {
       results.map(async (result) => {
         let subject = new Subject(
           this.perspective!,
+          //@ts-ignore
           result.Base,
           this.className
         );
