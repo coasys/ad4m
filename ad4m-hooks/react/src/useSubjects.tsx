@@ -71,6 +71,13 @@ export function useSubjects<SubjectClass>(props: Props<SubjectClass>) {
     }
   }, [cacheKey, query?.page, query?.infinite, query?.size]);
 
+  function debouncedGetData() {
+    if (timeout.current) clearTimeout(timeout.current);
+    timeout.current = setTimeout(() => {
+      getData();
+    }, 100);
+  }
+
   // Trigger initial fetch
   useEffect(getData, [cacheKey, query?.page, query?.infinite, query?.size]);
 
@@ -114,11 +121,7 @@ export function useSubjects<SubjectClass>(props: Props<SubjectClass>) {
       );
 
       if (isInstance) {
-        // debounced getData
-        if (timeout.current) clearTimeout(timeout.current);
-        timeout.current = setTimeout(() => {
-          getData();
-        }, 100);
+        debouncedGetData()
       }
     }
 
@@ -135,7 +138,7 @@ export function useSubjects<SubjectClass>(props: Props<SubjectClass>) {
     );
 
     if (removedAssociation) {
-      getData();
+      debouncedGetData()
     }
 
     // Remove entries if they are removed from source
