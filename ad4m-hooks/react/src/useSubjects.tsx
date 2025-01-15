@@ -114,7 +114,11 @@ export function useSubjects<SubjectClass>(props: Props<SubjectClass>) {
       );
 
       if (isInstance) {
-        fetchEntry(id);
+        // debounced getData
+        if (timeout.current) clearTimeout(timeout.current);
+        timeout.current = setTimeout(() => {
+          getData();
+        }, 100);
       }
     }
 
