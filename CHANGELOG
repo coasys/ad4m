@@ -18,7 +18,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Avoid high CPU load when idling by deactivating V8's code optimization [PR#531](https://github.com/coasys/ad4m/pull/531)
 - Enable high-throughput of perspective mutations by debouncing commits to link languages and coalesce them into aggregated perspective diffs [PR#533](https://github.com/coasys/ad4m/pull/533)
 - Fix for long Flux messages (and too long subject class properties in general) being broken [PR#538](https://github.com/coasys/ad4m/pull/538)
-- Fix for missing links: timeout added to useSubjects function 'linkAdded' that fetches all data after one second gap between new links propagating [PR#540](https://github.com/coasys/ad4m/pull/540)
+- Fix for missing links: race-condition fixed in useSubjects [PR#540](https://github.com/coasys/ad4m/pull/540) and [PR#554](https://github.com/coasys/ad4m/pull/554)
 - Fix for missing links: detect and rerun failed commits in p-diff-sync [PR#551](https://github.com/coasys/ad4m/pull/551)
 - Fix for syncing broken after some time: Prevent p-diff-sync diff entries from exceeding HC entry size limit of 4MB (which would happen at some point through snapshot creation) [PR#553](https://github.com/coasys/ad4m/pull/553)
 
