@@ -189,5 +189,5 @@ lazy_static! {
     pub static ref ACTIVE_AGENT_DURATION: chrono::Duration = chrono::Duration::seconds(3600);
     pub static ref ENABLE_SIGNALS: bool = true;
     pub static ref SNAPSHOT_INTERVAL: usize = 100;
-    pub static ref CHUNK_SIZE: u16 = 10000;
+    pub static ref CHUNK_SIZE: u16 = 1000;
 }
