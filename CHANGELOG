@@ -19,6 +19,9 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Enable high-throughput of perspective mutations by debouncing commits to link languages and coalesce them into aggregated perspective diffs [PR#533](https://github.com/coasys/ad4m/pull/533)
 - Fix for long Flux messages (and too long subject class properties in general) being broken [PR#538](https://github.com/coasys/ad4m/pull/538)
 - Fix for missing links: timeout added to useSubjects function 'linkAdded' that fetches all data after one second gap between new links propagating [PR#540](https://github.com/coasys/ad4m/pull/540)
+- Fix for missing links: detect and rerun failed commits in p-diff-sync [PR#551](https://github.com/coasys/ad4m/pull/551)
+- Fix for syncing broken after some time: Prevent p-diff-sync diff entries from exceeding HC entry size limit of 4MB (which would happen at some point through snapshot creation) [PR#553](https://github.com/coasys/ad4m/pull/553)
+
 
 ### Added
 - Prolog predicates needed in new Flux mention notification trigger:
@@ -36,6 +39,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Local AI inference for LLMs, embedding models and Whisper audio transcription [PR#522](https://github.com/coasys/ad4m/pull/522)
 - Full CRUD systems for choosing AI models, remote models through API calls and UI in ADAM Launcher for setup and managing of models [PR#504](https://github.com/coasys/ad4m/pull/504)
 - Add remote AI API model picking, to enable Ollama use-case [PR#547](https://github.com/coasys/ad4m/pull/547)
+- ad4m CLI: wildcards (underscore: "_") in query-links command [PR#551](https://github.com/coasys/ad4m/pull/551)
 
 ### Changed
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
@@ -48,6 +52,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Make Prolog engine update O(1) in case of only having link additions [PR#510](https://github.com/coasys/ad4m/pull/510)
 - Have Ad4mConnect set `authState` to `authenticated` on successful connection [PR#532](https://github.com/coasys/ad4m/pull/532) & [PR#543](https://github.com/coasys/ad4m/pull/543)
 - Holochain upgraded to latest stable v0.3.6 [PR#542](https://github.com/coasys/ad4m/pull/542) 
+- useSubjects improved: New useSubjects hook filter to reduce unnecissary re-renders [PR#522](https://github.com/coasys/ad4m/pull/552)
 
 ## [0.9.0] - 23/03/2024
 
