@@ -98,6 +98,7 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
     // First check if we are actually ahead of them -> we don't have to do anything
     // they will have to merge with / or fast-forward to our current
     if workspace.all_ancestors(&current.hash)?.contains(&theirs) {
+        debug!("===PerspectiveDiffSync.pull(): We are ahead of them. They will have to pull/fast-forward. Exiting without change...");
         return Ok(PullResult {
             diff: PerspectiveDiff::default(),
             current_revision: Some(current.hash),
