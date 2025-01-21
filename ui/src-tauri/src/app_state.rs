@@ -1,6 +1,6 @@
 use dirs::home_dir;
 use serde::{Deserialize, Serialize};
-use std::fs::{File, OpenOptions, create_dir_all};
+use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::prelude::*;
 use std::path::PathBuf;
 
@@ -20,13 +20,9 @@ pub struct LauncherState {
 }
 
 fn file_path() -> PathBuf {
-    let path = home_dir()
-        .expect("Could not get home dir")
-        .join(".ad4m");
-    
+    let path = home_dir().expect("Could not get home dir").join(".ad4m");
     // Create directories if they don't exist
     create_dir_all(&path).expect("Failed to create directory");
-    
     path.join(FILE_NAME)
 }
 
