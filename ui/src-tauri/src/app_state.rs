@@ -1,8 +1,10 @@
 use dirs::home_dir;
 use serde::{Deserialize, Serialize};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, create_dir_all};
 use std::io::prelude::*;
 use std::path::PathBuf;
+
+pub static FILE_NAME: &str = "launcher-state.json";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AgentConfigDir {
@@ -17,27 +19,32 @@ pub struct LauncherState {
     pub selected_agent: Option<AgentConfigDir>,
 }
 
+fn file_path() -> PathBuf {
+    let path = home_dir()
+        .expect("Could not get home dir")
+        .join(".ad4m");
+    
+    // Create directories if they don't exist
+    create_dir_all(&path).expect("Failed to create directory");
+    
+    path.join(FILE_NAME)
+}
+
 impl LauncherState {
     pub fn save(&mut self) -> std::io::Result<()> {
-        let path = home_dir()
-            .expect("Could not get home dir")
-            .join("ad4m-state.json");
-        let mut file = File::create(path)?;
+        let mut file = File::create(file_path())?;
         let data = serde_json::to_string(&self).unwrap();
         file.write_all(data.as_bytes())?;
         Ok(())
     }
 
     pub fn load() -> std::io::Result<LauncherState> {
-        let path = home_dir()
-            .expect("Could not get home dir")
-            .join("ad4m-state.json");
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(path)?;
+            .open(file_path())?;
         let mut data = String::new();
         file.read_to_string(&mut data)?;
 
