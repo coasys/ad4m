@@ -1,5 +1,5 @@
 extern crate remove_dir_all;
-use crate::app_state::{AgentList, LauncherState};
+use crate::app_state::{AgentConfigDir, LauncherState};
 use crate::util::create_tray_message_windows;
 use crate::{config::data_path, get_main_window};
 
@@ -49,7 +49,7 @@ pub fn open_tray(app_handle: tauri::AppHandle) {
 }
 
 #[tauri::command]
-pub fn add_app_agent_state(agent: AgentList) {
+pub fn add_app_agent_state(agent: AgentConfigDir) {
     let mut state = LauncherState::load().unwrap();
 
     let mut new_agent = agent.clone();
@@ -62,7 +62,7 @@ pub fn add_app_agent_state(agent: AgentList) {
 }
 
 #[tauri::command]
-pub fn remove_app_agent_state(agent: AgentList) {
+pub fn remove_app_agent_state(agent: AgentConfigDir) {
     let mut state = LauncherState::load().unwrap();
 
     state.remove_agent(agent.clone());
@@ -71,7 +71,7 @@ pub fn remove_app_agent_state(agent: AgentList) {
 }
 
 #[tauri::command]
-pub fn set_selected_agent(agent: AgentList) {
+pub fn set_selected_agent(agent: AgentConfigDir) {
     let mut state = LauncherState::load().unwrap();
 
     state.selected_agent = Some(agent);

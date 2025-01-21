@@ -5,7 +5,7 @@ use std::io::prelude::*;
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct AgentList {
+pub struct AgentConfigDir {
     pub name: String,
     pub path: PathBuf,
     pub bootstrap: Option<PathBuf>,
@@ -13,8 +13,8 @@ pub struct AgentList {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LauncherState {
-    pub agent_list: Vec<AgentList>,
-    pub selected_agent: Option<AgentList>,
+    pub agent_list: Vec<AgentConfigDir>,
+    pub selected_agent: Option<AgentConfigDir>,
 }
 
 impl LauncherState {
@@ -44,7 +44,7 @@ impl LauncherState {
         let state = match serde_json::from_str(&data) {
             Ok(state) => state,
             Err(_) => {
-                let agent = AgentList {
+                let agent = AgentConfigDir {
                     name: "Main Net".to_string(),
                     path: home_dir().expect("Could not get home dir").join(".ad4m"),
                     bootstrap: None,
@@ -60,13 +60,13 @@ impl LauncherState {
         Ok(state)
     }
 
-    pub fn add_agent(&mut self, agent: AgentList) {
+    pub fn add_agent(&mut self, agent: AgentConfigDir) {
         if !self.is_agent_taken(&agent.name, &agent.path) {
             self.agent_list.push(agent);
         }
     }
 
-    pub fn remove_agent(&mut self, agent: AgentList) {
+    pub fn remove_agent(&mut self, agent: AgentConfigDir) {
         self.agent_list
             .retain(|a| a.name != agent.name && a.path != agent.path);
     }
