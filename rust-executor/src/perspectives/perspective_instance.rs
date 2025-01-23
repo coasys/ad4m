@@ -1559,8 +1559,14 @@ impl PerspectiveInstance {
         let first_link = base_links
             .first()
             .ok_or_else(|| anyhow!("No links found for base expression: {}", base_expression))?;
-        object.insert(String::from("author"), first_link.author.clone());
-        object.insert(String::from("timestamp"), first_link.timestamp.clone());
+        object.insert(
+            String::from("author"),
+            format!("\"{}\"", first_link.author.clone()),
+        );
+        object.insert(
+            String::from("timestamp"),
+            format!("\"{}\"", first_link.timestamp.clone()),
+        );
 
         let class_name = self
             .subject_class_option_to_class_name(subject_class)
