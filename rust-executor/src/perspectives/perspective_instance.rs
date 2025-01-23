@@ -1552,6 +1552,16 @@ impl PerspectiveInstance {
     ) -> Result<String, AnyError> {
         let mut object: HashMap<String, String> = HashMap::new();
 
+        // Get author and timestamp from the first link mentioning base as source
+        let mut base_query = LinkQuery::default();
+        base_query.source = Some(base_expression.clone());
+        let base_links = self.get_links(&base_query).await?;
+        let first_link = base_links
+            .first()
+            .ok_or_else(|| anyhow!("No links found for base expression: {}", base_expression))?;
+        object.insert(String::from("author"), first_link.author.clone());
+        object.insert(String::from("timestamp"), first_link.timestamp.clone());
+
         let class_name = self
             .subject_class_option_to_class_name(subject_class)
             .await?;
