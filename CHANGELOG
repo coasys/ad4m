@@ -41,7 +41,9 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Full CRUD systems for choosing AI models, remote models through API calls and UI in ADAM Launcher for setup and managing of models [PR#504](https://github.com/coasys/ad4m/pull/504)
 - Add remote AI API model picking, to enable Ollama use-case [PR#547](https://github.com/coasys/ad4m/pull/547)
 - ad4m CLI: wildcards (underscore: "_") in query-links command [PR#551](https://github.com/coasys/ad4m/pull/551)
-
+- Add `author` and `timestamp` to SubjectEntity objects [PR#557](https://github.com/coasys/ad4m/pull/557)
+- Make `SubjectEntity.#perspective` protected to enable subclasses to implement complex fields and methods [PR#557](https://github.com/coasys/ad4m/pull/557)
+- 
 ### Changed
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
 - Improved performance of SDNA / SubjectClass functions by moving code from client into executor and saving a lot of client <-> executor roundtrips [PR#480](https://github.com/coasys/ad4m/pull/480)

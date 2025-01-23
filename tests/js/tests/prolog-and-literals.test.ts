@@ -782,6 +782,23 @@ describe("Prolog + Literals", () => {
                     expect(recipe2.resolve.length).to.equal(longName.length)
                     expect(recipe2.resolve).to.equal(longName)
                 })
+
+                it("should have author and timestamp properties", async () => {
+                    let root = Literal.from("Author and timestamp test").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://test";
+                    await recipe.save();
+
+                    const recipe2 = new Recipe(perspective!, root);
+                    await recipe2.get();
+
+                    const me = await ad4m!.agent.me();
+                    // @ts-ignore - author and timestamp are added by the system
+                    expect(recipe2.author).to.equal(me!.did)
+                    // @ts-ignore
+                    expect(recipe2.timestamp).to.not.be.undefined;
+                })
             })
         })
     })
