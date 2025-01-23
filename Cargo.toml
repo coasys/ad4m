@@ -6,7 +6,3 @@ members = [
     "rust-executor",
     "ui/src-tauri"
 ]
-
-
-[patch.crates-io]
-notify-rust = { version = "4.6.0", git = "https://github.com/coasys/notify-rust.git" }

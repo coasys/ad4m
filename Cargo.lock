@@ -20873,8 +20873,3 @@ dependencies = [
  "quote",
  "syn 2.0.87",
 ]
-
-[[patch.unused]]
-name = "notify-rust"
-version = "4.6.0"
-source = "git+https://github.com/coasys/notify-rust.git#b08ab0233810d365d1e914998ff81002090753a6"

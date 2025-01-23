@@ -1,11 +1,13 @@
 use dirs::home_dir;
 use serde::{Deserialize, Serialize};
-use std::fs::{File, OpenOptions};
+use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::prelude::*;
 use std::path::PathBuf;
 
+pub static FILE_NAME: &str = "launcher-state.json";
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct AgentList {
+pub struct AgentConfigDir {
     pub name: String,
     pub path: PathBuf,
     pub bootstrap: Option<PathBuf>,
@@ -13,38 +15,39 @@ pub struct AgentList {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LauncherState {
-    pub agent_list: Vec<AgentList>,
-    pub selected_agent: Option<AgentList>,
+    pub agent_list: Vec<AgentConfigDir>,
+    pub selected_agent: Option<AgentConfigDir>,
+}
+
+fn file_path() -> PathBuf {
+    let path = home_dir().expect("Could not get home dir").join(".ad4m");
+    // Create directories if they don't exist
+    create_dir_all(&path).expect("Failed to create directory");
+    path.join(FILE_NAME)
 }
 
 impl LauncherState {
     pub fn save(&mut self) -> std::io::Result<()> {
-        let path = home_dir()
-            .expect("Could not get home dir")
-            .join("ad4m-state.json");
-        let mut file = File::create(path)?;
+        let mut file = File::create(file_path())?;
         let data = serde_json::to_string(&self).unwrap();
         file.write_all(data.as_bytes())?;
         Ok(())
     }
 
     pub fn load() -> std::io::Result<LauncherState> {
-        let path = home_dir()
-            .expect("Could not get home dir")
-            .join("ad4m-state.json");
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(path)?;
+            .open(file_path())?;
         let mut data = String::new();
         file.read_to_string(&mut data)?;
 
         let state = match serde_json::from_str(&data) {
             Ok(state) => state,
             Err(_) => {
-                let agent = AgentList {
+                let agent = AgentConfigDir {
                     name: "Main Net".to_string(),
                     path: home_dir().expect("Could not get home dir").join(".ad4m"),
                     bootstrap: None,
@@ -60,13 +63,13 @@ impl LauncherState {
         Ok(state)
     }
 
-    pub fn add_agent(&mut self, agent: AgentList) {
+    pub fn add_agent(&mut self, agent: AgentConfigDir) {
         if !self.is_agent_taken(&agent.name, &agent.path) {
             self.agent_list.push(agent);
         }
     }
 
-    pub fn remove_agent(&mut self, agent: AgentList) {
+    pub fn remove_agent(&mut self, agent: AgentConfigDir) {
         self.agent_list
             .retain(|a| a.name != agent.name && a.path != agent.path);
     }
