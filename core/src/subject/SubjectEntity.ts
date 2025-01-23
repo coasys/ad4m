@@ -41,6 +41,14 @@ export class SubjectEntity {
     return this.#baseExpression
   }
 
+  /**
+   * Protected getter for the perspective.
+   * Allows subclasses to access the perspective while keeping it private from external code.
+   */
+  protected get perspective(): PerspectiveProxy {
+    return this.#perspective;
+  }
+
   private async getData(id?: string) {
     const tempId = id ?? this.#baseExpression;
     let data = await this.#perspective.getSubjectData(this.#subjectClass, tempId)
