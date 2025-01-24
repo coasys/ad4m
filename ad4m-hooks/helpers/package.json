@@ -1,6 +1,5 @@
 {
   "name": "@coasys/hooks-helpers",
-  "version": "0.10.1-rc4",
   "description": "",
   "main": "./src/index.ts",
   "module": "./src/index.ts",
@@ -18,5 +17,6 @@
     "@coasys/ad4m": "*",
     "@coasys/ad4m-connect": "*",
     "uuid": "*"
-  }
+  },
+  "version": "0.10.1-rc5"
 }
