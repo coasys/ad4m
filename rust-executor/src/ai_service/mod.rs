@@ -425,6 +425,7 @@ impl AIService {
                                         spawn_request.task.task_id.clone(),
                                         spawn_request.task,
                                     );
+                                    let _ = spawn_request.result_sender.send(Ok(()));
                                 }
                                 LlmModel::Local(ref mut llama) => {
                                     rt.block_on(publish_model_status(
