@@ -1,7 +1,6 @@
 {
   "productName": "ADAM Launcher",
   "mainBinaryName": "ADAM Launcher",
-  "version": "0.10.1-rc3",
   "identifier": "dev.ad4m.ad4min",
   "app": {
     "security": {
@@ -72,5 +71,6 @@
         "bundleMediaFramework": true
       }
     }
-  }
+  },
+  "version": "0.10.1-rc5"
 }

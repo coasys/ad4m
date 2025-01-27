@@ -9,6 +9,7 @@ import { ExpressionRendered } from "../expression/Expression";
 import { collectionAdderToName, collectionRemoverToName, collectionSetterToName } from "../subject/util";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
+import { AIClient } from "../ai/AIClient";
 
 type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
 
@@ -569,6 +570,10 @@ export class PerspectiveProxy {
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {
         return this.#client.getNeighbourhoodProxy(this.#handle.uuid)
+    }
+
+    get ai(): AIClient {
+        return this.#client.aiClient
     }
 
 }

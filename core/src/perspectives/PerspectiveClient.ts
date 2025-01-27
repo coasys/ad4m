@@ -9,6 +9,7 @@ import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
 import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
+import { AIClient } from "../ai/AIClient";
 
 const LINK_EXPRESSION_FIELDS = `
 author
@@ -53,6 +54,7 @@ export class PerspectiveClient {
     #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
+    #aiClient?: AIClient
 
     constructor(client: ApolloClient<any>, subscribe: boolean = true) {
         this.#apolloClient = client
@@ -74,6 +76,14 @@ export class PerspectiveClient {
 
     setNeighbourhoodClient(client: NeighbourhoodClient) {
         this.#neighbourhoodClient = client
+    }
+
+    setAIClient(client: AIClient) {
+        this.#aiClient = client
+    }
+
+    get aiClient(): AIClient {
+        return this.#aiClient
     }
 
     async all(): Promise<PerspectiveProxy[]> {

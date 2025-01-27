@@ -108,7 +108,7 @@ importers:
     dependencies:
       '@coasys/ad4m':
         specifier: '*'
-        version: 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+        version: 0.8.1(bufferutil@4.0.8)(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)(utf-8-validate@5.0.10)
       '@coasys/ad4m-connect':
         specifier: '*'
         version: 0.8.1(esbuild@0.19.12)
@@ -120,7 +120,7 @@ importers:
     dependencies:
       '@coasys/ad4m':
         specifier: '*'
-        version: 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+        version: 0.8.1(bufferutil@4.0.8)(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)(utf-8-validate@5.0.10)
       '@coasys/ad4m-connect':
         specifier: '*'
         version: 0.8.1(esbuild@0.19.12)
@@ -144,7 +144,7 @@ importers:
     dependencies:
       '@coasys/ad4m':
         specifier: '*'
-        version: 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+        version: 0.8.1(bufferutil@4.0.8)(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)(utf-8-validate@5.0.10)
       '@coasys/hooks-helpers':
         specifier: '*'
         version: 0.9.0(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
@@ -166,7 +166,7 @@ importers:
     devDependencies:
       '@coasys/ad4m':
         specifier: '*'
-        version: 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+        version: 0.8.1(bufferutil@4.0.8)(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)(utf-8-validate@5.0.10)
       '@perspect3vism/rollup-plugin-dna':
         specifier: ^0.0.2
         version: 0.0.2
@@ -239,7 +239,7 @@ importers:
     devDependencies:
       '@coasys/ad4m':
         specifier: '*'
-        version: 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+        version: 0.8.1(bufferutil@4.0.8)(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)(utf-8-validate@5.0.10)
       '@perspect3vism/rollup-plugin-dna':
         specifier: ^0.0.2
         version: 0.0.2
@@ -304,7 +304,7 @@ importers:
     dependencies:
       '@coasys/ad4m':
         specifier: '*'
-        version: 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+        version: 0.8.1(bufferutil@4.0.8)(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)(utf-8-validate@5.0.10)
       '@perspect3vism/rollup-plugin-dna':
         specifier: ^0.0.2
         version: 0.0.2
@@ -372,7 +372,7 @@ importers:
     devDependencies:
       '@coasys/ad4m':
         specifier: '*'
-        version: 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+        version: 0.8.1(bufferutil@4.0.8)(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)(utf-8-validate@5.0.10)
       '@perspect3vism/rollup-plugin-dna':
         specifier: ^0.0.2
         version: 0.0.2
@@ -411,7 +411,7 @@ importers:
     devDependencies:
       '@coasys/ad4m':
         specifier: '*'
-        version: 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+        version: 0.8.1(bufferutil@4.0.8)(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)(utf-8-validate@5.0.10)
       '@types/node':
         specifier: ^18.0.0
         version: 18.11.10
@@ -441,7 +441,7 @@ importers:
     devDependencies:
       '@coasys/ad4m':
         specifier: '*'
-        version: 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+        version: 0.8.1(bufferutil@4.0.8)(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)(utf-8-validate@5.0.10)
       '@perspect3vism/rollup-plugin-dna':
         specifier: ^0.0.2
         version: 0.0.2
@@ -517,7 +517,7 @@ importers:
     dependencies:
       '@coasys/ad4m':
         specifier: '*'
-        version: 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+        version: 0.8.1(bufferutil@4.0.8)(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)(utf-8-validate@5.0.10)
       '@perspect3vism/rollup-plugin-dna':
         specifier: ^0.0.2
         version: 0.0.2
@@ -581,7 +581,7 @@ importers:
     dependencies:
       '@coasys/ad4m':
         specifier: '*'
-        version: 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+        version: 0.8.1(bufferutil@4.0.8)(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)(utf-8-validate@5.0.10)
       '@perspect3vism/rollup-plugin-dna':
         specifier: ^0.0.2
         version: 0.0.2
@@ -645,7 +645,7 @@ importers:
     devDependencies:
       '@coasys/ad4m':
         specifier: '*'
-        version: 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+        version: 0.8.1(bufferutil@4.0.8)(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)(utf-8-validate@5.0.10)
       '@rollup/plugin-commonjs':
         specifier: ^14.0.0
         version: 14.0.0(rollup@2.79.1)
@@ -699,7 +699,7 @@ importers:
     devDependencies:
       '@coasys/ad4m-executor':
         specifier: '*'
-        version: 0.10.1-rc2
+        version: 0.10.1-rc3(ws@8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10))
 
   connect:
     dependencies:
@@ -729,7 +729,7 @@ importers:
         specifier: 3.7.10
         version: 3.7.10(graphql-ws@5.12.0(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
       '@coasys/ad4m':
-        specifier: workspace:0.10.1-rc3
+        specifier: workspace:0.10.1-rc5
         version: link:../core
       '@types/node':
         specifier: ^16.11.11
@@ -2276,8 +2276,8 @@ packages:
   '@coasys/ad4m-connect@0.8.1':
     resolution: {integrity: sha512-pbyeescsVOVAnXjn2Uh4BV0oWbuiseHT0HvGmDISdaJztaFv1MNglka2oOFf9xYmwz7PBExYNprnE5g75YVyNQ==}
 
-  '@coasys/ad4m-executor@0.10.1-rc2':
-    resolution: {integrity: sha512-2zoEmGTrX970tvpdfZullvZVRgZOxL2N1up2Zznp2QfvWmKp70YYfMqNcu5J9bq2NSXLORg3OrbwlIO58cyiaA==}
+  '@coasys/ad4m-executor@0.10.1-rc3':
+    resolution: {integrity: sha512-xWgbvUcb9/q9oUAgTK5fB+PRi500kvzN0Q2KPMdK1nCWwWpH66B7FQft/Vj0S45zbuwkmyYCna2KRVSP2ZYtpQ==}
 
   '@coasys/ad4m@0.8.1':
     resolution: {integrity: sha512-2or0Ykc+F+geDumBABYD/us5Iu9Se2xVRdVcj4h0l7etd9Zx3u5m/Q32YHywJz61DbPQV8Q+zTkYiqF54y9GrA==}
@@ -15736,7 +15736,7 @@ snapshots:
       - esbuild
       - supports-color
 
-  '@coasys/ad4m-executor@0.10.1-rc2':
+  '@coasys/ad4m-executor@0.10.1-rc3(ws@8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10))':
     dependencies:
       '@coasys/ad4m': link:../core
       '@holochain/client': https://codeload.github.com/coasys/holochain-client-js/tar.gz/2f3a436b6d28344b0aca883ef3dc229cd042c04b(ws@8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10))
@@ -15778,25 +15778,6 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@coasys/ad4m@0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)':
-    dependencies:
-      '@apollo/client': 3.7.10(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
-      '@holochain/client': 0.16.0
-      '@types/jest': 26.0.24
-      class-validator: 0.13.2
-      express: 4.18.2
-      graphql: 15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)
-      reflect-metadata: 0.1.14
-      type-graphql: 1.1.1(class-validator@0.13.2)(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))
-    transitivePeerDependencies:
-      - bufferutil
-      - graphql-ws
-      - react
-      - react-dom
-      - subscriptions-transport-ws
-      - supports-color
-      - utf-8-validate
-
   '@coasys/flux-constants@0.8.1': {}
 
   '@coasys/flux-types@0.8.1': {}
@@ -15822,7 +15803,7 @@ snapshots:
 
   '@coasys/hooks-helpers@0.9.0(esbuild@0.19.12)(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)':
     dependencies:
-      '@coasys/ad4m': 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+      '@coasys/ad4m': 0.8.1(bufferutil@4.0.8)(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)(utf-8-validate@5.0.10)
       '@coasys/ad4m-connect': 0.8.1(esbuild@0.19.12)
       uuid: 9.0.1
     transitivePeerDependencies:
@@ -15837,7 +15818,7 @@ snapshots:
 
   '@coasys/hooks-helpers@0.9.0(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)':
     dependencies:
-      '@coasys/ad4m': 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
+      '@coasys/ad4m': 0.8.1(bufferutil@4.0.8)(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)(utf-8-validate@5.0.10)
       '@coasys/ad4m-connect': 0.8.1
       uuid: 9.0.1
     transitivePeerDependencies:
@@ -16168,22 +16149,6 @@ snapshots:
       client-only: 0.0.1
       react: 18.2.0
       react-dom: 18.2.0(react@18.2.0)
-
-  '@holochain/client@0.16.0':
-    dependencies:
-      '@holochain/serialization': 0.1.0-beta-rc.3
-      '@msgpack/msgpack': 2.8.0
-      '@noble/ed25519': 2.0.0
-      '@tauri-apps/api': 1.5.3
-      emittery: 1.0.1
-      isomorphic-ws: 5.0.0(ws@8.13.0)
-      js-base64: 3.7.6
-      libsodium-wrappers: 0.7.13
-      lodash-es: 4.17.21
-      ws: 8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10)
-    transitivePeerDependencies:
-      - bufferutil
-      - utf-8-validate
 
   '@holochain/client@0.16.0(bufferutil@4.0.8)(utf-8-validate@5.0.10)':
     dependencies:
@@ -24054,10 +24019,6 @@ snapshots:
       ws: 7.5.9(bufferutil@4.0.8)(utf-8-validate@5.0.10)
 
   isomorphic-ws@5.0.0(ws@8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10)):
-    dependencies:
-      ws: 8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10)
-
-  isomorphic-ws@5.0.0(ws@8.13.0):
     dependencies:
       ws: 8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10)
 
