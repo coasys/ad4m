@@ -694,24 +694,43 @@ describe("Prolog + Literals", () => {
 
                 it("query()", async () => {
                     let recipes = await Recipe.query(perspective!, { page: 1, size: 2 });
-
                     expect(recipes.length).to.equal(2)
 
                     recipes = await Recipe.query(perspective!, { page: 2, size: 1 });
-
                     expect(recipes.length).to.equal(1)
+
+                    const testName = "recipe://where_test"
+
+                    recipes = await Recipe.query(perspective!, { where: { name: testName }})
+                    expect(recipes.length).to.equal(0)
+
+                    let root = Literal.from("Where test").toUrl()
+                    const whereTestRecipe = new Recipe(perspective!, root)
+                    whereTestRecipe.name = testName
+                    await whereTestRecipe.save()
+
+                    recipes = await Recipe.query(perspective!, { where: { name: testName }})
+                    expect(recipes.length).to.equal(1)
+
+                    recipes = await Recipe.query(perspective!, { where: { condition: `triple(Base, _, "ad4m://test_self")` }})
+                    expect(recipes.length).to.equal(0)
+
+                    await perspective?.add({source: root, target: "ad4m://test_self"})
+                    recipes = await Recipe.query(perspective!, { where: { condition: `triple(Base, _, "ad4m://test_self")` }})
+                    expect(recipes.length).to.equal(1)
+
                 })
 
                 it("delete()", async () => {
                     const recipe2 = await Recipe.all(perspective!);
 
-                    expect(recipe2.length).to.equal(3)
+                    expect(recipe2.length).to.equal(4)
 
                     await recipe2[0].delete();
 
                     const recipe3 = await Recipe.all(perspective!);
 
-                    expect(recipe3.length).to.equal(2)
+                    expect(recipe3.length).to.equal(3)
                 })
 
                 it("can constrain collection entries through 'where' clause with prolog condition", async () => {

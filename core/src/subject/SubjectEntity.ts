@@ -264,13 +264,27 @@ export class SubjectEntity {
     let subjectClass = await perspective.stringOrTemplateObjectToSubjectClass(this)
 
     let res = [];
+    let instanceConditions = `subject_class("${subjectClass}", C), instance(C, Base), link("${source}", Predicate, Base, Timestamp, Author)`
 
-    if (query) {
+    if (query) {  
+      if(query.where) {
+        if(query.where["condition"]) {
+          instanceConditions += ", " + query.where["condition"]
+        } else {
+          const pairs = Object.entries(query.where);
+          for(let p of pairs) {
+            const propertyName = p[0];
+            const propertyValue = p[1];
+            instanceConditions += `, property_getter(C, Base, "${propertyName}", "${propertyValue}")`
+          }
+        }
+      }
+
       try {
-        const queryResponse = (await perspective.infer(`findall([Timestamp, Base], (subject_class("${subjectClass}", C), instance(C, Base), link("${source}", Predicate, Base, Timestamp, Author)), AllData), sort(AllData, SortedData), length(SortedData, DataLength).`))[0]
+        const queryResponse = (await perspective.infer(`findall([Timestamp, Base], (${instanceConditions}), AllData), sort(AllData, SortedData), length(SortedData, DataLength).`))[0]
 
         if (queryResponse.DataLength >= query.size) {
-          const mainQuery = `findall([Timestamp, Base], (subject_class("${subjectClass}", C), instance(C, Base), link("${source}", Predicate, Base, Timestamp, Author)), AllData), sort(AllData, SortedData), reverse(SortedData, ReverseSortedData), paginate(ReverseSortedData, ${query.page}, ${query.size}, PageData).`
+          const mainQuery = `findall([Timestamp, Base], (${instanceConditions}), AllData), sort(AllData, SortedData), reverse(SortedData, ReverseSortedData), paginate(ReverseSortedData, ${query.page}, ${query.size}, PageData).`
 
           res = await perspective.infer(mainQuery);
 
@@ -279,17 +293,13 @@ export class SubjectEntity {
             Timestamp: r[0]
           }))
         } else {
-          res = await perspective.infer(
-            `subject_class("${subjectClass}", C), instance(C, Base), triple("${source}", Predicate, Base).`
-          );
+          res = await perspective.infer(instanceConditions);
         }
       } catch (e) {
         console.log("Query failed", e);
       }
     } else {
-      res = await perspective.infer(
-        `subject_class("${subjectClass}", C), instance(C, Base), triple("${source}", Predicate, Base).`
-      );
+      res = await perspective.infer(instanceConditions);
     }
 
     if (!res) return [];
@@ -320,4 +330,7 @@ export type SubjectEntityQueryParam = {
 
   // The page of the query.
   page?: number;
+
+  // conditions on properties
+  where?: { condition?: string } | object;
 }
