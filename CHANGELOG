@@ -44,6 +44,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Add `author` and `timestamp` to SubjectEntity objects [PR#557](https://github.com/coasys/ad4m/pull/557)
 - Make `SubjectEntity.#perspective` protected to enable subclasses to implement complex fields and methods [PR#557](https://github.com/coasys/ad4m/pull/557)
 - Add AI client to PerspectiveProxy to enable SubjectEntity sub-classes (subject classes) to use AI processes without having to rely on ad4m-connect or similar to access the AI client. [PR#558](https://github.com/coasys/ad4m/pull/558)
+- SubjectEntity.query() with `where: { propertyName: "value" }` and `where: { condition: 'triple(Base, _, "...")'} [PR#560](https://github.com/coasys/ad4m/pull/560)
 
 ### Changed
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
