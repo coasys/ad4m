@@ -6,7 +6,10 @@ import "../index.css";
 const AITypes = ["LLM", "EMBEDDING", "TRANSCRIPTION"];
 const llmModels = [
   "External API",
-  // "tiny_llama_1_1b",
+  "deepseek_r1_distill_qwen_1_5b",
+  "deepseek_r1_distill_qwen_7b",
+  "deepseek_r1_distill_qwen_14b",
+  "deepseek_r1_distill_llama_8b",
   "mistral_7b",
   "mistral_7b_instruct",
   "mistral_7b_instruct_2",
