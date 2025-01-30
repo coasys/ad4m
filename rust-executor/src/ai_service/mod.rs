@@ -287,7 +287,10 @@ impl AIService {
     ) -> Result<Llama> {
         publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
         let llama = Llama::builder().with_source(match model_size_string.as_str() {
-            // Local TinyLlama models
+            "deepseek_r1_distill_qwen_1_5b" => LlamaSource::deepseek_r1_distill_qwen_1_5b(),
+            "deepseek_r1_distill_qwen_7b" => LlamaSource::deepseek_r1_distill_qwen_7b(),
+            "deepseek_r1_distill_qwen_14b" => LlamaSource::deepseek_r1_distill_qwen_14b(),
+            "deepseek_r1_distill_llama_8b" => LlamaSource::deepseek_r1_distill_llama_8b(),
             "llama_tiny" => LlamaSource::tiny_llama_1_1b(),
             "llama_7b" => LlamaSource::llama_7b(),
             "llama_7b_chat" => LlamaSource::llama_7b_chat(),
