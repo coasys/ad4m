@@ -286,32 +286,25 @@ impl AIService {
         model_size_string: String,
     ) -> Result<Llama> {
         publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
-
-        let llama = match model_size_string.as_str() {
+        let llama = Llama::builder().with_source(match model_size_string.as_str() {
             // Local TinyLlama models
-            "llama_tiny" => Llama::builder().with_source(LlamaSource::tiny_llama_1_1b()),
-            "llama_7b" => Llama::builder().with_source(LlamaSource::llama_7b()),
-            "llama_7b_chat" => Llama::builder().with_source(LlamaSource::llama_7b_chat()),
-            "llama_7b_code" => Llama::builder().with_source(LlamaSource::llama_7b_code()),
-            "llama_8b" => Llama::builder().with_source(LlamaSource::llama_8b()),
-            "llama_8b_chat" => Llama::builder().with_source(LlamaSource::llama_8b_chat()),
-            "llama_3_1_8b_chat" => Llama::builder().with_source(LlamaSource::llama_3_1_8b_chat()),
-            "llama_13b" => Llama::builder().with_source(LlamaSource::llama_13b()),
-            "llama_13b_chat" => Llama::builder().with_source(LlamaSource::llama_13b_chat()),
-            "llama_13b_code" => Llama::builder().with_source(LlamaSource::llama_13b_code()),
-            "llama_34b_code" => Llama::builder().with_source(LlamaSource::llama_34b_code()),
-            "llama_70b" => Llama::builder().with_source(LlamaSource::llama_70b()),
-            "mistral_7b" => Llama::builder().with_source(LlamaSource::mistral_7b()),
-            "mistral_7b_instruct" => {
-                Llama::builder().with_source(LlamaSource::mistral_7b_instruct())
-            }
-            "mistral_7b_instruct_2" => {
-                Llama::builder().with_source(LlamaSource::mistral_7b_instruct_2())
-            }
-            "solar_10_7b" => Llama::builder().with_source(LlamaSource::solar_10_7b()),
-            "solar_10_7b_instruct" => {
-                Llama::builder().with_source(LlamaSource::solar_10_7b_instruct())
-            }
+            "llama_tiny" => LlamaSource::tiny_llama_1_1b(),
+            "llama_7b" => LlamaSource::llama_7b(),
+            "llama_7b_chat" => LlamaSource::llama_7b_chat(),
+            "llama_7b_code" => LlamaSource::llama_7b_code(),
+            "llama_8b" => LlamaSource::llama_8b(),
+            "llama_8b_chat" => LlamaSource::llama_8b_chat(),
+            "llama_3_1_8b_chat" => LlamaSource::llama_3_1_8b_chat(),
+            "llama_13b" => LlamaSource::llama_13b(),
+            "llama_13b_chat" => LlamaSource::llama_13b_chat(),
+            "llama_13b_code" => LlamaSource::llama_13b_code(),
+            "llama_34b_code" => LlamaSource::llama_34b_code(),
+            "llama_70b" => LlamaSource::llama_70b(),
+            "mistral_7b" => LlamaSource::mistral_7b(),
+            "mistral_7b_instruct" => LlamaSource::mistral_7b_instruct(),
+            "mistral_7b_instruct_2" => LlamaSource::mistral_7b_instruct_2(),
+            "solar_10_7b" => LlamaSource::solar_10_7b(),
+            "solar_10_7b_instruct" => LlamaSource::solar_10_7b_instruct(),
 
             // Handle unknown models
             _ => {
@@ -321,7 +314,7 @@ impl AIService {
                     model_size_string
                 ));
             }
-        };
+        });
 
         // Build the local Llama model
         let llama = llama
