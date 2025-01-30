@@ -115,6 +115,7 @@ futures-channel = "0.3.30"
 rodio = "*"
 libc = "0.2"
 chat-gpt-lib-rs = { version = "0.5.1", git = "https://github.com/coasys/chat-gpt-lib-rs" }
+anyhow = "1.0.95"
 
 [dev-dependencies]
 maplit = "1.0.2"

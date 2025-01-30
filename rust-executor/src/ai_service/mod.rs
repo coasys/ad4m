@@ -12,7 +12,6 @@ use candle_core::Device;
 use chat_gpt_lib_rs::{ChatGPTClient, ChatInput, Message, Role};
 use deno_core::error::AnyError;
 use futures::{FutureExt, SinkExt};
-use holochain::test_utils::itertools::Itertools;
 use kalosm::language::*;
 use kalosm::sound::TextStream;
 use kalosm::sound::*;
@@ -393,7 +392,7 @@ impl AIService {
                     }
                 };
 
-                let mut tasks = HashMap::<String, Task>::new();
+                let mut tasks = HashMap::<String, Task<Llama>>::new();
                 let mut task_descriptions = HashMap::<String, AITask>::new();
                 let idle_delay = Duration::from_millis(1);
 
@@ -803,7 +802,8 @@ impl AIService {
                         Ok(Some(request)) => {
                             let result: Result<Vec<f32>> = rt
                                 .block_on(async { model.embed(request.prompt).await })
-                                .map(|tensor| tensor.to_vec());
+                                .map(|tensor| tensor.to_vec())
+                                .map_err(|bert_error| anyhow!(bert_error));
                             let _ = request.result_sender.send(result);
                         }
                     }

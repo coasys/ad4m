@@ -73,6 +73,7 @@ name = "ad4m-executor"
 version = "0.10.1-rc6"
 dependencies = [
  "ad4m-client",
+ "anyhow",
  "argon2",
  "base64 0.21.7",
  "candle-core 0.7.2",
