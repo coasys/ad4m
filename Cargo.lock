@@ -76,7 +76,7 @@ dependencies = [
  "anyhow",
  "argon2",
  "base64 0.21.7",
- "candle-core 0.7.2",
+ "candle-core",
  "chat-gpt-lib-rs",
  "chrono",
  "cid",
@@ -1758,27 +1758,6 @@ dependencies = [
 
 [[package]]
 name = "candle-core"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e1a39b963e261c58017edf2007e5b63425ad21538aaaf51fe23d1da41703701"
-dependencies = [
- "byteorder",
- "gemm",
- "half 2.4.1",
- "memmap2 0.9.4",
- "num-traits",
- "num_cpus",
- "rand 0.8.5",
- "rand_distr",
- "rayon",
- "safetensors",
- "thiserror 1.0.63",
- "yoke",
- "zip 1.1.4",
-]
-
-[[package]]
-name = "candle-core"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "855dfedff437d2681d68e1f34ae559d88b0dd84aa5a6b63f2c8e75ebdd875bbf"
@@ -1835,7 +1814,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ddd3c6b2ee0dfd64af12ae5b07e4b7c517898981cdaeffcb10b71d7dd5c8f359"
 dependencies = [
  "accelerate-src",
- "candle-core 0.8.2",
+ "candle-core",
  "candle-metal-kernels",
  "half 2.4.1",
  "metal 0.27.0",
@@ -1854,7 +1833,7 @@ checksum = "4270cc692c4a3df2051c2e8c3c4da3a189746af7ca3a547b99ecd335582b92e1"
 dependencies = [
  "accelerate-src",
  "byteorder",
- "candle-core 0.8.2",
+ "candle-core",
  "candle-nn",
  "fancy-regex",
  "num-traits",
@@ -8957,11 +8936,11 @@ dependencies = [
 [[package]]
 name = "kalosm"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
  "arroy",
  "async-trait",
- "candle-core 0.8.2",
+ "candle-core",
  "comfy-table",
  "ego-tree",
  "futures-util",
@@ -8986,9 +8965,9 @@ dependencies = [
 [[package]]
 name = "kalosm-common"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
- "candle-core 0.8.2",
+ "candle-core",
  "candle-nn",
  "dirs 5.0.1",
  "hf-hub",
@@ -9005,12 +8984,12 @@ dependencies = [
 [[package]]
 name = "kalosm-language"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
  "anyhow",
  "arroy",
  "async-trait",
- "candle-core 0.8.2",
+ "candle-core",
  "candle-nn",
  "chrono",
  "convert_case 0.6.0",
@@ -9057,11 +9036,11 @@ dependencies = [
 [[package]]
 name = "kalosm-language-model"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
  "anyhow",
  "async-lock 3.4.0",
- "candle-core 0.8.2",
+ "candle-core",
  "dynosaur",
  "futures-channel",
  "futures-util",
@@ -9080,9 +9059,9 @@ dependencies = [
 [[package]]
 name = "kalosm-llama"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
- "candle-core 0.8.2",
+ "candle-core",
  "candle-nn",
  "candle-transformers",
  "half 2.4.1",
@@ -9105,9 +9084,9 @@ dependencies = [
 [[package]]
 name = "kalosm-ocr"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
- "candle-core 0.8.2",
+ "candle-core",
  "candle-nn",
  "candle-transformers",
  "hf-hub",
@@ -9124,7 +9103,7 @@ dependencies = [
 [[package]]
 name = "kalosm-parse-macro"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9134,7 +9113,7 @@ dependencies = [
 [[package]]
 name = "kalosm-sample"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
  "kalosm-parse-macro",
  "regex-automata 0.4.7",
@@ -9143,10 +9122,10 @@ dependencies = [
 [[package]]
 name = "kalosm-sound"
 version = "0.3.4"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
  "byteorder",
- "candle-core 0.8.2",
+ "candle-core",
  "candle-nn",
  "candle-transformers",
  "cpal",
@@ -9172,7 +9151,7 @@ dependencies = [
 [[package]]
 name = "kalosm-streams"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
  "futures-util",
  "image 0.24.9",
@@ -9183,7 +9162,7 @@ dependencies = [
 [[package]]
 name = "kalosm-vision"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
  "image 0.24.9",
  "kalosm-ocr",
@@ -13672,9 +13651,9 @@ dependencies = [
 [[package]]
 name = "rbert"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
- "candle-core 0.8.2",
+ "candle-core",
  "candle-nn",
  "candle-transformers",
  "kalosm-common",
@@ -14701,11 +14680,11 @@ dependencies = [
 [[package]]
 name = "rwhisper"
 version = "0.3.5"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
  "accelerate-src",
  "byteorder",
- "candle-core 0.8.2",
+ "candle-core",
  "candle-nn",
  "candle-transformers",
  "cpal",
@@ -14727,9 +14706,9 @@ dependencies = [
 [[package]]
 name = "rwuerstchen"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
- "candle-core 0.8.2",
+ "candle-core",
  "candle-nn",
  "candle-transformers",
  "futures-util",
@@ -15073,9 +15052,9 @@ dependencies = [
 [[package]]
 name = "segment-anything-rs"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
- "candle-core 0.8.2",
+ "candle-core",
  "candle-nn",
  "candle-transformers",
  "hf-hub",
