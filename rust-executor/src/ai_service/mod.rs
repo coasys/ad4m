@@ -17,7 +17,7 @@ use kalosm::sound::TextStream;
 use kalosm::sound::*;
 use std::collections::HashMap;
 use std::future::Future;
-use std::panic::catch_unwind;
+use holochain::test_utils::itertools::Itertools;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::thread;
@@ -431,8 +431,8 @@ impl AIService {
                                         true,
                                     ));
                                     let task_description = spawn_request.task;
-                                    let task =
-                                        Task::builder(task_description.system_prompt.clone())
+                                    
+                                    let task = llama.task(task_description.system_prompt.clone())
                                             .with_examples(
                                                 task_description
                                                     .prompt_examples
@@ -440,33 +440,13 @@ impl AIService {
                                                     .into_iter()
                                                     .map(|example| (example.input, example.output))
                                                     .collect::<Vec<(String, String)>>(),
-                                            )
-                                            .build();
+                                            );
 
-                                    let mut task_run = false;
-                                    let mut tries = 0;
-                                    while !task_run && tries < 20 {
-                                        tries += 1;
+                                    rt.block_on(task.run("Test example prompt").all_text());
 
-                                        match catch_unwind(|| {
-                                                    rt.block_on(task.run("Test example prompt", llama).all_text())
-                                                }) {
-                                                    Err(e) => log::error!(
-                                                        "Llama panicked during task spawn with: {:?}. Trying again..",
-                                                        e
-                                                    ),
-                                                    Ok(_) => task_run = true,
-                                                }
-                                    }
-
-                                    if task_run {
-                                        tasks.insert(task_description.task_id.clone(), task);
-                                        let _ = spawn_request.result_sender.send(Ok(()));
-                                    } else {
-                                        let _ = spawn_request
-                                            .result_sender
-                                            .send(Err(anyhow!("Couldn't run task without panics")));
-                                    }
+                                    tasks.insert(task_description.task_id.clone(), task);
+                                    let _ = spawn_request.result_sender.send(Ok(()));
+    
                                     rt.block_on(publish_model_status(
                                         model_config.id.clone(),
                                         100.0,
@@ -540,7 +520,7 @@ impl AIService {
                                         )));
                                     }
                                 }
-                                LlmModel::Local(ref mut llama) => {
+                                LlmModel::Local(_) => {
                                     if let Some(task) = tasks.get(&prompt_request.task_id) {
                                         rt.block_on(publish_model_status(
                                             model_config.id.clone(),
@@ -549,34 +529,12 @@ impl AIService {
                                             true,
                                             true,
                                         ));
-                                        let mut maybe_result: Option<String> = None;
-                                        let mut tries = 0;
-                                        while maybe_result.is_none() && tries < 20 {
-                                            tries += 1;
-
-                                            match catch_unwind(|| {
-                                                rt.block_on(async {
-                                                    task.run(prompt_request.prompt.clone(), llama)
-                                                        .all_text()
-                                                        .await
-                                                })
-                                            }) {
-                                                Err(e) => {
-                                                    log::error!(
-                                                        "Llama panicked with: {:?}. Trying again..",
-                                                        e
-                                                    );
-                                                    rt.block_on(publish_model_status(
-                                                        model_config.id.clone(),
-                                                        100.0,
-                                                        "Panicked while running inference - trying again...",
-                                                        true,
-                                                        true,
-                                                    ));
-                                                }
-                                                Ok(result) => maybe_result = Some(result),
-                                            }
-                                        }
+   
+                                        let result = rt.block_on(async {
+                                            task.run(prompt_request.prompt.clone())
+                                                .all_text()
+                                                .await
+                                        });
 
                                         rt.block_on(publish_model_status(
                                             model_config.id.clone(),
@@ -586,11 +544,8 @@ impl AIService {
                                             true,
                                         ));
 
-                                        if let Some(result) = maybe_result {
-                                            let _ = prompt_request.result_sender.send(Ok(result));
-                                        } else {
-                                            let _ = prompt_request.result_sender.send(Err(anyhow!("Unable to get response from Llama model. Giving up after 20 retries")));
-                                        }
+
+                                        let _ = prompt_request.result_sender.send(Ok(result));
                                     } else {
                                         let _ = prompt_request.result_sender.send(Err(anyhow!(
                                             "Task with ID {} not spawned",
