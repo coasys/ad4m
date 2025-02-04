@@ -66,6 +66,21 @@ const AI = () => {
     setModels(newModels);
   }
 
+  function deleteTask(modelId: string, taskId: string) {
+    const newModels = modelsRef.current.map((model) => {
+      if (model.id === modelId) {
+        client!.ai.removeTask(taskId)
+        
+        model.tasks = model.tasks.filter((task: any) => {
+          return (task.taskId !== taskId)
+        });
+      }
+      return model;
+    });
+    modelsRef.current = newModels;
+    setModels(newModels);
+  }
+
   useEffect(() => {
     if (client) getData();
   }, [client, getData]);
@@ -148,6 +163,7 @@ const AI = () => {
                 removeModel={() => removeModel(model)}
                 setDefaultModel={() => setDefaultModel(model)}
                 toggleTask={toggleTask}
+                deleteTask={deleteTask}
               />
             ))}
           </j-flex>

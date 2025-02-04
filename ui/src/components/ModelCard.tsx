@@ -7,8 +7,9 @@ export default function ModelCard(props: {
   removeModel: () => void;
   setDefaultModel: () => void;
   toggleTask: (modelId: string, taskId: string) => void;
+  deleteTask: (modelId: string, taskId: string) => void;
 }) {
-  const { model, editModel, removeModel, setDefaultModel, toggleTask } = props;
+  const { model, editModel, removeModel, setDefaultModel, toggleTask, deleteTask } = props;
   const {
     id,
     name,
@@ -155,6 +156,15 @@ export default function ModelCard(props: {
                             Show {task.collapsed ? "more" : "less"}
                             <j-icon
                               name={`chevron-${task.collapsed ? "down" : "up"}`}
+                            />
+                          </j-button>
+                          <j-button
+                            variant="subtle"
+                            onClick={() => deleteTask(id, task.taskId)}
+                          >
+                            Delete
+                            <j-icon
+                              name={"trash"}
                             />
                           </j-button>
                         </j-flex>
