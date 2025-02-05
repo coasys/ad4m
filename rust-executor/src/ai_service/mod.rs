@@ -12,12 +12,12 @@ use candle_core::Device;
 use chat_gpt_lib_rs::{ChatGPTClient, ChatInput, Message, Role};
 use deno_core::error::AnyError;
 use futures::{FutureExt, SinkExt};
+use holochain::test_utils::itertools::Itertools;
 use kalosm::language::*;
 use kalosm::sound::TextStream;
 use kalosm::sound::*;
 use std::collections::HashMap;
 use std::future::Future;
-use holochain::test_utils::itertools::Itertools;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::thread;
@@ -431,22 +431,23 @@ impl AIService {
                                         true,
                                     ));
                                     let task_description = spawn_request.task;
-                                    
-                                    let task = llama.task(task_description.system_prompt.clone())
-                                            .with_examples(
-                                                task_description
-                                                    .prompt_examples
-                                                    .clone()
-                                                    .into_iter()
-                                                    .map(|example| (example.input, example.output))
-                                                    .collect::<Vec<(String, String)>>(),
-                                            );
+
+                                    let task = llama
+                                        .task(task_description.system_prompt.clone())
+                                        .with_examples(
+                                            task_description
+                                                .prompt_examples
+                                                .clone()
+                                                .into_iter()
+                                                .map(|example| (example.input, example.output))
+                                                .collect::<Vec<(String, String)>>(),
+                                        );
 
                                     rt.block_on(task.run("Test example prompt").all_text());
 
                                     tasks.insert(task_description.task_id.clone(), task);
                                     let _ = spawn_request.result_sender.send(Ok(()));
-    
+
                                     rt.block_on(publish_model_status(
                                         model_config.id.clone(),
                                         100.0,
@@ -529,11 +530,9 @@ impl AIService {
                                             true,
                                             true,
                                         ));
-   
+
                                         let result = rt.block_on(async {
-                                            task.run(prompt_request.prompt.clone())
-                                                .all_text()
-                                                .await
+                                            task.run(prompt_request.prompt.clone()).all_text().await
                                         });
 
                                         rt.block_on(publish_model_status(
@@ -543,7 +542,6 @@ impl AIService {
                                             true,
                                             true,
                                         ));
-
 
                                         let _ = prompt_request.result_sender.send(Ok(result));
                                     } else {

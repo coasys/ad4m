@@ -6,6 +6,8 @@ import "../index.css";
 const AITypes = ["LLM", "EMBEDDING", "TRANSCRIPTION"];
 const llmModels = [
   "External API",
+  "deepseek_coder_6.7b-instruct Q8",
+  "deepseek_coder_6.7b-instruct Q4",
   "deepseek_r1_distill_qwen_1_5b",
   "deepseek_r1_distill_qwen_7b",
   "deepseek_r1_distill_qwen_14b",
