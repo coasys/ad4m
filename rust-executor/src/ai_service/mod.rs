@@ -727,7 +727,7 @@ impl AIService {
                         publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
 
                         let bert = Bert::builder()
-                            .with_device(Device::Cpu)
+                            .with_device(Self::new_candle_device())
                             .build_with_loading_handler({
                                 let model_id = model_id.clone();
                                 move |progress| {
@@ -807,7 +807,7 @@ impl AIService {
             rt.block_on(async {
                 let maybe_model = WhisperBuilder::default()
                     .with_source(WHISPER_MODEL)
-                    .with_device(Device::Cpu)
+                    .with_device(Self::new_candle_device())
                     .build()
                     .await;
 
@@ -905,7 +905,7 @@ impl AIService {
 
         let _ = WhisperBuilder::default()
             .with_source(WHISPER_MODEL)
-            .with_device(Device::Cpu)
+            .with_device(Self::new_candle_device())
             .build_with_loading_handler({
                 let name = id.clone();
                 move |progress| {
