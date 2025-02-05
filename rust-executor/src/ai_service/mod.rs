@@ -286,6 +286,11 @@ impl AIService {
     ) -> Result<Llama> {
         publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
         let llama = Llama::builder().with_source(match model_size_string.as_str() {
+            "Qwen2.5.1-Coder-7B-Instruct" => LlamaSource::new(FileSource::huggingface(
+                "bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF".to_string(),
+                "main".to_string(),
+                "Qwen2.5.1-Coder-7B-Instruct-Q4_K_M.gguf".to_string(),
+            )),
             "deepseek_r1_distill_qwen_1_5b" => LlamaSource::deepseek_r1_distill_qwen_1_5b(),
             "deepseek_r1_distill_qwen_7b" => LlamaSource::deepseek_r1_distill_qwen_7b(),
             "deepseek_r1_distill_qwen_14b" => LlamaSource::deepseek_r1_distill_qwen_14b(),
