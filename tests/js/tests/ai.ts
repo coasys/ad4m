@@ -32,8 +32,13 @@ export default function aiTests(testContext: TestContext) {
                     name: "TestLocalModel",
                     local: {
                         fileName: "test_model.bin",
-                        tokenizerSource: "test_tokenizer.json",
-                        modelParameters: JSON.stringify({ param1: "value1", param2: "value2" })
+                        tokenizerSource: {
+                            repo: "test-repo",
+                            revision: "main",
+                            fileName: "tokenizer.json"
+                        },
+                        huggingfaceRepo: "test-repo",
+                        revision: "main"
                     },
                     modelType: "EMBEDDING"
                 }
@@ -58,8 +63,11 @@ export default function aiTests(testContext: TestContext) {
                 expect(addedLocalModel).to.exist
                 expect(addedLocalModel?.id).to.equal(addLocalResult)
                 expect(addedLocalModel?.local?.fileName).to.equal("test_model.bin")
-                expect(addedLocalModel?.local?.tokenizerSource).to.equal("test_tokenizer.json")
-                expect(addedLocalModel?.local?.modelParameters).to.deep.equal(JSON.stringify({ param1: "value1", param2: "value2" }))
+                expect(addedLocalModel?.local?.tokenizerSource?.repo).to.equal("test-repo")
+                expect(addedLocalModel?.local?.tokenizerSource?.revision).to.equal("main")
+                expect(addedLocalModel?.local?.tokenizerSource?.fileName).to.equal("tokenizer.json")
+                expect(addedLocalModel?.local?.huggingfaceRepo).to.equal("test-repo")
+                expect(addedLocalModel?.local?.revision).to.equal("main")
 
                 // Test removing models
                 const removeApiResult = await ad4mClient.ai.removeModel(addedApiModel!.id)
@@ -106,8 +114,13 @@ export default function aiTests(testContext: TestContext) {
                     name: "UpdatedModel",
                     local: {
                         fileName: "updated_model.bin",
-                        tokenizerSource: "updated_tokenizer.json",
-                        modelParameters: JSON.stringify({ updated: "value" })
+                        tokenizerSource: {
+                            repo: "updated-repo",
+                            revision: "main",
+                            fileName: "updated_tokenizer.json"
+                        },
+                        huggingfaceRepo: "updated-repo",
+                        revision: "main"
                     },
                     modelType: "EMBEDDING"
                 }
@@ -123,8 +136,11 @@ export default function aiTests(testContext: TestContext) {
                 expect(retrievedModel?.name).to.equal("UpdatedModel")
                 expect(retrievedModel?.api).to.be.null
                 expect(retrievedModel?.local?.fileName).to.equal("updated_model.bin")
-                expect(retrievedModel?.local?.tokenizerSource).to.equal("updated_tokenizer.json")
-                expect(retrievedModel?.local?.modelParameters).to.equal(JSON.stringify({ updated: "value" }))
+                expect(retrievedModel?.local?.tokenizerSource?.repo).to.equal("updated-repo")
+                expect(retrievedModel?.local?.tokenizerSource?.revision).to.equal("main")
+                expect(retrievedModel?.local?.tokenizerSource?.fileName).to.equal("updated_tokenizer.json")
+                expect(retrievedModel?.local?.huggingfaceRepo).to.equal("updated-repo")
+                expect(retrievedModel?.local?.revision).to.equal("main")
                 expect(retrievedModel?.modelType).to.equal("EMBEDDING")
 
                 // Clean up
@@ -177,8 +193,13 @@ export default function aiTests(testContext: TestContext) {
                     name: "TestDefaultModel",
                     local: {
                         fileName: "llama_tiny",
-                        tokenizerSource: "test_tokenizer.json",
-                        modelParameters: JSON.stringify({ param1: "value1" })
+                        tokenizerSource: {
+                            repo: "test-repo",
+                            revision: "main",
+                            fileName: "tokenizer.json"
+                        },
+                        huggingfaceRepo: "test-repo",
+                        revision: "main"
                     },
                     modelType: "LLM"
                 }
@@ -210,11 +231,16 @@ export default function aiTests(testContext: TestContext) {
 
                 // Create another test model
                 const newModelInput: ModelInput = {
-                    name: "TestDefaultModel2", 
+                    name: "TestDefaultModel2",
                     local: {
                         fileName: "llama_tiny",
-                        tokenizerSource: "test_tokenizer.json",
-                        modelParameters: JSON.stringify({ param1: "value1" })
+                        tokenizerSource: {
+                            repo: "test-repo",
+                            revision: "main",
+                            fileName: "tokenizer.json"
+                        },
+                        huggingfaceRepo: "test-repo",
+                        revision: "main"
                     },
                     modelType: "LLM"
                 }
@@ -239,12 +265,10 @@ export default function aiTests(testContext: TestContext) {
                 expect(response2).to.be.a('string')
                 expect(response2.toLowerCase()).to.include('hello')
 
-                // Clean up new model
-                await ad4mClient.ai.removeModel(newModelId)
-
                 // Clean up
                 await ad4mClient.ai.removeTask(task.taskId)
                 await ad4mClient.ai.removeModel(modelId)
+                await ad4mClient.ai.removeModel(newModelId)
             })
 
             it.skip('can do Tasks CRUD', async() => {
@@ -253,8 +277,13 @@ export default function aiTests(testContext: TestContext) {
                     name: "Llama tiny",
                     local: {
                         fileName: "llama_tiny",
-                        tokenizerSource: "test_tokenizer.json",
-                        modelParameters: JSON.stringify({ param1: "value1", param2: "value2" })
+                        tokenizerSource: {
+                            repo: "test-repo",
+                            revision: "main",
+                            fileName: "tokenizer.json"
+                        },
+                        huggingfaceRepo: "test-repo",
+                        revision: "main"
                     },
                     modelType: "LLM"
                 }
@@ -310,8 +339,13 @@ export default function aiTests(testContext: TestContext) {
                     name: "Llama tiny",
                     local: {
                         fileName: "llama_tiny",
-                        tokenizerSource: "test_tokenizer.json",
-                        modelParameters: JSON.stringify({ param1: "value1", param2: "value2" })
+                        tokenizerSource: {
+                            repo: "test-repo",
+                            revision: "main",
+                            fileName: "tokenizer.json"
+                        },
+                        huggingfaceRepo: "test-repo",
+                        revision: "main"
                     },
                     modelType: "LLM"
                 }
