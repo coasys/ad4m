@@ -18,7 +18,6 @@ use kalosm::sound::TextStream;
 use kalosm::sound::*;
 use std::collections::HashMap;
 use std::future::Future;
-use std::panic::catch_unwind;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::thread;
@@ -286,32 +285,33 @@ impl AIService {
         model_size_string: String,
     ) -> Result<Llama> {
         publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
-
-        let llama = match model_size_string.as_str() {
-            // Local TinyLlama models
-            "llama_tiny" => Llama::builder().with_source(LlamaSource::tiny_llama_1_1b()),
-            "llama_7b" => Llama::builder().with_source(LlamaSource::llama_7b()),
-            "llama_7b_chat" => Llama::builder().with_source(LlamaSource::llama_7b_chat()),
-            "llama_7b_code" => Llama::builder().with_source(LlamaSource::llama_7b_code()),
-            "llama_8b" => Llama::builder().with_source(LlamaSource::llama_8b()),
-            "llama_8b_chat" => Llama::builder().with_source(LlamaSource::llama_8b_chat()),
-            "llama_3_1_8b_chat" => Llama::builder().with_source(LlamaSource::llama_3_1_8b_chat()),
-            "llama_13b" => Llama::builder().with_source(LlamaSource::llama_13b()),
-            "llama_13b_chat" => Llama::builder().with_source(LlamaSource::llama_13b_chat()),
-            "llama_13b_code" => Llama::builder().with_source(LlamaSource::llama_13b_code()),
-            "llama_34b_code" => Llama::builder().with_source(LlamaSource::llama_34b_code()),
-            "llama_70b" => Llama::builder().with_source(LlamaSource::llama_70b()),
-            "mistral_7b" => Llama::builder().with_source(LlamaSource::mistral_7b()),
-            "mistral_7b_instruct" => {
-                Llama::builder().with_source(LlamaSource::mistral_7b_instruct())
-            }
-            "mistral_7b_instruct_2" => {
-                Llama::builder().with_source(LlamaSource::mistral_7b_instruct_2())
-            }
-            "solar_10_7b" => Llama::builder().with_source(LlamaSource::solar_10_7b()),
-            "solar_10_7b_instruct" => {
-                Llama::builder().with_source(LlamaSource::solar_10_7b_instruct())
-            }
+        let llama = Llama::builder().with_source(match model_size_string.as_str() {
+            "Qwen2.5.1-Coder-7B-Instruct" => LlamaSource::new(FileSource::huggingface(
+                "bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF".to_string(),
+                "main".to_string(),
+                "Qwen2.5.1-Coder-7B-Instruct-Q4_K_M.gguf".to_string(),
+            )),
+            "deepseek_r1_distill_qwen_1_5b" => LlamaSource::deepseek_r1_distill_qwen_1_5b(),
+            "deepseek_r1_distill_qwen_7b" => LlamaSource::deepseek_r1_distill_qwen_7b(),
+            "deepseek_r1_distill_qwen_14b" => LlamaSource::deepseek_r1_distill_qwen_14b(),
+            "deepseek_r1_distill_llama_8b" => LlamaSource::deepseek_r1_distill_llama_8b(),
+            "llama_tiny" => LlamaSource::tiny_llama_1_1b(),
+            "llama_7b" => LlamaSource::llama_7b(),
+            "llama_7b_chat" => LlamaSource::llama_7b_chat(),
+            "llama_7b_code" => LlamaSource::llama_7b_code(),
+            "llama_8b" => LlamaSource::llama_8b(),
+            "llama_8b_chat" => LlamaSource::llama_8b_chat(),
+            "llama_3_1_8b_chat" => LlamaSource::llama_3_1_8b_chat(),
+            "llama_13b" => LlamaSource::llama_13b(),
+            "llama_13b_chat" => LlamaSource::llama_13b_chat(),
+            "llama_13b_code" => LlamaSource::llama_13b_code(),
+            "llama_34b_code" => LlamaSource::llama_34b_code(),
+            "llama_70b" => LlamaSource::llama_70b(),
+            "mistral_7b" => LlamaSource::mistral_7b(),
+            "mistral_7b_instruct" => LlamaSource::mistral_7b_instruct(),
+            "mistral_7b_instruct_2" => LlamaSource::mistral_7b_instruct_2(),
+            "solar_10_7b" => LlamaSource::solar_10_7b(),
+            "solar_10_7b_instruct" => LlamaSource::solar_10_7b_instruct(),
 
             // Handle unknown models
             _ => {
@@ -321,7 +321,7 @@ impl AIService {
                     model_size_string
                 ));
             }
-        };
+        });
 
         // Build the local Llama model
         let llama = llama
@@ -397,7 +397,7 @@ impl AIService {
                     }
                 };
 
-                let mut tasks = HashMap::<String, Task>::new();
+                let mut tasks = HashMap::<String, Task<Llama>>::new();
                 let mut task_descriptions = HashMap::<String, AITask>::new();
                 let idle_delay = Duration::from_millis(1);
 
@@ -436,42 +436,23 @@ impl AIService {
                                         true,
                                     ));
                                     let task_description = spawn_request.task;
-                                    let task =
-                                        Task::builder(task_description.system_prompt.clone())
-                                            .with_examples(
-                                                task_description
-                                                    .prompt_examples
-                                                    .clone()
-                                                    .into_iter()
-                                                    .map(|example| (example.input, example.output))
-                                                    .collect::<Vec<(String, String)>>(),
-                                            )
-                                            .build();
 
-                                    let mut task_run = false;
-                                    let mut tries = 0;
-                                    while !task_run && tries < 20 {
-                                        tries += 1;
+                                    let task = llama
+                                        .task(task_description.system_prompt.clone())
+                                        .with_examples(
+                                            task_description
+                                                .prompt_examples
+                                                .clone()
+                                                .into_iter()
+                                                .map(|example| (example.input, example.output))
+                                                .collect::<Vec<(String, String)>>(),
+                                        );
 
-                                        match catch_unwind(|| {
-                                                    rt.block_on(task.run("Test example prompt", llama).all_text())
-                                                }) {
-                                                    Err(e) => log::error!(
-                                                        "Llama panicked during task spawn with: {:?}. Trying again..",
-                                                        e
-                                                    ),
-                                                    Ok(_) => task_run = true,
-                                                }
-                                    }
+                                    rt.block_on(task.run("Test example prompt").all_text());
 
-                                    if task_run {
-                                        tasks.insert(task_description.task_id.clone(), task);
-                                        let _ = spawn_request.result_sender.send(Ok(()));
-                                    } else {
-                                        let _ = spawn_request
-                                            .result_sender
-                                            .send(Err(anyhow!("Couldn't run task without panics")));
-                                    }
+                                    tasks.insert(task_description.task_id.clone(), task);
+                                    let _ = spawn_request.result_sender.send(Ok(()));
+
                                     rt.block_on(publish_model_status(
                                         model_config.id.clone(),
                                         100.0,
@@ -545,7 +526,7 @@ impl AIService {
                                         )));
                                     }
                                 }
-                                LlmModel::Local(ref mut llama) => {
+                                LlmModel::Local(_) => {
                                     if let Some(task) = tasks.get(&prompt_request.task_id) {
                                         rt.block_on(publish_model_status(
                                             model_config.id.clone(),
@@ -554,34 +535,10 @@ impl AIService {
                                             true,
                                             true,
                                         ));
-                                        let mut maybe_result: Option<String> = None;
-                                        let mut tries = 0;
-                                        while maybe_result.is_none() && tries < 20 {
-                                            tries += 1;
 
-                                            match catch_unwind(|| {
-                                                rt.block_on(async {
-                                                    task.run(prompt_request.prompt.clone(), llama)
-                                                        .all_text()
-                                                        .await
-                                                })
-                                            }) {
-                                                Err(e) => {
-                                                    log::error!(
-                                                        "Llama panicked with: {:?}. Trying again..",
-                                                        e
-                                                    );
-                                                    rt.block_on(publish_model_status(
-                                                        model_config.id.clone(),
-                                                        100.0,
-                                                        "Panicked while running inference - trying again...",
-                                                        true,
-                                                        true,
-                                                    ));
-                                                }
-                                                Ok(result) => maybe_result = Some(result),
-                                            }
-                                        }
+                                        let result = rt.block_on(async {
+                                            task.run(prompt_request.prompt.clone()).all_text().await
+                                        });
 
                                         rt.block_on(publish_model_status(
                                             model_config.id.clone(),
@@ -591,11 +548,7 @@ impl AIService {
                                             true,
                                         ));
 
-                                        if let Some(result) = maybe_result {
-                                            let _ = prompt_request.result_sender.send(Ok(result));
-                                        } else {
-                                            let _ = prompt_request.result_sender.send(Err(anyhow!("Unable to get response from Llama model. Giving up after 20 retries")));
-                                        }
+                                        let _ = prompt_request.result_sender.send(Ok(result));
                                     } else {
                                         let _ = prompt_request.result_sender.send(Err(anyhow!(
                                             "Task with ID {} not spawned",
@@ -779,7 +732,7 @@ impl AIService {
                         publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
 
                         let bert = Bert::builder()
-                            .with_device(Device::Cpu)
+                            .with_device(Self::new_candle_device())
                             .build_with_loading_handler({
                                 let model_id = model_id.clone();
                                 move |progress| {
@@ -807,7 +760,8 @@ impl AIService {
                         Ok(Some(request)) => {
                             let result: Result<Vec<f32>> = rt
                                 .block_on(async { model.embed(request.prompt).await })
-                                .map(|tensor| tensor.to_vec());
+                                .map(|tensor| tensor.to_vec())
+                                .map_err(|bert_error| anyhow!(bert_error));
                             let _ = request.result_sender.send(result);
                         }
                     }
@@ -858,7 +812,7 @@ impl AIService {
             rt.block_on(async {
                 let maybe_model = WhisperBuilder::default()
                     .with_source(WHISPER_MODEL)
-                    .with_device(Device::Cpu)
+                    .with_device(Self::new_candle_device())
                     .build()
                     .await;
 
@@ -956,7 +910,7 @@ impl AIService {
 
         let _ = WhisperBuilder::default()
             .with_source(WHISPER_MODEL)
-            .with_device(Device::Cpu)
+            .with_device(Self::new_candle_device())
             .build_with_loading_handler({
                 let name = id.clone();
                 move |progress| {

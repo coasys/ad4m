@@ -73,6 +73,7 @@ name = "ad4m-executor"
 version = "0.10.1-rc6"
 dependencies = [
  "ad4m-client",
+ "anyhow",
  "argon2",
  "base64 0.21.7",
  "candle-core",
@@ -120,7 +121,7 @@ dependencies = [
  "regex",
  "reqwest 0.11.20",
  "rocket",
- "rodio",
+ "rodio 0.17.3",
  "rusqlite",
  "rust-embed",
  "rustls 0.23.12",
@@ -453,9 +454,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.86"
+version = "1.0.95"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3d1d046238990b9cf5bcde22a3fb3584ee5cf65fb2765f454ed428c7a0063da"
+checksum = "34ac096ce696dc2fcabef30516bb13c0a68a11d30131d3df6f04711467681b04"
 dependencies = [
  "backtrace",
 ]
@@ -1757,9 +1758,9 @@ dependencies = [
 
 [[package]]
 name = "candle-core"
-version = "0.7.2"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e1a39b963e261c58017edf2007e5b63425ad21538aaaf51fe23d1da41703701"
+checksum = "855dfedff437d2681d68e1f34ae559d88b0dd84aa5a6b63f2c8e75ebdd875bbf"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -1778,24 +1779,27 @@ dependencies = [
  "rayon",
  "safetensors",
  "thiserror 1.0.63",
+ "ug",
+ "ug-cuda",
+ "ug-metal",
  "yoke",
  "zip 1.1.4",
 ]
 
 [[package]]
 name = "candle-kernels"
-version = "0.7.2"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "539cbfbf2d1d68a6ed97115e579c77c98f8ed0cfe7edbc6d7d30d2ac0c9e3d50"
+checksum = "53343628fa470b7075c28c589b98735b4220b464e37ddbb8e117040e199f4787"
 dependencies = [
  "bindgen_cuda",
 ]
 
 [[package]]
 name = "candle-metal-kernels"
-version = "0.7.2"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "166a92826d615d98b205e346e52128fa0439f2ab3302587403fdc558b4219e19"
+checksum = "50fa64274a009a5d95c542b10bf3a4ea809bd394654c6ae99233bcc35b3a33ef"
 dependencies = [
  "metal 0.27.0",
  "once_cell",
@@ -1805,9 +1809,9 @@ dependencies = [
 
 [[package]]
 name = "candle-nn"
-version = "0.7.2"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "898f8d21b8bdf559a1c8635e2db8386b2134015cd3003c18c1a30a22a67daec6"
+checksum = "ddd3c6b2ee0dfd64af12ae5b07e4b7c517898981cdaeffcb10b71d7dd5c8f359"
 dependencies = [
  "accelerate-src",
  "candle-core",
@@ -1823,9 +1827,9 @@ dependencies = [
 
 [[package]]
 name = "candle-transformers"
-version = "0.7.2"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06b8a130a8ac1d1e20696d89f7a52948902e037ad0eec085fceb77021007cfee"
+checksum = "4270cc692c4a3df2051c2e8c3c4da3a189746af7ca3a547b99ecd335582b92e1"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -3112,7 +3116,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b28bfe653d79bd16c77f659305b195b82bb5ce0c0eb2a4846b82ddbd77586813"
 dependencies = [
  "bitflags 2.6.0",
- "libloading 0.8.5",
+ "libloading 0.7.4",
  "winapi 0.3.9",
 ]
 
@@ -4595,7 +4599,7 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330c60081dcc4c72131f8eb70510f1ac07223e5d4163db481a04a0befcffa412"
 dependencies = [
- "libloading 0.8.5",
+ "libloading 0.7.4",
 ]
 
 [[package]]
@@ -4801,6 +4805,27 @@ dependencies = [
  "byteorder",
  "dynasm",
  "memmap2 0.5.10",
+]
+
+[[package]]
+name = "dynosaur"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92fac44672fabad44990176319b9e94393f3a38b960b5ca2af6cd90f5ecd1497"
+dependencies = [
+ "dynosaur_derive",
+ "trait-variant",
+]
+
+[[package]]
+name = "dynosaur_derive"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16c187d1e575ef546d24f0fcd7701cc04abfe6b5e7e2758aabc450b99e835ac3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.87",
 ]
 
 [[package]]
@@ -5672,9 +5697,9 @@ dependencies = [
 
 [[package]]
 name = "futures-channel"
-version = "0.3.30"
+version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eac8f7d7865dcb88bd4373ab671c8cf4508703796caa2b1985a9ca867b3fcb78"
+checksum = "2dff15bf788c671c1934e366d07e30c1814a8ef514e1af724a602e8a2fbe1b10"
 dependencies = [
  "futures-core",
  "futures-sink",
@@ -5682,9 +5707,9 @@ dependencies = [
 
 [[package]]
 name = "futures-core"
-version = "0.3.30"
+version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfc6580bb841c5a68e9ef15c77ccc837b40a7504914d52e47b8b0e9bbda25a1d"
+checksum = "05f29059c0c2090612e8d742178b0580d2dc940c837851ad723096f87af6663e"
 
 [[package]]
 name = "futures-enum"
@@ -5755,9 +5780,9 @@ dependencies = [
 
 [[package]]
 name = "futures-sink"
-version = "0.3.30"
+version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9fb8e00e87438d937621c1c6269e53f536c14d3fbd6a042bb24879e57d474fb5"
+checksum = "e575fab7d1e0dcb8d0c7bcf9a63ee213816ab51902e6d244a95819acacf1d4f7"
 
 [[package]]
 name = "futures-task"
@@ -6382,7 +6407,7 @@ version = "0.1.0"
 source = "git+https://github.com/s3bk/glyphmatcher#7bd5d40aaa8893fa4f2e07c758fa34127e176c8c"
 dependencies = [
  "font",
- "istring 0.4.1",
+ "istring 0.4.2",
  "itertools 0.13.0",
  "pathfinder_content",
  "pathfinder_geometry",
@@ -8691,8 +8716,8 @@ dependencies = [
 
 [[package]]
 name = "istring"
-version = "0.4.1"
-source = "git+https://github.com/s3bk/istring#ac7b821c94cf5a1295b4712e60b65419e4c05352"
+version = "0.4.2"
+source = "git+https://github.com/s3bk/istring#bb736be4b5afda8a273b09ad7b27884c79ff09a5"
 dependencies = [
  "serde",
 ]
@@ -8911,9 +8936,8 @@ dependencies = [
 [[package]]
 name = "kalosm"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
- "anyhow",
  "arroy",
  "async-trait",
  "candle-core",
@@ -8933,7 +8957,7 @@ dependencies = [
  "once_cell",
  "rand 0.8.5",
  "serde",
- "thiserror 2.0.3",
+ "thiserror 2.0.11",
  "tokio",
  "tracing",
 ]
@@ -8941,9 +8965,8 @@ dependencies = [
 [[package]]
 name = "kalosm-common"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
- "anyhow",
  "candle-core",
  "candle-nn",
  "dirs 5.0.1",
@@ -8953,6 +8976,7 @@ dependencies = [
  "metal 0.29.0",
  "once_cell",
  "reqwest 0.11.20",
+ "thiserror 2.0.11",
  "tokio",
  "tracing",
 ]
@@ -8960,7 +8984,7 @@ dependencies = [
 [[package]]
 name = "kalosm-language"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
  "anyhow",
  "arroy",
@@ -8984,7 +9008,6 @@ dependencies = [
  "kalosm-streams",
  "llm-samplers",
  "log",
- "meval",
  "once_cell",
  "pdf",
  "pdf_text",
@@ -8994,9 +9017,7 @@ dependencies = [
  "readability",
  "reqwest 0.11.20",
  "roaring",
- "rphi",
  "rss",
- "rustc-hash 1.1.0",
  "scraper",
  "serde",
  "serde_json",
@@ -9004,8 +9025,7 @@ dependencies = [
  "srx",
  "tempfile",
  "texting_robots",
- "thiserror 2.0.3",
- "tokenizers",
+ "thiserror 2.0.11",
  "tokio",
  "tokio-util",
  "tracing",
@@ -9016,37 +9036,31 @@ dependencies = [
 [[package]]
 name = "kalosm-language-model"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
  "anyhow",
- "async-trait",
+ "async-lock 3.4.0",
  "candle-core",
+ "dynosaur",
+ "futures-channel",
  "futures-util",
  "kalosm-common",
  "kalosm-sample",
- "kalosm-streams",
  "llm-samplers",
  "log",
  "lru",
  "once_cell",
- "postcard",
  "rand 0.8.5",
- "rayon",
- "safetensors",
  "serde",
- "thiserror 1.0.63",
- "tokenizers",
- "tokio",
+ "thiserror 2.0.11",
  "tracing",
 ]
 
 [[package]]
 name = "kalosm-llama"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
- "anyhow",
- "async-trait",
  "candle-core",
  "candle-nn",
  "candle-transformers",
@@ -9054,10 +9068,14 @@ dependencies = [
  "kalosm-common",
  "kalosm-language-model",
  "kalosm-sample",
- "kalosm-streams",
  "llm-samplers",
+ "minijinja",
+ "minijinja-contrib",
  "once_cell",
  "rand 0.8.5",
+ "rayon",
+ "safetensors",
+ "thiserror 2.0.11",
  "tokenizers",
  "tokio",
  "tracing",
@@ -9066,9 +9084,8 @@ dependencies = [
 [[package]]
 name = "kalosm-ocr"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
- "anyhow",
  "candle-core",
  "candle-nn",
  "candle-transformers",
@@ -9077,6 +9094,7 @@ dependencies = [
  "kalosm-common",
  "serde",
  "serde_json",
+ "thiserror 2.0.11",
  "tokenizers",
  "tokio",
  "tracing",
@@ -9085,7 +9103,7 @@ dependencies = [
 [[package]]
 name = "kalosm-parse-macro"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9095,9 +9113,8 @@ dependencies = [
 [[package]]
 name = "kalosm-sample"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
- "anyhow",
  "kalosm-parse-macro",
  "regex-automata 0.4.7",
 ]
@@ -9105,10 +9122,8 @@ dependencies = [
 [[package]]
 name = "kalosm-sound"
 version = "0.3.4"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
- "anyhow",
- "async-trait",
  "byteorder",
  "candle-core",
  "candle-nn",
@@ -9125,10 +9140,9 @@ dependencies = [
  "ort",
  "ort-sys",
  "rand 0.8.5",
- "rodio",
+ "rodio 0.20.1",
  "rwhisper",
  "serde_json",
- "tokenizers",
  "tokio",
  "tracing",
  "voice_activity_detector",
@@ -9137,7 +9151,7 @@ dependencies = [
 [[package]]
 name = "kalosm-streams"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
  "futures-util",
  "image 0.24.9",
@@ -9148,7 +9162,7 @@ dependencies = [
 [[package]]
 name = "kalosm-vision"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
  "image 0.24.9",
  "kalosm-ocr",
@@ -10332,6 +10346,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a64a92489e2744ce060c349162be1c5f33c6969234104dbd99ddb5feb08b8c15"
 
 [[package]]
+name = "memo-map"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38d1115007560874e373613744c6fba374c17688327a71c1476d1a5954cc857b"
+
+[[package]]
 name = "memoffset"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10404,16 +10424,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "meval"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f79496a5651c8d57cd033c5add8ca7ee4e3d5f7587a4777484640d9cb60392d9"
-dependencies = [
- "fnv",
- "nom 1.2.4",
-]
-
-[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10427,6 +10437,28 @@ checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
 dependencies = [
  "mime",
  "unicase",
+]
+
+[[package]]
+name = "minijinja"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cff7b8df5e85e30b87c2b0b3f58ba3a87b68e133738bf512a7713769326dbca9"
+dependencies = [
+ "memo-map",
+ "self_cell",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "minijinja-contrib"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ac3e47a9006ed0500425a092c9f8b2e56d10f8aeec8ce870c5e8a7c6ef2d7c3"
+dependencies = [
+ "minijinja",
+ "serde",
 ]
 
 [[package]]
@@ -10992,12 +11024,6 @@ checksum = "a0f889fb66f7acdf83442c35775764b51fed3c606ab9cee51500dbde2cf528ca"
 
 [[package]]
 name = "nom"
-version = "1.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5b8c256fd9471521bcb84c3cdba98921497f1a331cbc15b8030fc63b82050ce"
-
-[[package]]
-name = "nom"
 version = "5.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08959a387a676302eebf4ddbcbc611da04285579f76f88ee0506c63b1a61dd4b"
@@ -11252,7 +11278,7 @@ version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af1844ef2428cc3e1cb900be36181049ef3d3193c63e43026cfe202983b27a56"
 dependencies = [
- "proc-macro-crate 3.1.0",
+ "proc-macro-crate 2.0.0",
  "proc-macro2",
  "quote",
  "syn 2.0.87",
@@ -12179,7 +12205,7 @@ dependencies = [
 [[package]]
 name = "pdf"
 version = "0.9.0"
-source = "git+https://github.com/pdf-rs/pdf#b69e0753c9d6adff567b911494309798e0954e6a"
+source = "git+https://github.com/pdf-rs/pdf#2eda40101944f78211b9725107e761203d6df375"
 dependencies = [
  "aes",
  "bitflags 2.6.0",
@@ -12207,7 +12233,7 @@ dependencies = [
 [[package]]
 name = "pdf_derive"
 version = "0.2.0"
-source = "git+https://github.com/pdf-rs/pdf#b69e0753c9d6adff567b911494309798e0954e6a"
+source = "git+https://github.com/pdf-rs/pdf#2eda40101944f78211b9725107e761203d6df375"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -12234,7 +12260,7 @@ dependencies = [
 [[package]]
 name = "pdf_render"
 version = "0.1.0"
-source = "git+https://github.com/pdf-rs/pdf_render#24d48551c546ac285e8582a27b0ab2753eaf6a45"
+source = "git+https://github.com/pdf-rs/pdf_render#9a31988b091495c65a54236fd6cdce8f1fa2afd0"
 dependencies = [
  "custom_debug_derive",
  "font",
@@ -12242,7 +12268,7 @@ dependencies = [
  "glyphmatcher",
  "image 0.24.9",
  "instant",
- "istring 0.4.1",
+ "istring 0.4.2",
  "itertools 0.13.0",
  "log",
  "once_cell",
@@ -12259,7 +12285,7 @@ dependencies = [
 [[package]]
 name = "pdf_text"
 version = "0.1.0"
-source = "git+https://github.com/pdf-rs/pdf_text#03d4789b4d23b24a991a18d31a352c8400237afc"
+source = "git+https://github.com/pdf-rs/pdf_text#fbe582d29ad4af5a4f84f6098352fcc033be6127"
 dependencies = [
  "font",
  "itertools 0.13.0",
@@ -13234,7 +13260,7 @@ dependencies = [
  "rustc-hash 2.0.0",
  "rustls 0.23.12",
  "socket2 0.5.7",
- "thiserror 2.0.3",
+ "thiserror 2.0.11",
  "tokio",
  "tracing",
 ]
@@ -13273,7 +13299,7 @@ dependencies = [
  "rustls 0.23.12",
  "rustls-pki-types",
  "slab",
- "thiserror 2.0.3",
+ "thiserror 2.0.11",
  "tinyvec",
  "tracing",
  "web-time",
@@ -13625,10 +13651,8 @@ dependencies = [
 [[package]]
 name = "rbert"
 version = "0.3.3"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
- "anyhow",
- "async-trait",
  "candle-core",
  "candle-nn",
  "candle-transformers",
@@ -13637,6 +13661,7 @@ dependencies = [
  "metal 0.27.0",
  "serde",
  "serde_json",
+ "thiserror 2.0.11",
  "tokenizers",
  "tokio",
  "tracing",
@@ -14203,6 +14228,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rodio"
+version = "0.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7ceb6607dd738c99bc8cb28eff249b7cd5c8ec88b9db96c0608c1480d140fb1"
+dependencies = [
+ "claxon",
+ "cpal",
+ "hound",
+ "lewton",
+ "symphonia",
+]
+
+[[package]]
 name = "ron"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14229,28 +14267,6 @@ dependencies = [
  "libc",
  "rtoolbox",
  "windows-sys 0.48.0",
-]
-
-[[package]]
-name = "rphi"
-version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
-dependencies = [
- "anyhow",
- "async-trait",
- "candle-core",
- "candle-nn",
- "candle-transformers",
- "kalosm-common",
- "kalosm-language-model",
- "kalosm-sample",
- "kalosm-streams",
- "llm-samplers",
- "rand 0.8.5",
- "serde_json",
- "tokenizers",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -14664,11 +14680,9 @@ dependencies = [
 [[package]]
 name = "rwhisper"
 version = "0.3.5"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
  "accelerate-src",
- "anyhow",
- "async-trait",
  "byteorder",
  "candle-core",
  "candle-nn",
@@ -14681,8 +14695,9 @@ dependencies = [
  "kalosm-language-model",
  "kalosm-streams",
  "rand 0.8.5",
- "rodio",
+ "rodio 0.20.1",
  "serde_json",
+ "thiserror 2.0.11",
  "tokenizers",
  "tokio",
  "tracing",
@@ -14691,10 +14706,8 @@ dependencies = [
 [[package]]
 name = "rwuerstchen"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
- "anyhow",
- "async-trait",
  "candle-core",
  "candle-nn",
  "candle-transformers",
@@ -14732,9 +14745,9 @@ dependencies = [
 
 [[package]]
 name = "safetensors"
-version = "0.4.4"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7725d4d98fa515472f43a6e2bbf956c48e06b89bb50593a040e5945160214450"
+checksum = "44560c11236a6130a46ce36c836a62936dc81ebf8c36a37947423571be0e55b6"
 dependencies = [
  "serde",
  "serde_json",
@@ -15039,14 +15052,14 @@ dependencies = [
 [[package]]
 name = "segment-anything-rs"
 version = "0.3.2"
-source = "git+https://github.com/coasys/floneum.git?branch=coasys-1#0b704ea2f28df596e9a22ef6c18c66748b0f7262"
+source = "git+https://github.com/coasys/floneum.git?branch=coasys-2#1c2603fcc3bd89e5e93c47f8147e0168825b8378"
 dependencies = [
- "anyhow",
  "candle-core",
  "candle-nn",
  "candle-transformers",
  "hf-hub",
  "image 0.24.9",
+ "thiserror 2.0.11",
  "tracing",
 ]
 
@@ -16904,7 +16917,7 @@ dependencies = [
  "tauri-runtime",
  "tauri-runtime-wry",
  "tauri-utils",
- "thiserror 2.0.3",
+ "thiserror 2.0.11",
  "tokio",
  "tray-icon",
  "url",
@@ -16957,7 +16970,7 @@ dependencies = [
  "sha2 0.10.8",
  "syn 2.0.87",
  "tauri-utils",
- "thiserror 2.0.3",
+ "thiserror 2.0.11",
  "time 0.3.36",
  "url",
  "uuid 1.10.0",
@@ -17213,7 +17226,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tauri-utils",
- "thiserror 2.0.3",
+ "thiserror 2.0.11",
  "url",
  "windows 0.58.0",
 ]
@@ -17273,7 +17286,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "swift-rs",
- "thiserror 2.0.3",
+ "thiserror 2.0.11",
  "toml 0.8.19",
  "url",
  "urlpattern 0.3.0",
@@ -17477,11 +17490,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.3"
+version = "2.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c006c85c7651b3cf2ada4584faa36773bd07bac24acfb39f3c431b36d7e667aa"
+checksum = "d452f284b73e6d76dd36758a0c8684b1d5be31f92b89d07fd5822175732206fc"
 dependencies = [
- "thiserror-impl 2.0.3",
+ "thiserror-impl 2.0.11",
 ]
 
 [[package]]
@@ -17497,9 +17510,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.3"
+version = "2.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f077553d607adc1caf65430528a576c757a71ed73944b66ebb58ef2bbd243568"
+checksum = "26afc1baea8a989337eeb52b6e72a039780ce45c3edfcc9c5b9d112feeb173c2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -17636,9 +17649,9 @@ dependencies = [
 
 [[package]]
 name = "tokenizers"
-version = "0.19.1"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e500fad1dd3af3d626327e6a3fe5050e664a6eaa4708b8ca92f1794aaf73e6fd"
+checksum = "9ecededfed68a69bc657e486510089e255e53c3d38cc7d4d59c8742668ca2cae"
 dependencies = [
  "aho-corasick",
  "derive_builder 0.20.1",
@@ -18079,6 +18092,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "trait-variant"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70977707304198400eb4835a78f6a9f928bf41bba420deb8fdb175cd965d77a7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.87",
+]
+
+[[package]]
 name = "transpose"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -18271,7 +18295,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
  "cfg-if 1.0.0",
- "rand 0.8.5",
+ "rand 0.6.5",
  "static_assertions",
 ]
 
@@ -18491,6 +18515,48 @@ dependencies = [
  "memoffset 0.9.1",
  "tempfile",
  "winapi 0.3.9",
+]
+
+[[package]]
+name = "ug"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4eef2ebfc18c67a6dbcacd9d8a4d85e0568cc58c82515552382312c2730ea13"
+dependencies = [
+ "half 2.4.1",
+ "num",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.63",
+]
+
+[[package]]
+name = "ug-cuda"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c4dcab280ad0ef3957e153a82dcad608c954d02cf253b695322f502d1f8902e"
+dependencies = [
+ "cudarc",
+ "half 2.4.1",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.63",
+ "ug",
+]
+
+[[package]]
+name = "ug-metal"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e4ed1df2c20a1a138f993041f650cc84ff27aaefb4342b7f986e77d00e80799"
+dependencies = [
+ "half 2.4.1",
+ "metal 0.29.0",
+ "objc",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.63",
+ "ug",
 ]
 
 [[package]]
@@ -19595,7 +19661,7 @@ dependencies = [
  "log",
  "naga",
  "once_cell",
- "parking_lot 0.12.3",
+ "parking_lot 0.11.2",
  "profiling",
  "raw-window-handle 0.6.2",
  "ron",
@@ -19630,14 +19696,14 @@ dependencies = [
  "js-sys",
  "khronos-egl",
  "libc",
- "libloading 0.8.5",
+ "libloading 0.7.4",
  "log",
  "metal 0.28.0",
  "naga",
  "ndk-sys 0.5.0+25.2.9519653",
  "objc",
  "once_cell",
- "parking_lot 0.12.3",
+ "parking_lot 0.11.2",
  "profiling",
  "range-alloc",
  "raw-window-handle 0.6.2",
