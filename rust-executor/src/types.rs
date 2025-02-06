@@ -477,8 +477,17 @@ pub struct ModelApi {
 #[serde(rename_all = "camelCase")]
 pub struct LocalModel {
     pub file_name: String,
-    pub tokenizer_source: String,
-    pub model_parameters: String,
+    pub tokenizer_source: Option<TokenizerSource>,
+    pub huggingface_repo: Option<String>,
+    pub revision: Option<String>,
+}
+
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenizerSource {
+    pub repo: String,
+    pub revision: String,
+    pub file_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, GraphQLEnum, PartialEq, Default)]

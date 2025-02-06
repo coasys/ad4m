@@ -169,8 +169,9 @@ impl AIService {
                     model_type: ModelType::Embedding,
                     local: Some(LocalModel {
                         file_name: "bert".to_string(),
-                        tokenizer_source: String::new(),
-                        model_parameters: String::new(),
+                        tokenizer_source: None,
+                        huggingface_repo: None,
+                        revision: None,
                     }),
                     api: None,
                 })

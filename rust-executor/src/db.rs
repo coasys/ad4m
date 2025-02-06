@@ -4,7 +4,7 @@ use crate::graphql::graphql_types::{
 };
 use crate::types::{
     AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
-    ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff,
+    ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff, TokenizerSource,
 };
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::str::FromStr;
 use url::Url;
-use uuid::Uuid;
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -189,8 +188,11 @@ impl Ad4mDb {
                 model TEXT,
                 api_type TEXT,
                 local_file_name TEXT,
-                local_tokenizer_source TEXT,
-                local_model_parameters TEXT,
+                local_tokenizer_repo TEXT,
+                local_tokenizer_revision TEXT,
+                local_tokenizer_file_name TEXT,
+                local_huggingface_repo TEXT,
+                local_revision TEXT,
                 type TEXT NOT NULL
             )",
             [],
@@ -1099,10 +1101,10 @@ impl Ad4mDb {
     }
 
     pub fn add_model(&self, model: &ModelInput) -> Ad4mDbResult<String> {
-        let id = Uuid::new_v4().to_string();
+        let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO models (id, name, api_base_url, api_key, model, api_type, local_file_name, local_tokenizer_source, local_model_parameters, type)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO models (id, name, api_base_url, api_key, model, api_type, local_file_name, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, local_huggingface_repo, local_revision, type)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 id,
                 model.name,
@@ -1111,8 +1113,11 @@ impl Ad4mDb {
                 model.api.as_ref().map(|api| api.model.clone()),
                 model.api.as_ref().map(|api| serde_json::to_string(&api.api_type).unwrap()),
                 model.local.as_ref().map(|local| local.file_name.clone()),
-                model.local.as_ref().map(|local| local.tokenizer_source.clone()),
-                model.local.as_ref().map(|local| local.model_parameters.clone()),
+                model.local.as_ref().and_then(|local| local.tokenizer_source.as_ref().map(|ts| ts.repo.clone())),
+                model.local.as_ref().and_then(|local| local.tokenizer_source.as_ref().map(|ts| ts.revision.clone())),
+                model.local.as_ref().and_then(|local| local.tokenizer_source.as_ref().map(|ts| ts.file_name.clone())),
+                model.local.as_ref().and_then(|local| local.huggingface_repo.clone()),
+                model.local.as_ref().and_then(|local| local.revision.clone()),
                 serde_json::to_string(&model.model_type).unwrap(),
             ],
         )?;
@@ -1139,25 +1144,37 @@ impl Ad4mDb {
                     None
                 };
 
-                let local =
-                    if let (Some(file_name), Some(tokenizer_source), Some(model_parameters)) =
-                        (row.get(6)?, row.get(7)?, row.get(8)?)
-                    {
-                        Some(LocalModel {
+                let local: Option<LocalModel> = if let Some(file_name) = row.get::<_, Option<String>>(6)? {
+                    let tokenizer_source = if let (Some(repo), Some(revision), Some(file_name)) = (
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                    ) {
+                        Some(TokenizerSource {
+                            repo,
+                            revision,
                             file_name,
-                            tokenizer_source,
-                            model_parameters,
                         })
                     } else {
                         None
                     };
+
+                    Some(LocalModel {
+                        file_name,
+                        tokenizer_source,
+                        huggingface_repo: row.get::<_, Option<String>>(10)?,
+                        revision: row.get::<_, Option<String>>(11)?,
+                    })
+                } else {
+                    None
+                };
 
                 Ok(Model {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     api,
                     local,
-                    model_type: serde_json::from_str(&row.get::<_, String>(9)?).unwrap(),
+                    model_type: serde_json::from_str(&row.get::<_, String>(12)?).unwrap(),
                 })
             })
             .optional()?;
@@ -1183,13 +1200,26 @@ impl Ad4mDb {
                 None
             };
 
-            let local = if let (Some(file_name), Some(tokenizer_source), Some(model_parameters)) =
-                (row.get(6)?, row.get(7)?, row.get(8)?)
-            {
+            let local: Option<LocalModel> = if let Some(file_name) = row.get::<_, Option<String>>(6)? {
+                let tokenizer_source = if let (Some(repo), Some(revision), Some(file_name)) = (
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                ) {
+                    Some(TokenizerSource {
+                        repo,
+                        revision,
+                        file_name,
+                    })
+                } else {
+                    None
+                };
+
                 Some(LocalModel {
                     file_name,
                     tokenizer_source,
-                    model_parameters,
+                    huggingface_repo: row.get::<_, Option<String>>(10)?,
+                    revision: row.get::<_, Option<String>>(11)?,
                 })
             } else {
                 None
@@ -1200,7 +1230,7 @@ impl Ad4mDb {
                 name: row.get(1)?,
                 api,
                 local,
-                model_type: serde_json::from_str(&row.get::<_, String>(9)?).unwrap(),
+                model_type: serde_json::from_str(&row.get::<_, String>(12)?).unwrap(),
             })
         })?;
 
@@ -1220,11 +1250,15 @@ impl Ad4mDb {
         let local_tokenizer = model
             .local
             .as_ref()
-            .map(|local| local.tokenizer_source.clone());
-        let local_params = model
+            .and_then(|local| local.tokenizer_source.as_ref());
+        let local_huggingface_repo = model
             .local
             .as_ref()
-            .map(|local| local.model_parameters.clone());
+            .and_then(|local| local.huggingface_repo.clone());
+        let local_revision = model
+            .local
+            .as_ref()
+            .and_then(|local| local.revision.clone());
 
         self.conn.execute(
             "UPDATE models SET 
@@ -1234,10 +1268,13 @@ impl Ad4mDb {
                 model = ?4,
                 api_type = ?5,
                 local_file_name = ?6,
-                local_tokenizer_source = ?7,
-                local_model_parameters = ?8,
-                type = ?9
-             WHERE id = ?10",
+                local_tokenizer_repo = ?7,
+                local_tokenizer_revision = ?8,
+                local_tokenizer_file_name = ?9,
+                local_huggingface_repo = ?10,
+                local_revision = ?11,
+                type = ?12
+             WHERE id = ?13",
             params![
                 model.name,
                 api_base_url,
@@ -1245,8 +1282,11 @@ impl Ad4mDb {
                 api_model,
                 api_type,
                 local_file_name,
-                local_tokenizer,
-                local_params,
+                local_tokenizer.as_ref().map(|ts| ts.repo.clone()),
+                local_tokenizer.as_ref().map(|ts| ts.revision.clone()),
+                local_tokenizer.as_ref().map(|ts| ts.file_name.clone()),
+                local_huggingface_repo,
+                local_revision,
                 serde_json::to_string(&model.model_type).unwrap(),
                 id
             ],
@@ -1300,7 +1340,7 @@ impl Ad4mDb {
 mod tests {
     use super::*;
     use crate::{
-        graphql::graphql_types::{LocalModelInput, ModelApiInput},
+        graphql::graphql_types::{LocalModelInput, ModelApiInput, TokenizerSourceInput},
         types::{ExpressionProof, Link, LinkExpression, ModelApiType, ModelType},
     };
     use chrono::Utc;
@@ -1653,8 +1693,13 @@ mod tests {
             api: None,
             local: Some(LocalModelInput {
                 file_name: "test_model.bin".to_string(),
-                tokenizer_source: "test_tokenizer".to_string(),
-                model_parameters: "test_parameters".to_string(),
+                tokenizer_source: Some(TokenizerSourceInput {
+                    repo: "test_repo".to_string(),
+                    revision: "main".to_string(),
+                    file_name: "tokenizer.json".to_string(),
+                }),
+                huggingface_repo: Some("huggingface/test".to_string()),
+                revision: Some("main".to_string()),
             }),
             model_type: ModelType::Llm,
         };
@@ -1692,7 +1737,11 @@ mod tests {
         assert!(retrieved_model_local.api.is_none());
         assert!(retrieved_model_local.local.is_some());
         assert_eq!(
-            retrieved_model_local.local.as_ref().unwrap().file_name,
+            retrieved_model_local
+                .local
+                .as_ref()
+                .unwrap()
+                .file_name,
             "test_model.bin"
         );
         assert_eq!(
@@ -1700,16 +1749,21 @@ mod tests {
                 .local
                 .as_ref()
                 .unwrap()
-                .tokenizer_source,
-            "test_tokenizer"
+                .tokenizer_source
+                .as_ref()
+                .unwrap()
+                .repo,
+            "test_repo"
         );
         assert_eq!(
             retrieved_model_local
                 .local
                 .as_ref()
                 .unwrap()
-                .model_parameters,
-            "test_parameters"
+                .huggingface_repo
+                .as_ref()
+                .unwrap(),
+            "huggingface/test"
         );
         assert_eq!(retrieved_model_local.model_type, ModelType::Llm);
 
@@ -1798,8 +1852,13 @@ mod tests {
             name: "Test Embedding Model".to_string(),
             local: Some(LocalModelInput {
                 file_name: "embedding.bin".to_string(),
-                tokenizer_source: "embedding_tokenizer".to_string(),
-                model_parameters: "{}".to_string(),
+                tokenizer_source: Some(TokenizerSourceInput {
+                    repo: "test_repo".to_string(),
+                    revision: "main".to_string(),
+                    file_name: "tokenizer.json".to_string(),
+                }),
+                huggingface_repo: Some("huggingface/test".to_string()),
+                revision: Some("main".to_string()),
             }),
             api: None,
             model_type: ModelType::Embedding,
@@ -1941,8 +2000,13 @@ mod tests {
             api: None,
             local: Some(LocalModelInput {
                 file_name: "model.bin".to_string(),
-                tokenizer_source: "tokenizer".to_string(),
-                model_parameters: "{}".to_string(),
+                tokenizer_source: Some(TokenizerSourceInput {
+                    repo: "test_repo".to_string(),
+                    revision: "main".to_string(),
+                    file_name: "tokenizer.json".to_string(),
+                }),
+                huggingface_repo: Some("huggingface/test".to_string()),
+                revision: Some("main".to_string()),
             }),
             model_type: ModelType::Transcription,
         };
