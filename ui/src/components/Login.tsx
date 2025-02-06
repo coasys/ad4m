@@ -160,7 +160,7 @@ const Login = () => {
       const llm = { name: "LLM Model 1", modelType: "LLM" } as ModelInput;
       if (aiMode === "Local") {
         llm.local = {
-          fileName: "solar_10_7b_instruct",
+          fileName: "Qwen2.5.1-Coder-7B-Instruct",
           tokenizerSource: "",
           modelParameters: "",
         };
@@ -598,13 +598,14 @@ const Login = () => {
                 <a
                   onClick={() =>
                     open(
-                      "https://huggingface.co/TheBloke/SOLAR-10.7B-Instruct-v1.0-GGUF"
+                      "https://huggingface.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF"
                     )
                   }
                   style={{ cursor: "pointer" }}
                 >
-                  SOLAR 10.7b instruct
+                  Qwen2.5 Coder 7B Instruct
                 </a>
+                {" "}(4.68GB)
               </j-text>
             </j-flex>
           )}
