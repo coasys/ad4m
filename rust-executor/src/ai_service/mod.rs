@@ -78,10 +78,17 @@ struct LLMTaskRemoveRequest {
 
 #[allow(dead_code)]
 #[derive(Debug)]
+struct LLMTaskShutdownRequest {
+    pub result_sender: oneshot::Sender<()>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
 enum LLMTaskRequest {
     Spawn(LLMTaskSpawnRequest),
     Prompt(LLMTaskPromptRequest),
     Remove(LLMTaskRemoveRequest),
+    Shutdown(LLMTaskShutdownRequest),
 }
 
 enum LlmModel {
@@ -442,6 +449,19 @@ impl AIService {
                         Err(_timeout) => std::thread::sleep(idle_delay * 5),
                         Ok(None) => break,
                         Ok(Some(task_request)) => match task_request {
+                            LLMTaskRequest::Shutdown(shutdown_request) => {
+                                rt.block_on(publish_model_status(
+                                    model_config.id.clone(),
+                                    100.0,
+                                    "Shutting down",
+                                    true,
+                                    false,
+                                ));
+                                
+                                // Send confirmation before breaking
+                                let _ = shutdown_request.result_sender.send(());
+                                break;
+                            },
                             LLMTaskRequest::Spawn(spawn_request) => match model {
                                 LlmModel::Remote(_) => {
                                     task_descriptions.insert(
@@ -585,7 +605,7 @@ impl AIService {
                                 let _ = tasks.remove(&remove_request.task_id);
                                 let _ = task_descriptions.remove(&remove_request.task_id);
                                 let _ = remove_request.result_sender.send(());
-                            }
+                            },
                         },
                     }
                 }
@@ -944,11 +964,101 @@ impl AIService {
 
         publish_model_status(id.clone(), 100.0, "Loaded", true, false).await;
     }
+
+    pub async fn update_model(&self, model_id: String, model_config: ModelInput) -> Result<()> {
+        // First get the existing model to determine its type
+        let existing_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+            .map_err(|e| anyhow!("Database error: {}", e))?
+            .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
+
+        // Update the model in the database
+        Ad4mDb::with_global_instance(|db| db.update_model(&model_id, &model_config))
+            .map_err(|e| anyhow!("Failed to update model in database: {}", e))?;
+
+        // Get the updated model from the database
+        let updated_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+            .map_err(|e| anyhow!("Database error: {}", e))?
+            .ok_or_else(|| anyhow!("Model not found after update: {}", model_id))?;
+
+        match existing_model.model_type {
+            ModelType::Llm => {
+                // Shutdown the existing model thread
+                {
+                    let mut llm_channel = self.llm_channel.lock().await;
+                    if let Some(sender) = llm_channel.get(&model_id) {
+                        let (tx, rx) = oneshot::channel();
+                        sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
+                            result_sender: tx,
+                        }))?;
+                        
+                        // Wait for the thread to confirm shutdown
+                        let _ = rx.await;
+                        log::info!("LLM model thread for {} confirmed shutdown", model_id);
+                        
+                        // Remove the channel from the map
+                        llm_channel.remove(&model_id);
+                    }
+                }
+                
+
+                // Spawn the model with new configuration
+                log::info!("Spawning new LLM model thread for {} with updated config", model_id);
+                self.spawn_llm_model(updated_model).await?;
+            },
+            ModelType::Embedding => {
+                // TODO: Handle embedding model updates
+            },
+            ModelType::Transcription => {
+                // TODO: Handle transcription model updates
+            },
+        }
+
+        Ok(())
+    }
+
+    pub async fn remove_model(&self, model_id: String) -> Result<()> {
+        // First get the existing model to determine its type
+        let existing_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+            .map_err(|e| anyhow!("Database error: {}", e))?
+            .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
+
+        match existing_model.model_type {
+            ModelType::Llm => {
+                log::info!("Shutting down LLM model thread for {}", model_id);
+                // Shutdown the existing model thread
+                if let Some(sender) = self.llm_channel.lock().await.get(&model_id) {
+                    let (tx, rx) = oneshot::channel();
+                    sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
+                        result_sender: tx,
+                    }))?;
+                    
+                    // Wait for the thread to confirm shutdown
+                    let _ = rx.await;
+                    log::info!("LLM model thread for {} confirmed shutdown", model_id);
+                    
+                    // Remove the channel from the map
+                    self.llm_channel.lock().await.remove(&model_id);
+                }
+            },
+            ModelType::Embedding => {
+                // TODO: Handle embedding model removal
+            },
+            ModelType::Transcription => {
+                // TODO: Handle transcription model removal
+            },
+        }
+
+        // Remove the model from the database
+        Ad4mDb::with_global_instance(|db| db.remove_model(&model_id))
+            .map_err(|e| anyhow!("Failed to remove model from database: {}", e))?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::graphql::graphql_types::AIPromptExamplesInput;
+    use crate::graphql::graphql_types::{AIPromptExamplesInput, LocalModelInput};
 
     use super::*;
 
@@ -1035,5 +1145,86 @@ mod tests {
         let response = responses.join("\n");
         println!("Responses: {}", response);
         assert!(!response.is_empty())
+    }
+
+    #[tokio::test]
+    async fn test_model_lifecycle() {
+        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        let service = AIService::new().expect("initialization to work");
+
+        // Add a model
+        let model_input = ModelInput {
+            name: "Test Model".into(),
+            model_type: ModelType::Llm,
+            local: Some(LocalModelInput {
+                file_name: "llama_tiny".into(),
+                tokenizer_source: None,
+                huggingface_repo: None,
+                revision: None,
+            }),
+            api: None,
+        };
+
+        let model_id = service.add_model(model_input.clone()).await.expect("model to be added");
+
+        // Update the model
+        let updated_model = ModelInput {
+            name: "Updated Test Model".into(),
+            ..model_input.clone()
+        };
+        service.update_model(model_id.clone(), updated_model).await.expect("model to be updated");
+
+        // Verify the update
+        let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone())).expect("to get model");
+        assert_eq!(model.unwrap().name, "Updated Test Model");
+
+        // Remove the model
+        service.remove_model(model_id.clone()).await.expect("model to be removed");
+
+        // Verify removal
+        let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone())).expect("to get model");
+        assert!(model.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_model_update_with_tasks() {
+        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        let service = AIService::new().expect("initialization to work");
+
+        // Add a model
+        let model_input = ModelInput {
+            name: "Test Model".into(),
+            model_type: ModelType::Llm,
+            local: Some(LocalModelInput {
+                file_name: "llama_tiny".into(),
+                tokenizer_source: None,
+                huggingface_repo: None,
+                revision: None,
+            }),
+            api: None,
+        };
+
+        let model_id = service.add_model(model_input.clone()).await.expect("model to be added");
+
+        // Create a task using this model
+        let task = service.add_task(AITaskInput {
+            name: "Test task".into(),
+            model_id: model_id.clone(),
+            system_prompt: "Test prompt".into(),
+            prompt_examples: vec![],
+            meta_data: None,
+        }).await.expect("task to be created");
+
+        // Update the model
+        let updated_model = ModelInput {
+            name: "Updated Test Model".into(),
+            ..model_input.clone()
+        };
+        service.update_model(model_id.clone(), updated_model).await.expect("model to be updated");
+
+        // Verify the task still works
+        let response = service.prompt(task.task_id.clone(), "Test input".into())
+            .await.expect("prompt to work after model update");
+        assert!(!response.is_empty());
     }
 }

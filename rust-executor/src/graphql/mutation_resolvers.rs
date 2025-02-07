@@ -1229,8 +1229,17 @@ impl Mutation {
         model: ModelInput,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        Ad4mDb::with_global_instance(|db| db.update_model(&model_id, &model))
-            .map_err(|e| e.to_string())?;
+        
+        // Update the model using AIService
+        AIService::global_instance()
+            .await?
+            .update_model(model_id, model)
+            .await
+            .map_err(|e| FieldError::new(
+                "Failed to update model",
+                graphql_value!({ "error": e.to_string() }),
+            ))?;
+
         Ok(true)
     }
 
@@ -1240,7 +1249,17 @@ impl Mutation {
         model_id: String,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        Ad4mDb::with_global_instance(|db| db.remove_model(&model_id)).map_err(|e| e.to_string())?;
+        
+        // Remove the model using AIService
+        AIService::global_instance()
+            .await?
+            .remove_model(model_id)
+            .await
+            .map_err(|e| FieldError::new(
+                "Failed to remove model",
+                graphql_value!({ "error": e.to_string() }),
+            ))?;
+
         Ok(true)
     }
 
