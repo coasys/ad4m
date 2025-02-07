@@ -281,12 +281,13 @@ impl AIService {
             Device::Cpu
         }
     }
-    async fn build_local_llama_from_string(
+    async fn build_local_llama(
         model_id: String,
-        model_size_string: String,
+        model_config: LocalModel,
     ) -> Result<Llama> {
         publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
-        let llama = Llama::builder().with_source(match model_size_string.as_str() {
+        let llama = Llama::builder().with_source(match model_config.file_name.as_str() {
+            // First check model name shortcuts
             "Qwen2.5.1-Coder-7B-Instruct" => LlamaSource::new(FileSource::huggingface(
                 "bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF".to_string(),
                 "main".to_string(),
@@ -316,11 +317,32 @@ impl AIService {
 
             // Handle unknown models
             _ => {
-                log::error!("Unknown model string: {}", model_size_string);
-                return Err(anyhow::anyhow!(
-                    "Unknown model string: {}",
-                    model_size_string
-                ));
+                if let Some(repo) = model_config.huggingface_repo {
+                    let mut builder = LlamaSource::new(FileSource::huggingface(
+                        repo,
+                        model_config.revision.unwrap_or("main".to_string()),
+                        model_config.file_name,
+                    ));
+                    if let Some(tokenizer_source) = model_config.tokenizer_source {
+                        builder = builder.with_tokenizer(FileSource::huggingface(
+                            tokenizer_source.repo,
+                            tokenizer_source.revision,
+                            tokenizer_source.file_name,
+                        ));
+                    }
+                    builder
+                } else {
+                    log::error!(
+                        "Unknown model string: {} and no Huggingface repo provided. Don't know where to get model weights from for: {}", 
+                        model_config.file_name,
+                        model_id
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Unknown model string: {} and no Huggingface repo provided. Don't know where to get model weights from for: {}", 
+                        model_config.file_name,
+                        model_id
+                    ));
+                }
             }
         });
 
@@ -340,7 +362,7 @@ impl AIService {
         Ok(llama)
     }
 
-    async fn build_remote_gpt4(model_id: String, api_key: String, base_url: Url) -> ChatGPTClient {
+    async fn build_remote_client(model_id: String, api_key: String, base_url: Url) -> ChatGPTClient {
         let mut url = base_url;
         if let Some(segments) = url.path_segments() {
             if segments.clone().next() == Some("v1") {
@@ -370,12 +392,12 @@ impl AIService {
                 let maybe_model = rt
                     .block_on(async {
                         if let Some(local_model) = model_config.local {
-                            Self::build_local_llama_from_string(model_id, local_model.file_name)
+                            Self::build_local_llama(model_id, local_model)
                                 .await
                                 .map(LlmModel::Local)
                         } else if let Some(api) = model_config.api {
                             Ok(LlmModel::Remote((
-                                Self::build_remote_gpt4(model_id, api.api_key, api.base_url).await,
+                                Self::build_remote_client(model_id, api.api_key, api.base_url).await,
                                 api.model
                             )))
                         } else {
