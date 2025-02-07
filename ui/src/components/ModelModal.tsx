@@ -207,7 +207,28 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
 
       if (oldModel.modelType === "LLM") {
         setNewModels(llmModels);
-        setNewModel(oldModel.api ? "External API" : oldModel.local.fileName);
+        if (oldModel.api) {
+          setNewModel("External API");
+          setApiUrl(oldModel.api.baseUrl);
+          apiUrlRef.current = oldModel.api.baseUrl;
+          setApiKey(oldModel.api.apiKey);
+          apiKeyRef.current = oldModel.api.apiKey;
+        } else if (oldModel.local?.huggingfaceRepo) {
+          setNewModel("Custom Hugging Face Model");
+          setCustomHfModel({
+            huggingfaceRepo: oldModel.local.huggingfaceRepo,
+            revision: oldModel.local.revision || "main",
+            fileName: oldModel.local.fileName,
+            tokenizerSource: oldModel.local.tokenizerSource || {
+              repo: "",
+              revision: "main",
+              fileName: ""
+            }
+          });
+          setUseCustomTokenizer(!!oldModel.local.tokenizerSource);
+        } else {
+          setNewModel(oldModel.local.fileName);
+        }
       } else if (oldModel.modelType === "EMBEDDING") {
         setNewModels(embeddingModels);
         setNewModel(oldModel.local.fileName);
