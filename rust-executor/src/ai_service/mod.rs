@@ -1026,7 +1026,8 @@ impl AIService {
             ModelType::Llm => {
                 log::info!("Shutting down LLM model thread for {}", model_id);
                 // Shutdown the existing model thread
-                if let Some(sender) = self.llm_channel.lock().await.get(&model_id) {
+                let mut llm_channel = self.llm_channel.lock().await;
+                if let Some(sender) = llm_channel.get(&model_id) {
                     let (tx, rx) = oneshot::channel();
                     sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
                         result_sender: tx,
@@ -1037,7 +1038,7 @@ impl AIService {
                     log::info!("LLM model thread for {} confirmed shutdown", model_id);
                     
                     // Remove the channel from the map
-                    self.llm_channel.lock().await.remove(&model_id);
+                    llm_channel.remove(&model_id);
                 }
             },
             ModelType::Embedding => {
