@@ -1110,8 +1110,8 @@ impl AIService {
 
 #[cfg(test)]
 mod tests {
-    use crate::graphql::graphql_types::{AIPromptExamplesInput, LocalModelInput};
     use super::*;
+    use crate::graphql::graphql_types::{AIPromptExamplesInput, LocalModelInput};
 
     // TODO: We ignore these tests because they need a GPU to not take ages to run
     // BUT: the model lifecycle and update tests show another problem:
@@ -1119,7 +1119,7 @@ mod tests {
     // the one global DB gets reseted for each test.
     // -> need to refactor this so that services like AIService or PerspectiveInstance
     // get an DB reference passed in, so we can write proper unit tests.
-    
+
     #[ignore]
     #[tokio::test]
     async fn test_embedding() {
