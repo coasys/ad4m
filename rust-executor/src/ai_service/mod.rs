@@ -305,6 +305,7 @@ impl AIService {
             "deepseek_r1_distill_qwen_14b" => LlamaSource::deepseek_r1_distill_qwen_14b(),
             "deepseek_r1_distill_llama_8b" => LlamaSource::deepseek_r1_distill_llama_8b(),
             "llama_tiny" => LlamaSource::tiny_llama_1_1b(),
+            "llama_tiny_1_1b_chat" => LlamaSource::tiny_llama_1_1b_chat(),
             "llama_7b" => LlamaSource::llama_7b(),
             "llama_7b_chat" => LlamaSource::llama_7b_chat(),
             "llama_7b_code" => LlamaSource::llama_7b_code(),
@@ -1158,7 +1159,7 @@ mod tests {
             name: "Test Model".into(),
             model_type: ModelType::Llm,
             local: Some(LocalModelInput {
-                file_name: "llama_tiny".into(),
+                file_name: "llama_tiny_1_1b_chat".into(),
                 tokenizer_source: None,
                 huggingface_repo: None,
                 revision: None,
@@ -1197,7 +1198,7 @@ mod tests {
             name: "Test Model".into(),
             model_type: ModelType::Llm,
             local: Some(LocalModelInput {
-                file_name: "llama_tiny".into(),
+                file_name: "llama_tiny_1_1b_chat".into(),
                 tokenizer_source: None,
                 huggingface_repo: None,
                 revision: None,
