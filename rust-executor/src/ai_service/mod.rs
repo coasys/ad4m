@@ -322,13 +322,21 @@ impl AIService {
 
             // Handle unknown models
             _ => {
-                if let Some(repo) = model_config.huggingface_repo {
+                if let Some(repo) = model_config.huggingface_repo.clone() {
+                    log::info!("Trying to load model from Huggingface:\n
+                        model_config.file_name: {:?}\n
+                        model_config.huggingface_repo: {:?}\n
+                        model_config.revision: {:?}", model_config.file_name, model_config.huggingface_repo, model_config.revision);
                     let mut builder = LlamaSource::new(FileSource::huggingface(
                         repo,
                         model_config.revision.unwrap_or("main".to_string()),
                         model_config.file_name,
                     ));
                     if let Some(tokenizer_source) = model_config.tokenizer_source {
+                        log::info!("Trying to load tokenizer from Huggingface:\n
+                            tokenizer_source.repo: {:?}\n
+                            tokenizer_source.revision: {:?}\n
+                            tokenizer_source.file_name: {:?}", tokenizer_source.repo, tokenizer_source.revision, tokenizer_source.file_name);
                         builder = builder.with_tokenizer(FileSource::huggingface(
                             tokenizer_source.repo,
                             tokenizer_source.revision,
@@ -405,6 +413,13 @@ impl AIService {
             move || {
                 let model_id = model_config.id.clone();
                 let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(publish_model_status(
+                    model_config.id.clone(),
+                    100.0,
+                    "Spawning model thread...",
+                    true,
+                    false,
+                ));
                 let maybe_model = rt
                     .block_on(async {
                         if let Some(local_model) = model_config.local {
@@ -426,7 +441,7 @@ impl AIService {
                     Err(e) => {
                         error!("Failed to build LLM model: {}", e);
                         rt.block_on(publish_model_status(
-                            model_config.id,
+                            model_config.id.clone(),
                             100.0,
                             &format!("Failed to build LLM model: {}", e),
                             true,
@@ -978,6 +993,7 @@ impl AIService {
     }
 
     pub async fn update_model(&self, model_id: String, model_config: ModelInput) -> Result<()> {
+        log::info!("Updating model: {} with: {:?}", model_id, model_config);
         // First get the existing model to determine its type
         let existing_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
             .map_err(|e| anyhow!("Database error: {}", e))?
@@ -992,23 +1008,28 @@ impl AIService {
             .map_err(|e| anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow!("Model not found after update: {}", model_id))?;
 
+        log::info!("Updated model in DB: {:?}", updated_model);
+
         match existing_model.model_type {
             ModelType::Llm => {
                 // Shutdown the existing model thread
                 {
                     let mut llm_channel = self.llm_channel.lock().await;
                     if let Some(sender) = llm_channel.get(&model_id) {
+                        log::info!("Shutting down LLM model thread for {}", model_id);
                         let (tx, rx) = oneshot::channel();
-                        sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
+                        if let Ok(()) = sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
                             result_sender: tx,
-                        }))?;
-
-                        // Wait for the thread to confirm shutdown
-                        let _ = rx.await;
-                        log::info!("LLM model thread for {} confirmed shutdown", model_id);
+                        })) {
+                            // Wait for the thread to confirm shutdown
+                            let _ = rx.await;
+                            log::info!("LLM model thread for {} confirmed shutdown", model_id);
+                        }
 
                         // Remove the channel from the map
                         llm_channel.remove(&model_id);
+                    } else {
+                        log::info!("LLM model thread for {} not found. Nothing to shutdown", model_id);
                     }
                 }
 
