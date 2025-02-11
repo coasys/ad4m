@@ -210,7 +210,7 @@ impl AIService {
 
     async fn init_model(&self, model: crate::types::Model) -> Result<()> {
         match model.model_type {
-            ModelType::Llm => self.spawn_llm_model(model).await?,
+            ModelType::Llm => self.spawn_llm_model(model, None).await?,
             ModelType::Embedding => self.spawn_embedding_model(model).await,
             ModelType::Transcription => Self::load_transcriber_model(&model).await,
         };
@@ -383,7 +383,7 @@ impl AIService {
         client
     }
 
-    async fn spawn_llm_model(&self, model_config: crate::types::Model) -> Result<()> {
+    async fn spawn_llm_model(&self, model_config: crate::types::Model, model_ready_sender: Option<oneshot::Sender<()>>) -> Result<()> {
         if model_config.local.is_none() && model_config.api.is_none() {
             return Err(anyhow!(
                 "AI model definition {} doesn't have a body, nothing to spawn!",
@@ -392,7 +392,7 @@ impl AIService {
         }
 
         let (llama_tx, mut llama_rx) = mpsc::unbounded_channel::<LLMTaskRequest>();
-        let model_id = model_config.id.clone();
+        self.llm_channel.lock().await.insert(model_config.id.clone(), llama_tx);
         thread::spawn({
             move || {
                 let model_id = model_config.id.clone();
@@ -439,6 +439,10 @@ impl AIService {
                     true,
                     true,
                 ));
+
+                if let Some(model_ready_sender) = model_ready_sender {
+                    let _ = model_ready_sender.send(());
+                }
 
                 loop {
                     match rt.block_on(async {
@@ -613,7 +617,6 @@ impl AIService {
             }
         });
 
-        self.llm_channel.lock().await.insert(model_id, llama_tx);
         Ok(())
     }
 
@@ -1004,7 +1007,17 @@ impl AIService {
 
                 // Spawn the model with new configuration
                 log::info!("Spawning new LLM model thread for {} with updated config", model_id);
-                self.spawn_llm_model(updated_model).await?;
+                let (model_ready_tx, model_ready_rx) = oneshot::channel();
+                self.spawn_llm_model(updated_model, Some(model_ready_tx)).await?;
+                model_ready_rx.await?;
+
+                // Respawn all tasks for this model
+                let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
+                    .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
+
+                for task in tasks.into_iter().filter(|t| t.model_id == model_id) {
+                    self.spawn_task(task).await?;
+                }
             },
             ModelType::Embedding => {
                 // TODO: Handle embedding model updates
