@@ -851,12 +851,13 @@ impl PerspectiveInstance {
         link_expressions: Vec<LinkExpression>,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let handle = self.persisted.lock().await.clone();
-        
+
         // Filter to only existing links and collect their statuses
         let mut existing_links = Vec::new();
         for link in link_expressions {
-            if let Some((link_from_db, status)) = 
-                Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &link))? {
+            if let Some((link_from_db, status)) =
+                Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &link))?
+            {
                 existing_links.push((link_from_db, status));
             }
         }
@@ -871,14 +872,14 @@ impl PerspectiveInstance {
 
         // Create diff from links that exist
         let diff = PerspectiveDiff::from_removals(links.clone());
-        
+
         // Create decorated versions
         let decorated_links: Vec<DecoratedLinkExpression> = links
             .into_iter()
             .zip(statuses.iter())
             .map(|(link, status)| DecoratedLinkExpression::from((link, status.clone())))
             .collect();
-        
+
         let decorated_diff = DecoratedPerspectiveDiff::from_removals(decorated_links.clone());
 
         // Remove from DB
@@ -890,7 +891,8 @@ impl PerspectiveInstance {
         self.pubsub_publish_diff(decorated_diff).await;
 
         // Only commit shared links by filtering decorated_links
-        let shared_links: Vec<LinkExpression> = decorated_links.iter()
+        let shared_links: Vec<LinkExpression> = decorated_links
+            .iter()
             .filter(|link| link.status == Some(LinkStatus::Shared))
             .map(|link| link.clone().into())
             .collect();
@@ -906,7 +908,7 @@ impl PerspectiveInstance {
         *(self.links_have_changed.lock().await) = true;
         Ok(decorated_links)
     }
-    
+
     async fn get_links_local(
         &self,
         query: &LinkQuery,

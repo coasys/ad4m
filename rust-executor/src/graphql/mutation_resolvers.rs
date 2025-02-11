@@ -834,7 +834,10 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        let links = links.into_iter().map(|l| LinkExpression::try_from(l)).collect::<Result<Vec<_>, _>>()?;
+        let links = links
+            .into_iter()
+            .map(|l| LinkExpression::try_from(l))
+            .collect::<Result<Vec<_>, _>>()?;
         let removed_links = perspective.remove_links(links).await?;
         Ok(removed_links)
     }
