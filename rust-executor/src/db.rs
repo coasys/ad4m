@@ -1144,7 +1144,9 @@ impl Ad4mDb {
                     None
                 };
 
-                let local: Option<LocalModel> = if let Some(file_name) = row.get::<_, Option<String>>(6)? {
+                let local: Option<LocalModel> = if let Some(file_name) =
+                    row.get::<_, Option<String>>(6)?
+                {
                     let tokenizer_source = if let (Some(repo), Some(revision), Some(file_name)) = (
                         row.get::<_, Option<String>>(7)?,
                         row.get::<_, Option<String>>(8)?,
@@ -1200,30 +1202,31 @@ impl Ad4mDb {
                 None
             };
 
-            let local: Option<LocalModel> = if let Some(file_name) = row.get::<_, Option<String>>(6)? {
-                let tokenizer_source = if let (Some(repo), Some(revision), Some(file_name)) = (
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, Option<String>>(9)?,
-                ) {
-                    Some(TokenizerSource {
-                        repo,
-                        revision,
+            let local: Option<LocalModel> =
+                if let Some(file_name) = row.get::<_, Option<String>>(6)? {
+                    let tokenizer_source = if let (Some(repo), Some(revision), Some(file_name)) = (
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                    ) {
+                        Some(TokenizerSource {
+                            repo,
+                            revision,
+                            file_name,
+                        })
+                    } else {
+                        None
+                    };
+
+                    Some(LocalModel {
                         file_name,
+                        tokenizer_source,
+                        huggingface_repo: row.get::<_, Option<String>>(10)?,
+                        revision: row.get::<_, Option<String>>(11)?,
                     })
                 } else {
                     None
                 };
-
-                Some(LocalModel {
-                    file_name,
-                    tokenizer_source,
-                    huggingface_repo: row.get::<_, Option<String>>(10)?,
-                    revision: row.get::<_, Option<String>>(11)?,
-                })
-            } else {
-                None
-            };
 
             Ok(Model {
                 id: row.get(0)?,
@@ -1737,11 +1740,7 @@ mod tests {
         assert!(retrieved_model_local.api.is_none());
         assert!(retrieved_model_local.local.is_some());
         assert_eq!(
-            retrieved_model_local
-                .local
-                .as_ref()
-                .unwrap()
-                .file_name,
+            retrieved_model_local.local.as_ref().unwrap().file_name,
             "test_model.bin"
         );
         assert_eq!(

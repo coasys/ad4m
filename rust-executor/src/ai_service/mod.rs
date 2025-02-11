@@ -288,10 +288,7 @@ impl AIService {
             Device::Cpu
         }
     }
-    async fn build_local_llama(
-        model_id: String,
-        model_config: LocalModel,
-    ) -> Result<Llama> {
+    async fn build_local_llama(model_id: String, model_config: LocalModel) -> Result<Llama> {
         publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
         let llama = Llama::builder().with_source(match model_config.file_name.as_str() {
             // First check model name shortcuts
@@ -370,7 +367,11 @@ impl AIService {
         Ok(llama)
     }
 
-    async fn build_remote_client(model_id: String, api_key: String, base_url: Url) -> ChatGPTClient {
+    async fn build_remote_client(
+        model_id: String,
+        api_key: String,
+        base_url: Url,
+    ) -> ChatGPTClient {
         let mut url = base_url;
         if let Some(segments) = url.path_segments() {
             if segments.clone().next() == Some("v1") {
@@ -383,7 +384,11 @@ impl AIService {
         client
     }
 
-    async fn spawn_llm_model(&self, model_config: crate::types::Model, model_ready_sender: Option<oneshot::Sender<()>>) -> Result<()> {
+    async fn spawn_llm_model(
+        &self,
+        model_config: crate::types::Model,
+        model_ready_sender: Option<oneshot::Sender<()>>,
+    ) -> Result<()> {
         if model_config.local.is_none() && model_config.api.is_none() {
             return Err(anyhow!(
                 "AI model definition {} doesn't have a body, nothing to spawn!",
@@ -392,7 +397,10 @@ impl AIService {
         }
 
         let (llama_tx, mut llama_rx) = mpsc::unbounded_channel::<LLMTaskRequest>();
-        self.llm_channel.lock().await.insert(model_config.id.clone(), llama_tx);
+        self.llm_channel
+            .lock()
+            .await
+            .insert(model_config.id.clone(), llama_tx);
         thread::spawn({
             move || {
                 let model_id = model_config.id.clone();
@@ -462,11 +470,11 @@ impl AIService {
                                     true,
                                     false,
                                 ));
-                                
+
                                 // Send confirmation before breaking
                                 let _ = shutdown_request.result_sender.send(());
                                 break;
-                            },
+                            }
                             LLMTaskRequest::Spawn(spawn_request) => match model {
                                 LlmModel::Remote(_) => {
                                     task_descriptions.insert(
@@ -610,7 +618,7 @@ impl AIService {
                                 let _ = tasks.remove(&remove_request.task_id);
                                 let _ = task_descriptions.remove(&remove_request.task_id);
                                 let _ = remove_request.result_sender.send(());
-                            },
+                            }
                         },
                     }
                 }
@@ -994,21 +1002,24 @@ impl AIService {
                         sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
                             result_sender: tx,
                         }))?;
-                        
+
                         // Wait for the thread to confirm shutdown
                         let _ = rx.await;
                         log::info!("LLM model thread for {} confirmed shutdown", model_id);
-                        
+
                         // Remove the channel from the map
                         llm_channel.remove(&model_id);
                     }
                 }
-                
 
                 // Spawn the model with new configuration
-                log::info!("Spawning new LLM model thread for {} with updated config", model_id);
+                log::info!(
+                    "Spawning new LLM model thread for {} with updated config",
+                    model_id
+                );
                 let (model_ready_tx, model_ready_rx) = oneshot::channel();
-                self.spawn_llm_model(updated_model, Some(model_ready_tx)).await?;
+                self.spawn_llm_model(updated_model, Some(model_ready_tx))
+                    .await?;
                 model_ready_rx.await?;
 
                 // Respawn all tasks for this model
@@ -1018,13 +1029,13 @@ impl AIService {
                 for task in tasks.into_iter().filter(|t| t.model_id == model_id) {
                     self.spawn_task(task).await?;
                 }
-            },
+            }
             ModelType::Embedding => {
                 // TODO: Handle embedding model updates
-            },
+            }
             ModelType::Transcription => {
                 // TODO: Handle transcription model updates
-            },
+            }
         }
 
         Ok(())
@@ -1046,21 +1057,21 @@ impl AIService {
                     sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
                         result_sender: tx,
                     }))?;
-                    
+
                     // Wait for the thread to confirm shutdown
                     let _ = rx.await;
                     log::info!("LLM model thread for {} confirmed shutdown", model_id);
-                    
+
                     // Remove the channel from the map
                     llm_channel.remove(&model_id);
                 }
-            },
+            }
             ModelType::Embedding => {
                 // TODO: Handle embedding model removal
-            },
+            }
             ModelType::Transcription => {
                 // TODO: Handle transcription model removal
-            },
+            }
         }
 
         // Remove the model from the database
@@ -1180,24 +1191,35 @@ mod tests {
             api: None,
         };
 
-        let model_id = service.add_model(model_input.clone()).await.expect("model to be added");
+        let model_id = service
+            .add_model(model_input.clone())
+            .await
+            .expect("model to be added");
 
         // Update the model
         let updated_model = ModelInput {
             name: "Updated Test Model".into(),
             ..model_input.clone()
         };
-        service.update_model(model_id.clone(), updated_model).await.expect("model to be updated");
+        service
+            .update_model(model_id.clone(), updated_model)
+            .await
+            .expect("model to be updated");
 
         // Verify the update
-        let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone())).expect("to get model");
+        let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+            .expect("to get model");
         assert_eq!(model.unwrap().name, "Updated Test Model");
 
         // Remove the model
-        service.remove_model(model_id.clone()).await.expect("model to be removed");
+        service
+            .remove_model(model_id.clone())
+            .await
+            .expect("model to be removed");
 
         // Verify removal
-        let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone())).expect("to get model");
+        let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+            .expect("to get model");
         assert!(model.is_none());
     }
 
@@ -1219,27 +1241,38 @@ mod tests {
             api: None,
         };
 
-        let model_id = service.add_model(model_input.clone()).await.expect("model to be added");
+        let model_id = service
+            .add_model(model_input.clone())
+            .await
+            .expect("model to be added");
 
         // Create a task using this model
-        let task = service.add_task(AITaskInput {
-            name: "Test task".into(),
-            model_id: model_id.clone(),
-            system_prompt: "Test prompt".into(),
-            prompt_examples: vec![],
-            meta_data: None,
-        }).await.expect("task to be created");
+        let task = service
+            .add_task(AITaskInput {
+                name: "Test task".into(),
+                model_id: model_id.clone(),
+                system_prompt: "Test prompt".into(),
+                prompt_examples: vec![],
+                meta_data: None,
+            })
+            .await
+            .expect("task to be created");
 
         // Update the model
         let updated_model = ModelInput {
             name: "Updated Test Model".into(),
             ..model_input.clone()
         };
-        service.update_model(model_id.clone(), updated_model).await.expect("model to be updated");
+        service
+            .update_model(model_id.clone(), updated_model)
+            .await
+            .expect("model to be updated");
 
         // Verify the task still works
-        let response = service.prompt(task.task_id.clone(), "Test input".into())
-            .await.expect("prompt to work after model update");
+        let response = service
+            .prompt(task.task_id.clone(), "Test input".into())
+            .await
+            .expect("prompt to work after model update");
         assert!(!response.is_empty());
     }
 }
