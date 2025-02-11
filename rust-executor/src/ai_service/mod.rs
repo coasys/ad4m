@@ -1018,9 +1018,11 @@ impl AIService {
                     if let Some(sender) = llm_channel.get(&model_id) {
                         log::info!("Shutting down LLM model thread for {}", model_id);
                         let (tx, rx) = oneshot::channel();
-                        if let Ok(()) = sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
-                            result_sender: tx,
-                        })) {
+                        if let Ok(()) =
+                            sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
+                                result_sender: tx,
+                            }))
+                        {
                             // Wait for the thread to confirm shutdown
                             let _ = rx.await;
                             log::info!("LLM model thread for {} confirmed shutdown", model_id);
@@ -1029,7 +1031,10 @@ impl AIService {
                         // Remove the channel from the map
                         llm_channel.remove(&model_id);
                     } else {
-                        log::info!("LLM model thread for {} not found. Nothing to shutdown", model_id);
+                        log::info!(
+                            "LLM model thread for {} not found. Nothing to shutdown",
+                            model_id
+                        );
                     }
                 }
 
