@@ -1111,9 +1111,15 @@ impl AIService {
 #[cfg(test)]
 mod tests {
     use crate::graphql::graphql_types::{AIPromptExamplesInput, LocalModelInput};
-
     use super::*;
 
+    // TODO: We ignore these tests because they need a GPU to not take ages to run
+    // BUT: the model lifecycle and update tests show another problem:
+    // We can't run them in parallel with each other or other tests because
+    // the one global DB gets reseted for each test.
+    // -> need to refactor this so that services like AIService or PerspectiveInstance
+    // get an DB reference passed in, so we can write proper unit tests.
+    
     #[ignore]
     #[tokio::test]
     async fn test_embedding() {
@@ -1199,6 +1205,7 @@ mod tests {
         assert!(!response.is_empty())
     }
 
+    #[ignore]
     #[tokio::test]
     async fn test_model_lifecycle() {
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
@@ -1249,6 +1256,7 @@ mod tests {
         assert!(model.is_none());
     }
 
+    #[ignore]
     #[tokio::test]
     async fn test_model_update_with_tasks() {
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
