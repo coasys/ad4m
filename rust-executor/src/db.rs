@@ -1052,7 +1052,7 @@ impl Ad4mDb {
             }
 
             // Reduce count and try again
-            count = count / 2;
+            count /= 2;
         }
     }
 

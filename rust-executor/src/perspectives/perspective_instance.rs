@@ -498,7 +498,7 @@ impl PerspectiveInstance {
 
         let ok = match commit_result {
             Ok(Some(rev)) => {
-                if rev.trim().len() == 0 {
+                if rev.trim().is_empty() {
                     log::warn!("Committed but got no revision from LinkLanguage!\nStoring in pending diffs for later");
                     false
                 } else {
@@ -1553,8 +1553,10 @@ impl PerspectiveInstance {
         let mut object: HashMap<String, String> = HashMap::new();
 
         // Get author and timestamp from the first link mentioning base as source
-        let mut base_query = LinkQuery::default();
-        base_query.source = Some(base_expression.clone());
+        let base_query = LinkQuery {
+            source: Some(base_expression.clone()),
+            ..Default::default()
+        };
         let base_links = self.get_links(&base_query).await?;
         let first_link = base_links
             .first()

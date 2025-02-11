@@ -20,7 +20,7 @@ pub fn prolog_value_to_json_tring(value: Value) -> String {
         Value::Integer(i) => format!("{}", i),
         Value::Float(f) => format!("{}", f),
         Value::Rational(r) => format!("{}", r),
-        Value::Atom(a) => format!("{}", a.as_str()),
+        Value::Atom(a) => a,
         Value::String(s) => {
             if let Err(_e) = serde_json::from_str::<serde_json::Value>(s.as_str()) {
                 //treat as string literal
