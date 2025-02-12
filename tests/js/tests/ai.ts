@@ -9,6 +9,11 @@ import { ModelInput } from '@coasys/ad4m/lib/src/ai/AIResolver';
 export default function aiTests(testContext: TestContext) {
     return () => {
         describe('AI service', () => {
+            // This is used in the skipped tests below
+            // They are skipped for CI, run on local device with GPU
+            let testModelFileName: string = "llama_3_1_8b_chat"
+            let testModelId: string = ""
+            
             it("can perform Model CRUD operations", async () => {
                 const ad4mClient = testContext.ad4mClient!
 
@@ -32,8 +37,13 @@ export default function aiTests(testContext: TestContext) {
                     name: "TestLocalModel",
                     local: {
                         fileName: "test_model.bin",
-                        tokenizerSource: "test_tokenizer.json",
-                        modelParameters: JSON.stringify({ param1: "value1", param2: "value2" })
+                        tokenizerSource: {
+                            repo: "test-repo",
+                            revision: "main",
+                            fileName: "tokenizer.json"
+                        },
+                        huggingfaceRepo: "test-repo",
+                        revision: "main"
                     },
                     modelType: "EMBEDDING"
                 }
@@ -58,8 +68,11 @@ export default function aiTests(testContext: TestContext) {
                 expect(addedLocalModel).to.exist
                 expect(addedLocalModel?.id).to.equal(addLocalResult)
                 expect(addedLocalModel?.local?.fileName).to.equal("test_model.bin")
-                expect(addedLocalModel?.local?.tokenizerSource).to.equal("test_tokenizer.json")
-                expect(addedLocalModel?.local?.modelParameters).to.deep.equal(JSON.stringify({ param1: "value1", param2: "value2" }))
+                expect(addedLocalModel?.local?.tokenizerSource?.repo).to.equal("test-repo")
+                expect(addedLocalModel?.local?.tokenizerSource?.revision).to.equal("main")
+                expect(addedLocalModel?.local?.tokenizerSource?.fileName).to.equal("tokenizer.json")
+                expect(addedLocalModel?.local?.huggingfaceRepo).to.equal("test-repo")
+                expect(addedLocalModel?.local?.revision).to.equal("main")
 
                 // Test removing models
                 const removeApiResult = await ad4mClient.ai.removeModel(addedApiModel!.id)
@@ -102,18 +115,51 @@ export default function aiTests(testContext: TestContext) {
                 expect(addedModel).to.exist
 
                 // Create updated model data
-                const updatedModel: ModelInput = {
+                const bogusModelUrls: ModelInput = {
                     name: "UpdatedModel",
                     local: {
                         fileName: "updated_model.bin",
-                        tokenizerSource: "updated_tokenizer.json",
-                        modelParameters: JSON.stringify({ updated: "value" })
+                        tokenizerSource: {
+                            repo: "updated-repo",
+                            revision: "main",
+                            fileName: "updated_tokenizer.json"
+                        },
+                        huggingfaceRepo: "updated-repo",
+                        revision: "main"
                     },
                     modelType: "EMBEDDING"
                 }
 
                 // Update the model
-                const updateResult = await ad4mClient.ai.updateModel(addedModel!.id, updatedModel)
+                let updateResult = false
+                let error = {}
+                try {
+                    updateResult = await ad4mClient.ai.updateModel(addedModel!.id, bogusModelUrls)
+                }catch(e) {
+                    //@ts-ignore
+                    error = e
+                    console.log(error)
+                }
+                expect(updateResult).to.be.false
+                expect(error).to.have.property('message')
+                //@ts-ignore
+                expect(error.message).to.include('Failed to update model')
+                
+
+                // Create updated model data
+                const updatedModel: ModelInput = {
+                    name: "UpdatedModel",
+                    api: {
+                        baseUrl: "https://api.example.com/v2",
+                        apiKey: "updated-api-key", 
+                        model: "gpt-4",
+                        apiType: "OPEN_AI"
+                    },
+                    modelType: "LLM"
+                }
+
+                updateResult = await ad4mClient.ai.updateModel(addedModel!.id, updatedModel)
+                
                 expect(updateResult).to.be.true
 
                 // Verify the update
@@ -121,15 +167,87 @@ export default function aiTests(testContext: TestContext) {
                 const retrievedModel = updatedModels.find(model => model.id === addedModel!.id)
                 expect(retrievedModel).to.exist
                 expect(retrievedModel?.name).to.equal("UpdatedModel")
-                expect(retrievedModel?.api).to.be.null
-                expect(retrievedModel?.local?.fileName).to.equal("updated_model.bin")
-                expect(retrievedModel?.local?.tokenizerSource).to.equal("updated_tokenizer.json")
-                expect(retrievedModel?.local?.modelParameters).to.equal(JSON.stringify({ updated: "value" }))
-                expect(retrievedModel?.modelType).to.equal("EMBEDDING")
+                expect(retrievedModel?.local).to.be.null
+                expect(retrievedModel?.api?.baseUrl).to.equal("https://api.example.com/v2")
+                expect(retrievedModel?.api?.apiKey).to.equal("updated-api-key")
+                expect(retrievedModel?.api?.model).to.equal("gpt-4")
+                expect(retrievedModel?.api?.apiType).to.equal("OPEN_AI")
+                expect(retrievedModel?.modelType).to.equal("LLM")
 
                 // Clean up
                 const removeResult = await ad4mClient.ai.removeModel(addedModel!.id)
                 expect(removeResult).to.be.true
+            })
+
+            it.skip('can update model and verify it works', async () => {
+                const ad4mClient = testContext.ad4mClient!
+
+                // Create initial model
+                const initialModel: ModelInput = {
+                    name: "TestModel",
+                    local: {
+                        fileName: "llama_tiny_1_1b_chat"
+                    },
+                    modelType: "LLM"
+                }
+
+                // Add initial model
+                const modelId = await ad4mClient.ai.addModel(initialModel)
+                expect(modelId).to.be.a.string
+
+                // Wait for model to be loaded
+                let status;
+                do {
+                    status = await ad4mClient.ai.modelLoadingStatus(modelId);
+                    await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second between checks
+                } while (status.progress < 100);
+
+                testModelId = modelId
+
+                // Create task using "default" as model_id
+                const task = await ad4mClient.ai.addTask(
+                    "test-task",
+                    modelId,
+                    "You are a helpful assistant",
+                    [{ input: "Say hi", output: "Hello!" }]
+                )
+
+                // Test that initial model works
+                const prompt = "Say hello"
+                const initialResponse = await ad4mClient.ai.prompt(task.taskId, prompt)
+                expect(initialResponse).to.be.a.string
+                expect(initialResponse.length).to.be.greaterThan(0)
+
+                // Create updated model config
+                const updatedModel: ModelInput = {
+                    name: "UpdatedTestModel",
+                    local: { fileName: testModelFileName },
+                    modelType: "LLM"
+                }
+
+                // Update the model
+                const updateResult = await ad4mClient.ai.updateModel(modelId, updatedModel)
+                expect(updateResult).to.be.true
+
+                // Wait for model to be loaded
+                do {
+                    status = await ad4mClient.ai.modelLoadingStatus(modelId);
+                    await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second between checks
+                } while (status.progress < 100);
+
+                // Verify model was updated in DB
+                const models = await ad4mClient.ai.getModels()
+                const retrievedModel = models.find(m => m.id === modelId)
+                expect(retrievedModel).to.exist
+                expect(retrievedModel?.name).to.equal("UpdatedTestModel")
+                expect(retrievedModel?.local?.fileName).to.equal(testModelFileName)
+
+                // Test that updated model still works
+                const updatedResponse = await ad4mClient.ai.prompt(task.taskId, prompt)
+                expect(updatedResponse).to.be.a.string 
+                expect(updatedResponse.length).to.be.greaterThan(0)
+
+                // keep model around for other tests
             })
 
             it ('AI model status', async () => {
@@ -166,37 +284,18 @@ export default function aiTests(testContext: TestContext) {
                 expect(defaultModel.api?.baseUrl).to.equal("https://api.example.com/")
 
                 // Clean up
-                await ad4mClient.ai.removeModel("TestDefaultApiModel")
+                await ad4mClient.ai.removeModel(id)
             })
 
             it.skip('can use "default" as model_id in tasks and prompting works', async () => {
                 const ad4mClient = testContext.ad4mClient!
-                
-                // Create a test model and set as default
-                const modelInput: ModelInput = {
-                    name: "TestDefaultModel",
-                    local: {
-                        fileName: "llama_tiny",
-                        tokenizerSource: "test_tokenizer.json",
-                        modelParameters: JSON.stringify({ param1: "value1" })
-                    },
-                    modelType: "LLM"
-                }
-                const modelId = await ad4mClient.ai.addModel(modelInput)
-                await ad4mClient.ai.setDefaultModel("LLM", modelId)
-
-                // Wait for model to be loaded
-                let status;
-                do {
-                    status = await ad4mClient.ai.modelLoadingStatus(modelId);
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                } while (status.progress < 100);
+                await ad4mClient.ai.setDefaultModel("LLM", testModelId)
 
                 // Create task using "default" as model_id
                 const task = await ad4mClient.ai.addTask(
                     "default-model-task",
                     "default",
-                    "You are a helpful assistant",
+                    "You are a helpful assistant. Whatever you say, it will include 'hello'",
                     [{ input: "Say hi", output: "Hello!" }]
                 )
                 expect(task).to.have.property('taskId')
@@ -210,12 +309,8 @@ export default function aiTests(testContext: TestContext) {
 
                 // Create another test model
                 const newModelInput: ModelInput = {
-                    name: "TestDefaultModel2", 
-                    local: {
-                        fileName: "llama_tiny",
-                        tokenizerSource: "test_tokenizer.json",
-                        modelParameters: JSON.stringify({ param1: "value1" })
-                    },
+                    name: "TestDefaultModel2",
+                    local: { fileName: "llama_3_1_8b_chat" },
                     modelType: "LLM"
                 }
                 const newModelId = await ad4mClient.ai.addModel(newModelInput)
@@ -239,43 +334,24 @@ export default function aiTests(testContext: TestContext) {
                 expect(response2).to.be.a('string')
                 expect(response2.toLowerCase()).to.include('hello')
 
-                // Clean up new model
-                await ad4mClient.ai.removeModel(newModelId)
-
                 // Clean up
                 await ad4mClient.ai.removeTask(task.taskId)
-                await ad4mClient.ai.removeModel(modelId)
+                await ad4mClient.ai.removeModel(newModelId)
             })
 
             it.skip('can do Tasks CRUD', async() => {
                 const ad4mClient = testContext.ad4mClient!
-                const llamaDescription: ModelInput = {
-                    name: "Llama tiny",
-                    local: {
-                        fileName: "llama_tiny",
-                        tokenizerSource: "test_tokenizer.json",
-                        modelParameters: JSON.stringify({ param1: "value1", param2: "value2" })
-                    },
-                    modelType: "LLM"
-                }
-                let llamaId = await ad4mClient.ai.addModel(llamaDescription)
 
-                // Wait for model to be loaded
-                let status;
-                do {
-                    status = await ad4mClient.ai.modelLoadingStatus(llamaId);
-                    await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second between checks
-                } while (status.progress < 100);
                 // Add a task
                 const newTask = await ad4mClient.ai.addTask(
                     "test-name",
-                    llamaId,
+                    testModelId,
                     "This is a test system prompt",
                     [{ input: "Test input", output: "Test output" }]
                 );
                 expect(newTask).to.have.property('taskId');
                 expect(newTask.name).to.equal('test-name');
-                expect(newTask.modelId).to.equal(llamaId);
+                expect(newTask.modelId).to.equal(testModelId);
                 expect(newTask.systemPrompt).to.equal("This is a test system prompt");
                 expect(newTask.promptExamples).to.deep.equal([{ input: "Test input", output: "Test output" }]);
 
@@ -306,28 +382,11 @@ export default function aiTests(testContext: TestContext) {
 
             it.skip('can prompt a task', async () => {
                 const ad4mClient = testContext.ad4mClient!
-                const llamaDescription: ModelInput = {
-                    name: "Llama tiny",
-                    local: {
-                        fileName: "llama_tiny",
-                        tokenizerSource: "test_tokenizer.json",
-                        modelParameters: JSON.stringify({ param1: "value1", param2: "value2" })
-                    },
-                    modelType: "LLM"
-                }
-                let llamaId = await ad4mClient.ai.addModel(llamaDescription)
-
-                // Wait for model to be loaded
-                let status;
-                do {
-                    status = await ad4mClient.ai.modelLoadingStatus(llamaId);
-                    await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second between checks
-                } while (status.progress < 100);
 
                 // Create a new task
                 const newTask = await ad4mClient.ai.addTask(
                     "test-name",
-                    llamaId,
+                    testModelId,
                     "You are inside a test. Please ALWAYS respond with 'works', plus something else.",
                     [
                         { input: "What's the capital of France?", output: "works. Also that is Paris" },
@@ -361,7 +420,7 @@ export default function aiTests(testContext: TestContext) {
                 // Create a new task
                 const newTask = await ad4mClient.ai.addTask(
                     "test-name",
-                    "llama",
+                    testModelId,
                     "You are inside a test. Please respond with a short, unique message each time.",
                     [
                         { input: "Test long 1", output: "This is a much longer response that includes various details. It talks about the weather being sunny, the importance of staying hydrated, and even mentions a recipe for chocolate chip cookies. The response goes on to discuss the benefits of regular exercise, the plot of a popular novel, and concludes with a fun fact about the migration patterns of monarch butterflies." },

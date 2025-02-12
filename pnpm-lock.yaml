@@ -699,7 +699,7 @@ importers:
     devDependencies:
       '@coasys/ad4m-executor':
         specifier: '*'
-        version: 0.10.1-rc6(ws@8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10))
+        version: 0.10.1-rc7(ws@8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10))
 
   connect:
     dependencies:
@@ -729,7 +729,7 @@ importers:
         specifier: 3.7.10
         version: 3.7.10(graphql-ws@5.12.0(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
       '@coasys/ad4m':
-        specifier: workspace:0.10.1-rc7
+        specifier: workspace:0.10.1-rc8
         version: link:../core
       '@types/node':
         specifier: ^16.11.11
@@ -2276,8 +2276,8 @@ packages:
   '@coasys/ad4m-connect@0.8.1':
     resolution: {integrity: sha512-pbyeescsVOVAnXjn2Uh4BV0oWbuiseHT0HvGmDISdaJztaFv1MNglka2oOFf9xYmwz7PBExYNprnE5g75YVyNQ==}
 
-  '@coasys/ad4m-executor@0.10.1-rc6':
-    resolution: {integrity: sha512-kSMEReTb6QKNwIrN9tSjUJyienNY5QtY7kW51GR+F3PNheGm5/4T5tJA1bzzhVzshtsatZMpWBSJ823YS0aHwg==}
+  '@coasys/ad4m-executor@0.10.1-rc7':
+    resolution: {integrity: sha512-kcNuq5n98HXTqT8HIwaIvdGHf/WgXC5IJBoOpjtRuUfN3C7Z2kfcQIy9Jv84iiiarmpm1VOiFuOTMt0K1Rz5Cw==}
 
   '@coasys/ad4m@0.8.1':
     resolution: {integrity: sha512-2or0Ykc+F+geDumBABYD/us5Iu9Se2xVRdVcj4h0l7etd9Zx3u5m/Q32YHywJz61DbPQV8Q+zTkYiqF54y9GrA==}
@@ -15736,7 +15736,7 @@ snapshots:
       - esbuild
       - supports-color
 
-  '@coasys/ad4m-executor@0.10.1-rc6(ws@8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10))':
+  '@coasys/ad4m-executor@0.10.1-rc7(ws@8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10))':
     dependencies:
       '@coasys/ad4m': link:../core
       '@holochain/client': https://codeload.github.com/coasys/holochain-client-js/tar.gz/2f3a436b6d28344b0aca883ef3dc229cd042c04b(ws@8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10))

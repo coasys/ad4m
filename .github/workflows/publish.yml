@@ -61,7 +61,7 @@ jobs:
       uses: actions-rs/toolchain@v1
       with:
         override: true
-        toolchain: 1.81.0
+        toolchain: 1.84.0
     - run: rustup target add wasm32-unknown-unknown
 
     - name: Install Rust targets for macOS

@@ -23,6 +23,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Fix for syncing broken after some time: Prevent p-diff-sync diff entries from exceeding HC entry size limit of 4MB (which would happen at some point through snapshot creation) [PR#553](https://github.com/coasys/ad4m/pull/553)
 - Fix for crash when removing .ad4m directory after using multiple agent feature [PR#556](https://github.com/coasys/ad4m/pull/556)
 - Fix error after spawning AI task [PR#559](https://github.com/coasys/ad4m/pull/559)
+- Fix some problems with perspective.removeLinks() with a proper implementation [PR#563](https://github.com/coasys/ad4m/pull/563)
 
 ### Added
 - Prolog predicates needed in new Flux mention notification trigger:
@@ -45,7 +46,9 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Make `SubjectEntity.#perspective` protected to enable subclasses to implement complex fields and methods [PR#557](https://github.com/coasys/ad4m/pull/557)
 - Add AI client to PerspectiveProxy to enable SubjectEntity sub-classes (subject classes) to use AI processes without having to rely on ad4m-connect or similar to access the AI client. [PR#558](https://github.com/coasys/ad4m/pull/558)
 - SubjectEntity.query() with `where: { propertyName: "value" }` and `where: { condition: 'triple(Base, _, "...")'} [PR#560](https://github.com/coasys/ad4m/pull/560)
-
+- Update Kalosm and candle to latest versions and add very recent open-source models like DeepSeek and Qwen to the model picker. Also add AI task delete button to launcher UI. Set Qwen 2.5 coder instruct 7b as default for local LLM [PR#558](https://github.com/coasys/ad4m/pull/561)
+- Models can now be added directly from Huggingface without changing the code, just providing repo and filename in the launcher [PR562](https://github.com/coasys/ad4m/pull/562)
+- 
 ### Changed
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
 - Improved performance of SDNA / SubjectClass functions by moving code from client into executor and saving a lot of client <-> executor roundtrips [PR#480](https://github.com/coasys/ad4m/pull/480)
@@ -68,6 +71,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Added ability to handle multiple agents in launcher. [PR#459](https://github.com/coasys/ad4m/pull/459)
  - Added a way to show & add new `AgentInfo` in launcher. [PR#463](https://github.com/coasys/ad4m/pull/463)
  - `ad4m-executor` binary prints capability request challange to stdout to enable app hand-shake [PR#471](https://github.com/coasys/ad4m/pull/471)
+ - Add ability to select Whisper model size [PR#564](https://github.com/coasys/ad4m/pull/564)
 
 ### Changed
  - Much improved ADAM Launcher setup flow [PR#440](https://github.com/coasys/ad4m/pull/440) and [PR#444](https://github.com/coasys/ad4m/pull/444):

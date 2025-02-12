@@ -1158,9 +1158,26 @@ describe('Ad4mClient', () => {
             expect(models).toBeDefined();
             expect(Array.isArray(models)).toBe(true);
             if (models.length > 0) {
-                expect(models[0]).toHaveProperty('name');
-                expect(models[0]).toHaveProperty('api');
-                expect(models[0]).toHaveProperty('local');
+                const model = models[0];
+                expect(model).toHaveProperty('name');
+                expect(model).toHaveProperty('id');
+                expect(model).toHaveProperty('modelType');
+                if (model.api) {
+                    expect(model.api).toHaveProperty('baseUrl');
+                    expect(model.api).toHaveProperty('apiKey');
+                    expect(model.api).toHaveProperty('model');
+                    expect(model.api).toHaveProperty('apiType');
+                }
+                if (model.local) {
+                    expect(model.local).toHaveProperty('fileName');
+                    if (model.local.tokenizerSource) {
+                        expect(model.local.tokenizerSource).toHaveProperty('repo');
+                        expect(model.local.tokenizerSource).toHaveProperty('revision');
+                        expect(model.local.tokenizerSource).toHaveProperty('fileName');
+                    }
+                    expect(model.local).toHaveProperty('huggingfaceRepo');
+                    expect(model.local).toHaveProperty('revision');
+                }
             }
         })
 
@@ -1175,8 +1192,13 @@ describe('Ad4mClient', () => {
                 },
                 local: {
                     fileName: "new-test-model.bin",
-                    tokenizerSource: "new-test-tokenizer",
-                    modelParameters: "{}"
+                    tokenizerSource: {
+                        repo: "test-repo",
+                        revision: "main",
+                        fileName: "tokenizer.json"
+                    },
+                    huggingfaceRepo: "test-repo",
+                    revision: "main"
                 },
                 modelType: "LLM"
             };
@@ -1196,8 +1218,13 @@ describe('Ad4mClient', () => {
                 },
                 local: {
                     fileName: "updated-test-model.bin",
-                    tokenizerSource: "updated-test-tokenizer",
-                    modelParameters: "{}"
+                    tokenizerSource: {
+                        repo: "test-repo",
+                        revision: "main",
+                        fileName: "tokenizer.json"
+                    },
+                    huggingfaceRepo: "test-repo",
+                    revision: "main"
                 },
                 modelType: "LLM"
             };
@@ -1222,18 +1249,23 @@ describe('Ad4mClient', () => {
             const setResult = await ad4mClient.ai.setDefaultModel(modelType, modelName);
             expect(setResult).toBe(true);
 
-            const model = await ad4mClient.ai.getDefaultModel(modelType);
-            expect(model).toBeDefined();
-            expect(model.name).toBe("Default Test Model");
-            expect(model.api).toBeDefined();
-            expect(model.api.baseUrl).toBe("https://api.example.com");
-            expect(model.api.apiKey).toBe("test-api-key");
-            expect(model.api.apiType).toBe("OpenAi");
-            expect(model.local).toBeDefined();
-            expect(model.local.fileName).toBe("test-model.bin");
-            expect(model.local.tokenizerSource).toBe("test-tokenizer");
-            expect(model.local.modelParameters).toBe("{}");
-            expect(model.modelType).toBe(modelType);
+            const defaultModel = await ad4mClient.ai.getDefaultModel(modelType);
+            expect(defaultModel).toBeDefined();
+            expect(defaultModel.name).toBe("Default Test Model");
+            expect(defaultModel.api).toBeDefined();
+            expect(defaultModel.api.baseUrl).toBe("https://api.example.com");
+            expect(defaultModel.api.apiKey).toBe("test-api-key");
+            expect(defaultModel.api.apiType).toBe("OpenAi");
+            expect(defaultModel.local).toBeDefined();
+            expect(defaultModel.local.fileName).toBe("test-model.bin");
+            if (defaultModel.local.tokenizerSource) {
+                expect(defaultModel.local.tokenizerSource.repo).toBe("test-repo");
+                expect(defaultModel.local.tokenizerSource.revision).toBe("main");
+                expect(defaultModel.local.tokenizerSource.fileName).toBe("tokenizer.json");
+            }
+            expect(defaultModel.local.huggingfaceRepo).toBe("test-repo");
+            expect(defaultModel.local.revision).toBe("main");
+            expect(defaultModel.modelType).toBe(modelType);
         })
 
         it('embed()', async () => {

@@ -18,7 +18,6 @@ use kalosm::sound::TextStream;
 use kalosm::sound::*;
 use std::collections::HashMap;
 use std::future::Future;
-use std::panic::catch_unwind;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::thread;
@@ -79,10 +78,17 @@ struct LLMTaskRemoveRequest {
 
 #[allow(dead_code)]
 #[derive(Debug)]
+struct LLMTaskShutdownRequest {
+    pub result_sender: oneshot::Sender<()>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
 enum LLMTaskRequest {
     Spawn(LLMTaskSpawnRequest),
     Prompt(LLMTaskPromptRequest),
     Remove(LLMTaskRemoveRequest),
+    Shutdown(LLMTaskShutdownRequest),
 }
 
 enum LlmModel {
@@ -170,8 +176,9 @@ impl AIService {
                     model_type: ModelType::Embedding,
                     local: Some(LocalModel {
                         file_name: "bert".to_string(),
-                        tokenizer_source: String::new(),
-                        model_parameters: String::new(),
+                        tokenizer_source: None,
+                        huggingface_repo: None,
+                        revision: None,
                     }),
                     api: None,
                 })
@@ -203,9 +210,9 @@ impl AIService {
 
     async fn init_model(&self, model: crate::types::Model) -> Result<()> {
         match model.model_type {
-            ModelType::Llm => self.spawn_llm_model(model).await?,
+            ModelType::Llm => self.spawn_llm_model(model, None).await?,
             ModelType::Embedding => self.spawn_embedding_model(model).await,
-            ModelType::Transcription => Self::load_transcriber_model(&model).await,
+            ModelType::Transcription => Self::load_transcriber_model(model.id.clone()).await,
         };
         Ok(())
     }
@@ -281,47 +288,76 @@ impl AIService {
             Device::Cpu
         }
     }
-    async fn build_local_llama_from_string(
-        model_id: String,
-        model_size_string: String,
-    ) -> Result<Llama> {
+    async fn build_local_llama(model_id: String, model_config: LocalModel) -> Result<Llama> {
         publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
-
-        let llama = match model_size_string.as_str() {
-            // Local TinyLlama models
-            "llama_tiny" => Llama::builder().with_source(LlamaSource::tiny_llama_1_1b()),
-            "llama_7b" => Llama::builder().with_source(LlamaSource::llama_7b()),
-            "llama_7b_chat" => Llama::builder().with_source(LlamaSource::llama_7b_chat()),
-            "llama_7b_code" => Llama::builder().with_source(LlamaSource::llama_7b_code()),
-            "llama_8b" => Llama::builder().with_source(LlamaSource::llama_8b()),
-            "llama_8b_chat" => Llama::builder().with_source(LlamaSource::llama_8b_chat()),
-            "llama_3_1_8b_chat" => Llama::builder().with_source(LlamaSource::llama_3_1_8b_chat()),
-            "llama_13b" => Llama::builder().with_source(LlamaSource::llama_13b()),
-            "llama_13b_chat" => Llama::builder().with_source(LlamaSource::llama_13b_chat()),
-            "llama_13b_code" => Llama::builder().with_source(LlamaSource::llama_13b_code()),
-            "llama_34b_code" => Llama::builder().with_source(LlamaSource::llama_34b_code()),
-            "llama_70b" => Llama::builder().with_source(LlamaSource::llama_70b()),
-            "mistral_7b" => Llama::builder().with_source(LlamaSource::mistral_7b()),
-            "mistral_7b_instruct" => {
-                Llama::builder().with_source(LlamaSource::mistral_7b_instruct())
-            }
-            "mistral_7b_instruct_2" => {
-                Llama::builder().with_source(LlamaSource::mistral_7b_instruct_2())
-            }
-            "solar_10_7b" => Llama::builder().with_source(LlamaSource::solar_10_7b()),
-            "solar_10_7b_instruct" => {
-                Llama::builder().with_source(LlamaSource::solar_10_7b_instruct())
-            }
+        let llama = Llama::builder().with_source(match model_config.file_name.as_str() {
+            // First check model name shortcuts
+            "Qwen2.5.1-Coder-7B-Instruct" => LlamaSource::new(FileSource::huggingface(
+                "bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF".to_string(),
+                "main".to_string(),
+                "Qwen2.5.1-Coder-7B-Instruct-Q4_K_M.gguf".to_string(),
+            )),
+            "deepseek_r1_distill_qwen_1_5b" => LlamaSource::deepseek_r1_distill_qwen_1_5b(),
+            "deepseek_r1_distill_qwen_7b" => LlamaSource::deepseek_r1_distill_qwen_7b(),
+            "deepseek_r1_distill_qwen_14b" => LlamaSource::deepseek_r1_distill_qwen_14b(),
+            "deepseek_r1_distill_llama_8b" => LlamaSource::deepseek_r1_distill_llama_8b(),
+            "llama_tiny" => LlamaSource::tiny_llama_1_1b(),
+            "llama_tiny_1_1b_chat" => LlamaSource::tiny_llama_1_1b_chat(),
+            "llama_7b" => LlamaSource::llama_7b(),
+            "llama_7b_chat" => LlamaSource::llama_7b_chat(),
+            "llama_7b_code" => LlamaSource::llama_7b_code(),
+            "llama_8b" => LlamaSource::llama_8b(),
+            "llama_8b_chat" => LlamaSource::llama_8b_chat(),
+            "llama_3_1_8b_chat" => LlamaSource::llama_3_1_8b_chat(),
+            "llama_13b" => LlamaSource::llama_13b(),
+            "llama_13b_chat" => LlamaSource::llama_13b_chat(),
+            "llama_13b_code" => LlamaSource::llama_13b_code(),
+            "llama_34b_code" => LlamaSource::llama_34b_code(),
+            "llama_70b" => LlamaSource::llama_70b(),
+            "mistral_7b" => LlamaSource::mistral_7b(),
+            "mistral_7b_instruct" => LlamaSource::mistral_7b_instruct(),
+            "mistral_7b_instruct_2" => LlamaSource::mistral_7b_instruct_2(),
+            "solar_10_7b" => LlamaSource::solar_10_7b(),
+            "solar_10_7b_instruct" => LlamaSource::solar_10_7b_instruct(),
 
             // Handle unknown models
             _ => {
-                log::error!("Unknown model string: {}", model_size_string);
-                return Err(anyhow::anyhow!(
-                    "Unknown model string: {}",
-                    model_size_string
-                ));
+                if let Some(repo) = model_config.huggingface_repo.clone() {
+                    log::info!("Trying to load model from Huggingface:\n
+                        model_config.file_name: {:?}\n
+                        model_config.huggingface_repo: {:?}\n
+                        model_config.revision: {:?}", model_config.file_name, model_config.huggingface_repo, model_config.revision);
+                    let mut builder = LlamaSource::new(FileSource::huggingface(
+                        repo,
+                        model_config.revision.unwrap_or("main".to_string()),
+                        model_config.file_name,
+                    ));
+                    if let Some(tokenizer_source) = model_config.tokenizer_source {
+                        log::info!("Trying to load tokenizer from Huggingface:\n
+                            tokenizer_source.repo: {:?}\n
+                            tokenizer_source.revision: {:?}\n
+                            tokenizer_source.file_name: {:?}", tokenizer_source.repo, tokenizer_source.revision, tokenizer_source.file_name);
+                        builder = builder.with_tokenizer(FileSource::huggingface(
+                            tokenizer_source.repo,
+                            tokenizer_source.revision,
+                            tokenizer_source.file_name,
+                        ));
+                    }
+                    builder
+                } else {
+                    log::error!(
+                        "Unknown model string: {} and no Huggingface repo provided. Don't know where to get model weights from for: {}", 
+                        model_config.file_name,
+                        model_id
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Unknown model string: {} and no Huggingface repo provided. Don't know where to get model weights from for: {}", 
+                        model_config.file_name,
+                        model_id
+                    ));
+                }
             }
-        };
+        });
 
         // Build the local Llama model
         let llama = llama
@@ -339,7 +375,11 @@ impl AIService {
         Ok(llama)
     }
 
-    async fn build_remote_gpt4(model_id: String, api_key: String, base_url: Url) -> ChatGPTClient {
+    async fn build_remote_client(
+        model_id: String,
+        api_key: String,
+        base_url: Url,
+    ) -> ChatGPTClient {
         let mut url = base_url;
         if let Some(segments) = url.path_segments() {
             if segments.clone().next() == Some("v1") {
@@ -352,7 +392,11 @@ impl AIService {
         client
     }
 
-    async fn spawn_llm_model(&self, model_config: crate::types::Model) -> Result<()> {
+    async fn spawn_llm_model(
+        &self,
+        model_config: crate::types::Model,
+        model_ready_sender: Option<oneshot::Sender<()>>,
+    ) -> Result<()> {
         if model_config.local.is_none() && model_config.api.is_none() {
             return Err(anyhow!(
                 "AI model definition {} doesn't have a body, nothing to spawn!",
@@ -361,20 +405,30 @@ impl AIService {
         }
 
         let (llama_tx, mut llama_rx) = mpsc::unbounded_channel::<LLMTaskRequest>();
-        let model_id = model_config.id.clone();
+        self.llm_channel
+            .lock()
+            .await
+            .insert(model_config.id.clone(), llama_tx);
         thread::spawn({
             move || {
                 let model_id = model_config.id.clone();
                 let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(publish_model_status(
+                    model_config.id.clone(),
+                    100.0,
+                    "Spawning model thread...",
+                    true,
+                    false,
+                ));
                 let maybe_model = rt
                     .block_on(async {
                         if let Some(local_model) = model_config.local {
-                            Self::build_local_llama_from_string(model_id, local_model.file_name)
+                            Self::build_local_llama(model_id, local_model)
                                 .await
                                 .map(LlmModel::Local)
                         } else if let Some(api) = model_config.api {
                             Ok(LlmModel::Remote((
-                                Self::build_remote_gpt4(model_id, api.api_key, api.base_url).await,
+                                Self::build_remote_client(model_id, api.api_key, api.base_url).await,
                                 api.model
                             )))
                         } else {
@@ -387,7 +441,7 @@ impl AIService {
                     Err(e) => {
                         error!("Failed to build LLM model: {}", e);
                         rt.block_on(publish_model_status(
-                            model_config.id,
+                            model_config.id.clone(),
                             100.0,
                             &format!("Failed to build LLM model: {}", e),
                             true,
@@ -397,7 +451,7 @@ impl AIService {
                     }
                 };
 
-                let mut tasks = HashMap::<String, Task>::new();
+                let mut tasks = HashMap::<String, Task<Llama>>::new();
                 let mut task_descriptions = HashMap::<String, AITask>::new();
                 let idle_delay = Duration::from_millis(1);
 
@@ -409,6 +463,10 @@ impl AIService {
                     true,
                 ));
 
+                if let Some(model_ready_sender) = model_ready_sender {
+                    let _ = model_ready_sender.send(());
+                }
+
                 loop {
                     match rt.block_on(async {
                         tokio::select! {
@@ -419,6 +477,19 @@ impl AIService {
                         Err(_timeout) => std::thread::sleep(idle_delay * 5),
                         Ok(None) => break,
                         Ok(Some(task_request)) => match task_request {
+                            LLMTaskRequest::Shutdown(shutdown_request) => {
+                                rt.block_on(publish_model_status(
+                                    model_config.id.clone(),
+                                    100.0,
+                                    "Shutting down",
+                                    true,
+                                    false,
+                                ));
+
+                                // Send confirmation before breaking
+                                let _ = shutdown_request.result_sender.send(());
+                                break;
+                            }
                             LLMTaskRequest::Spawn(spawn_request) => match model {
                                 LlmModel::Remote(_) => {
                                     task_descriptions.insert(
@@ -436,42 +507,23 @@ impl AIService {
                                         true,
                                     ));
                                     let task_description = spawn_request.task;
-                                    let task =
-                                        Task::builder(task_description.system_prompt.clone())
-                                            .with_examples(
-                                                task_description
-                                                    .prompt_examples
-                                                    .clone()
-                                                    .into_iter()
-                                                    .map(|example| (example.input, example.output))
-                                                    .collect::<Vec<(String, String)>>(),
-                                            )
-                                            .build();
 
-                                    let mut task_run = false;
-                                    let mut tries = 0;
-                                    while !task_run && tries < 20 {
-                                        tries += 1;
+                                    let task = llama
+                                        .task(task_description.system_prompt.clone())
+                                        .with_examples(
+                                            task_description
+                                                .prompt_examples
+                                                .clone()
+                                                .into_iter()
+                                                .map(|example| (example.input, example.output))
+                                                .collect::<Vec<(String, String)>>(),
+                                        );
 
-                                        match catch_unwind(|| {
-                                                    rt.block_on(task.run("Test example prompt", llama).all_text())
-                                                }) {
-                                                    Err(e) => log::error!(
-                                                        "Llama panicked during task spawn with: {:?}. Trying again..",
-                                                        e
-                                                    ),
-                                                    Ok(_) => task_run = true,
-                                                }
-                                    }
+                                    rt.block_on(task.run("Test example prompt").all_text());
 
-                                    if task_run {
-                                        tasks.insert(task_description.task_id.clone(), task);
-                                        let _ = spawn_request.result_sender.send(Ok(()));
-                                    } else {
-                                        let _ = spawn_request
-                                            .result_sender
-                                            .send(Err(anyhow!("Couldn't run task without panics")));
-                                    }
+                                    tasks.insert(task_description.task_id.clone(), task);
+                                    let _ = spawn_request.result_sender.send(Ok(()));
+
                                     rt.block_on(publish_model_status(
                                         model_config.id.clone(),
                                         100.0,
@@ -545,7 +597,7 @@ impl AIService {
                                         )));
                                     }
                                 }
-                                LlmModel::Local(ref mut llama) => {
+                                LlmModel::Local(_) => {
                                     if let Some(task) = tasks.get(&prompt_request.task_id) {
                                         rt.block_on(publish_model_status(
                                             model_config.id.clone(),
@@ -554,34 +606,10 @@ impl AIService {
                                             true,
                                             true,
                                         ));
-                                        let mut maybe_result: Option<String> = None;
-                                        let mut tries = 0;
-                                        while maybe_result.is_none() && tries < 20 {
-                                            tries += 1;
 
-                                            match catch_unwind(|| {
-                                                rt.block_on(async {
-                                                    task.run(prompt_request.prompt.clone(), llama)
-                                                        .all_text()
-                                                        .await
-                                                })
-                                            }) {
-                                                Err(e) => {
-                                                    log::error!(
-                                                        "Llama panicked with: {:?}. Trying again..",
-                                                        e
-                                                    );
-                                                    rt.block_on(publish_model_status(
-                                                        model_config.id.clone(),
-                                                        100.0,
-                                                        "Panicked while running inference - trying again...",
-                                                        true,
-                                                        true,
-                                                    ));
-                                                }
-                                                Ok(result) => maybe_result = Some(result),
-                                            }
-                                        }
+                                        let result = rt.block_on(async {
+                                            task.run(prompt_request.prompt.clone()).all_text().await
+                                        });
 
                                         rt.block_on(publish_model_status(
                                             model_config.id.clone(),
@@ -591,11 +619,7 @@ impl AIService {
                                             true,
                                         ));
 
-                                        if let Some(result) = maybe_result {
-                                            let _ = prompt_request.result_sender.send(Ok(result));
-                                        } else {
-                                            let _ = prompt_request.result_sender.send(Err(anyhow!("Unable to get response from Llama model. Giving up after 20 retries")));
-                                        }
+                                        let _ = prompt_request.result_sender.send(Ok(result));
                                     } else {
                                         let _ = prompt_request.result_sender.send(Err(anyhow!(
                                             "Task with ID {} not spawned",
@@ -616,7 +640,6 @@ impl AIService {
             }
         });
 
-        self.llm_channel.lock().await.insert(model_id, llama_tx);
         Ok(())
     }
 
@@ -779,7 +802,7 @@ impl AIService {
                         publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
 
                         let bert = Bert::builder()
-                            .with_device(Device::Cpu)
+                            .with_device(Self::new_candle_device())
                             .build_with_loading_handler({
                                 let model_id = model_id.clone();
                                 move |progress| {
@@ -807,7 +830,8 @@ impl AIService {
                         Ok(Some(request)) => {
                             let result: Result<Vec<f32>> = rt
                                 .block_on(async { model.embed(request.prompt).await })
-                                .map(|tensor| tensor.to_vec());
+                                .map(|tensor| tensor.to_vec())
+                                .map_err(|bert_error| anyhow!(bert_error));
                             let _ = request.result_sender.send(result);
                         }
                     }
@@ -844,7 +868,66 @@ impl AIService {
     // Whisper / Transcription
     // -------------------------------------
 
-    pub async fn open_transcription_stream(&self, _model_id: String) -> Result<String> {
+    fn whisper_string_to_model(whisper_string: String) -> Result<WhisperSource> {
+        match whisper_string.as_str() {
+            "whisper_tiny" => Ok(WhisperSource::Tiny),
+            "whisper_tiny_quantized" => Ok(WhisperSource::QuantizedTiny),
+            "whisper_tiny_en" => Ok(WhisperSource::TinyEn),
+            "whisper_tiny_en_quantized" => Ok(WhisperSource::QuantizedTinyEn),
+            "whisper_base" => Ok(WhisperSource::Base),
+            "whisper_base_en" => Ok(WhisperSource::BaseEn),
+            "whisper_small" => Ok(WhisperSource::Small),
+            "whisper_small_en" => Ok(WhisperSource::SmallEn),
+            "whisper_medium" => Ok(WhisperSource::Medium),
+            "whisper_medium_en" => Ok(WhisperSource::MediumEn),
+            "whisper_medium_en_quantized_distil" => Ok(WhisperSource::QuantizedDistilMediumEn),
+            "whisper_large" => Ok(WhisperSource::Large),
+            "whisper_large_v2" => Ok(WhisperSource::LargeV2),
+            "whisper_distil_medium_en" => Ok(WhisperSource::DistilMediumEn),
+            "whisper_distil_large_v2" => Ok(WhisperSource::DistilLargeV2),
+            "whisper_distil_large_v3" => Ok(WhisperSource::DistilLargeV3),
+            "whisper_distil_large_v3_quantized" => Ok(WhisperSource::QuantizedDistilLargeV3),
+            "whisper_large_v3_turbo_quantized" => Ok(WhisperSource::QuantizedLargeV3Turbo),
+            _ => Err(anyhow!("Unknown whisper model: {}", whisper_string)),
+        }
+    }
+
+    fn get_whisper_model_size(model_id: String) -> Result<WhisperSource> {
+        // Try to treat string as model size string first
+        if let Ok(model) = Self::whisper_string_to_model(model_id.clone()) {
+            return Ok(model);
+        }
+
+        // Try to get model from DB by ID
+        if let Ok(Some(model)) = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone())) {
+            if model.model_type != ModelType::Transcription {
+                return Err(anyhow!("Model '{}' is not a transcription model", model_id));
+            }
+            // Use filename from local model config
+            if let Some(local) = model.local {
+                return Self::whisper_string_to_model(local.file_name);
+            }
+        }
+
+        // if nothing above works, see if we have a transcription model in the DB and use that
+        // Try to find first transcription model in DB
+        if let Ok(models) = Ad4mDb::with_global_instance(|db| db.get_models()) {
+            if let Some(model) = models
+                .into_iter()
+                .find(|m| m.model_type == ModelType::Transcription)
+            {
+                if let Some(local) = model.local {
+                    return Self::whisper_string_to_model(local.file_name);
+                }
+            }
+        }
+
+        // Default to tiny if nothing found
+        Ok(WhisperSource::Tiny)
+    }
+
+    pub async fn open_transcription_stream(&self, model_id: String) -> Result<String> {
+        let model_size = Self::get_whisper_model_size(model_id)?;
         let stream_id = uuid::Uuid::new_v4().to_string();
         let stream_id_clone = stream_id.clone();
         let (samples_tx, samples_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
@@ -857,8 +940,8 @@ impl AIService {
 
             rt.block_on(async {
                 let maybe_model = WhisperBuilder::default()
-                    .with_source(WHISPER_MODEL)
-                    .with_device(Device::Cpu)
+                    .with_source(model_size)
+                    .with_device(Self::new_candle_device())
                     .build()
                     .await;
 
@@ -950,30 +1033,160 @@ impl AIService {
         }
     }
 
-    async fn load_transcriber_model(model: &crate::types::Model) {
-        let id = &model.id;
-        publish_model_status(id.clone(), 0.0, "Loading", false, false).await;
+    async fn load_transcriber_model(model_id: String) {
+        publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
+
+        let model_size = Self::get_whisper_model_size(model_id.clone())
+            .ok()
+            .unwrap_or(WHISPER_MODEL);
 
         let _ = WhisperBuilder::default()
-            .with_source(WHISPER_MODEL)
-            .with_device(Device::Cpu)
+            .with_source(model_size)
+            .with_device(Self::new_candle_device())
             .build_with_loading_handler({
-                let name = id.clone();
+                let name = model_id.clone();
                 move |progress| {
                     tokio::spawn(handle_progress(name.clone(), progress));
                 }
             })
             .await;
 
-        publish_model_status(id.clone(), 100.0, "Loaded", true, false).await;
+        publish_model_status(model_id.clone(), 100.0, "Loaded", true, false).await;
+    }
+
+    pub async fn update_model(&self, model_id: String, model_config: ModelInput) -> Result<()> {
+        log::info!("Updating model: {} with: {:?}", model_id, model_config);
+        // First get the existing model to determine its type
+        let existing_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+            .map_err(|e| anyhow!("Database error: {}", e))?
+            .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
+
+        // Update the model in the database
+        Ad4mDb::with_global_instance(|db| db.update_model(&model_id, &model_config))
+            .map_err(|e| anyhow!("Failed to update model in database: {}", e))?;
+
+        // Get the updated model from the database
+        let updated_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+            .map_err(|e| anyhow!("Database error: {}", e))?
+            .ok_or_else(|| anyhow!("Model not found after update: {}", model_id))?;
+
+        log::info!("Updated model in DB: {:?}", updated_model);
+
+        match existing_model.model_type {
+            ModelType::Llm => {
+                // Shutdown the existing model thread
+                {
+                    let mut llm_channel = self.llm_channel.lock().await;
+                    if let Some(sender) = llm_channel.get(&model_id) {
+                        log::info!("Shutting down LLM model thread for {}", model_id);
+                        let (tx, rx) = oneshot::channel();
+                        if let Ok(()) =
+                            sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
+                                result_sender: tx,
+                            }))
+                        {
+                            // Wait for the thread to confirm shutdown
+                            let _ = rx.await;
+                            log::info!("LLM model thread for {} confirmed shutdown", model_id);
+                        }
+
+                        // Remove the channel from the map
+                        llm_channel.remove(&model_id);
+                    } else {
+                        log::info!(
+                            "LLM model thread for {} not found. Nothing to shutdown",
+                            model_id
+                        );
+                    }
+                }
+
+                // Spawn the model with new configuration
+                log::info!(
+                    "Spawning new LLM model thread for {} with updated config",
+                    model_id
+                );
+                let (model_ready_tx, model_ready_rx) = oneshot::channel();
+                self.spawn_llm_model(updated_model, Some(model_ready_tx))
+                    .await?;
+                model_ready_rx.await?;
+
+                // Respawn all tasks for this model
+                let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
+                    .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
+
+                for task in tasks.into_iter().filter(|t| t.model_id == model_id) {
+                    self.spawn_task(task).await?;
+                }
+            }
+            ModelType::Embedding => {
+                // TODO: Handle embedding model updates
+            }
+            ModelType::Transcription => {
+                Self::load_transcriber_model(updated_model.id.clone()).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn remove_model(&self, model_id: String) -> Result<()> {
+        // First get the existing model to determine its type
+        let existing_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+            .map_err(|e| anyhow!("Database error: {}", e))?
+            .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
+
+        match existing_model.model_type {
+            ModelType::Llm => {
+                log::info!("Shutting down LLM model thread for {}", model_id);
+                // Shutdown the existing model thread
+                let mut llm_channel = self.llm_channel.lock().await;
+                if let Some(sender) = llm_channel.get(&model_id) {
+                    let (tx, rx) = oneshot::channel();
+                    if let Ok(()) = sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
+                        result_sender: tx,
+                    })) {
+                        // Wait for the thread to confirm shutdown
+                        let _ = rx.await;
+                    }
+
+                    log::info!("LLM model thread for {} confirmed shutdown", model_id);
+
+                    // Remove the channel from the map
+                    llm_channel.remove(&model_id);
+                } else {
+                    log::warn!(
+                        "LLM model thread for {} not found. Nothing to shutdown",
+                        model_id
+                    );
+                }
+            }
+            ModelType::Embedding => {
+                // TODO: Handle embedding model removal
+            }
+            ModelType::Transcription => {
+                // TODO: Handle transcription model removal
+            }
+        }
+
+        // Remove the model from the database
+        Ad4mDb::with_global_instance(|db| db.remove_model(&model_id))
+            .map_err(|e| anyhow!("Failed to remove model from database: {}", e))?;
+
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::graphql::graphql_types::AIPromptExamplesInput;
-
     use super::*;
+    use crate::graphql::graphql_types::{AIPromptExamplesInput, LocalModelInput};
+
+    // TODO: We ignore these tests because they need a GPU to not take ages to run
+    // BUT: the model lifecycle and update tests show another problem:
+    // We can't run them in parallel with each other or other tests because
+    // the one global DB gets reseted for each test.
+    // -> need to refactor this so that services like AIService or PerspectiveInstance
+    // get an DB reference passed in, so we can write proper unit tests.
 
     #[ignore]
     #[tokio::test]
@@ -1058,5 +1271,110 @@ mod tests {
         let response = responses.join("\n");
         println!("Responses: {}", response);
         assert!(!response.is_empty())
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn test_model_lifecycle() {
+        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        let service = AIService::new().expect("initialization to work");
+
+        // Add a model
+        let model_input = ModelInput {
+            name: "Test Model".into(),
+            model_type: ModelType::Llm,
+            local: Some(LocalModelInput {
+                file_name: "llama_tiny_1_1b_chat".into(),
+                tokenizer_source: None,
+                huggingface_repo: None,
+                revision: None,
+            }),
+            api: None,
+        };
+
+        let model_id = service
+            .add_model(model_input.clone())
+            .await
+            .expect("model to be added");
+
+        // Update the model
+        let updated_model = ModelInput {
+            name: "Updated Test Model".into(),
+            ..model_input.clone()
+        };
+        service
+            .update_model(model_id.clone(), updated_model)
+            .await
+            .expect("model to be updated");
+
+        // Verify the update
+        let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+            .expect("to get model");
+        assert_eq!(model.unwrap().name, "Updated Test Model");
+
+        // Remove the model
+        service
+            .remove_model(model_id.clone())
+            .await
+            .expect("model to be removed");
+
+        // Verify removal
+        let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+            .expect("to get model");
+        assert!(model.is_none());
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn test_model_update_with_tasks() {
+        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        let service = AIService::new().expect("initialization to work");
+
+        // Add a model
+        let model_input = ModelInput {
+            name: "Test Model".into(),
+            model_type: ModelType::Llm,
+            local: Some(LocalModelInput {
+                file_name: "llama_tiny_1_1b_chat".into(),
+                tokenizer_source: None,
+                huggingface_repo: None,
+                revision: None,
+            }),
+            api: None,
+        };
+
+        let model_id = service
+            .add_model(model_input.clone())
+            .await
+            .expect("model to be added");
+
+        // Create a task using this model
+        let task = service
+            .add_task(AITaskInput {
+                name: "Test task".into(),
+                model_id: model_id.clone(),
+                system_prompt: "Test prompt".into(),
+                prompt_examples: vec![],
+                meta_data: None,
+            })
+            .await
+            .expect("task to be created");
+
+        // Update the model
+        let updated_model = ModelInput {
+            name: "Updated Test Model".into(),
+            ..model_input.clone()
+        };
+        service
+            .update_model(model_id.clone(), updated_model)
+            .await
+            .expect("model to be updated");
+
+        // Verify the task still works
+        let response = service
+            .prompt(task.task_id.clone(), "Test input".into())
+            .await
+            .expect("prompt to work after model update");
+        assert!(!response.is_empty());
     }
 }

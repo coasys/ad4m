@@ -24,15 +24,30 @@ export class ModelApi {
 }
 
 @ObjectType()
+export class TokenizerSource {
+    @Field()
+    repo: string;
+
+    @Field()
+    revision: string;
+
+    @Field()
+    fileName: string;
+}
+
+@ObjectType()
 export class LocalModel {
     @Field()
     fileName: string;
 
-    @Field()
-    tokenizerSource: string;
+    @Field({ nullable: true })
+    tokenizerSource?: TokenizerSource;
 
-    @Field()
-    modelParameters: string;
+    @Field({ nullable: true })
+    huggingfaceRepo?: string;
+
+    @Field({ nullable: true })
+    revision?: string;
 }
 
 export type ModelType = "LLM" | "EMBEDDING" | "TRANSCRIPTION";
@@ -71,15 +86,30 @@ export class ModelApiInput {
 }
 
 @InputType()
+export class TokenizerSourceInput {
+    @Field()
+    repo: string;
+
+    @Field()
+    revision: string;
+
+    @Field()
+    fileName: string;
+}
+
+@InputType()
 export class LocalModelInput {
     @Field()
     fileName: string;
 
-    @Field()
-    tokenizerSource: string;
+    @Field({ nullable: true })
+    tokenizerSource?: TokenizerSourceInput;
 
-    @Field()
-    modelParameters: string;
+    @Field({ nullable: true })
+    huggingfaceRepo?: string;
+
+    @Field({ nullable: true })
+    revision?: string;
 }
 
 @InputType()
@@ -113,8 +143,13 @@ export default class AIResolver {
                 },
                 local: {
                     fileName: "test-model.bin",
-                    tokenizerSource: "test-tokenizer",
-                    modelParameters: "{}"
+                    tokenizerSource: {
+                        repo: "test-repo",
+                        revision: "main",
+                        fileName: "tokenizer.json"
+                    },
+                    huggingfaceRepo: "test-repo",
+                    revision: "main"
                 },
                 modelType: "LLM"
             }
@@ -165,8 +200,13 @@ export default class AIResolver {
             },
             local: {
                 fileName: "test-model.bin",
-                tokenizerSource: "test-tokenizer", 
-                modelParameters: "{}"
+                tokenizerSource: {
+                    repo: "test-repo",
+                    revision: "main",
+                    fileName: "tokenizer.json"
+                },
+                huggingfaceRepo: "test-repo",
+                revision: "main"
             },
             modelType: modelType
         }

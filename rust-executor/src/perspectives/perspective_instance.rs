@@ -498,7 +498,7 @@ impl PerspectiveInstance {
 
         let ok = match commit_result {
             Ok(Some(rev)) => {
-                if rev.trim().len() == 0 {
+                if rev.trim().is_empty() {
                     log::warn!("Committed but got no revision from LinkLanguage!\nStoring in pending diffs for later");
                     false
                 } else {
@@ -844,6 +844,69 @@ impl PerspectiveInstance {
         } else {
             Err(anyhow!("Link not found"))
         }
+    }
+
+    pub async fn remove_links(
+        &mut self,
+        link_expressions: Vec<LinkExpression>,
+    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        let handle = self.persisted.lock().await.clone();
+
+        // Filter to only existing links and collect their statuses
+        let mut existing_links = Vec::new();
+        for link in link_expressions {
+            if let Some((link_from_db, status)) =
+                Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &link))?
+            {
+                existing_links.push((link_from_db, status));
+            }
+        }
+
+        // Skip if no links found
+        if existing_links.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Split into links and statuses
+        let (links, statuses): (Vec<_>, Vec<_>) = existing_links.into_iter().unzip();
+
+        // Create diff from links that exist
+        let diff = PerspectiveDiff::from_removals(links.clone());
+
+        // Create decorated versions
+        let decorated_links: Vec<DecoratedLinkExpression> = links
+            .into_iter()
+            .zip(statuses.iter())
+            .map(|(link, status)| DecoratedLinkExpression::from((link, status.clone())))
+            .collect();
+
+        let decorated_diff = DecoratedPerspectiveDiff::from_removals(decorated_links.clone());
+
+        // Remove from DB
+        for link in diff.removals.iter() {
+            Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, link))?;
+        }
+
+        self.spawn_prolog_facts_update(decorated_diff.clone());
+        self.pubsub_publish_diff(decorated_diff).await;
+
+        // Only commit shared links by filtering decorated_links
+        let shared_links: Vec<LinkExpression> = decorated_links
+            .iter()
+            .filter(|link| link.status == Some(LinkStatus::Shared))
+            .map(|link| link.clone().into())
+            .collect();
+
+        if !shared_links.is_empty() {
+            let shared_diff = PerspectiveDiff {
+                additions: vec![],
+                removals: shared_links,
+            };
+            self.spawn_commit_and_handle_error(&shared_diff);
+        }
+
+        *(self.links_have_changed.lock().await) = true;
+        Ok(decorated_links)
     }
 
     async fn get_links_local(
@@ -1553,8 +1616,10 @@ impl PerspectiveInstance {
         let mut object: HashMap<String, String> = HashMap::new();
 
         // Get author and timestamp from the first link mentioning base as source
-        let mut base_query = LinkQuery::default();
-        base_query.source = Some(base_expression.clone());
+        let base_query = LinkQuery {
+            source: Some(base_expression.clone()),
+            ..Default::default()
+        };
         let base_links = self.get_links(&base_query).await?;
         let first_link = base_links
             .first()

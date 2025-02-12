@@ -631,8 +631,17 @@ impl From<AIPromptExamples> for AIPromptExamplesInput {
 #[serde(rename_all = "camelCase")]
 pub struct LocalModelInput {
     pub file_name: String,
-    pub tokenizer_source: String,
-    pub model_parameters: String,
+    pub tokenizer_source: Option<TokenizerSourceInput>,
+    pub huggingface_repo: Option<String>,
+    pub revision: Option<String>,
+}
+
+#[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenizerSourceInput {
+    pub repo: String,
+    pub revision: String,
+    pub file_name: String,
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
