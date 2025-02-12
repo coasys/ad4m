@@ -868,7 +868,6 @@ impl AIService {
     // Whisper / Transcription
     // -------------------------------------
 
-
     fn whisper_string_to_model(whisper_string: String) -> Result<WhisperSource> {
         match whisper_string.as_str() {
             "whisper_tiny" => Ok(WhisperSource::Tiny),
@@ -886,10 +885,10 @@ impl AIService {
             "whisper_large_v2" => Ok(WhisperSource::LargeV2),
             "whisper_distil_medium_en" => Ok(WhisperSource::DistilMediumEn),
             "whisper_distil_large_v2" => Ok(WhisperSource::DistilLargeV2),
-            "whisper_distil_large_v3"  => Ok(WhisperSource::DistilLargeV3),
+            "whisper_distil_large_v3" => Ok(WhisperSource::DistilLargeV3),
             "whisper_distil_large_v3_quantized" => Ok(WhisperSource::QuantizedDistilLargeV3),
             "whisper_large_v3_turbo_quantized" => Ok(WhisperSource::QuantizedLargeV3Turbo),
-            _ => Err(anyhow!("Unknown whisper model: {}", whisper_string))
+            _ => Err(anyhow!("Unknown whisper model: {}", whisper_string)),
         }
     }
 
@@ -913,7 +912,10 @@ impl AIService {
         // if nothing above works, see if we have a transcription model in the DB and use that
         // Try to find first transcription model in DB
         if let Ok(models) = Ad4mDb::with_global_instance(|db| db.get_models()) {
-            if let Some(model) = models.into_iter().find(|m| m.model_type == ModelType::Transcription) {
+            if let Some(model) = models
+                .into_iter()
+                .find(|m| m.model_type == ModelType::Transcription)
+            {
                 if let Some(local) = model.local {
                     return Self::whisper_string_to_model(local.file_name);
                 }
@@ -922,9 +924,7 @@ impl AIService {
 
         // Default to tiny if nothing found
         Ok(WhisperSource::Tiny)
-        
     }
-
 
     pub async fn open_transcription_stream(&self, model_id: String) -> Result<String> {
         let model_size = Self::get_whisper_model_size(model_id)?;
@@ -1036,7 +1036,9 @@ impl AIService {
     async fn load_transcriber_model(model_id: String) {
         publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
 
-        let model_size = Self::get_whisper_model_size(model_id.clone()).ok().unwrap_or(WHISPER_MODEL);
+        let model_size = Self::get_whisper_model_size(model_id.clone())
+            .ok()
+            .unwrap_or(WHISPER_MODEL);
 
         let _ = WhisperBuilder::default()
             .with_source(model_size)
