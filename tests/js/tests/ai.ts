@@ -110,7 +110,7 @@ export default function aiTests(testContext: TestContext) {
                 expect(addedModel).to.exist
 
                 // Create updated model data
-                const updatedModel: ModelInput = {
+                const bogusModelUrls: ModelInput = {
                     name: "UpdatedModel",
                     local: {
                         fileName: "updated_model.bin",
@@ -126,7 +126,41 @@ export default function aiTests(testContext: TestContext) {
                 }
 
                 // Update the model
-                const updateResult = await ad4mClient.ai.updateModel(addedModel!.id, updatedModel)
+                let updateResult = false
+                let error = {}
+                try {
+                    updateResult = await ad4mClient.ai.updateModel(addedModel!.id, bogusModelUrls)
+                }catch(e) {
+                    //@ts-ignore
+                    error = e
+                    console.log(error)
+                }
+                expect(updateResult).to.be.false
+                expect(error).to.have.property('message')
+                //@ts-ignore
+                expect(error.message).to.include('Failed to update model')
+                
+
+
+                // Create updated model data
+                const updatedModel: ModelInput = {
+                    name: "UpdatedModel",
+                    local: {
+                        fileName: "Llama-Express.1-Tiny.Q4_K_S.gguf",
+                        huggingfaceRepo: "mradermacher/Llama-Express.1-Tiny-GGUF",
+                        revision: "main",
+                        tokenizerSource: {
+                            repo: "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                            revision: "main",
+                            fileName: "tokenizer.json"
+                        },
+                        
+                    },
+                    modelType: "LLM"
+                }
+
+                updateResult = await ad4mClient.ai.updateModel(addedModel!.id, updatedModel)
+                
                 expect(updateResult).to.be.true
 
                 // Verify the update
@@ -135,13 +169,13 @@ export default function aiTests(testContext: TestContext) {
                 expect(retrievedModel).to.exist
                 expect(retrievedModel?.name).to.equal("UpdatedModel")
                 expect(retrievedModel?.api).to.be.null
-                expect(retrievedModel?.local?.fileName).to.equal("updated_model.bin")
-                expect(retrievedModel?.local?.tokenizerSource?.repo).to.equal("updated-repo")
-                expect(retrievedModel?.local?.tokenizerSource?.revision).to.equal("main")
-                expect(retrievedModel?.local?.tokenizerSource?.fileName).to.equal("updated_tokenizer.json")
-                expect(retrievedModel?.local?.huggingfaceRepo).to.equal("updated-repo")
+                expect(retrievedModel?.local?.fileName).to.equal("Llama-Express.1-Tiny.Q4_K_S.gguf")
+                expect(retrievedModel?.local?.huggingfaceRepo).to.equal("mradermacher/Llama-Express.1-Tiny-GGUF")
                 expect(retrievedModel?.local?.revision).to.equal("main")
-                expect(retrievedModel?.modelType).to.equal("EMBEDDING")
+                expect(retrievedModel?.local?.tokenizerSource?.repo).to.equal("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+                expect(retrievedModel?.local?.tokenizerSource?.revision).to.equal("main")
+                expect(retrievedModel?.local?.tokenizerSource?.fileName).to.equal("tokenizer.json")
+                expect(retrievedModel?.modelType).to.equal("LLM")
 
                 // Clean up
                 const removeResult = await ad4mClient.ai.removeModel(addedModel!.id)
@@ -182,7 +216,7 @@ export default function aiTests(testContext: TestContext) {
                 expect(defaultModel.api?.baseUrl).to.equal("https://api.example.com/")
 
                 // Clean up
-                await ad4mClient.ai.removeModel("TestDefaultApiModel")
+                await ad4mClient.ai.removeModel(id)
             })
 
             it.skip('can use "default" as model_id in tasks and prompting works', async () => {
@@ -191,16 +225,7 @@ export default function aiTests(testContext: TestContext) {
                 // Create a test model and set as default
                 const modelInput: ModelInput = {
                     name: "TestDefaultModel",
-                    local: {
-                        fileName: "llama_tiny",
-                        tokenizerSource: {
-                            repo: "test-repo",
-                            revision: "main",
-                            fileName: "tokenizer.json"
-                        },
-                        huggingfaceRepo: "test-repo",
-                        revision: "main"
-                    },
+                    local: { fileName: "llama_tiny" },
                     modelType: "LLM"
                 }
                 const modelId = await ad4mClient.ai.addModel(modelInput)
@@ -232,16 +257,7 @@ export default function aiTests(testContext: TestContext) {
                 // Create another test model
                 const newModelInput: ModelInput = {
                     name: "TestDefaultModel2",
-                    local: {
-                        fileName: "llama_tiny",
-                        tokenizerSource: {
-                            repo: "test-repo",
-                            revision: "main",
-                            fileName: "tokenizer.json"
-                        },
-                        huggingfaceRepo: "test-repo",
-                        revision: "main"
-                    },
+                    local: {fileName: "llama_tiny"},
                     modelType: "LLM"
                 }
                 const newModelId = await ad4mClient.ai.addModel(newModelInput)
