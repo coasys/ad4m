@@ -141,20 +141,14 @@ export default function aiTests(testContext: TestContext) {
                 expect(error.message).to.include('Failed to update model')
                 
 
-
                 // Create updated model data
                 const updatedModel: ModelInput = {
                     name: "UpdatedModel",
-                    local: {
-                        fileName: "Llama-Express.1-Tiny.Q4_K_S.gguf",
-                        huggingfaceRepo: "mradermacher/Llama-Express.1-Tiny-GGUF",
-                        revision: "main",
-                        tokenizerSource: {
-                            repo: "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-                            revision: "main",
-                            fileName: "tokenizer.json"
-                        },
-                        
+                    api: {
+                        baseUrl: "https://api.example.com/v2",
+                        apiKey: "updated-api-key", 
+                        model: "gpt-4",
+                        apiType: "OPEN_AI"
                     },
                     modelType: "LLM"
                 }
@@ -168,13 +162,11 @@ export default function aiTests(testContext: TestContext) {
                 const retrievedModel = updatedModels.find(model => model.id === addedModel!.id)
                 expect(retrievedModel).to.exist
                 expect(retrievedModel?.name).to.equal("UpdatedModel")
-                expect(retrievedModel?.api).to.be.null
-                expect(retrievedModel?.local?.fileName).to.equal("Llama-Express.1-Tiny.Q4_K_S.gguf")
-                expect(retrievedModel?.local?.huggingfaceRepo).to.equal("mradermacher/Llama-Express.1-Tiny-GGUF")
-                expect(retrievedModel?.local?.revision).to.equal("main")
-                expect(retrievedModel?.local?.tokenizerSource?.repo).to.equal("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
-                expect(retrievedModel?.local?.tokenizerSource?.revision).to.equal("main")
-                expect(retrievedModel?.local?.tokenizerSource?.fileName).to.equal("tokenizer.json")
+                expect(retrievedModel?.local).to.be.null
+                expect(retrievedModel?.api?.baseUrl).to.equal("https://api.example.com/v2")
+                expect(retrievedModel?.api?.apiKey).to.equal("updated-api-key")
+                expect(retrievedModel?.api?.model).to.equal("gpt-4")
+                expect(retrievedModel?.api?.apiType).to.equal("OPEN_AI")
                 expect(retrievedModel?.modelType).to.equal("LLM")
 
                 // Clean up
