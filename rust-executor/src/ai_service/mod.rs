@@ -1092,7 +1092,10 @@ impl AIService {
                     // Remove the channel from the map
                     llm_channel.remove(&model_id);
                 } else {
-                    log::warn!("LLM model thread for {} not found. Nothing to shutdown", model_id);
+                    log::warn!(
+                        "LLM model thread for {} not found. Nothing to shutdown",
+                        model_id
+                    );
                 }
             }
             ModelType::Embedding => {
