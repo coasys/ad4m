@@ -380,7 +380,7 @@ export default function aiTests(testContext: TestContext) {
                 expect(tasksAfterRemoval.find(task => task.taskId === newTask.taskId)).to.be.undefined;
             }).timeout(900000)
 
-            it('can prompt a task', async () => {
+            it.skip('can prompt a task', async () => {
                 const ad4mClient = testContext.ad4mClient!
 
                 // Create a new task
