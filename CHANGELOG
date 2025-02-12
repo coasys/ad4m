@@ -23,6 +23,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Fix for syncing broken after some time: Prevent p-diff-sync diff entries from exceeding HC entry size limit of 4MB (which would happen at some point through snapshot creation) [PR#553](https://github.com/coasys/ad4m/pull/553)
 - Fix for crash when removing .ad4m directory after using multiple agent feature [PR#556](https://github.com/coasys/ad4m/pull/556)
 - Fix error after spawning AI task [PR#559](https://github.com/coasys/ad4m/pull/559)
+- Fix some problems with perspective.removeLinks() with a proper implementation [PR#563](https://github.com/coasys/ad4m/pull/563)
 
 ### Added
 - Prolog predicates needed in new Flux mention notification trigger:

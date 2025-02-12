@@ -130,6 +130,28 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(linksPostMutation.length).to.equal(2);
             })
 
+            it(`doesn't error when duplicate entries passed to removeLinks`, async () => {
+                const ad4mClient = testContext.ad4mClient!;
+                const perspective = await ad4mClient.perspective.add('test-duplicate-link-removal');
+                expect(perspective.name).to.equal('test-duplicate-link-removal');
+
+                // create link
+                const link = { source: 'root', predicate: 'p', target: 'abc' };
+                const addLink = await perspective.add(link);
+                expect(addLink.data.target).to.equal("abc");
+
+                // get link expression
+                const linkExpression = (await perspective.get(new LinkQuery(link)))[0];
+                expect(linkExpression.data.target).to.equal("abc");
+
+                // attempt to remove link twice (currently errors and prevents further execution of code)
+                await perspective.removeLinks([linkExpression, linkExpression])
+
+                // check link is removed
+                const links = await perspective.get(new LinkQuery(link));
+                expect(links.length).to.equal(0);
+            })
+
             it('test local perspective links - time query', async () => {
                 const ad4mClient = testContext.ad4mClient!
 
