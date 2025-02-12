@@ -225,7 +225,7 @@ export default function aiTests(testContext: TestContext) {
                 // Create a test model and set as default
                 const modelInput: ModelInput = {
                     name: "TestDefaultModel",
-                    local: { fileName: "llama_tiny" },
+                    local: { fileName: "llama_tiny_1_1b_chat" },
                     modelType: "LLM"
                 }
                 const modelId = await ad4mClient.ai.addModel(modelInput)
@@ -257,7 +257,7 @@ export default function aiTests(testContext: TestContext) {
                 // Create another test model
                 const newModelInput: ModelInput = {
                     name: "TestDefaultModel2",
-                    local: {fileName: "llama_tiny"},
+                    local: {fileName: "llama_tiny_1_1b_chat"},
                     modelType: "LLM"
                 }
                 const newModelId = await ad4mClient.ai.addModel(newModelInput)
@@ -291,16 +291,7 @@ export default function aiTests(testContext: TestContext) {
                 const ad4mClient = testContext.ad4mClient!
                 const llamaDescription: ModelInput = {
                     name: "Llama tiny",
-                    local: {
-                        fileName: "llama_tiny",
-                        tokenizerSource: {
-                            repo: "test-repo",
-                            revision: "main",
-                            fileName: "tokenizer.json"
-                        },
-                        huggingfaceRepo: "test-repo",
-                        revision: "main"
-                    },
+                    local: { fileName: "llama_tiny_1_1b_chat" },
                     modelType: "LLM"
                 }
                 let llamaId = await ad4mClient.ai.addModel(llamaDescription)
@@ -353,16 +344,7 @@ export default function aiTests(testContext: TestContext) {
                 const ad4mClient = testContext.ad4mClient!
                 const llamaDescription: ModelInput = {
                     name: "Llama tiny",
-                    local: {
-                        fileName: "llama_tiny",
-                        tokenizerSource: {
-                            repo: "test-repo",
-                            revision: "main",
-                            fileName: "tokenizer.json"
-                        },
-                        huggingfaceRepo: "test-repo",
-                        revision: "main"
-                    },
+                    local: { fileName: "llama_tiny_1_1b_chat" },
                     modelType: "LLM"
                 }
                 let llamaId = await ad4mClient.ai.addModel(llamaDescription)
@@ -406,12 +388,19 @@ export default function aiTests(testContext: TestContext) {
             it.skip('can prompt several tasks in a row fast', async () => {
                 const ad4mClient = testContext.ad4mClient!
 
+                const llamaDescription: ModelInput = {
+                    name: "Llama tiny",
+                    local: { fileName: "llama_tiny_1_1b_chat" },
+                    modelType: "LLM"
+                }
+                let llamaId = await ad4mClient.ai.addModel(llamaDescription)
+
                 console.log("test 1");
 
                 // Create a new task
                 const newTask = await ad4mClient.ai.addTask(
                     "test-name",
-                    "llama",
+                    llamaId,
                     "You are inside a test. Please respond with a short, unique message each time.",
                     [
                         { input: "Test long 1", output: "This is a much longer response that includes various details. It talks about the weather being sunny, the importance of staying hydrated, and even mentions a recipe for chocolate chip cookies. The response goes on to discuss the benefits of regular exercise, the plot of a popular novel, and concludes with a fun fact about the migration patterns of monarch butterflies." },
