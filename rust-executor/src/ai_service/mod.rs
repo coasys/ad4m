@@ -1080,16 +1080,19 @@ impl AIService {
                 let mut llm_channel = self.llm_channel.lock().await;
                 if let Some(sender) = llm_channel.get(&model_id) {
                     let (tx, rx) = oneshot::channel();
-                    sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
+                    if let Ok(()) = sender.send(LLMTaskRequest::Shutdown(LLMTaskShutdownRequest {
                         result_sender: tx,
-                    }))?;
+                    })) {
+                        // Wait for the thread to confirm shutdown
+                        let _ = rx.await;
+                    }
 
-                    // Wait for the thread to confirm shutdown
-                    let _ = rx.await;
                     log::info!("LLM model thread for {} confirmed shutdown", model_id);
 
                     // Remove the channel from the map
                     llm_channel.remove(&model_id);
+                } else {
+                    log::warn!("LLM model thread for {} not found. Nothing to shutdown", model_id);
                 }
             }
             ModelType::Embedding => {
