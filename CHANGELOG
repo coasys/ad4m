@@ -71,6 +71,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
  - Added ability to handle multiple agents in launcher. [PR#459](https://github.com/coasys/ad4m/pull/459)
  - Added a way to show & add new `AgentInfo` in launcher. [PR#463](https://github.com/coasys/ad4m/pull/463)
  - `ad4m-executor` binary prints capability request challange to stdout to enable app hand-shake [PR#471](https://github.com/coasys/ad4m/pull/471)
+ - Add ability to select Whisper model size [PR#564](https://github.com/coasys/ad4m/pull/564)
 
 ### Changed
  - Much improved ADAM Launcher setup flow [PR#440](https://github.com/coasys/ad4m/pull/440) and [PR#444](https://github.com/coasys/ad4m/pull/444):

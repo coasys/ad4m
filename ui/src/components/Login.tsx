@@ -155,15 +155,13 @@ const Login = () => {
   }
 
   async function saveModels() {
+    let whisperModel = "whisper_small";
     // add llm model
     if (aiMode !== "None") {
       const llm = { name: "LLM Model 1", modelType: "LLM" } as ModelInput;
       if (aiMode === "Local") {
-        llm.local = {
-          fileName: "Qwen2.5.1-Coder-7B-Instruct",
-          tokenizerSource: "",
-          modelParameters: "",
-        };
+        llm.local = { fileName: "Qwen2.5.1-Coder-7B-Instruct" };
+        whisperModel = "whisper_large_v3_turbo_quantized";
       } else {
         llm.api = {
           baseUrl: apiUrl,
@@ -179,23 +177,16 @@ const Login = () => {
     // add embedding model
     client!.ai.addModel({
       name: "bert",
-      local: {
-        fileName: "bert",
-        tokenizerSource: "",
-        modelParameters: "",
-      },
+      local: { fileName: "bert" },
       modelType: "EMBEDDING",
     });
-    // add transcription model
+    // add medium whisper model
     client!.ai.addModel({
-      name: "Transcription Model 1",
-      local: {
-        fileName: "whisper",
-        tokenizerSource: "",
-        modelParameters: "",
-      },
+      name: "Whisper",
+      local: { fileName: whisperModel },
       modelType: "TRANSCRIPTION",
     });
+
     setCurrentIndex(6);
   }
 
@@ -493,39 +484,6 @@ const Login = () => {
               Is your computer capabale of running Large Language Models
               locally?
             </j-text>
-            <j-text>
-              Regardless of your choice here, we will always download and use
-              small AI models (such as{" "}
-              <a
-                onClick={() =>
-                  open("https://huggingface.co/openai/whisper-small")
-                }
-                style={{ cursor: "pointer" }}
-              >
-                Whisper small
-              </a>{" "}
-              and an{" "}
-              <a
-                onClick={() =>
-                  open(
-                    "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
-                  )
-                }
-                style={{ cursor: "pointer" }}
-              >
-                Embedding model
-              </a>
-              ) to handle basic tasks on all devices.
-              <br></br>
-              <br></br>
-              When it comes to LLMs, it depends on you having either an Apple
-              Silicon mac (M1 or better) or an nVidia GPU (with enough vRAM).
-              <br></br>
-              <br></br>
-              Alternatively, you can configure ADAM to out-source LLM tasks to a
-              remote API. If you unsure, you can select "None" now and add,
-              remove or change model settings later-on in the <b>AI tab</b>.
-            </j-text>
           </j-flex>
 
           <j-flex gap="400" style={{ padding: "0 10px" }}>
@@ -594,18 +552,43 @@ const Login = () => {
               style={{ marginTop: 30, maxWidth: 350 }}
             >
               <j-text>
-                This will download{" "}
-                <a
-                  onClick={() =>
-                    open(
-                      "https://huggingface.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF"
-                    )
-                  }
-                  style={{ cursor: "pointer" }}
-                >
-                  Qwen2.5 Coder 7B Instruct
-                </a>
-                {" "}(4.68GB)
+                This will download
+                <p>
+                  <a
+                    onClick={() =>
+                      open(
+                        "https://huggingface.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF"
+                      )
+                    }
+                    style={{ cursor: "pointer" }}
+                  >
+                    Qwen2.5 Coder 7B Instruct (4.68GB)
+                  </a>
+                </p>
+                and
+                <p>
+                  <a
+                    onClick={() =>
+                      open(
+                        "https://huggingface.co/openai/whisper-large-v3-turbo"
+                      )
+                    }
+                    style={{ cursor: "pointer" }}
+                  >Whisper large v3 turbo (809MB)</a>
+                </p>
+                and
+                <p>
+                  <a
+                    onClick={() =>
+                      open(
+                        "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
+                      )
+                    }
+                    style={{ cursor: "pointer" }}
+                  >
+                    Bert Embedding model (90MB)
+                  </a>
+                </p>
               </j-text>
             </j-flex>
           )}
@@ -690,6 +673,33 @@ const Login = () => {
                   )}
                 </j-flex>
 
+                <j-text>
+                  This will still download
+                  <p>
+                    <a
+                      onClick={() =>
+                        open(
+                          "https://huggingface.co/openai/whisper-small"
+                        )
+                      }
+                      style={{ cursor: "pointer" }}
+                    >Whisper small (244MB)</a>
+                  </p>
+                  and
+                  <p>
+                    <a
+                      onClick={() =>
+                        open(
+                          "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
+                        )
+                      }
+                      style={{ cursor: "pointer" }}
+                    >
+                      Bert Embedding model (90MB)
+                    </a>
+                  </p>
+                </j-text>
+
                 {apiValid && (
                   <j-flex direction="column" a="center" gap="400">
                     <j-flex a="center" gap="400">
@@ -730,6 +740,7 @@ const Login = () => {
                       </j-text>
                     )}
                   </j-flex>
+                  
                 )}
 
                 {(!apiModelValid || !apiValid) && (
@@ -768,6 +779,33 @@ const Login = () => {
                 Selecting <b>None</b> here and not having any LLM configured
                 might result in new Synergy features not working in Flux...
               </j-text>
+
+              <j-text>
+                  This will still download
+                  <p>
+                    <a
+                      onClick={() =>
+                        open(
+                          "https://huggingface.co/openai/whisper-small"
+                        )
+                      }
+                      style={{ cursor: "pointer" }}
+                    >Whisper small (244MB)</a>
+                  </p>
+                  and
+                  <p>
+                    <a
+                      onClick={() =>
+                        open(
+                          "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
+                        )
+                      }
+                      style={{ cursor: "pointer" }}
+                    >
+                      Bert Embedding model (90MB)
+                    </a>
+                  </p>
+                </j-text>
             </j-flex>
           )}
 
