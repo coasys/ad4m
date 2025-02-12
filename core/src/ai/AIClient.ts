@@ -28,8 +28,13 @@ export class AIClient {
                         }
                         local {
                             fileName
-                            tokenizerSource
-                            modelParameters
+                            tokenizerSource {
+                                repo
+                                revision
+                                fileName
+                            }
+                            huggingfaceRepo
+                            revision
                         }
                         modelType
                     }
@@ -102,8 +107,13 @@ export class AIClient {
                         }
                         local {
                             fileName
-                            tokenizerSource
-                            modelParameters
+                            tokenizerSource {
+                                repo
+                                revision
+                                fileName
+                            }
+                            huggingfaceRepo
+                            revision
                         }
                         modelType
                     }

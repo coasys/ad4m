@@ -21,9 +21,12 @@ path = "src/ad4m.rs"
 name = "ad4m-executor"
 path = "src/ad4m_executor.rs"
 
+[features]
+# Pass metal and cuda features through to ad4m-executor
+metal = ["ad4m-executor/metal"]
+cuda = ["ad4m-executor/cuda"]
+
 [dependencies]
-
-
 ad4m-client = { path = "../rust-client", version="0.10.1-rc6" }
 ad4m-executor = { path = "../rust-executor", version="0.10.1-rc6" }
 anyhow = "1.0.65"

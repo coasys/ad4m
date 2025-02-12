@@ -6,6 +6,7 @@ import "../index.css";
 const AITypes = ["LLM", "EMBEDDING", "TRANSCRIPTION"];
 const llmModels = [
   "External API",
+  "Custom Hugging Face Model",
   "Qwen2.5.1-Coder-7B-Instruct",
   "deepseek_r1_distill_qwen_1_5b",
   "deepseek_r1_distill_qwen_7b",
@@ -54,6 +55,17 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
   const [apiModels, setApiModels] = useState<string[]>([]);
   const apiUrlRef = useRef("https://api.openai.com/v1");
   const apiKeyRef = useRef("");
+  const [useCustomTokenizer, setUseCustomTokenizer] = useState(false);
+  const [customHfModel, setCustomHfModel] = useState({
+    huggingfaceRepo: "",
+    revision: "main",
+    fileName: "",
+    tokenizerSource: {
+      repo: "",
+      revision: "main",
+      fileName: ""
+    }
+  });
 
   function closeMenu(menuId: string) {
     const menu = document.getElementById(menuId);
@@ -164,11 +176,16 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
           apiType: "OPEN_AI",
           model: apiModel,
         };
+      } else if (newModel === "Custom Hugging Face Model") {
+        model.local = {
+          fileName: customHfModel.fileName,
+          huggingfaceRepo: customHfModel.huggingfaceRepo,
+          revision: customHfModel.revision,
+          tokenizerSource: useCustomTokenizer ? customHfModel.tokenizerSource : undefined
+        };
       } else {
         model.local = {
           fileName: newModel,
-          tokenizerSource: "",
-          modelParameters: "",
         };
       }
       if (oldModel) client!.ai.updateModel(oldModel.id, model);
@@ -190,7 +207,28 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
 
       if (oldModel.modelType === "LLM") {
         setNewModels(llmModels);
-        setNewModel(oldModel.api ? "External API" : oldModel.local.fileName);
+        if (oldModel.api) {
+          setNewModel("External API");
+          setApiUrl(oldModel.api.baseUrl);
+          apiUrlRef.current = oldModel.api.baseUrl;
+          setApiKey(oldModel.api.apiKey);
+          apiKeyRef.current = oldModel.api.apiKey;
+        } else if (oldModel.local?.huggingfaceRepo) {
+          setNewModel("Custom Hugging Face Model");
+          setCustomHfModel({
+            huggingfaceRepo: oldModel.local.huggingfaceRepo,
+            revision: oldModel.local.revision || "main",
+            fileName: oldModel.local.fileName,
+            tokenizerSource: oldModel.local.tokenizerSource || {
+              repo: "",
+              revision: "main",
+              fileName: ""
+            }
+          });
+          setUseCustomTokenizer(!!oldModel.local.tokenizerSource);
+        } else {
+          setNewModel(oldModel.local.fileName);
+        }
       } else if (oldModel.modelType === "EMBEDDING") {
         setNewModels(embeddingModels);
         setNewModel(oldModel.local.fileName);
@@ -407,6 +445,140 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
                   </j-flex>
                 )}
               </>
+            )}
+
+            {newModel === "Custom Hugging Face Model" && (
+              <j-flex direction="column" gap="400">
+                <j-text nomargin color="ui-0" size="300">
+                  Note: The model file must be a GGUF file format, which typically includes the tokenizer.
+                </j-text>
+
+                <j-flex a="center" gap="400">
+                  <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+                    Repository:
+                  </j-text>
+                  <j-input
+                    size="md"
+                    type="text"
+                    placeholder="e.g., TheBloke/Llama-2-7B-GGUF"
+                    value={customHfModel.huggingfaceRepo}
+                    onInput={(e: any) => setCustomHfModel({
+                      ...customHfModel,
+                      huggingfaceRepo: e.target.value
+                    })}
+                    style={{ width: "100%" }}
+                  />
+                </j-flex>
+
+                <j-flex a="center" gap="400">
+                  <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+                    Branch/Revision:
+                  </j-text>
+                  <j-input
+                    size="md"
+                    type="text"
+                    placeholder="main"
+                    value={customHfModel.revision}
+                    onInput={(e: any) => setCustomHfModel({
+                      ...customHfModel,
+                      revision: e.target.value
+                    })}
+                    style={{ width: "100%" }}
+                  />
+                </j-flex>
+
+                <j-flex a="center" gap="400">
+                  <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+                    Filename:
+                  </j-text>
+                  <j-input
+                    size="md"
+                    type="text"
+                    placeholder="e.g., llama-2-7b.Q4_K_M.gguf"
+                    value={customHfModel.fileName}
+                    onInput={(e: any) => setCustomHfModel({
+                      ...customHfModel,
+                      fileName: e.target.value
+                    })}
+                    style={{ width: "100%" }}
+                  />
+                </j-flex>
+
+                <j-flex a="center" gap="400">
+                  <j-checkbox
+                    checked={useCustomTokenizer}
+                    onChange={(e: any) => setUseCustomTokenizer(e.target.checked)}
+                  >
+                    Use Custom Tokenizer (Optional)
+                  </j-checkbox>
+                </j-flex>
+
+                {useCustomTokenizer && (
+                  <j-box pl="400">
+                    <j-flex direction="column" gap="400">
+                      <j-flex a="center" gap="400">
+                        <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+                          Tokenizer Repo:
+                        </j-text>
+                        <j-input
+                          size="md"
+                          type="text"
+                          placeholder="e.g., TheBloke/Llama-2-7B-GGUF"
+                          value={customHfModel.tokenizerSource.repo}
+                          onInput={(e: any) => setCustomHfModel({
+                            ...customHfModel,
+                            tokenizerSource: {
+                              ...customHfModel.tokenizerSource,
+                              repo: e.target.value
+                            }
+                          })}
+                          style={{ width: "100%" }}
+                        />
+                      </j-flex>
+
+                      <j-flex a="center" gap="400">
+                        <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+                          Tokenizer Branch:
+                        </j-text>
+                        <j-input
+                          size="md"
+                          type="text"
+                          placeholder="main"
+                          value={customHfModel.tokenizerSource.revision}
+                          onInput={(e: any) => setCustomHfModel({
+                            ...customHfModel,
+                            tokenizerSource: {
+                              ...customHfModel.tokenizerSource,
+                              revision: e.target.value
+                            }
+                          })}
+                          style={{ width: "100%" }}
+                        />
+                      </j-flex>
+
+                      <j-flex a="center" gap="400">
+                        <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+                          Tokenizer File:
+                        </j-text>
+                        <j-input
+                          size="md"
+                          type="text"
+                          placeholder="e.g., tokenizer.json"
+                          value={customHfModel.tokenizerSource.fileName}
+                          onInput={(e: any) => setCustomHfModel({
+                            ...customHfModel,
+                            tokenizerSource: {
+                              ...customHfModel.tokenizerSource,
+                              fileName: e.target.value
+                            }
+                          })}
+                          style={{ width: "100%" }}
+                        />
+                      </j-flex>
+                    </j-flex>
+                  </j-box>
+                )}
+              </j-flex>
             )}
           </j-flex>
 
