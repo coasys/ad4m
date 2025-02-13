@@ -10,7 +10,14 @@
     "AD4M"
   ],
   "remote": {
-    "urls": ["http://127.0.0.1:3000", "http://localhost:11434", "http://127.0.0.1", "https://127.0.0.1", "http://localhost", "https://localhost"]
+    "urls": [
+      "http://127.0.0.1:3000",
+      "http://localhost:11434",
+      "http://127.0.0.1",
+      "https://127.0.0.1",
+      "http://localhost",
+      "https://localhost"
+    ]
   },
   "permissions": [
     "updater:default",
@@ -92,6 +99,7 @@
     "notification:default",
     "process:default",
     "dialog:default",
-    "clipboard-manager:default"
+    "clipboard-manager:default",
+    "dialog:default"
   ]
 }
