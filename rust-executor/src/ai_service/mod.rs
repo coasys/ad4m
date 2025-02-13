@@ -18,6 +18,7 @@ use kalosm::sound::TextStream;
 use kalosm::sound::*;
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::thread;
@@ -323,20 +324,30 @@ impl AIService {
             // Handle unknown models
             _ => {
                 if let Some(repo) = model_config.huggingface_repo.clone() {
-                    log::info!("Trying to load model from Huggingface:\n
+                    log::info!(
+                        "Trying to load model from Huggingface:\n
                         model_config.file_name: {:?}\n
                         model_config.huggingface_repo: {:?}\n
-                        model_config.revision: {:?}", model_config.file_name, model_config.huggingface_repo, model_config.revision);
+                        model_config.revision: {:?}",
+                        model_config.file_name,
+                        model_config.huggingface_repo,
+                        model_config.revision
+                    );
                     let mut builder = LlamaSource::new(FileSource::huggingface(
                         repo,
                         model_config.revision.unwrap_or("main".to_string()),
                         model_config.file_name,
                     ));
                     if let Some(tokenizer_source) = model_config.tokenizer_source {
-                        log::info!("Trying to load tokenizer from Huggingface:\n
+                        log::info!(
+                            "Trying to load tokenizer from Huggingface:\n
                             tokenizer_source.repo: {:?}\n
                             tokenizer_source.revision: {:?}\n
-                            tokenizer_source.file_name: {:?}", tokenizer_source.repo, tokenizer_source.revision, tokenizer_source.file_name);
+                            tokenizer_source.file_name: {:?}",
+                            tokenizer_source.repo,
+                            tokenizer_source.revision,
+                            tokenizer_source.file_name
+                        );
                         builder = builder.with_tokenizer(FileSource::huggingface(
                             tokenizer_source.repo,
                             tokenizer_source.revision,
@@ -345,16 +356,43 @@ impl AIService {
                     }
                     builder
                 } else {
-                    log::error!(
-                        "Unknown model string: {} and no Huggingface repo provided. Don't know where to get model weights from for: {}", 
-                        model_config.file_name,
-                        model_id
+                    // If no huggingface repo is set, treat as local file path
+                    log::info!(
+                        "Trying to load model from local file: {}",
+                        model_config.file_name
                     );
-                    return Err(anyhow::anyhow!(
-                        "Unknown model string: {} and no Huggingface repo provided. Don't know where to get model weights from for: {}", 
-                        model_config.file_name,
-                        model_id
-                    ));
+
+                    let model_path = PathBuf::from(&model_config.file_name);
+                    if !model_path.exists() {
+                        let error_msg =
+                            format!("Model file not found at path: {}", model_config.file_name);
+                        log::error!("{}", error_msg);
+                        return Err(anyhow!(error_msg));
+                    }
+
+                    let mut builder = LlamaSource::new(FileSource::local(model_path));
+
+                    // If a tokenizer is specified, add it
+                    if let Some(tokenizer_source) = model_config.tokenizer_source {
+                        if tokenizer_source.repo.is_empty() {
+                            // Empty repo means it's a local file path
+                            let tokenizer_path = PathBuf::from(&tokenizer_source.file_name);
+                            if !tokenizer_path.exists() {
+                                let error_msg = format!(
+                                    "Tokenizer file not found at path: {}",
+                                    tokenizer_source.file_name
+                                );
+                                log::error!("{}", error_msg);
+                                return Err(anyhow!(error_msg));
+                            }
+                            log::info!(
+                                "Loading tokenizer from local file: {}",
+                                tokenizer_source.file_name
+                            );
+                            builder = builder.with_tokenizer(FileSource::local(tokenizer_path));
+                        }
+                    }
+                    builder
                 }
             }
         });

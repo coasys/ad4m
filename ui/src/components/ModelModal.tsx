@@ -1,12 +1,14 @@
 import { ModelInput } from "@coasys/ad4m/lib/src/ai/AIResolver";
 import { useContext, useEffect, useState, useRef } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
+import { open } from '@tauri-apps/plugin-dialog';
 import "../index.css";
 
 const AITypes = ["LLM", "EMBEDDING", "TRANSCRIPTION"];
 const llmModels = [
-  "External API",
-  "Custom Hugging Face Model",
+  "🌐 External API",
+  "🤗 Custom Hugging Face Model", 
+  "📁 Local File",
   "Qwen2.5.1-Coder-7B-Instruct",
   "deepseek_r1_distill_qwen_1_5b",
   "deepseek_r1_distill_qwen_7b",
@@ -82,6 +84,12 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
     tokenizerSource: {
       repo: "",
       revision: "main",
+      fileName: ""
+    }
+  });
+  const [localFile, setLocalFile] = useState({
+    fileName: "",
+    tokenizerSource: {
       fileName: ""
     }
   });
@@ -188,19 +196,28 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
         name: newModelName,
         modelType: newModelType,
       } as ModelInput;
-      if (newModel === "External API") {
+      if (newModel.includes("External API")) {
         model.api = {
           baseUrl: apiUrl,
           apiKey,
           apiType: "OPEN_AI",
           model: apiModel,
         };
-      } else if (newModel === "Custom Hugging Face Model") {
+      } else if (newModel.includes("Custom Hugging Face Model")) {
         model.local = {
           fileName: customHfModel.fileName,
           huggingfaceRepo: customHfModel.huggingfaceRepo,
           revision: customHfModel.revision,
           tokenizerSource: useCustomTokenizer ? customHfModel.tokenizerSource : undefined
+        };
+      } else if (newModel.includes("Local File")) {
+        model.local = {
+          fileName: localFile.fileName,
+          tokenizerSource: localFile.tokenizerSource && localFile.tokenizerSource.fileName.length > 0 ? {
+            repo: "",
+            revision: "",
+            fileName: localFile.tokenizerSource.fileName
+          } : undefined
         };
       } else {
         model.local = {
@@ -229,13 +246,13 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
       if (oldModel.modelType === "LLM") {
         setNewModels(llmModels);
         if (oldModel.api) {
-          setNewModel("External API");
+          setNewModel("🌐 External API");
           setApiUrl(oldModel.api.baseUrl);
           apiUrlRef.current = oldModel.api.baseUrl;
           setApiKey(oldModel.api.apiKey);
           apiKeyRef.current = oldModel.api.apiKey;
         } else if (oldModel.local?.huggingfaceRepo) {
-          setNewModel("Custom Hugging Face Model");
+          setNewModel("🤗 Custom Hugging Face Model");
           setCustomHfModel({
             huggingfaceRepo: oldModel.local.huggingfaceRepo,
             revision: oldModel.local.revision || "main",
@@ -353,7 +370,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
               </j-menu>
             </j-flex>
 
-            {newModel === "External API" && (
+            {newModel.includes("External API") && (
               <>
                 <j-flex a="center" gap="400">
                   <j-button
@@ -468,7 +485,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
               </>
             )}
 
-            {newModel === "Custom Hugging Face Model" && (
+            {newModel.includes("Custom Hugging Face Model") && (
               <j-flex direction="column" gap="400">
                 <j-text nomargin color="ui-0" size="300">
                   Note: The model file must be a GGUF file format, which typically includes the tokenizer.
@@ -601,9 +618,104 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
                 )}
               </j-flex>
             )}
+
+            {newModel.includes("Local File") && (
+              <j-flex direction="column" gap="400">
+                <j-text nomargin color="ui-0" size="300">
+                  Note: The model file must be a GGUF file format, which typically includes the tokenizer.
+                </j-text>
+
+                <j-flex a="center" gap="400">
+                  <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+                    Model File:
+                  </j-text>
+                  <j-input
+                    size="md"
+                    type="text"
+                    placeholder="Select model file..."
+                    value={localFile.fileName}
+                    readonly
+                    style={{ width: "100%" }}
+                  />
+                  <j-button
+                    onClick={async () => {
+                      const filePath = await open({
+                        filters: [{
+                          name: 'Model Files',
+                          extensions: ['gguf', 'bin']
+                        }]
+                      });
+
+                      console.log("FilePath:", filePath);
+                      
+                      if (filePath && typeof filePath === 'string') {
+                        setLocalFile({
+                          ...localFile,
+                          fileName: filePath
+                        });
+                      }
+                    }}
+                    variant="ghost"
+                  >
+                    Browse
+                  </j-button>
+                </j-flex>
+
+                <j-flex a="center" gap="400">
+                  <j-checkbox
+                    checked={useCustomTokenizer}
+                    onChange={(e: any) => setUseCustomTokenizer(e.target.checked)}
+                  >
+                    Use Custom Tokenizer (Optional)
+                  </j-checkbox>
+                </j-flex>
+
+                {useCustomTokenizer && (
+                  <j-box pl="400">
+                    <j-flex direction="column" gap="400">
+                      <j-flex a="center" gap="400">
+                        <j-text nomargin color="ui-800" style={{ flexShrink: 0 }}>
+                          Tokenizer File:
+                        </j-text>
+                        <j-input
+                          size="md"
+                          type="text"
+                          placeholder="Select tokenizer file..."
+                          value={localFile.tokenizerSource?.fileName || ""}
+                          readonly
+                          style={{ width: "100%" }}
+                        />
+                        <j-button
+                          onClick={() => {
+                            const input = document.createElement('input');
+                            input.type = 'file';
+                            input.accept = '.json,.model';
+                            input.onchange = (e: any) => {
+                              const file = e.target.files[0];
+                              if (file) {
+                                setLocalFile({
+                                  ...localFile,
+                                  tokenizerSource: {
+                                    fileName: file.path
+                                  }
+                                });
+                              }
+                            };
+                            input.click();
+                          }}
+                          variant="ghost"
+                        >
+                          Browse
+                        </j-button>
+                      </j-flex>
+                    </j-flex>
+                  </j-box>
+                )}
+              </j-flex>
+            )}
           </j-flex>
 
-          {newModel === "External API" && (!apiModelValid || !apiValid) ? (
+          {newModel === "🌐 External API" && (!apiModelValid || !apiValid) ? (
             <>
               {!apiValid ? (
                 <j-button onClick={checkApi} variant="primary" loading={loading}>
