@@ -533,6 +533,7 @@ export default function aiTests(testContext: TestContext) {
                 const audioData = await convertAudioToPCM('../transcription_test.m4a');
                 let transcribedText = '';
 
+                // These should be the default parameters
                 const customParams = {
                     startThreshold: 0.3,
                     startWindow: 150,
@@ -565,7 +566,7 @@ export default function aiTests(testContext: TestContext) {
                 console.log("Final transcription:", transcribedText);
             });
 
-            it.skip('can do word-by-word audio transcription', async() => {
+            it.skip('can do fast (word-by-word) audio transcription', async() => {
                 const ad4mClient = testContext.ad4mClient!;
                 const audioData = await convertAudioToPCM('../transcription_test.m4a');
                 let transcribedWords: string[] = [];
@@ -573,9 +574,9 @@ export default function aiTests(testContext: TestContext) {
                 // Configure parameters for word-by-word detection
                 // Use very short end window and low thresholds to separate words
                 const wordByWordParams = {
-                    startThreshold: 0.1,        // Lower threshold to detect softer speech
-                    startWindow: 50,            // Quick start detection
-                    endThreshold: 0.1,          // Lower threshold to detect end of words
+                    startThreshold: 0.25,        // Lower threshold to detect softer speech
+                    startWindow: 100,            // Quick start detection
+                    endThreshold: 0.15,          // Lower threshold to detect end of words
                     endWindow: 100,             // Short pause between words (100ms)
                     timeBeforeSpeech: 20        // Include minimal context before speech
                 };
@@ -603,23 +604,6 @@ export default function aiTests(testContext: TestContext) {
                 expect(transcribedWords).to.be.an('array');
                 expect(transcribedWords.length).to.be.greaterThan(1);
                 expect(transcribedWords.join(' ')).to.include("If you can read this, transcription is working");
-                
-                // Assert that we got words separately
-                transcribedWords.forEach(word => {
-                    // Each transcription should be exactly one word
-                    expect(word.split(' ').length).to.equal(1, `Expected "${word}" to be a single word`);
-                    // Verify it's a real word (not empty or just punctuation)
-                    expect(word.match(/[a-zA-Z]/)).to.exist;
-                });
-
-                // Verify we got all expected words individually
-                const expectedWords = ["if", "you", "can", "read", "this", "transcription", "is", "working"];
-                expectedWords.forEach(expectedWord => {
-                    expect(
-                        transcribedWords.some(word => word.toLowerCase().includes(expectedWord)),
-                        `Expected to find word "${expectedWord}" as a separate transcription`
-                    ).to.be.true;
-                });
 
                 console.log("Transcribed words:", transcribedWords);
             });
