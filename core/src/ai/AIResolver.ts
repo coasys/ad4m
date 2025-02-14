@@ -127,6 +127,24 @@ export class ModelInput {
     modelType: ModelType;
 }
 
+@InputType()
+export class VoiceActivityParams {
+    @Field(() => Float, { nullable: true })
+    startThreshold?: number;
+
+    @Field(() => Float, { nullable: true })
+    startWindow?: number;
+
+    @Field(() => Float, { nullable: true })
+    endThreshold?: number;
+
+    @Field(() => Float, { nullable: true })
+    endWindow?: number;
+
+    @Field(() => Float, { nullable: true })
+    timeBeforeSpeech?: number;
+}
+
 @Resolver()
 export default class AIResolver {
     @Query(returns => [Model])
@@ -319,7 +337,8 @@ export default class AIResolver {
 
     @Mutation(() => String)
     aiOpenTranscriptionStream(
-        @Arg("modelId") modelId: string
+        @Arg("modelId") modelId: string,
+        @Arg("params", () => VoiceActivityParams, { nullable: true }) params?: VoiceActivityParams
     ): string {
         return "streamId"
     }

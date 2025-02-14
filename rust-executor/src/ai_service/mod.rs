@@ -143,6 +143,15 @@ async fn handle_progress(model_id: String, loading: ModelLoadingProgress) {
     publish_model_status(model_id.clone(), progress, &status, false, false).await;
 }
 
+#[derive(Debug)]
+pub struct VoiceActivityParams {
+    pub start_threshold: Option<f32>,
+    pub start_window: Option<u64>,
+    pub end_threshold: Option<f32>,
+    pub end_window: Option<u64>,
+    pub time_before_speech: Option<u64>,
+}
+
 impl AIService {
     pub fn new() -> Result<Self> {
         let service = AIService {
@@ -979,7 +988,11 @@ impl AIService {
         Ok(WhisperSource::Tiny)
     }
 
-    pub async fn open_transcription_stream(&self, model_id: String) -> Result<String> {
+    pub async fn open_transcription_stream(
+        &self,
+        model_id: String,
+        params: Option<VoiceActivityParams>,
+    ) -> Result<String> {
         let model_size = Self::get_whisper_model_size(model_id)?;
         let stream_id = uuid::Uuid::new_v4().to_string();
         let stream_id_clone = stream_id.clone();
@@ -1004,11 +1017,31 @@ impl AIService {
                         receiver: Box::pin(samples_rx.map(futures_util::stream::iter).flatten()),
                     };
 
-                    let mut word_stream = audio_stream
-                        .voice_activity_stream()
-                        .rechunk_voice_activity()
-                        .with_end_window(Duration::from_millis(500))
-                        .transcribe(whisper);
+                    let mut voice_stream = audio_stream.voice_activity_stream().rechunk_voice_activity();
+
+                    // Apply voice activity parameters if provided
+                    if let Some(params) = params {
+                        if let Some(start_threshold) = params.start_threshold {
+                            voice_stream = voice_stream.with_start_threshold(start_threshold);
+                        }
+                        if let Some(start_window) = params.start_window {
+                            voice_stream = voice_stream.with_start_window(Duration::from_millis(start_window));
+                        }
+                        if let Some(end_threshold) = params.end_threshold {
+                            voice_stream = voice_stream.with_end_threshold(end_threshold);
+                        }
+                        if let Some(end_window) = params.end_window {
+                            voice_stream = voice_stream.with_end_window(Duration::from_millis(end_window));
+                        }
+                        if let Some(time_before_speech) = params.time_before_speech {
+                            voice_stream = voice_stream.with_time_before_speech(Duration::from_millis(time_before_speech));
+                        }
+                    } else {
+                        // Set default end window if no params provided
+                        voice_stream = voice_stream.with_end_window(Duration::from_millis(500));
+                    }
+
+                    let mut word_stream = voice_stream.transcribe(whisper);
 
                     let _ = done_tx.send(Ok(()));
 

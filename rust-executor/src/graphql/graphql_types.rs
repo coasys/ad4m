@@ -979,3 +979,25 @@ impl GetFilter for AIModelLoadingStatus {
         None
     }
 }
+
+#[derive(GraphQLInputObject, Serialize, Deserialize, Default, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceActivityParamsInput {
+    pub start_threshold: Option<f64>,
+    pub start_window: Option<i32>,
+    pub end_threshold: Option<f64>,
+    pub end_window: Option<i32>,
+    pub time_before_speech: Option<i32>,
+}
+
+impl Into<crate::ai_service::VoiceActivityParams> for VoiceActivityParamsInput {
+    fn into(self) -> crate::ai_service::VoiceActivityParams {
+        crate::ai_service::VoiceActivityParams {
+            start_threshold: self.start_threshold.map(|x| x as f32),
+            start_window: self.start_window.map(|x| x as u64),
+            end_threshold: self.end_threshold.map(|x| x as f32),
+            end_window: self.end_window.map(|x| x as u64),
+            time_before_speech: self.time_before_speech.map(|x| x as u64),
+        }
+    }
+}
