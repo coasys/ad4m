@@ -298,6 +298,21 @@ impl AIService {
                 "main".to_string(),
                 "Qwen2.5.1-Coder-7B-Instruct-Q4_K_M.gguf".to_string(),
             )),
+            "deephermes-3-llama-3-8b-Q4" => LlamaSource::new(FileSource::huggingface(
+                "NousResearch/DeepHermes-3-Llama-3-8B-Preview-GGUF".to_string(),
+                "main".to_string(),
+                "DeepHermes-3-Llama-3-8B-q4.gguf".to_string(),
+            )).with_override_stop_token_string("<|eot_id|>".to_string()),
+            "deephermes-3-llama-3-8b-Q6" => LlamaSource::new(FileSource::huggingface(
+                "NousResearch/DeepHermes-3-Llama-3-8B-Preview-GGUF".to_string(),
+                "main".to_string(),
+                "DeepHermes-3-Llama-3-8B-q6.gguf".to_string(),
+            )).with_override_stop_token_string("<|eot_id|>".to_string()),
+            "deephermes-3-llama-3-8b-Q8" => LlamaSource::new(FileSource::huggingface(
+                "NousResearch/DeepHermes-3-Llama-3-8B-Preview-GGUF".to_string(),
+                "main".to_string(),
+                "DeepHermes-3-Llama-3-8B-q8.gguf".to_string(),
+            )).with_override_stop_token_string("<|eot_id|>".to_string()),
             "deepseek_r1_distill_qwen_1_5b" => LlamaSource::deepseek_r1_distill_qwen_1_5b(),
             "deepseek_r1_distill_qwen_7b" => LlamaSource::deepseek_r1_distill_qwen_7b(),
             "deepseek_r1_distill_qwen_14b" => LlamaSource::deepseek_r1_distill_qwen_14b(),
