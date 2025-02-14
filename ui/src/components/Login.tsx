@@ -160,7 +160,7 @@ const Login = () => {
     if (aiMode !== "None") {
       const llm = { name: "DeepHermes-3-Llama-3-8B", modelType: "LLM" } as ModelInput;
       if (aiMode === "Local") {
-        whisperModel = "whisper_large_v3_turbo_quantized";
+        whisperModel = "whisper_distil_large_v3";
         llm.local = { fileName: "deephermes-3-llama-3-8b-Q4" };
       } else {
         llm.api = {
@@ -574,7 +574,7 @@ const Login = () => {
                       )
                     }
                     style={{ cursor: "pointer" }}
-                  >Whisper large v3 turbo (809MB)</a>
+                  >Whisper distill large v3 (1.42GB)</a>
                 </p>
                 and
                 <p>
