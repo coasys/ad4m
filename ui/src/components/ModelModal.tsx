@@ -645,8 +645,6 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
                           extensions: ['gguf', 'bin']
                         }]
                       });
-
-                      console.log("FilePath:", filePath);
                       
                       if (filePath && typeof filePath === 'string') {
                         setLocalFile({
@@ -686,22 +684,24 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
                           style={{ width: "100%" }}
                         />
                         <j-button
-                          onClick={() => {
-                            const input = document.createElement('input');
-                            input.type = 'file';
-                            input.accept = '.json,.model';
-                            input.onchange = (e: any) => {
-                              const file = e.target.files[0];
-                              if (file) {
-                                setLocalFile({
-                                  ...localFile,
-                                  tokenizerSource: {
-                                    fileName: file.path
-                                  }
-                                });
-                              }
-                            };
-                            input.click();
+                          onClick={async () => {
+
+                            const filePath = await open({
+                              filters: [{
+                                name: 'Tokenizer Files',
+                                extensions: ['json']
+                              }]
+                            });
+                            
+                            if (filePath && typeof filePath === 'string') {
+                              setLocalFile({
+                                ...localFile,
+                                tokenizerSource: {
+                                  ...localFile.tokenizerSource,
+                                  fileName: filePath
+                                }
+                              });
+                            }
                           }}
                           variant="ghost"
                         >
