@@ -506,10 +506,20 @@ export default function aiTests(testContext: TestContext) {
 
                 // Open the transcription stream
                 let transcribedText = '';
+
+                // Test with custom voice activity parameters
+                const customParams = {
+                    startThreshold: 0.3,
+                    startWindow: 150,
+                    endThreshold: 0.2,
+                    endWindow: 300,
+                    timeBeforeSpeech: 100
+                };
+
                 const streamId = await ad4mClient.ai.openTranscriptionStream("Whisper", (text) => {
                     console.log("Received transcription:", text);
                     transcribedText += text;
-                });
+                }, customParams);
 
                 // Define chunk size (e.g., 0.5 seconds of audio at 16000 Hz sample rate)
                 const chunkSize = 8000; // 16000 * 0.5
