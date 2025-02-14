@@ -311,17 +311,20 @@ impl AIService {
                 "NousResearch/DeepHermes-3-Llama-3-8B-Preview-GGUF".to_string(),
                 "main".to_string(),
                 "DeepHermes-3-Llama-3-8B-q4.gguf".to_string(),
-            )).with_override_stop_token_string("<|eot_id|>".to_string()),
+            ))
+            .with_override_stop_token_string("<|eot_id|>".to_string()),
             "deephermes-3-llama-3-8b-Q6" => LlamaSource::new(FileSource::huggingface(
                 "NousResearch/DeepHermes-3-Llama-3-8B-Preview-GGUF".to_string(),
                 "main".to_string(),
                 "DeepHermes-3-Llama-3-8B-q6.gguf".to_string(),
-            )).with_override_stop_token_string("<|eot_id|>".to_string()),
+            ))
+            .with_override_stop_token_string("<|eot_id|>".to_string()),
             "deephermes-3-llama-3-8b-Q8" => LlamaSource::new(FileSource::huggingface(
                 "NousResearch/DeepHermes-3-Llama-3-8B-Preview-GGUF".to_string(),
                 "main".to_string(),
                 "DeepHermes-3-Llama-3-8B-q8.gguf".to_string(),
-            )).with_override_stop_token_string("<|eot_id|>".to_string()),
+            ))
+            .with_override_stop_token_string("<|eot_id|>".to_string()),
             "deepseek_r1_distill_qwen_1_5b" => LlamaSource::deepseek_r1_distill_qwen_1_5b(),
             "deepseek_r1_distill_qwen_7b" => LlamaSource::deepseek_r1_distill_qwen_7b(),
             "deepseek_r1_distill_qwen_14b" => LlamaSource::deepseek_r1_distill_qwen_14b(),
@@ -1017,7 +1020,9 @@ impl AIService {
                         receiver: Box::pin(samples_rx.map(futures_util::stream::iter).flatten()),
                     };
 
-                    let mut voice_stream = audio_stream.voice_activity_stream().rechunk_voice_activity();
+                    let mut voice_stream = audio_stream
+                        .voice_activity_stream()
+                        .rechunk_voice_activity();
 
                     // Apply voice activity parameters if provided
                     if let Some(params) = params {
@@ -1025,16 +1030,19 @@ impl AIService {
                             voice_stream = voice_stream.with_start_threshold(start_threshold);
                         }
                         if let Some(start_window) = params.start_window {
-                            voice_stream = voice_stream.with_start_window(Duration::from_millis(start_window));
+                            voice_stream =
+                                voice_stream.with_start_window(Duration::from_millis(start_window));
                         }
                         if let Some(end_threshold) = params.end_threshold {
                             voice_stream = voice_stream.with_end_threshold(end_threshold);
                         }
                         if let Some(end_window) = params.end_window {
-                            voice_stream = voice_stream.with_end_window(Duration::from_millis(end_window));
+                            voice_stream =
+                                voice_stream.with_end_window(Duration::from_millis(end_window));
                         }
                         if let Some(time_before_speech) = params.time_before_speech {
-                            voice_stream = voice_stream.with_time_before_speech(Duration::from_millis(time_before_speech));
+                            voice_stream = voice_stream
+                                .with_time_before_speech(Duration::from_millis(time_before_speech));
                         }
                     } else {
                         // Set default end window if no params provided
