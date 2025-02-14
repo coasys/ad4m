@@ -560,6 +560,112 @@ export default function aiTests(testContext: TestContext) {
                 expect(transcribedText).to.include("If you can read this, transcription is working.")
                 console.log("Final transcription:", transcribedText);
             })
+
+            it.skip('can do word-by-word audio transcription', async() => {
+                const ad4mClient = testContext.ad4mClient!;
+
+                // Convert m4a to raw PCM data
+                const pcmData: Buffer = await new Promise((resolve, reject) => {
+                    const chunks: Buffer[] = [];
+                    ffmpeg()
+                        .input('../transcription_test.m4a')
+                        .inputFormat('m4a')
+                        .toFormat('f32le')
+                        .audioFrequency(16000)
+                        .audioChannels(1)
+                        .on('error', reject)
+                        .pipe()
+                        .on('data', (chunk: any) => {
+                            chunks.push(chunk)
+                        })
+                        .on('end', () => {
+                            const finalBuffer = Buffer.concat(chunks);
+                            console.log("Total PCM data size:", finalBuffer.length);
+                            resolve(finalBuffer);
+                        })
+                        .on('error', reject);
+                });
+
+                const result = new Float32Array(pcmData.buffer, pcmData.byteOffset, pcmData.byteLength / Float32Array.BYTES_PER_ELEMENT);
+                //@ts-ignore
+                const audioData = result;
+
+                // Open the transcription stream
+                let transcribedWords: string[] = [];
+
+                // Configure parameters for word-by-word detection
+                // Use very short end window and low thresholds to separate words
+                const wordByWordParams = {
+                    startThreshold: 0.1,        // Lower threshold to detect softer speech
+                    startWindow: 50,            // Quick start detection
+                    endThreshold: 0.1,          // Lower threshold to detect end of words
+                    endWindow: 100,             // Short pause between words (100ms)
+                    timeBeforeSpeech: 20        // Include minimal context before speech
+                };
+
+                const streamId = await ad4mClient.ai.openTranscriptionStream("Whisper", (text) => {
+                    console.log("Received word:", text);
+                    if (text.trim()) {  // Only add non-empty text
+                        transcribedWords.push(text.trim());
+                    }
+                }, wordByWordParams);
+
+                // Define chunk size (e.g., 0.5 seconds of audio at 16000 Hz sample rate)
+                const chunkSize = 8000;
+
+                // Stream the audio data in chunks
+                for (let i = 0; i < audioData.length; i += chunkSize) {
+                    let end = i+chunkSize
+                    if(end > audioData.length) {
+                        end = audioData.length
+                    }
+                    console.log(`Sending chunk: ${i} - ${end}`)
+                    const chunk = audioData.slice(i, end);
+                    const floatArray = Array.from(chunk).map(x=> !x?0.0:x)
+                    //@ts-ignore
+                    await ad4mClient.ai.feedTranscriptionStream(streamId, floatArray);
+
+                    // Simulate real-time processing by adding a small delay
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+
+                // Close the transcription stream
+                try {
+                    await ad4mClient.ai.closeTranscriptionStream(streamId);
+                }catch(e) {
+                    console.log("Error trying to close TranscriptionStream:", e)
+                }
+
+                let i=0
+                while(transcribedWords.length == 0 && i < 60){
+                    await new Promise(resolve => setTimeout(resolve, 1000));    
+                    i+=1
+                }
+                
+                // Assertions
+                expect(transcribedWords).to.be.an('array');
+                expect(transcribedWords.length).to.be.greaterThan(1); // Should have multiple words
+                expect(transcribedWords.join(' ')).to.include("If you can read this, transcription is working");
+                
+                // Assert that we got words separately
+                transcribedWords.forEach(word => {
+                    // Each transcription should be exactly one word
+                    expect(word.split(' ').length).to.equal(1, `Expected "${word}" to be a single word`);
+                    // Verify it's a real word (not empty or just punctuation)
+                    expect(word.match(/[a-zA-Z]/)).to.exist;
+                });
+
+                // Verify we got all expected words individually
+                const expectedWords = ["if", "you", "can", "read", "this", "transcription", "is", "working"];
+                expectedWords.forEach(expectedWord => {
+                    expect(
+                        transcribedWords.some(word => word.toLowerCase().includes(expectedWord)),
+                        `Expected to find word "${expectedWord}" as a separate transcription`
+                    ).to.be.true;
+                });
+
+                console.log("Transcribed words:", transcribedWords);
+            })
         })
     }
 }
