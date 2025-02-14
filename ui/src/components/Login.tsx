@@ -158,10 +158,10 @@ const Login = () => {
     let whisperModel = "whisper_small";
     // add llm model
     if (aiMode !== "None") {
-      const llm = { name: "LLM Model 1", modelType: "LLM" } as ModelInput;
+      const llm = { name: "DeepHermes-3-Llama-3-8B", modelType: "LLM" } as ModelInput;
       if (aiMode === "Local") {
-        llm.local = { fileName: "Qwen2.5.1-Coder-7B-Instruct" };
         whisperModel = "whisper_large_v3_turbo_quantized";
+        llm.local = { fileName: "deephermes-3-llama-3-8b-Q4" };
       } else {
         llm.api = {
           baseUrl: apiUrl,
@@ -557,12 +557,12 @@ const Login = () => {
                   <a
                     onClick={() =>
                       open(
-                        "https://huggingface.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF"
+                        "https://huggingface.co/NousResearch/DeepHermes-3-Llama-3-8B-Preview-GGUF"
                       )
                     }
                     style={{ cursor: "pointer" }}
                   >
-                    Qwen2.5 Coder 7B Instruct (4.68GB)
+                    DeepHermes-3-Llama-3-8B (4.66GB)
                   </a>
                 </p>
                 and
