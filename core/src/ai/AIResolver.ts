@@ -128,7 +128,7 @@ export class ModelInput {
 }
 
 @InputType()
-export class VoiceActivityParams {
+export class VoiceActivityParamsInput {
     @Field(() => Float, { nullable: true })
     startThreshold?: number;
 
@@ -338,7 +338,7 @@ export default class AIResolver {
     @Mutation(() => String)
     aiOpenTranscriptionStream(
         @Arg("modelId") modelId: string,
-        @Arg("params", () => VoiceActivityParams, { nullable: true }) params?: VoiceActivityParams
+        @Arg("params", () => VoiceActivityParamsInput, { nullable: true }) params?: VoiceActivityParamsInput
     ): string {
         return "streamId"
     }
