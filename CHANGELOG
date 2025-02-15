@@ -49,6 +49,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Update Kalosm and candle to latest versions and add very recent open-source models like DeepSeek and Qwen to the model picker. Also add AI task delete button to launcher UI. Set Qwen 2.5 coder instruct 7b as default for local LLM [PR#558](https://github.com/coasys/ad4m/pull/561)
 - Models can now be added directly from Huggingface without changing the code, just providing repo and filename in the launcher [PR562](https://github.com/coasys/ad4m/pull/562)
 - Models can also be added straight from a local file [PR#565](https://github.com/coasys/ad4m/pull/565)
+- Enable fine-tuning of voice detection parameters for transcription streams [PR#566](https://github.com/coasys/ad4m/pull/566)
 
 ### Changed
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
