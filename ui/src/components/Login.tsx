@@ -187,6 +187,12 @@ const Login = () => {
       modelType: "TRANSCRIPTION",
     });
 
+    client!.ai.addModel({
+      name: "Whisper tiny quantized",
+      local: { fileName: "whisper_tiny_quantized" },
+      modelType: "TRANSCRIPTION",
+    });
+
     setCurrentIndex(6);
   }
 
