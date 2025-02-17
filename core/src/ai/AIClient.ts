@@ -293,15 +293,26 @@ export class AIClient {
         return decompressed;
     }
 
-    async openTranscriptionStream(modelId: string, streamCallback: (text: string) => void): Promise<string> {
+    async openTranscriptionStream(
+        modelId: string,
+        streamCallback: (text: string) => void,
+        params?: {
+            startThreshold?: number;
+            startWindow?: number;
+            endThreshold?: number;
+            endWindow?: number;
+            timeBeforeSpeech?: number;
+        }
+    ): Promise<string> {
         const { aiOpenTranscriptionStream } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`
-                mutation AiOpenTranscriptionStream($modelId: String!) {
-                    aiOpenTranscriptionStream(modelId: $modelId)
+                mutation AiOpenTranscriptionStream($modelId: String!, $params: VoiceActivityParamsInput) {
+                    aiOpenTranscriptionStream(modelId: $modelId, params: $params)
                 }
             `,
             variables: {
-                modelId
+                modelId,
+                params
             }
         }));
 
