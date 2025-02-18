@@ -382,12 +382,14 @@ const Profile = (props: Props) => {
         </j-button>
       </j-box>
       <j-box px="500" my="500">
-        <j-button onClick={handleExport} variant="ghost">
+        <j-button onClick={handleExport} full variant="ghost">
+          <j-icon size="sm" slot="start" name="download"></j-icon>
           {exportStatus || "Export Database"}
         </j-button>
       </j-box>
       <j-box px="500" my="500">
-        <j-button onClick={handleImport} variant="ghost">
+        <j-button onClick={handleImport} full variant="ghost">
+          <j-icon size="sm" slot="start" name="upload"></j-icon>
           {importStatus || "Import Database"}
         </j-button>
       </j-box>
