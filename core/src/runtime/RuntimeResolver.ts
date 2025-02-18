@@ -336,5 +336,15 @@ export default class RuntimeResolver {
             }
         }
     }
+
+    @Mutation()
+    runtimeExportDb(@Arg("filePath", type => String) filePath: string): boolean {
+        return true
+    }
+
+    @Mutation()
+    runtimeImportDb(@Arg("filePath", type => String) filePath: string): boolean {
+        return true
+    }
 }
 

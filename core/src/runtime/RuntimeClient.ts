@@ -287,6 +287,26 @@ export class RuntimeClient {
         return runtimeGrantNotification
     }
 
+    async exportDb(filePath: string): Promise<boolean> {
+        const { runtimeExportDb } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeExportDb($filePath: String!) {
+                runtimeExportDb(filePath: $filePath)
+            }`,
+            variables: { filePath }
+        }))
+        return runtimeExportDb
+    }
+
+    async importDb(filePath: string): Promise<boolean> {
+        const { runtimeImportDb } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeImportDb($filePath: String!) {
+                runtimeImportDb(filePath: $filePath)
+            }`,
+            variables: { filePath }
+        }))
+        return runtimeImportDb
+    }
+
     async notifications(): Promise<Notification[]> {
         const { runtimeNotifications } = unwrapApolloResult(await this.#apolloClient.query({
             query: gql`query runtimeNotifications {
