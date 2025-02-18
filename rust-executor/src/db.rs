@@ -1337,6 +1337,323 @@ impl Ad4mDb {
         let ad4m_db_ref = ad4m_db_lock.as_ref().expect("Ad4mDb not initialized");
         func(ad4m_db_ref)
     }
+
+    pub fn export_all_to_json(&self) -> Ad4mDbResult<serde_json::Value> {
+        let mut export_data = serde_json::Map::new();
+
+        // Export links
+        let links: Vec<(LinkSchema, String, String)> = self.conn.prepare(
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link"
+        )?.query_map([], |row| {
+            Ok((
+                LinkSchema {
+                    perspective: row.get(0)?,
+                    link_expression: serde_json::Value::Null, // Will be constructed from fields
+                    source: row.get(1)?,
+                    predicate: row.get(2)?,
+                    target: row.get(3)?,
+                    author: row.get(4)?,
+                    timestamp: row.get(5)?,
+                    status: row.get(8)?,
+                },
+                row.get::<_, String>(6)?, // signature
+                row.get::<_, String>(7)?, // key
+            ))
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        export_data.insert("links".to_string(), serde_json::to_value(links)?);
+
+        // Export expressions
+        let expressions: Vec<ExpressionSchema> = self.conn.prepare(
+            "SELECT url, data FROM expression"
+        )?.query_map([], |row| {
+            Ok(ExpressionSchema {
+                url: row.get(0)?,
+                data: serde_json::from_str(&row.get::<_, String>(1)?).unwrap_or(serde_json::Value::Null),
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+        export_data.insert("expressions".to_string(), serde_json::to_value(expressions)?);
+
+        // Export perspective_diffs
+        let diffs: Vec<serde_json::Value> = self.conn.prepare(
+            "SELECT perspective, additions, removals, is_pending FROM perspective_diff"
+        )?.query_map([], |row| {
+            Ok(serde_json::json!({
+                "perspective": row.get::<_, String>(0)?,
+                "additions": serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(1)?).unwrap_or(serde_json::Value::Null),
+                "removals": serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(2)?).unwrap_or(serde_json::Value::Null),
+                "is_pending": row.get::<_, bool>(3)?
+            }))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        export_data.insert("perspective_diffs".to_string(), serde_json::to_value(diffs)?);
+
+        // Export notifications
+        let notifications: Vec<serde_json::Value> = self.conn.prepare(
+            "SELECT id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted FROM notifications"
+        )?.query_map([], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "description": row.get::<_, String>(1)?,
+                "app_name": row.get::<_, String>(2)?,
+                "app_url": row.get::<_, String>(3)?,
+                "app_icon_path": row.get::<_, String>(4)?,
+                "trigger": row.get::<_, String>(5)?,
+                "perspective_ids": row.get::<_, String>(6)?,
+                "webhook_url": row.get::<_, String>(7)?,
+                "webhook_auth": row.get::<_, String>(8)?,
+                "granted": row.get::<_, bool>(9)?
+            }))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        export_data.insert("notifications".to_string(), serde_json::to_value(notifications)?);
+
+        // Export tasks
+        let tasks: Vec<serde_json::Value> = self.conn.prepare(
+            "SELECT id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at FROM tasks"
+        )?.query_map([], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "model_id": row.get::<_, String>(2)?,
+                "system_prompt": row.get::<_, String>(3)?,
+                "prompt_examples": serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(4)?).unwrap_or(serde_json::Value::Null),
+                "metadata": row.get::<_, Option<String>>(5)?,
+                "created_at": row.get::<_, String>(6)?,
+                "updated_at": row.get::<_, String>(7)?
+            }))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        export_data.insert("tasks".to_string(), serde_json::to_value(tasks)?);
+
+        // Export models
+        let models: Vec<serde_json::Value> = self.conn.prepare(
+            "SELECT id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name FROM models"
+        )?.query_map([], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "model_type": row.get::<_, String>(2)?,
+                "api_type": row.get::<_, Option<String>>(3)?,
+                "api_key": row.get::<_, Option<String>>(4)?,
+                "api_base_url": row.get::<_, Option<String>>(5)?,
+                "model": row.get::<_, Option<String>>(6)?,
+                "local_file_name": row.get::<_, Option<String>>(7)?,
+                "local_huggingface_repo": row.get::<_, Option<String>>(8)?,
+                "local_revision": row.get::<_, Option<String>>(9)?,
+                "local_tokenizer_repo": row.get::<_, Option<String>>(10)?,
+                "local_tokenizer_revision": row.get::<_, Option<String>>(11)?,
+                "local_tokenizer_file_name": row.get::<_, Option<String>>(12)?
+            }))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        export_data.insert("models".to_string(), serde_json::to_value(models)?);
+
+        // Export model_status
+        let model_status: Vec<serde_json::Value> = self.conn.prepare(
+            "SELECT model, progress, status, downloaded, loaded FROM model_status"
+        )?.query_map([], |row| {
+            Ok(serde_json::json!({
+                "model": row.get::<_, String>(0)?,
+                "progress": row.get::<_, f64>(1)?,
+                "status": row.get::<_, String>(2)?,
+                "downloaded": row.get::<_, bool>(3)?,
+                "loaded": row.get::<_, bool>(4)?
+            }))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        export_data.insert("model_status".to_string(), serde_json::to_value(model_status)?);
+
+        // Export friends
+        let mut stmt = self.conn.prepare("SELECT friend FROM friends")?;
+        let friends: Vec<String> = stmt.query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        export_data.insert("friends".to_string(), serde_json::to_value(friends)?);
+
+        // Export trusted agents
+        let mut stmt = self.conn.prepare("SELECT agent FROM trusted_agent")?;
+        let agents: Vec<String> = stmt.query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        export_data.insert("trusted_agents".to_string(), serde_json::to_value(agents)?);
+
+        // Export known link languages
+        let mut stmt = self.conn.prepare("SELECT language FROM known_link_languages")?;
+        let languages: Vec<String> = stmt.query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        export_data.insert("known_link_languages".to_string(), serde_json::to_value(languages)?);
+
+        Ok(serde_json::Value::Object(export_data))
+    }
+
+    pub fn import_from_json(&self, data: serde_json::Value) -> Ad4mDbResult<()> {
+        let data = data.as_object().ok_or_else(|| anyhow::anyhow!("Invalid JSON data"))?;
+
+        // Import links
+        if let Some(links) = data.get("links") {
+            let links: Vec<(LinkSchema, String, String)> = serde_json::from_value(links.clone())?;
+            for (link, signature, key) in links {
+                self.conn.execute(
+                    "INSERT INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status) 
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        link.perspective,
+                        link.source,
+                        link.predicate,
+                        link.target,
+                        link.author,
+                        link.timestamp,
+                        signature,
+                        key,
+                        link.status
+                    ],
+                )?;
+            }
+        }
+
+        // Import expressions
+        if let Some(expressions) = data.get("expressions") {
+            let expressions: Vec<ExpressionSchema> = serde_json::from_value(expressions.clone())?;
+            for expr in expressions {
+                self.conn.execute(
+                    "INSERT INTO expression (url, data) VALUES (?1, ?2)",
+                    params![expr.url, expr.data.to_string()],
+                )?;
+            }
+        }
+
+        // Import perspective_diffs
+        if let Some(diffs) = data.get("perspective_diffs") {
+            let diffs: Vec<serde_json::Value> = serde_json::from_value(diffs.clone())?;
+            for diff in diffs {
+                self.conn.execute(
+                    "INSERT INTO perspective_diff (perspective, additions, removals, is_pending) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        diff["perspective"].as_str().unwrap_or(""),
+                        diff["additions"].to_string(),
+                        diff["removals"].to_string(),
+                        diff["is_pending"].as_bool().unwrap_or(false)
+                    ],
+                )?;
+            }
+        }
+
+        // Import notifications
+        if let Some(notifications) = data.get("notifications") {
+            let notifications: Vec<serde_json::Value> = serde_json::from_value(notifications.clone())?;
+            for notification in notifications {
+                self.conn.execute(
+                    "INSERT INTO notifications (id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted) 
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        notification["id"].as_str().unwrap_or(""),
+                        notification["description"].as_str().unwrap_or(""),
+                        notification["app_name"].as_str().unwrap_or(""),
+                        notification["app_url"].as_str().unwrap_or(""),
+                        notification["app_icon_path"].as_str().unwrap_or(""),
+                        notification["trigger"].as_str().unwrap_or(""),
+                        notification["perspective_ids"].as_str().unwrap_or(""),
+                        notification["webhook_url"].as_str().unwrap_or(""),
+                        notification["webhook_auth"].as_str().unwrap_or(""),
+                        notification["granted"].as_bool().unwrap_or(false)
+                    ],
+                )?;
+            }
+        }
+
+        // Import tasks
+        if let Some(tasks) = data.get("tasks") {
+            let tasks: Vec<serde_json::Value> = serde_json::from_value(tasks.clone())?;
+            for task in tasks {
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at) 
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        task["id"].as_str().unwrap_or(""),
+                        task["name"].as_str().unwrap_or(""),
+                        task["model_id"].as_str().unwrap_or(""),
+                        task["system_prompt"].as_str().unwrap_or(""),
+                        task["prompt_examples"].to_string(),
+                        task["metadata"].as_str(),
+                        task["created_at"].as_str().unwrap_or(""),
+                        task["updated_at"].as_str().unwrap_or("")
+                    ],
+                )?;
+            }
+        }
+
+        // Import models
+        if let Some(models) = data.get("models") {
+            let models: Vec<serde_json::Value> = serde_json::from_value(models.clone())?;
+            for model in models {
+                self.conn.execute(
+                    "INSERT INTO models (id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name) 
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![
+                        model["id"].as_str().unwrap_or(""),
+                        model["name"].as_str().unwrap_or(""),
+                        model["model_type"].as_str().unwrap_or(""),
+                        model["api_type"].as_str(),
+                        model["api_key"].as_str(),
+                        model["api_base_url"].as_str(),
+                        model["model"].as_str(),
+                        model["local_file_name"].as_str(),
+                        model["local_huggingface_repo"].as_str(),
+                        model["local_revision"].as_str(),
+                        model["local_tokenizer_repo"].as_str(),
+                        model["local_tokenizer_revision"].as_str(),
+                        model["local_tokenizer_file_name"].as_str()
+                    ],
+                )?;
+            }
+        }
+
+        // Import model_status
+        if let Some(model_status) = data.get("model_status") {
+            let model_status: Vec<serde_json::Value> = serde_json::from_value(model_status.clone())?;
+            for status in model_status {
+                self.conn.execute(
+                    "INSERT INTO model_status (model, progress, status, downloaded, loaded) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        status["model"].as_str().unwrap_or(""),
+                        status["progress"].as_f64().unwrap_or(0.0),
+                        status["status"].as_str().unwrap_or(""),
+                        status["downloaded"].as_bool().unwrap_or(false),
+                        status["loaded"].as_bool().unwrap_or(false)
+                    ],
+                )?;
+            }
+        }
+
+        // Import friends
+        if let Some(friends) = data.get("friends") {
+            let friends: Vec<String> = serde_json::from_value(friends.clone())?;
+            for friend in friends {
+                self.conn.execute(
+                    "INSERT INTO friends (friend) VALUES (?1)",
+                    params![friend],
+                )?;
+            }
+        }
+
+        // Import trusted agents
+        if let Some(agents) = data.get("trusted_agents") {
+            let agents: Vec<String> = serde_json::from_value(agents.clone())?;
+            for agent in agents {
+                self.conn.execute(
+                    "INSERT INTO trusted_agent (agent) VALUES (?1)", 
+                    params![agent],
+                )?;
+            }
+        }
+
+        // Import known link languages
+        if let Some(languages) = data.get("known_link_languages") {
+            let languages: Vec<String> = serde_json::from_value(languages.clone())?;
+            for language in languages {
+                self.conn.execute(
+                    "INSERT INTO known_link_languages (language) VALUES (?1)",
+                    params![language],
+                )?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1365,6 +1682,121 @@ mod tests {
             timestamp: Utc::now().to_rfc3339(),
             status: Some(status),
         }
+    }
+
+    #[test]
+    fn test_export_import_all_tables() {
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // 1. Add test data to all tables
+        // Add trusted agents
+        db.add_trusted_agents(vec!["test-agent-1".to_string(), "test-agent-2".to_string()]).unwrap();
+
+        // Add friends
+        db.add_friends(vec!["test-friend-1".to_string(), "test-friend-2".to_string()]).unwrap();
+
+        // Add known link languages
+        db.add_known_link_languages(vec!["test-lang-1".to_string(), "test-lang-2".to_string()]).unwrap();
+
+        // Add notifications
+        let notification = NotificationInput {
+            description: "Test Description".to_string(),
+            app_name: "Test App".to_string(),
+            app_url: "http://test.app".to_string(),
+            app_icon_path: "/test/icon.png".to_string(),
+            trigger: "test-trigger".to_string(),
+            perspective_ids: vec!["test-perspective-1".to_string()],
+            webhook_url: "http://test.webhook".to_string(),
+            webhook_auth: "test-auth".to_string(),
+        };
+        let notification_id = db.add_notification(notification).unwrap();
+
+        // Add tasks
+        let task = AIPromptExamples {
+            input: "test input".to_string(),
+            output: "test output".to_string(),
+        };
+        let task_id = db.add_task(
+            "Test Task".to_string(),
+            "test-model".to_string(),
+            "test system prompt".to_string(),
+            vec![task],
+            Some("test metadata".to_string()),
+        ).unwrap();
+
+        // Add models
+        let model_input = ModelInput {
+            name: "Test Model".to_string(),
+            model_type: ModelType::Llm,
+            api: Some(ModelApiInput {
+                base_url: "https://api.example.com".to_string(),
+                api_key: "test-key".to_string(),
+                model: "gpt-4".to_string(),
+                api_type: ModelApiType::OpenAi.to_string(),
+            }),
+            local: None,
+        };
+        let model_id = db.add_model(&model_input).unwrap();
+
+        // Add model status
+        db.create_or_update_model_status(
+            &model_id,
+            0.5,
+            "loading",
+            true,
+            false,
+        ).unwrap();
+
+        // 2. Export all data
+        let exported_data = db.export_all_to_json().unwrap();
+
+        // 3. Create a new database for import
+        let import_db = Ad4mDb::new(":memory:").unwrap();
+
+        // 4. Import the data
+        import_db.import_from_json(exported_data).unwrap();
+
+        // 5. Verify imported data
+        // Verify trusted agents
+        let trusted_agents = import_db.get_all_trusted_agents().unwrap();
+        assert_eq!(trusted_agents, vec!["test-agent-1", "test-agent-2"]);
+
+        // Verify friends
+        let friends = import_db.get_all_friends().unwrap();
+        assert_eq!(friends, vec!["test-friend-1", "test-friend-2"]);
+
+        // Verify known link languages
+        let languages = import_db.get_all_known_link_languages().unwrap();
+        assert_eq!(languages, vec!["test-lang-1", "test-lang-2"]);
+
+        // Verify notifications
+        let notifications = import_db.get_notifications().unwrap();
+        assert_eq!(notifications.len(), 1);
+        let imported_notification = notifications.first().unwrap();
+        assert_eq!(imported_notification.id, notification_id);
+        assert_eq!(imported_notification.app_name, "Test App");
+
+        // Verify tasks
+        let tasks = import_db.get_tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        let imported_task = tasks.first().unwrap();
+        assert_eq!(imported_task.task_id, task_id);
+        assert_eq!(imported_task.name, "Test Task");
+
+        // Verify models
+        let models = import_db.get_models().unwrap();
+        assert_eq!(models.len(), 1);
+        let imported_model = models.first().unwrap();
+        assert_eq!(imported_model.id, model_id);
+        assert_eq!(imported_model.name, "Test Model");
+
+        // Verify model status
+        let model_status = import_db.get_model_status(&model_id).unwrap().unwrap();
+        assert_eq!(model_status.progress, 0.5);
+        assert_eq!(model_status.status, "loading");
+        assert_eq!(model_status.downloaded, true);
+        assert_eq!(model_status.loaded, false);
     }
 
     #[test]
