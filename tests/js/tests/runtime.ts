@@ -302,6 +302,40 @@ export default function runtimeTests(testContext: TestContext) {
             expect(match.Target).to.equal("test://target2")
         })
 
+        it("can export and import database", async () => {
+            const ad4mClient = testContext.ad4mClient!
+            const exportPath = "./tst-tmp/db_export.json"
+            const importPath = "./tst-tmp/db_import.json"
+
+            // Add some test data
+            await ad4mClient.runtime.addTrustedAgents(["test-agent-1", "test-agent-2"])
+            await ad4mClient.runtime.addFriends(["test-friend-1", "test-friend-2"])
+            
+            // Export the database
+            const exported = await ad4mClient.runtime.exportDb(exportPath)
+            expect(exported).to.be.true
+
+            // Verify export file exists
+            expect(fs.existsSync(exportPath)).to.be.true
+
+            // Clear some data
+            await ad4mClient.runtime.removeFriends(["test-friend-1", "test-friend-2"])
+            await ad4mClient.runtime.deleteTrustedAgents(["test-agent-1", "test-agent-2"])
+
+            // Import the database
+            const imported = await ad4mClient.runtime.importDb(exportPath)
+            expect(imported).to.be.true
+
+            // Verify data was restored
+            const trustedAgents = await ad4mClient.runtime.getTrustedAgents()
+            expect(trustedAgents).to.include.members(["test-agent-1", "test-agent-2"])
+
+            const friends = await ad4mClient.runtime.friends()
+            expect(friends).to.include.members(["test-friend-1", "test-friend-2"])
+
+            // Clean up test files
+            fs.unlinkSync(exportPath)
+        })
 
          
         // See comments on the imports at the top
