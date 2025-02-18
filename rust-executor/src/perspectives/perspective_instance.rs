@@ -1398,13 +1398,19 @@ impl PerspectiveInstance {
         }
     }
 
-    pub async fn send_broadcast(&self, payload: PerspectiveExpression, loopback: bool) -> Result<(), AnyError> {
+    pub async fn send_broadcast(
+        &self,
+        payload: PerspectiveExpression,
+        loopback: bool,
+    ) -> Result<(), AnyError> {
         if loopback {
             // send back to all clients through neighbourhood signal subscription
             let payload_clone = payload.clone();
             let self_clone = self.clone();
             tokio::spawn(async move {
-                self_clone.telepresence_signal_from_link_language(payload_clone).await;
+                self_clone
+                    .telepresence_signal_from_link_language(payload_clone)
+                    .await;
             });
         }
 
