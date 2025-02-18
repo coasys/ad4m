@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open } from "@tauri-apps/plugin-shell";
+import { save as dialogSave, open as dialogOpen } from "@tauri-apps/plugin-dialog";
 import { useCallback, useContext, useEffect, useState } from "react";
 import QRCode from "react-qr-code";
 import { PREDICATE_FIRSTNAME, PREDICATE_LASTNAME, PREDICATE_USERNAME } from "../constants/triples";
@@ -81,6 +82,9 @@ const Profile = (props: Props) => {
   const [showAddHcAgentInfos, setShowAddHcAgentInfos] = useState(false);
 
   const [addHcAgentInfos, setAddHcAgentInfos] = useState("");
+
+  const [exportStatus, setExportStatus] = useState("");
+  const [importStatus, setImportStatus] = useState("");
 
   function openLogs() {
     appWindow.emit("copyLogs");
@@ -240,6 +244,51 @@ const Profile = (props: Props) => {
     getAppState();
   };
 
+  const handleExport = async () => {
+    try {
+      setExportStatus("Exporting...");
+      const filePath = await dialogSave({
+        defaultPath: "ad4m_backup.json",
+        filters: [{
+          name: 'JSON',
+          extensions: ['json']
+        }]
+      });
+      
+      if (filePath && client) {
+        await client.runtime.exportDb(filePath);
+        setExportStatus("Export successful!");
+      }
+      setTimeout(() => setExportStatus(""), 3000);
+    } catch (error) {
+      console.error("Export failed:", error);
+      setExportStatus("Export failed!");
+      setTimeout(() => setExportStatus(""), 3000);
+    }
+  };
+
+  const handleImport = async () => {
+    try {
+      setImportStatus("Importing...");
+      const filePath = await dialogOpen({
+        filters: [{
+          name: 'JSON',
+          extensions: ['json']
+        }]
+      });
+      
+      if (filePath && client) {
+        await client.runtime.importDb(filePath);
+        setImportStatus("Import successful!");
+      }
+      setTimeout(() => setImportStatus(""), 3000);
+    } catch (error) {
+      console.error("Import failed:", error);
+      setImportStatus("Import failed!");
+      setTimeout(() => setImportStatus(""), 3000);
+    }
+  };
+
   return (
     <div>
       <j-box px="500" my="500">
@@ -330,6 +379,16 @@ const Profile = (props: Props) => {
         <j-button onClick={() => setClearAgentModalOpen(true)} full variant="primary">
           <j-icon size="sm" slot="start" name="trash"></j-icon>
           Delete Agent
+        </j-button>
+      </j-box>
+      <j-box px="500" my="500">
+        <j-button onClick={handleExport} variant="ghost">
+          {exportStatus || "Export Database"}
+        </j-button>
+      </j-box>
+      <j-box px="500" my="500">
+        <j-button onClick={handleImport} variant="ghost">
+          {importStatus || "Import Database"}
         </j-button>
       </j-box>
 
