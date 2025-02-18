@@ -416,6 +416,74 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     //@ts-ignore
                     expect(aliceData.data.links[0].data).to.deep.equal(link2)
                 })
+
+                it('supports loopback functionality for broadcasts', async () => {
+                    let aliceCalls = 0;
+                    let aliceData = null;
+                    const aliceHandler = async (payload: Perspective) => {
+                        aliceCalls += 1;
+                        //@ts-ignore
+                        aliceData = payload;
+                    };
+                    aliceNH!.addSignalHandler(aliceHandler)
+
+                    let bobCalls = 0;
+                    let bobData = null;
+                    const bobHandler = async (payload: Perspective) => {
+                        bobCalls += 1;
+                        //@ts-ignore
+                        bobData = payload;
+                    };
+                    bobNH!.addSignalHandler(bobHandler)
+
+                    // Test broadcast without loopback
+                    let link = new Link({source: "alice", target: "broadcast", predicate: "test"});
+                    const aliceSignal = new PerspectiveUnsignedInput([link])
+                    await aliceNH!.sendBroadcastU(aliceSignal)
+
+                    await sleep(1000)
+
+                    expect(bobCalls).to.be.equal(1)
+                    expect(aliceCalls).to.be.equal(0) // Alice shouldn't receive her own broadcast
+                    //@ts-ignore
+                    expect(bobData.data.links[0].data).to.deep.equal(link)
+
+                    // Reset counters
+                    bobCalls = 0
+                    aliceCalls = 0
+                    bobData = null
+                    aliceData = null
+
+                    // Test broadcast with loopback enabled
+                    let link2 = new Link({source: "alice", target: "broadcast-loopback", predicate: "test"});
+                    const aliceSignal2 = new PerspectiveUnsignedInput([link2])
+                    // @ts-ignore - Ignoring the type error since we know the implementation supports loopback
+                    await aliceNH!.sendBroadcastU(aliceSignal2, true)
+
+                    await sleep(1000)
+
+                    expect(bobCalls).to.be.equal(1)
+                    expect(aliceCalls).to.be.equal(1) // Alice should receive her own broadcast
+                    //@ts-ignore
+                    expect(bobData.data.links[0].data).to.deep.equal(link2)
+                    //@ts-ignore
+                    expect(aliceData.data.links[0].data).to.deep.equal(link2)
+
+                    // Test Bob's broadcast with loopback
+                    let link3 = new Link({source: "bob", target: "broadcast-loopback", predicate: "test"});
+                    const bobSignal = new PerspectiveUnsignedInput([link3])
+                    // @ts-ignore - Ignoring the type error since we know the implementation supports loopback
+                    await bobNH!.sendBroadcastU(bobSignal, true)
+
+                    await sleep(1000)
+
+                    expect(bobCalls).to.be.equal(2) // Bob should receive his own broadcast
+                    expect(aliceCalls).to.be.equal(2) // Alice should receive Bob's broadcast
+                    //@ts-ignore
+                    expect(bobData.data.links[0].data).to.deep.equal(link3)
+                    //@ts-ignore
+                    expect(aliceData.data.links[0].data).to.deep.equal(link3)
+                })
             })
         })
     }

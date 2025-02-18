@@ -184,35 +184,39 @@ export class NeighbourhoodClient {
         return neighbourhoodSendSignalU
     }
 
-    async sendBroadcast(perspectiveUUID: string, payload: Perspective): Promise<boolean> {
+    async sendBroadcast(perspectiveUUID: string, payload: Perspective, loopback: boolean = false): Promise<boolean> {
         const { neighbourhoodSendBroadcast } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation neighbourhoodSendBroadcast(
                 $perspectiveUUID: String!,
-                $payload: PerspectiveInput!
+                $payload: PerspectiveInput!,
+                $loopback: Boolean
             ) {
                 neighbourhoodSendBroadcast(
                     perspectiveUUID: $perspectiveUUID,
-                    payload: $payload
+                    payload: $payload,
+                    loopback: $loopback
                 )
             }`,
-            variables: { perspectiveUUID, payload }
+            variables: { perspectiveUUID, payload, loopback }
         }))
 
         return neighbourhoodSendBroadcast
     }
 
-    async sendBroadcastU(perspectiveUUID: string, payload: PerspectiveUnsignedInput): Promise<boolean> {
+    async sendBroadcastU(perspectiveUUID: string, payload: PerspectiveUnsignedInput, loopback: boolean = false): Promise<boolean> {
         const { neighbourhoodSendBroadcastU } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation neighbourhoodSendBroadcastU(
                 $perspectiveUUID: String!,
-                $payload: PerspectiveUnsignedInput!
+                $payload: PerspectiveUnsignedInput!,
+                $loopback: Boolean
             ) {
                 neighbourhoodSendBroadcastU(
                     perspectiveUUID: $perspectiveUUID,
-                    payload: $payload
+                    payload: $payload,
+                    loopback: $loopback
                 )
             }`,
-            variables: { perspectiveUUID, payload }
+            variables: { perspectiveUUID, payload, loopback }
         }))
 
         return neighbourhoodSendBroadcastU

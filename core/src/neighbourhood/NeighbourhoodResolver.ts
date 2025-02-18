@@ -84,12 +84,12 @@ export default class NeighbourhoodResolver {
     }
 
     @Mutation()
-    neighbourhoodSendBroadcast(@Arg('perspectiveUUID') perspectiveUUID: string, @Arg('payload') signal: PerspectiveInput): boolean {
+    neighbourhoodSendBroadcast(@Arg('perspectiveUUID') perspectiveUUID: string, @Arg('payload') signal: PerspectiveInput, @Arg('loopback', { nullable: true }) loopback?: boolean): boolean {
         return true
     }
 
     @Mutation()
-    neighbourhoodSendBroadcastU(@Arg('perspectiveUUID') perspectiveUUID: string, @Arg('payload') signal: PerspectiveUnsignedInput): boolean {
+    neighbourhoodSendBroadcastU(@Arg('perspectiveUUID') perspectiveUUID: string, @Arg('payload') signal: PerspectiveUnsignedInput, @Arg('loopback', { nullable: true }) loopback?: boolean): boolean {
         return true
     }
 
