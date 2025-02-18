@@ -1364,15 +1364,21 @@ impl Ad4mDb {
         export_data.insert("links".to_string(), serde_json::to_value(links)?);
 
         // Export expressions
-        let expressions: Vec<ExpressionSchema> = self.conn.prepare(
-            "SELECT url, data FROM expression"
-        )?.query_map([], |row| {
-            Ok(ExpressionSchema {
-                url: row.get(0)?,
-                data: serde_json::from_str(&row.get::<_, String>(1)?).unwrap_or(serde_json::Value::Null),
-            })
-        })?.collect::<Result<Vec<_>, _>>()?;
-        export_data.insert("expressions".to_string(), serde_json::to_value(expressions)?);
+        let expressions: Vec<ExpressionSchema> = self
+            .conn
+            .prepare("SELECT url, data FROM expression")?
+            .query_map([], |row| {
+                Ok(ExpressionSchema {
+                    url: row.get(0)?,
+                    data: serde_json::from_str(&row.get::<_, String>(1)?)
+                        .unwrap_or(serde_json::Value::Null),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        export_data.insert(
+            "expressions".to_string(),
+            serde_json::to_value(expressions)?,
+        );
 
         // Export perspective_diffs
         let diffs: Vec<serde_json::Value> = self.conn.prepare(
@@ -1385,7 +1391,10 @@ impl Ad4mDb {
                 "is_pending": row.get::<_, bool>(3)?
             }))
         })?.collect::<Result<Vec<_>, _>>()?;
-        export_data.insert("perspective_diffs".to_string(), serde_json::to_value(diffs)?);
+        export_data.insert(
+            "perspective_diffs".to_string(),
+            serde_json::to_value(diffs)?,
+        );
 
         // Export notifications
         let notifications: Vec<serde_json::Value> = self.conn.prepare(
@@ -1404,7 +1413,10 @@ impl Ad4mDb {
                 "granted": row.get::<_, bool>(9)?
             }))
         })?.collect::<Result<Vec<_>, _>>()?;
-        export_data.insert("notifications".to_string(), serde_json::to_value(notifications)?);
+        export_data.insert(
+            "notifications".to_string(),
+            serde_json::to_value(notifications)?,
+        );
 
         // Export tasks
         let tasks: Vec<serde_json::Value> = self.conn.prepare(
@@ -1446,42 +1458,57 @@ impl Ad4mDb {
         export_data.insert("models".to_string(), serde_json::to_value(models)?);
 
         // Export model_status
-        let model_status: Vec<serde_json::Value> = self.conn.prepare(
-            "SELECT model, progress, status, downloaded, loaded FROM model_status"
-        )?.query_map([], |row| {
-            Ok(serde_json::json!({
-                "model": row.get::<_, String>(0)?,
-                "progress": row.get::<_, f64>(1)?,
-                "status": row.get::<_, String>(2)?,
-                "downloaded": row.get::<_, bool>(3)?,
-                "loaded": row.get::<_, bool>(4)?
-            }))
-        })?.collect::<Result<Vec<_>, _>>()?;
-        export_data.insert("model_status".to_string(), serde_json::to_value(model_status)?);
+        let model_status: Vec<serde_json::Value> = self
+            .conn
+            .prepare("SELECT model, progress, status, downloaded, loaded FROM model_status")?
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "model": row.get::<_, String>(0)?,
+                    "progress": row.get::<_, f64>(1)?,
+                    "status": row.get::<_, String>(2)?,
+                    "downloaded": row.get::<_, bool>(3)?,
+                    "loaded": row.get::<_, bool>(4)?
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        export_data.insert(
+            "model_status".to_string(),
+            serde_json::to_value(model_status)?,
+        );
 
         // Export friends
         let mut stmt = self.conn.prepare("SELECT friend FROM friends")?;
-        let friends: Vec<String> = stmt.query_map([], |row| row.get(0))?
+        let friends: Vec<String> = stmt
+            .query_map([], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
         export_data.insert("friends".to_string(), serde_json::to_value(friends)?);
 
         // Export trusted agents
         let mut stmt = self.conn.prepare("SELECT agent FROM trusted_agent")?;
-        let agents: Vec<String> = stmt.query_map([], |row| row.get(0))?
+        let agents: Vec<String> = stmt
+            .query_map([], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
         export_data.insert("trusted_agents".to_string(), serde_json::to_value(agents)?);
 
         // Export known link languages
-        let mut stmt = self.conn.prepare("SELECT language FROM known_link_languages")?;
-        let languages: Vec<String> = stmt.query_map([], |row| row.get(0))?
+        let mut stmt = self
+            .conn
+            .prepare("SELECT language FROM known_link_languages")?;
+        let languages: Vec<String> = stmt
+            .query_map([], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
-        export_data.insert("known_link_languages".to_string(), serde_json::to_value(languages)?);
+        export_data.insert(
+            "known_link_languages".to_string(),
+            serde_json::to_value(languages)?,
+        );
 
         Ok(serde_json::Value::Object(export_data))
     }
 
     pub fn import_from_json(&self, data: serde_json::Value) -> Ad4mDbResult<()> {
-        let data = data.as_object().ok_or_else(|| anyhow::anyhow!("Invalid JSON data"))?;
+        let data = data
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("Invalid JSON data"))?;
 
         // Import links
         if let Some(links) = data.get("links") {
@@ -1534,7 +1561,8 @@ impl Ad4mDb {
 
         // Import notifications
         if let Some(notifications) = data.get("notifications") {
-            let notifications: Vec<serde_json::Value> = serde_json::from_value(notifications.clone())?;
+            let notifications: Vec<serde_json::Value> =
+                serde_json::from_value(notifications.clone())?;
             for notification in notifications {
                 self.conn.execute(
                     "INSERT INTO notifications (id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted) 
@@ -1604,7 +1632,8 @@ impl Ad4mDb {
 
         // Import model_status
         if let Some(model_status) = data.get("model_status") {
-            let model_status: Vec<serde_json::Value> = serde_json::from_value(model_status.clone())?;
+            let model_status: Vec<serde_json::Value> =
+                serde_json::from_value(model_status.clone())?;
             for status in model_status {
                 self.conn.execute(
                     "INSERT INTO model_status (model, progress, status, downloaded, loaded) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1623,10 +1652,8 @@ impl Ad4mDb {
         if let Some(friends) = data.get("friends") {
             let friends: Vec<String> = serde_json::from_value(friends.clone())?;
             for friend in friends {
-                self.conn.execute(
-                    "INSERT INTO friends (friend) VALUES (?1)",
-                    params![friend],
-                )?;
+                self.conn
+                    .execute("INSERT INTO friends (friend) VALUES (?1)", params![friend])?;
             }
         }
 
@@ -1635,7 +1662,7 @@ impl Ad4mDb {
             let agents: Vec<String> = serde_json::from_value(agents.clone())?;
             for agent in agents {
                 self.conn.execute(
-                    "INSERT INTO trusted_agent (agent) VALUES (?1)", 
+                    "INSERT INTO trusted_agent (agent) VALUES (?1)",
                     params![agent],
                 )?;
             }
@@ -1691,13 +1718,19 @@ mod tests {
 
         // 1. Add test data to all tables
         // Add trusted agents
-        db.add_trusted_agents(vec!["test-agent-1".to_string(), "test-agent-2".to_string()]).unwrap();
+        db.add_trusted_agents(vec!["test-agent-1".to_string(), "test-agent-2".to_string()])
+            .unwrap();
 
         // Add friends
-        db.add_friends(vec!["test-friend-1".to_string(), "test-friend-2".to_string()]).unwrap();
+        db.add_friends(vec![
+            "test-friend-1".to_string(),
+            "test-friend-2".to_string(),
+        ])
+        .unwrap();
 
         // Add known link languages
-        db.add_known_link_languages(vec!["test-lang-1".to_string(), "test-lang-2".to_string()]).unwrap();
+        db.add_known_link_languages(vec!["test-lang-1".to_string(), "test-lang-2".to_string()])
+            .unwrap();
 
         // Add notifications
         let notification = NotificationInput {
@@ -1717,13 +1750,15 @@ mod tests {
             input: "test input".to_string(),
             output: "test output".to_string(),
         };
-        let task_id = db.add_task(
-            "Test Task".to_string(),
-            "test-model".to_string(),
-            "test system prompt".to_string(),
-            vec![task],
-            Some("test metadata".to_string()),
-        ).unwrap();
+        let task_id = db
+            .add_task(
+                "Test Task".to_string(),
+                "test-model".to_string(),
+                "test system prompt".to_string(),
+                vec![task],
+                Some("test metadata".to_string()),
+            )
+            .unwrap();
 
         // Add models
         let model_input = ModelInput {
@@ -1740,13 +1775,8 @@ mod tests {
         let model_id = db.add_model(&model_input).unwrap();
 
         // Add model status
-        db.create_or_update_model_status(
-            &model_id,
-            0.5,
-            "loading",
-            true,
-            false,
-        ).unwrap();
+        db.create_or_update_model_status(&model_id, 0.5, "loading", true, false)
+            .unwrap();
 
         // 2. Export all data
         let exported_data = db.export_all_to_json().unwrap();

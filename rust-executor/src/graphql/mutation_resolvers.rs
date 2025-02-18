@@ -1217,19 +1217,22 @@ impl Mutation {
         file_path: String,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        
-        let json_data = Ad4mDb::with_global_instance(|db| db.export_all_to_json())
-            .map_err(|e| FieldError::new(
-                "Failed to export database",
-                graphql_value!({ "error": e.to_string() })
-            ))?;
+
+        let json_data =
+            Ad4mDb::with_global_instance(|db| db.export_all_to_json()).map_err(|e| {
+                FieldError::new(
+                    "Failed to export database",
+                    graphql_value!({ "error": e.to_string() }),
+                )
+            })?;
 
         // Write to file
-        std::fs::write(&file_path, serde_json::to_string_pretty(&json_data)?)
-            .map_err(|e| FieldError::new(
+        std::fs::write(&file_path, serde_json::to_string_pretty(&json_data)?).map_err(|e| {
+            FieldError::new(
                 "Failed to write export file",
-                graphql_value!({ "error": e.to_string() })
-            ))?;
+                graphql_value!({ "error": e.to_string() }),
+            )
+        })?;
 
         Ok(true)
     }
@@ -1242,23 +1245,26 @@ impl Mutation {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
 
         // Read from file
-        let json_str = std::fs::read_to_string(&file_path)
-            .map_err(|e| FieldError::new(
+        let json_str = std::fs::read_to_string(&file_path).map_err(|e| {
+            FieldError::new(
                 "Failed to read import file",
-                graphql_value!({ "error": e.to_string() })
-            ))?;
+                graphql_value!({ "error": e.to_string() }),
+            )
+        })?;
 
-        let json_data: serde_json::Value = serde_json::from_str(&json_str)
-            .map_err(|e| FieldError::new(
+        let json_data: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
+            FieldError::new(
                 "Failed to parse JSON data",
-                graphql_value!({ "error": e.to_string() })
-            ))?;
+                graphql_value!({ "error": e.to_string() }),
+            )
+        })?;
 
-        Ad4mDb::with_global_instance(|db| db.import_from_json(json_data))
-            .map_err(|e| FieldError::new(
+        Ad4mDb::with_global_instance(|db| db.import_from_json(json_data)).map_err(|e| {
+            FieldError::new(
                 "Failed to import database",
-                graphql_value!({ "error": e.to_string() })
-            ))?;
+                graphql_value!({ "error": e.to_string() }),
+            )
+        })?;
 
         Ok(true)
     }
