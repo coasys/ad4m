@@ -33,7 +33,7 @@ export default function Start({
                 class="button"
                 target="_blank"
                 @click=${clickLink}
-                href="https://ad4m.dev/download"
+                href="https://github.com/coasys/ad4m/releases"
               >
                 Download AD4M
               </a>`}
