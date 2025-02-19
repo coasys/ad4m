@@ -41,12 +41,12 @@ export default function Start({
               ${hosting ? html`<button class="button" @click=${() => changeState("hosting")}>Use hosted AD4M (alpha)</button>` : ""}
           </div>
             <div class="text-center">
-              <button class="button button--link " @click=${() => connect()}>
+              <button class="button button--secondary" @click=${() => connect()}>
                 Try again
               </button>
               or
               <button
-                class="button button--link "
+                class="button button--secondary "
                 @click=${() => changeState("settings")}
               >
                 Change connection settings
@@ -77,7 +77,7 @@ export default function Start({
           }
 
       <div class="text-center">
-        <a class="button button--link" _target="blank" href="https://ad4m.dev"
+        <a class="button button--secondary" _target="blank" href="https://ad4m.dev"
           >Learn more about ADAM</a
         >
       </div>
