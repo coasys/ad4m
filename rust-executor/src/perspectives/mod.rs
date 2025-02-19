@@ -1,20 +1,21 @@
 pub mod perspective_instance;
 pub mod sdna;
 pub mod utils;
-use crate::graphql::graphql_types::{LinkStatus, LinkQuery, PerspectiveExpression, PerspectiveHandle, PerspectiveState};
+use crate::graphql::graphql_types::{
+    LinkQuery, LinkStatus, PerspectiveExpression, PerspectiveHandle, PerspectiveState,
+};
 use lazy_static::lazy_static;
 use perspective_instance::PerspectiveInstance;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::RwLock;
-use serde::{Deserialize, Serialize};
 
 use crate::db::Ad4mDb;
 use crate::pubsub::{
     get_global_pubsub, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_REMOVED_TOPIC,
     PERSPECTIVE_UPDATED_TOPIC,
 };
-use crate::types::{PerspectiveDiff, LinkExpression};
-use chrono::Utc;
+use crate::types::{LinkExpression, PerspectiveDiff};
 
 lazy_static! {
     static ref PERSPECTIVES: RwLock<HashMap<String, RwLock<PerspectiveInstance>>> =
@@ -24,7 +25,7 @@ lazy_static! {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SerializedPerspective {
     #[serde(flatten)]
-    pub handle: PerspectiveHandle, 
+    pub handle: PerspectiveHandle,
     pub links: Vec<LinkExpression>,
 }
 
@@ -246,24 +247,28 @@ pub async fn handle_telepresence_signal_from_link_language_impl(
 }
 
 pub async fn export_perspective(uuid: &str) -> Result<SerializedPerspective, String> {
-    let perspective = get_perspective(uuid).ok_or_else(|| format!("Perspective not found: {}", uuid))?;
+    let perspective =
+        get_perspective(uuid).ok_or_else(|| format!("Perspective not found: {}", uuid))?;
     let handle = perspective.persisted.lock().await.clone();
-    
-    let decorated_links = perspective.get_links(&LinkQuery::default()).await.map_err(|e| e.to_string())?;
-    let links = decorated_links.into_iter()
-        .map(|l| l.into())
-        .collect();
-    
+
+    let decorated_links = perspective
+        .get_links(&LinkQuery::default())
+        .await
+        .map_err(|e| e.to_string())?;
+    let links = decorated_links.into_iter().map(|l| l.into()).collect();
+
     Ok(SerializedPerspective {
         handle: handle.clone(),
         links,
     })
 }
 
-pub async fn import_perspective(instance: SerializedPerspective) -> Result<PerspectiveHandle, String> {
+pub async fn import_perspective(
+    instance: SerializedPerspective,
+) -> Result<PerspectiveHandle, String> {
     // First check if perspective exists
     let existing = get_perspective(&instance.handle.uuid);
-    
+
     if existing.is_none() {
         // Create new perspective only if it doesn't exist
         add_perspective(instance.handle.clone(), None)
@@ -273,11 +278,8 @@ pub async fn import_perspective(instance: SerializedPerspective) -> Result<Persp
 
     // Add all links directly to DB to preserve original authorship
     Ad4mDb::with_global_instance(|db| {
-        db.add_many_links(
-            &instance.handle.uuid,
-            instance.links,
-            &LinkStatus::Local
-        ).map_err(|e| e.to_string())
+        db.add_many_links(&instance.handle.uuid, instance.links, &LinkStatus::Local)
+            .map_err(|e| e.to_string())
     })?;
 
     Ok(instance.handle)
@@ -285,12 +287,9 @@ pub async fn import_perspective(instance: SerializedPerspective) -> Result<Persp
 
 #[cfg(test)]
 mod tests {
-
-    use chrono::DateTime;
-
-    use crate::types::{ExpressionProof, Link};
-
     use super::*;
+    use crate::types::{ExpressionProof, Link};
+    use chrono::Utc;
 
     fn setup() {
         //setup_wallet();
@@ -379,10 +378,12 @@ mod tests {
     #[tokio::test]
     async fn test_perspective_import_export() {
         setup();
-        
+
         // Create a test perspective with some links
         let handle = PerspectiveHandle::new_from_name("Test Import/Export".to_string());
-        add_perspective(handle.clone(), None).await.expect("Failed to add perspective");
+        add_perspective(handle.clone(), None)
+            .await
+            .expect("Failed to add perspective");
         let mut perspective = get_perspective(&handle.uuid).unwrap();
 
         // Add some test links to the perspective
@@ -392,7 +393,7 @@ mod tests {
             data: Link {
                 source: "test://source".to_string(),
                 predicate: Some("test://predicate".to_string()),
-                target: "test://target".to_string()
+                target: "test://target".to_string(),
             },
             proof: ExpressionProof {
                 key: "test-key".to_string(),
@@ -402,7 +403,8 @@ mod tests {
         };
         println!("test_link: {:?}", test_link);
 
-        perspective.add_link_expression(test_link.clone(), LinkStatus::Local)
+        perspective
+            .add_link_expression(test_link.clone(), LinkStatus::Local)
             .await
             .expect("Failed to add link");
 
@@ -431,11 +433,11 @@ mod tests {
 
         // Verify imported perspective
         assert_eq!(imported_handle.uuid, handle.uuid);
-        
+
         // Verify imported links
-        let imported_perspective = get_perspective(&handle.uuid)
-            .expect("Failed to get imported perspective");
-        
+        let imported_perspective =
+            get_perspective(&handle.uuid).expect("Failed to get imported perspective");
+
         let imported_links = imported_perspective
             .get_links(&LinkQuery::default())
             .await
