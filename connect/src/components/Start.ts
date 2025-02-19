@@ -1,5 +1,5 @@
 import { html } from "lit";
-import { getForVersion } from "../utils";
+import { getForVersion, DEFAULT_PORT } from "../utils";
 
 export default function Start({
   connect,
@@ -10,7 +10,7 @@ export default function Start({
   scanQrcode,
   hosting
 }) {
-  const url = getForVersion('ad4murl') || "http://localhost:12000";
+  const url = getForVersion('ad4murl') || `http://localhost:${DEFAULT_PORT}`;
   const isLocal = url.includes("localhost");
 
   function clickLink(e: Event) {

@@ -21,7 +21,7 @@ import ScanQRCode from "./components/ScanQRCode";
 import Settings from "./components/Settings";
 import Start from "./components/Start";
 import VerifyCode from "./components/VerifyCode";
-import { getForVersion, removeForVersion, setForVersion } from "./utils";
+import { DEFAULT_PORT, getForVersion, removeForVersion, setForVersion } from "./utils";
 
 export { getAd4mClient } from "./utils";
 
@@ -525,7 +525,7 @@ export class Ad4mConnectElement extends LitElement {
 
   // TODO: localstorage doesnt work here
   @property({ type: String, reflect: true })
-  port = parseInt(getForVersion("ad4mport")) || 12000;
+  port = parseInt(getForVersion("ad4mport")) || DEFAULT_PORT;
 
   // TODO: localstorage doesnt work here
   @property({ type: String, reflect: true })
@@ -566,7 +566,7 @@ export class Ad4mConnectElement extends LitElement {
       capabilities: Array.isArray(this.capabilities)
         ? this.capabilities
         : JSON.parse(this.capabilities),
-      port: this.port || parseInt(getForVersion("ad4mport")) || 12000,
+      port: this.port || parseInt(getForVersion("ad4mport")) || DEFAULT_PORT,
       token: this.token || getForVersion("ad4mtoken"),
       url: this.url || getForVersion("ad4murl"),
       hosting: this.hosting,

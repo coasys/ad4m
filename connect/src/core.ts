@@ -6,7 +6,7 @@ import {
 import { createClient, Client as WSClient } from "graphql-ws";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { Ad4mClient, CapabilityInput } from "@coasys/ad4m";
-import { checkPort, connectWebSocket, removeForVersion, setForVersion } from "./utils";
+import { checkPort, connectWebSocket, DEFAULT_PORT, removeForVersion, setForVersion } from "./utils";
 import autoBind from "auto-bind";
 
 export type Ad4mConnectOptions = {
@@ -51,7 +51,7 @@ export default class Ad4mConnect {
   requestId?: string;
   url: string;
   token: string;
-  port = 12000;
+  port = DEFAULT_PORT;
   capabilities: CapabilityInput[] = [];
   appName: string;
   appDesc: string;
@@ -289,7 +289,7 @@ export default class Ad4mConnect {
 
   async findPort(): Promise<number> {
     const ports = [...Array(10).keys()].map((_, i) => {
-      return checkPort(12000 + i);
+      return checkPort(DEFAULT_PORT + i);
     });
 
     const results = await Promise.allSettled(ports);
@@ -456,7 +456,7 @@ export default class Ad4mConnect {
 
   clearState() {
     this.setToken(null);
-    this.setPort(12000);
+    this.setPort(DEFAULT_PORT);
     this.notifyConnectionChange("not_connected");
     this.notifyAuthChange("unauthenticated");
   }

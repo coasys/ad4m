@@ -4,6 +4,8 @@ import { AuthStates } from "./core";
 // @ts-ignore
 import { version } from "../package.json";
 
+export const DEFAULT_PORT = 12000;
+
 function Timeout() {
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 20);
