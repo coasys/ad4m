@@ -339,21 +339,32 @@ export default class Ad4mConnect {
           this.notifyConnectionChange("connected");
           this.checkAuth();
         },
-        closed: async () => {
-          if (!this.requestedRestart) {
-            if (!this.token) {
+        closed: async (e: CloseEvent) => {
+          // If the connection was closed cleanly, which happens on every
+          // first connection, don't treat this as a disconnect
+          if(e.wasClean) {
+            return
+          }
+
+          // Iff the user explicitly requested a restart, also don't treat 
+          // this as a disconnect (handling the disconnect makes sense when an
+          // established connection gets lost after the first handshake)
+          if (this.requestedRestart) {
+            return
+          }
+
+          if (!this.token) {
+            this.notifyConnectionChange(!this.token ? "not_connected" : "disconnected");
+            this.notifyAuthChange("unauthenticated");
+            this.requestedRestart = false;
+          } else {
+            const client = await this.connect();
+            if (client) {
+              this.ad4mClient = client;
+            } else {
               this.notifyConnectionChange(!this.token ? "not_connected" : "disconnected");
               this.notifyAuthChange("unauthenticated");
               this.requestedRestart = false;
-            } else {
-              const client = await this.connect();
-              if (client) {
-                this.ad4mClient = client;
-              } else {
-                this.notifyConnectionChange(!this.token ? "not_connected" : "disconnected");
-                this.notifyAuthChange("unauthenticated");
-                this.requestedRestart = false;
-              }
             }
           }
         },
