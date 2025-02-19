@@ -1247,14 +1247,14 @@ impl Mutation {
         // Read from file
         let json_str = std::fs::read_to_string(&file_path).map_err(|e| {
             FieldError::new(
-                "Failed to read import file",
+                format!("Failed to read import file '{}': {}", file_path, e),
                 graphql_value!({ "error": e.to_string() }),
             )
         })?;
 
         let json_data: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
             FieldError::new(
-                "Failed to parse JSON data",
+                format!("Failed to parse JSON data: {}", e),
                 graphql_value!({ "error": e.to_string() }),
             )
         })?;
@@ -1514,14 +1514,14 @@ impl Mutation {
         // Read from file
         let json_str = std::fs::read_to_string(&file_path).map_err(|e| {
             FieldError::new(
-                "Failed to read import file",
+                format!("Failed to read import file '{}': {}", file_path, e),
                 graphql_value!({ "error": e.to_string() }),
             )
         })?;
 
         let serialized: SerializedPerspective = serde_json::from_str(&json_str).map_err(|e| {
             FieldError::new(
-                "Failed to parse perspective data",
+                format!("Failed to parse perspective data: {}", e),
                 graphql_value!({ "error": e.to_string() }),
             )
         })?;
@@ -1531,7 +1531,7 @@ impl Mutation {
             .await
             .map_err(|e| {
                 FieldError::new(
-                    "Failed to import perspective",
+                    format!("Failed to import perspective: {}", e),
                     graphql_value!({ "error": e.to_string() }),
                 )
             })?;
