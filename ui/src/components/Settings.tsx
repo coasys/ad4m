@@ -284,6 +284,7 @@ const Profile = (props: Props) => {
       setTimeout(() => setImportStatus(""), 3000);
     } catch (error) {
       console.error("Import failed:", error);
+      alert("Import failed: " + error);
       setImportStatus("Import failed!");
       setTimeout(() => setImportStatus(""), 3000);
     }
