@@ -142,7 +142,7 @@ export default class Ad4mConnect {
   async connect(url?: string): Promise<Ad4mClient> {
     try {
       if (url) {
-        await connectWebSocket(url, 10000);
+        await connectWebSocket(url);
         this.setUrl(url);
         const client = this.buildClient();
         await this.checkAuth();
@@ -252,7 +252,7 @@ export default class Ad4mConnect {
           
           // Try to connect immediately after building client
           try {
-            await connectWebSocket(this.url, 10000);
+            await connectWebSocket(this.url);
             this.notifyConnectionChange("connected");
             return client;
           } catch (e) {
@@ -279,7 +279,7 @@ export default class Ad4mConnect {
     try {
       this.notifyConnectionChange("connecting");
 
-      await connectWebSocket(this.url, 10000);
+      await connectWebSocket(this.url);
       return this.buildClient();
     } catch (e) {
       this.notifyConnectionChange("not_connected");
