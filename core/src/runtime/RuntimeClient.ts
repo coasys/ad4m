@@ -336,6 +336,25 @@ export class RuntimeClient {
         return runtimeRemoveNotification
     }
 
+    async exportPerspective(uuid: string, filePath: string): Promise<boolean> {
+        const { runtimeExportPerspective } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeExportPerspective($perspectiveUuid: String!, $filePath: String!) {
+                runtimeExportPerspective(perspectiveUuid: $perspectiveUuid, filePath: $filePath)
+            }`,
+            variables: { perspectiveUuid: uuid, filePath }
+        }))
+        return runtimeExportPerspective
+    }
+
+    async importPerspective(filePath: string): Promise<boolean> {
+        const { runtimeImportPerspective } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeImportPerspective($filePath: String!) {
+                runtimeImportPerspective(filePath: $filePath)
+            }`,
+            variables: { filePath }
+        }))
+        return runtimeImportPerspective
+    }
 
     addNotificationTriggeredCallback(cb: NotificationTriggeredCallback) {
         this.#notificationTriggeredCallbacks.push(cb)

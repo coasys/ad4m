@@ -346,5 +346,18 @@ export default class RuntimeResolver {
     runtimeImportDb(@Arg("filePath", type => String) filePath: string): boolean {
         return true
     }
+
+    @Mutation()
+    runtimeExportPerspective(
+        @Arg("perspectiveUuid", type => String) perspectiveUuid: string,
+        @Arg("filePath", type => String) filePath: string
+    ): boolean {
+        return true
+    }
+
+    @Mutation()
+    runtimeImportPerspective(@Arg("filePath", type => String) filePath: string): boolean {
+        return true
+    }
 }
 
