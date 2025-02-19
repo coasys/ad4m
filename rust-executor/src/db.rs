@@ -708,8 +708,18 @@ impl Ad4mDb {
     }
 
     pub fn remove_perspective(&self, uuid: &str) -> Ad4mDbResult<()> {
+        // Delete the perspective handle itself
         self.conn
             .execute("DELETE FROM perspective_handle WHERE uuid = ?1", [uuid])?;
+
+        // Delete all links associated with this perspective
+        self.conn
+            .execute("DELETE FROM link WHERE perspective = ?1", [uuid])?;
+
+        // Delete all pending diffs associated with this perspective
+        self.conn
+            .execute("DELETE FROM pending_diff WHERE perspective = ?1", [uuid])?;
+
         Ok(())
     }
 
