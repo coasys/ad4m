@@ -27,14 +27,16 @@ export default function Start({
           <div class="text-center">
             <h1 class="heading">Could not connect to AD4M</h1>
             ${isLocal ? html`
-              <p style="height: 60px; color: #d2d2d2; font-size: 15px; text-align: center; margin: 0; margin-top: -30px;">
+              <p style="color: #b9b9b9; font-size: 15px; text-align: center; margin: 30px 0;">
                 Please make sure you have the ADAM Launcher running on your computer and there are no browser restrictions ("Shields") blocking your connection to ADAM on localhost.
+                <br/>
                 <br/>
                 (Safari users: please use a different browser for now. Safari is very strict about this and we are working on a solution.)
               </p>
               ` : html`
-              <p style="height: 60px; color: #d2d2d2; font-size: 15px; text-align: center; margin: 0; margin-top: -30px;">
+              <p style="color: #b9b9b9; font-size: 15px; text-align: center; margin: 30px 0;">
                 Looks like the remote executor you are trying to connect to is not reachable.
+                <br/>
                 <br/>
                 Please try connecting to a different remote executor or check your connection settings.
               </p>
@@ -58,7 +60,7 @@ export default function Start({
             ${hosting ? html`<button class="button" @click=${() => changeState("hosting")}>Use hosted AD4M (alpha)</button>` : ""}
           </div>
 
-          <div style="display: flex; flex-direction: column; align-items: center; gap: 20px">
+          <div style="display: flex; flex-direction: column; align-items: center; gap: 20px; margin-top: -30px">
             or
             <button class="button button--secondary" @click=${() => connect()}>
               Try reconnecting
