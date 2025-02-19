@@ -38,7 +38,8 @@ export type ConnectionStates =
   | "error"
   | "port_not_found"
   | "not_connected"
-  | "disconnected";
+  | "disconnected"
+  | "checking_local";
 
 export default class Ad4mConnect {
   activeSocket: WebSocket = null;
@@ -148,16 +149,26 @@ export default class Ad4mConnect {
         await this.checkAuth();
         return client;
       } else {
-        const client = await this.ensureConnection();
-        await this.checkAuth();
-        return client;
+        // Try local connection first
+        this.notifyConnectionChange("checking_local");
+        try {
+          // Quick check for local agent
+          await connectWebSocket(`ws://localhost:${this.port}/graphql`, 2000);
+          const client = this.buildClient();
+          await this.checkAuth();
+          return client;
+        } catch {
+          // If local connection fails, proceed with port scanning
+          const client = await this.ensureConnection();
+          await this.checkAuth();
+          return client;
+        }
       }
     } catch {
       this.notifyConnectionChange("not_connected");
       this.notifyAuthChange("unauthenticated");
     }
   }
-
 
   async loginToHosting(email: string, password: string) {
     try {
@@ -236,8 +247,6 @@ export default class Ad4mConnect {
   // If port is explicit, don't search for port
   async connectToPort(port?: number): Promise<Ad4mClient> {
     try {
-      this.notifyConnectionChange("connecting");
-      
       if (port) {
         const found = await checkPort(port);
         this.setPort(found);
@@ -248,22 +257,12 @@ export default class Ad4mConnect {
           const port = await this.findPort();
           this.setPort(port);
 
-          const client = this.buildClient();
-          
-          // Try to connect immediately after building client
-          try {
-            await connectWebSocket(this.url);
-            this.notifyConnectionChange("connected");
-            return client;
-          } catch (e) {
-            this.notifyConnectionChange("not_connected");
-            throw e;
-          }
+          return this.buildClient();
         }
       }
     } catch (error) {
       this.notifyConnectionChange("not_connected");
-      throw error;
+      this.notifyAuthChange("unauthenticated");
     }
   }
 

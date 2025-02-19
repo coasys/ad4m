@@ -578,15 +578,8 @@ export class Ad4mConnectElement extends LitElement {
 
     this.loadFont();
     
-    // Attempt initial connection immediately
-    if (!this.token && !this.url) {
-      // Only try connecting if we don't have a token/url yet
-      // This prevents unnecessary connection attempts when we know we need auth
-      this._client.connectToPort().catch(() => {
-        // If connection fails, we'll show the start screen through the connection state handler
-        console.log("Initial connection attempt failed");
-      });
-    }
+    // Automatically try to connect on component load
+    this._client.connect();
   }
 
   private async checkEmail() {
@@ -695,11 +688,15 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private handleConnectionChange(event: ConnectionStates) {
-    console.log(event);
-    //  this._isOpen = true;
+    if (event === "checking_local") {
+      this._isOpen = false; // Don't show dialog while checking
+      return;
+    }
+
     if (event === "connected") {
       if (this.authState !== "authenticated") {
         this.changeUIState("requestcap");
+        this._isOpen = true;
       } else {
         this.changeUIState("connected");
         this._isOpen = false;
