@@ -1697,7 +1697,7 @@ impl Ad4mDb {
 mod tests {
     use super::*;
     use crate::{
-        graphql::graphql_types::{LocalModelInput, ModelApiInput, TokenizerSourceInput},
+        graphql::graphql_types::{LocalModelInput, ModelApiInput, Perspective, Neighbourhood, TokenizerSourceInput},
         types::{ExpressionProof, Link, LinkExpression, ModelApiType, ModelType},
     };
     use chrono::Utc;
@@ -1723,6 +1723,9 @@ mod tests {
 
     #[test]
     fn test_export_import_all_tables() {
+        use crate::graphql::graphql_types::{DecoratedNeighbourhoodExpression, PerspectiveState, Perspective, Neighbourhood};
+        use crate::types::{DecoratedExpressionProof};
+
         // Initialize test database
         let db = Ad4mDb::new(":memory:").unwrap();
 
@@ -1742,6 +1745,48 @@ mod tests {
         db.add_known_link_languages(vec!["test-lang-1".to_string(), "test-lang-2".to_string()])
             .unwrap();
 
+        // Create a test neighbourhood expression
+        let test_neighbourhood = DecoratedNeighbourhoodExpression {
+            author: "test-author".to_string(),
+            timestamp: "test-timestamp".to_string(),
+            data: Neighbourhood {
+                link_language: "test-link-language".to_string(),
+                meta: Perspective::default(),
+            },
+            proof: DecoratedExpressionProof {
+                signature: "test-signature".to_string(),
+                key: "test-key".to_string(),
+                valid: None,
+                invalid: None,
+            },
+        };
+
+        // Add perspectives with links
+        let perspective1 = PerspectiveHandle {
+            uuid: Uuid::new_v4().to_string(),
+            name: Some("Test Perspective 1".to_string()),
+            neighbourhood: None,
+            shared_url: None,
+            state: PerspectiveState::Private,
+        };
+        let perspective2 = PerspectiveHandle {
+            uuid: Uuid::new_v4().to_string(),
+            name: Some("Test Perspective 2".to_string()),
+            neighbourhood: Some(test_neighbourhood),
+            shared_url: Some("test-shared-url".to_string()),
+            state: PerspectiveState::Synced,
+        };
+        
+        db.add_perspective(&perspective1).unwrap();
+        db.add_perspective(&perspective2).unwrap();
+
+        // Add some links to the perspectives
+        let link1 = construct_dummy_link_expression(LinkStatus::Shared);
+        let link2 = construct_dummy_link_expression(LinkStatus::Local);
+        
+        db.add_link(&perspective1.uuid, &link1, &LinkStatus::Shared).unwrap();
+        db.add_link(&perspective2.uuid, &link2, &LinkStatus::Local).unwrap();
+
         // Add notifications
         let notification = NotificationInput {
             description: "Test Description".to_string(),
@@ -1749,7 +1794,7 @@ mod tests {
             app_url: "http://test.app".to_string(),
             app_icon_path: "/test/icon.png".to_string(),
             trigger: "test-trigger".to_string(),
-            perspective_ids: vec!["test-perspective-1".to_string()],
+            perspective_ids: vec![perspective1.uuid.clone()],
             webhook_url: "http://test.webhook".to_string(),
             webhook_auth: "test-auth".to_string(),
         };
@@ -1837,6 +1882,36 @@ mod tests {
         assert_eq!(model_status.status, "loading");
         assert_eq!(model_status.downloaded, true);
         assert_eq!(model_status.loaded, false);
+
+        // Verify perspectives
+        let imported_perspectives = import_db.get_all_perspectives().unwrap();
+        assert_eq!(imported_perspectives.len(), 2);
+        
+        // Find and verify first perspective
+        let imported_perspective1 = imported_perspectives.iter()
+            .find(|p| p.name == Some("Test Perspective 1".to_string()))
+            .unwrap();
+        assert_eq!(imported_perspective1.uuid, perspective1.uuid);
+        assert_eq!(imported_perspective1.shared_url, None);
+        assert_eq!(imported_perspective1.state, PerspectiveState::Private);
+
+        // Find and verify second perspective
+        let imported_perspective2 = imported_perspectives.iter()
+            .find(|p| p.name == Some("Test Perspective 2".to_string()))
+            .unwrap();
+        assert_eq!(imported_perspective2.uuid, perspective2.uuid);
+        assert_eq!(imported_perspective2.neighbourhood.as_ref().unwrap().data.link_language, "test-link-language");
+        assert_eq!(imported_perspective2.shared_url, Some("test-shared-url".to_string()));
+        assert_eq!(imported_perspective2.state, PerspectiveState::Synced);
+
+        // Verify perspective links
+        let imported_links1 = import_db.get_all_links(&perspective1.uuid).unwrap();
+        assert_eq!(imported_links1.len(), 1);
+        assert_eq!(imported_links1[0], (link1, LinkStatus::Shared));
+
+        let imported_links2 = import_db.get_all_links(&perspective2.uuid).unwrap();
+        assert_eq!(imported_links2.len(), 1);
+        assert_eq!(imported_links2[0], (link2, LinkStatus::Local));
     }
 
     #[test]
