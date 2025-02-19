@@ -577,6 +577,16 @@ export class Ad4mConnectElement extends LitElement {
     this._client.on("connectionstatechange", this.handleConnectionChange);
 
     this.loadFont();
+    
+    // Attempt initial connection immediately
+    if (!this.token && !this.url) {
+      // Only try connecting if we don't have a token/url yet
+      // This prevents unnecessary connection attempts when we know we need auth
+      this._client.connectToPort().catch(() => {
+        // If connection fails, we'll show the start screen through the connection state handler
+        console.log("Initial connection attempt failed");
+      });
+    }
   }
 
   private async checkEmail() {

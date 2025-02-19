@@ -236,6 +236,8 @@ export default class Ad4mConnect {
   // If port is explicit, don't search for port
   async connectToPort(port?: number): Promise<Ad4mClient> {
     try {
+      this.notifyConnectionChange("connecting");
+      
       if (port) {
         const found = await checkPort(port);
         this.setPort(found);
@@ -246,12 +248,22 @@ export default class Ad4mConnect {
           const port = await this.findPort();
           this.setPort(port);
 
-          return this.buildClient();
+          const client = this.buildClient();
+          
+          // Try to connect immediately after building client
+          try {
+            await connectWebSocket(this.url, 10000);
+            this.notifyConnectionChange("connected");
+            return client;
+          } catch (e) {
+            this.notifyConnectionChange("not_connected");
+            throw e;
+          }
         }
       }
     } catch (error) {
       this.notifyConnectionChange("not_connected");
-      this.notifyAuthChange("unauthenticated");
+      throw error;
     }
   }
 
