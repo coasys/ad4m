@@ -1351,6 +1351,20 @@ impl Ad4mDb {
     pub fn export_all_to_json(&self) -> Ad4mDbResult<serde_json::Value> {
         let mut export_data = serde_json::Map::new();
 
+        // Export perspectives
+        let perspectives: Vec<serde_json::Value> = self.conn.prepare(
+            "SELECT uuid, name, neighbourhood, shared_url, state FROM perspective_handle"
+        )?.query_map([], |row| {
+            Ok(serde_json::json!({
+                "uuid": row.get::<_, String>(0)?,
+                "name": row.get::<_, Option<String>>(1)?,
+                "neighbourhood": row.get::<_, Option<String>>(2)?,
+                "shared_url": row.get::<_, Option<String>>(3)?,
+                "state": row.get::<_, String>(4)?
+            }))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        export_data.insert("perspectives".to_string(), serde_json::to_value(perspectives)?);
+
         // Export links
         let links: Vec<(LinkSchema, String, String)> = self.conn.prepare(
             "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link"
@@ -1519,6 +1533,23 @@ impl Ad4mDb {
         let data = data
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("Invalid JSON data"))?;
+
+        // Import perspectives
+        if let Some(perspectives) = data.get("perspectives") {
+            let perspectives: Vec<serde_json::Value> = serde_json::from_value(perspectives.clone())?;
+            for perspective in perspectives {
+                self.conn.execute(
+                    "INSERT INTO perspective_handle (uuid, name, neighbourhood, shared_url, state) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        perspective["uuid"].as_str().unwrap_or(""),
+                        perspective["name"].as_str(),
+                        perspective.get("neighbourhood").and_then(|n| n.as_str()),  // Fixed: properly handle optional JSON string
+                        perspective["shared_url"].as_str(),
+                        perspective["state"].as_str().unwrap_or("")
+                    ],
+                )?;
+            }
+        }
 
         // Import links
         if let Some(links) = data.get("links") {
@@ -1697,7 +1728,7 @@ impl Ad4mDb {
 mod tests {
     use super::*;
     use crate::{
-        graphql::graphql_types::{LocalModelInput, ModelApiInput, Perspective, Neighbourhood, TokenizerSourceInput},
+        graphql::graphql_types::{LocalModelInput, ModelApiInput, TokenizerSourceInput},
         types::{ExpressionProof, Link, LinkExpression, ModelApiType, ModelType},
     };
     use chrono::Utc;
@@ -1835,6 +1866,8 @@ mod tests {
 
         // 2. Export all data
         let exported_data = db.export_all_to_json().unwrap();
+
+        //println!("exported_data: {}", serde_json::to_string_pretty(&exported_data).unwrap());
 
         // 3. Create a new database for import
         let import_db = Ad4mDb::new(":memory:").unwrap();
