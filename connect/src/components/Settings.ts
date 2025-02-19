@@ -31,64 +31,61 @@ export default function Settings({
           Locally
         </button>
         <button class=${proxyClasses} @click=${() => changeIsRemote(true)}>
-          Proxy
+          Remotely
         </button>
       </div>
-      ${isRemote
-        ? html`<div class="input">
-              <label class="input__label">URL</label>
-              <input
-                class="input__field"
-                value=${url}
-                @input=${(e: any) => changeUrl(e.target.value)}
-              />
-            </div>
-            <div class="buttons">
-              <button
-                class="button button--full button--secondary"
-                @click=${() => changeState("start")}
-              >
-                Back
-              </button>
-              <button
-                class="button button--full"
-                @click=${() => connectRemote(url)}
-              >
-                Connect
-              </button>
-            </div>`
-        : html`<div class="input">
-              <label class="input__label">PORT</label>
-              <input
-                class="input__field"
-                value=${port}
-                @input=${(e: any) => changePort(parseInt(e.target.value))}
-              />
-            </div>
+      ${isRemote ? html`
+        <div class="input">
+          <label class="input__label">URL</label>
+          <input
+            class="input__field"
+            value=${url}
+            @input=${(e: any) => changeUrl(e.target.value)}
+          />
+        </div>
+        <div class="buttons">
+          <button
+            class="button button--full"
+            @click=${() => connectRemote(url)}
+          >
+            Connect
+          </button>
+        </div>
+      ` : html`
+        <div class="input">
+          <label class="input__label">PORT</label>
+          <input
+            class="input__field"
+            value=${port}
+            @input=${(e: any) => changePort(parseInt(e.target.value))}
+          />
+        </div>
 
-            <div class="buttons">
-              <button
-                class="button button--full button--secondary"
-                @click=${() => changeState("start")}
-              >
-                Back
-              </button>
-              <button
-                class="button button--full"
-                @click=${() => connectToPort(port)}
-              >
-                Connect
-              </button>
-            </div>`}
-            <div class="text-center">or</div>
-            <div class="buttons">
-            <button 
-              class="button button--full button--secondary"
-              @click=${clearState}
-              >
-                Clear state
-              </button>
-            </div
+        <div class="buttons">
+          <button
+            class="button button--full"
+            @click=${() => connectToPort(port)}
+          >
+            Connect
+          </button>
+        </div>
+      `}
+
+      <div class="text-center">or</div>
+      <div class="buttons">
+        <button
+          class="button button--full button--secondary"
+          @click=${() => changeState("start")}
+        >
+          Back
+        </button>
+        <button 
+          class="button button--full button--secondary"
+          @click=${clearState}
+        >
+          Clear state
+        </button>
+      </div
     </div>
   `;
 }
