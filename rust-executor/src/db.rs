@@ -1486,6 +1486,17 @@ impl Ad4mDb {
         })?.collect::<Result<Vec<_>, _>>()?;
         export_data.insert("models".to_string(), serde_json::to_value(models)?);
 
+        // Export default_models
+        let default_models: Vec<serde_json::Value> = self.conn.prepare(
+            "SELECT model_type, model_id FROM default_models"
+        )?.query_map([], |row| {
+            Ok(serde_json::json!({
+                "model_type": row.get::<_, String>(0)?,
+                "model_id": row.get::<_, String>(1)?
+            }))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        export_data.insert("default_models".to_string(), serde_json::to_value(default_models)?);
+
         // Nah, we don't need to export model_status
         // It's kinda transient, but in the DB so the model loading percentage is not lost over restarts
         // but doesn't make sense to import it into another instance
@@ -1645,28 +1656,6 @@ impl Ad4mDb {
             }
         }
 
-        // Import tasks
-        if let Some(tasks) = data.get("tasks") {
-            let tasks: Vec<serde_json::Value> = serde_json::from_value(tasks.clone())?;
-            log::debug!("Importing {} tasks", tasks.len());
-            for task in tasks {
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at) 
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        task["id"].as_str().unwrap_or(""),
-                        task["name"].as_str().unwrap_or(""),
-                        task["model_id"].as_str().unwrap_or(""),
-                        task["system_prompt"].as_str().unwrap_or(""),
-                        task["prompt_examples"].to_string(),
-                        task["metadata"].as_str(),
-                        task["created_at"].as_str().unwrap_or(""),
-                        task["updated_at"].as_str().unwrap_or("")
-                    ],
-                )?;
-            }
-        }
-
         // Import models
         if let Some(models) = data.get("models") {
             let models: Vec<serde_json::Value> = serde_json::from_value(models.clone())?;
@@ -1690,6 +1679,44 @@ impl Ad4mDb {
                         model["local_tokenizer_repo"].as_str(),
                         model["local_tokenizer_revision"].as_str(),
                         model["local_tokenizer_file_name"].as_str()
+                    ],
+                )?;
+            }
+        }
+
+        // Import default_models
+        if let Some(default_models) = data.get("default_models") {
+            let default_models: Vec<serde_json::Value> = serde_json::from_value(default_models.clone())?;
+            log::debug!("Importing {} default model mappings", default_models.len());
+            for default_model in default_models {
+                self.conn.execute(
+                    "INSERT INTO default_models (model_type, model_id) VALUES (?1, ?2)",
+                    params![
+                        default_model["model_type"].as_str().unwrap_or(""),
+                        default_model["model_id"].as_str().unwrap_or("")
+                    ],
+                )?;
+            }
+        }
+        
+
+        // Import tasks
+        if let Some(tasks) = data.get("tasks") {
+            let tasks: Vec<serde_json::Value> = serde_json::from_value(tasks.clone())?;
+            log::debug!("Importing {} tasks", tasks.len());
+            for task in tasks {
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at) 
+                        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        task["id"].as_str().unwrap_or(""),
+                        task["name"].as_str().unwrap_or(""),
+                        task["model_id"].as_str().unwrap_or(""),
+                        task["system_prompt"].as_str().unwrap_or(""),
+                        task["prompt_examples"].to_string(),
+                        task["metadata"].as_str(),
+                        task["created_at"].as_str().unwrap_or(""),
+                        task["updated_at"].as_str().unwrap_or("")
                     ],
                 )?;
             }
@@ -1892,6 +1919,9 @@ mod tests {
         };
         let model_id = db.add_model(&model_input).unwrap();
 
+        // Set default model
+        db.set_default_model(ModelType::Llm, &model_id).unwrap();
+
         // 2. Export all data
         let exported_data = db.export_all_to_json().unwrap();
 
@@ -1936,6 +1966,10 @@ mod tests {
         let imported_model = models.first().unwrap();
         assert_eq!(imported_model.id, model_id);
         assert_eq!(imported_model.name, "Test Model");
+
+        // Verify default model mapping was imported
+        let imported_default_model = import_db.get_default_model(ModelType::Llm).unwrap();
+        assert_eq!(imported_default_model, Some(model_id));
 
         // Verify perspectives
         let imported_perspectives = import_db.get_all_perspectives().unwrap();
