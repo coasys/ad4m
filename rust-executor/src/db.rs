@@ -1571,7 +1571,7 @@ impl Ad4mDb {
                         perspective["name"].as_str(),
                         perspective.get("neighbourhood").and_then(|n| n.as_str()),  // Fixed: properly handle optional JSON string
                         perspective["shared_url"].as_str(),
-                        state.as_str()
+                        perspective["state"].as_str().unwrap_or(state.as_str())
                     ],
                 )?;
             }
