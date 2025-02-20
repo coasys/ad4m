@@ -1,7 +1,7 @@
 import { ApolloClient, gql } from "@apollo/client/core"
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import unwrapApolloResult from "../unwrapApolloResult"
-import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification } from "./RuntimeResolver"
+import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult } from "./RuntimeResolver"
 
 const PERSPECTIVE_EXPRESSION_FIELDS = `
 author
@@ -287,6 +287,38 @@ export class RuntimeClient {
         return runtimeGrantNotification
     }
 
+    async exportDb(filePath: string): Promise<boolean> {
+        const { runtimeExportDb } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeExportDb($filePath: String!) {
+                runtimeExportDb(filePath: $filePath)
+            }`,
+            variables: { filePath }
+        }))
+        return runtimeExportDb
+    }
+
+    async importDb(filePath: string): Promise<ImportResult> {
+        const { runtimeImportDb } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeImportDb($filePath: String!) {
+                runtimeImportDb(filePath: $filePath) {
+                    perspectives { total imported failed omitted errors }
+                    links { total imported failed omitted errors }
+                    expressions { total imported failed omitted errors }
+                    perspectiveDiffs { total imported failed omitted errors }
+                    notifications { total imported failed omitted errors }
+                    models { total imported failed omitted errors }
+                    defaultModels { total imported failed omitted errors }
+                    tasks { total imported failed omitted errors }
+                    friends { total imported failed omitted errors }
+                    trustedAgents { total imported failed omitted errors }
+                    knownLinkLanguages { total imported failed omitted errors }
+                }
+            }`,
+            variables: { filePath }
+        }))
+        return runtimeImportDb
+    }
+
     async notifications(): Promise<Notification[]> {
         const { runtimeNotifications } = unwrapApolloResult(await this.#apolloClient.query({
             query: gql`query runtimeNotifications {
@@ -316,6 +348,25 @@ export class RuntimeClient {
         return runtimeRemoveNotification
     }
 
+    async exportPerspective(uuid: string, filePath: string): Promise<boolean> {
+        const { runtimeExportPerspective } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeExportPerspective($perspectiveUuid: String!, $filePath: String!) {
+                runtimeExportPerspective(perspectiveUuid: $perspectiveUuid, filePath: $filePath)
+            }`,
+            variables: { perspectiveUuid: uuid, filePath }
+        }))
+        return runtimeExportPerspective
+    }
+
+    async importPerspective(filePath: string): Promise<boolean> {
+        const { runtimeImportPerspective } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeImportPerspective($filePath: String!) {
+                runtimeImportPerspective(filePath: $filePath)
+            }`,
+            variables: { filePath }
+        }))
+        return runtimeImportPerspective
+    }
 
     addNotificationTriggeredCallback(cb: NotificationTriggeredCallback) {
         this.#notificationTriggeredCallbacks.push(cb)

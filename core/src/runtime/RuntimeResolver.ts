@@ -138,6 +138,60 @@ export class TriggeredNotification {
     triggerMatch: string;
 }
 
+@ObjectType()
+export class ImportStats {
+    @Field()
+    total: number;
+
+    @Field()
+    imported: number;
+
+    @Field()
+    failed: number;
+
+    @Field()
+    omitted: number;
+
+    @Field(type => [String])
+    errors: string[];
+}
+
+@ObjectType()
+export class ImportResult {
+    @Field()
+    perspectives: ImportStats;
+
+    @Field()
+    links: ImportStats;
+
+    @Field()
+    expressions: ImportStats;
+
+    @Field()
+    perspectiveDiffs: ImportStats;
+
+    @Field()
+    notifications: ImportStats;
+
+    @Field()
+    models: ImportStats;
+
+    @Field()
+    defaultModels: ImportStats;
+
+    @Field()
+    tasks: ImportStats;
+
+    @Field()
+    friends: ImportStats;
+
+    @Field()
+    trustedAgents: ImportStats;
+
+    @Field()
+    knownLinkLanguages: ImportStats;
+}
+
 /**
  * Resolver classes are used here to define the GraphQL schema 
  * (through the type-graphql annotations)
@@ -335,6 +389,29 @@ export default class RuntimeResolver {
                 webhookAuth: "test-auth",
             }
         }
+    }
+
+    @Mutation()
+    runtimeExportDb(@Arg("filePath", type => String) filePath: string): boolean {
+        return true
+    }
+
+    @Mutation()
+    runtimeImportDb(@Arg("filePath", type => String) filePath: string): boolean {
+        return true
+    }
+
+    @Mutation()
+    runtimeExportPerspective(
+        @Arg("perspectiveUuid", type => String) perspectiveUuid: string,
+        @Arg("filePath", type => String) filePath: string
+    ): boolean {
+        return true
+    }
+
+    @Mutation()
+    runtimeImportPerspective(@Arg("filePath", type => String) filePath: string): boolean {
+        return true
     }
 }
 

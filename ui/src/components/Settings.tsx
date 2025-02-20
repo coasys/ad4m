@@ -1,8 +1,9 @@
-import { Agent, Literal } from "@coasys/ad4m";
+import { Agent, ImportResult, ImportStats, Literal } from "@coasys/ad4m";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open } from "@tauri-apps/plugin-shell";
+import { save as dialogSave, open as dialogOpen, message as dialogMessage, type MessageDialogOptions } from "@tauri-apps/plugin-dialog";
 import { useCallback, useContext, useEffect, useState } from "react";
 import QRCode from "react-qr-code";
 import { PREDICATE_FIRSTNAME, PREDICATE_LASTNAME, PREDICATE_USERNAME } from "../constants/triples";
@@ -81,6 +82,9 @@ const Profile = (props: Props) => {
   const [showAddHcAgentInfos, setShowAddHcAgentInfos] = useState(false);
 
   const [addHcAgentInfos, setAddHcAgentInfos] = useState("");
+
+  const [exportStatus, setExportStatus] = useState("");
+  const [importStatus, setImportStatus] = useState("");
 
   function openLogs() {
     appWindow.emit("copyLogs");
@@ -240,14 +244,98 @@ const Profile = (props: Props) => {
     getAppState();
   };
 
+  const handleExport = async () => {
+    try {
+      setExportStatus("Exporting...");
+      const filePath = await dialogSave({
+        defaultPath: "ad4m_backup.json",
+        filters: [{
+          name: 'JSON',
+          extensions: ['json']
+        }]
+      });
+      
+      if (filePath && client) {
+        await client.runtime.exportDb(filePath);
+        setExportStatus("Export successful!");
+      }
+      setTimeout(() => setExportStatus(""), 3000);
+    } catch (error) {
+      console.error("Export failed:", error);
+      setExportStatus("Export failed!");
+      setTimeout(() => setExportStatus(""), 3000);
+    }
+  };
+
+  const handleImport = async () => {
+    try {
+      setImportStatus("Importing...");
+      const filePath = await dialogOpen({
+        filters: [{
+          name: 'JSON',
+          extensions: ['json']
+        }]
+      });
+      
+      if (filePath && client) {
+        const result = await client.runtime.importDb(filePath.toString());
+        
+        if (result && typeof result === 'object') {
+          const importResult = result as ImportResult;
+          
+          // Create a summary message
+          const summary = [
+            `Successfully imported:`,
+            `- ${importResult.perspectives.imported} of ${importResult.perspectives.total} perspectives`,
+            `- ${importResult.links.imported} of ${importResult.links.total} links`,
+            `- ${importResult.expressions.imported} of ${importResult.expressions.total} expressions`,
+            `- ${importResult.perspectiveDiffs.imported} of ${importResult.perspectiveDiffs.total} perspective diffs`,
+            `- ${importResult.notifications.imported} of ${importResult.notifications.total} notifications`,
+            `- ${importResult.models.imported} of ${importResult.models.total} models`,
+            `- ${importResult.defaultModels.imported} of ${importResult.defaultModels.total} default models`,
+            `- ${importResult.tasks.imported} of ${importResult.tasks.total} tasks`,
+            `- ${importResult.friends.imported} of ${importResult.friends.total} friends`,
+            `- ${importResult.trustedAgents.imported} of ${importResult.trustedAgents.total} trusted agents`,
+            `- ${importResult.knownLinkLanguages.imported} of ${importResult.knownLinkLanguages.total} known link languages`,
+          ];
+
+          // Add error summary if there are any errors
+          const totalErrors = Object.values(importResult).reduce((sum: number, stats: ImportStats) => {
+            return sum + (stats.errors?.length || 0);
+          }, 0);
+
+          if (totalErrors > 0) {
+            summary.push("\nErrors encountered:");
+            Object.entries(importResult).forEach(([category, stats]) => {
+              const typedStats = stats as ImportStats;
+              if (typedStats.errors && typedStats.errors.length > 0) {
+                summary.push(`\n${category}:`);
+                typedStats.errors.forEach((error: string) => summary.push(`- ${error}`));
+              }
+            });
+          }
+
+          // Show dialog with results
+          const dialogOptions: MessageDialogOptions = {
+            title: "Import Results"
+          };
+
+          await dialogMessage(summary.join('\n'), dialogOptions);
+
+          setImportStatus("Import completed");
+        }
+      }
+      setTimeout(() => setImportStatus(""), 3000);
+    } catch (error) {
+      console.error("Import failed:", error);
+      alert("Import failed: " + error);
+      setImportStatus("Import failed!");
+      setTimeout(() => setImportStatus(""), 3000);
+    }
+  };
+
   return (
     <div>
-      <j-box px="500" my="500">
-        <j-toggle full="" checked={expertMode} onChange={(e) => toggleExpertMode()}>
-          Advanced mode
-        </j-toggle>
-      </j-box>
-
       <j-box px="500" my="500">
         <j-toggle
           checked={!!proxy}
@@ -255,7 +343,7 @@ const Profile = (props: Props) => {
             e.target.checked ? setupProxy(e) : stopProxy(e);
           }}
         >
-          Proxy
+          Enable remote access via proxy
         </j-toggle>
 
         {loadingProxy && <j-spinner size="sm"></j-spinner>}
@@ -267,7 +355,7 @@ const Profile = (props: Props) => {
               <ActionButton title="QR Code" onClick={showProxyQRCode} icon="qr-code-scan" />
               <ActionButton
                 title="Open GraphQL"
-                onClick={() => open(url.replace("ws", "http"))}
+                onClick={() => open(proxy.replace("wss", "https").replace("graphql", "playground"))}
                 icon="box-arrow-up-right"
               />
             </j-flex>
@@ -276,21 +364,52 @@ const Profile = (props: Props) => {
       </j-box>
 
       <j-box px="500" my="500">
-        <j-button onClick={() => settrustedAgentModalOpen(true)} full variant="secondary">
-          <j-icon size="sm" slot="start" name="shield-check"></j-icon>
-          Show trusted agents
+        <j-button onClick={openLogs} full variant="primary">
+          <j-icon size="sm" slot="start" name="clipboard"></j-icon>
+          Show logs
         </j-button>
+      </j-box>
+
+      <j-box px="500" my="500">
+        <j-button onClick={() => setShowAgentSelection(true)} full variant="secondary">
+          <j-icon size="sm" slot="start" name="server"></j-icon>
+          Switch/create agent
+        </j-button>
+      </j-box>
+
+      <j-box px="500" my="500">
+        <j-toggle full="" checked={expertMode} onChange={(e) => toggleExpertMode()}>
+          Advanced mode
+        </j-toggle>
       </j-box>
 
       {expertMode && (
         <div>
+          <j-box px="500" my="500">
+            <j-button onClick={handleExport} full variant="ghost">
+              <j-icon size="sm" slot="start" name="download"></j-icon>
+              {exportStatus || "Export Database"}
+            </j-button>
+          </j-box>
+          <j-box px="500" my="500">
+            <j-button onClick={handleImport} full variant="ghost">
+              <j-icon size="sm" slot="start" name="upload"></j-icon>
+              {importStatus || "Import Database"}
+            </j-button>
+          </j-box>
+          <j-box px="500" my="500">
+            <j-button onClick={() => setClearAgentModalOpen(true)} full variant="ghost">
+              <j-icon size="sm" slot="start" name="trash"></j-icon>
+              Delete Agent
+            </j-button>
+          </j-box>
           <j-box px="500" my="500">
             <j-button
               onClick={() => {
                 getAgentInfo();
               }}
               full
-              variant="secondary"
+              variant="ghost"
             >
               <j-icon size="sm" slot="start" name={!copied ? "clipboard" : "clipboard-check"}></j-icon>
               Copy Holochain Agent Info(s)
@@ -303,35 +422,22 @@ const Profile = (props: Props) => {
                 setShowAddHcAgentInfos(true);
               }}
               full
-              variant="secondary"
+              variant="ghost"
             >
               <j-icon size="sm" slot="start" name="shield-check"></j-icon>
               Add Holochain Agent Info(s)
             </j-button>
           </j-box>
+          <j-box px="500" my="500">
+            <j-button onClick={() => settrustedAgentModalOpen(true)} full variant="ghost">
+              <j-icon size="sm" slot="start" name="shield-check"></j-icon>
+              Show trusted agents
+            </j-button>
+          </j-box>
+          <j-box px="500" my="500">
+          </j-box>
         </div>
       )}
-
-      <j-box px="500" my="500">
-        <j-button onClick={openLogs} full variant="secondary">
-          <j-icon size="sm" slot="start" name="clipboard"></j-icon>
-          Show logs
-        </j-button>
-      </j-box>
-
-      <j-box px="500" my="500">
-        <j-button onClick={() => setShowAgentSelection(true)} full variant="secondary">
-          <j-icon size="sm" slot="start" name="server"></j-icon>
-          Select agent
-        </j-button>
-      </j-box>
-
-      <j-box px="500" my="500">
-        <j-button onClick={() => setClearAgentModalOpen(true)} full variant="primary">
-          <j-icon size="sm" slot="start" name="trash"></j-icon>
-          Delete Agent
-        </j-button>
-      </j-box>
 
       {showAddHcAgentInfos && (
         <j-modal open={showAddHcAgentInfos} onToggle={(e: any) => setAddHcAgentInfos(e.target.open)}>

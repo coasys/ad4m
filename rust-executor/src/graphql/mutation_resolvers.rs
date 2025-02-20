@@ -5,9 +5,9 @@ use crate::{
     ai_service::AIService,
     neighbourhoods::{self, install_neighbourhood},
     perspectives::{
-        add_perspective, get_perspective,
+        self, add_perspective, export_perspective, get_perspective, import_perspective,
         perspective_instance::{PerspectiveInstance, SdnaType},
-        remove_perspective, update_perspective,
+        remove_perspective, update_perspective, SerializedPerspective,
     },
     types::{AITask, DecoratedLinkExpression, Link, LinkExpression, ModelType},
 };
@@ -1213,6 +1213,68 @@ impl Mutation {
         Ok(true)
     }
 
+    async fn runtime_export_db(
+        &self,
+        context: &RequestContext,
+        file_path: String,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+
+        let json_data =
+            Ad4mDb::with_global_instance(|db| db.export_all_to_json()).map_err(|e| {
+                FieldError::new(
+                    "Failed to export database",
+                    graphql_value!({ "error": e.to_string() }),
+                )
+            })?;
+
+        // Write to file
+        std::fs::write(&file_path, serde_json::to_string_pretty(&json_data)?).map_err(|e| {
+            FieldError::new(
+                "Failed to write export file",
+                graphql_value!({ "error": e.to_string() }),
+            )
+        })?;
+
+        Ok(true)
+    }
+
+    async fn runtime_import_db(
+        &self,
+        context: &RequestContext,
+        file_path: String,
+    ) -> FieldResult<ImportResult> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+
+        // Read from file
+        let json_str = std::fs::read_to_string(&file_path).map_err(|e| {
+            FieldError::new(
+                format!("Failed to read import file '{}': {}", file_path, e),
+                graphql_value!({ "error": e.to_string() }),
+            )
+        })?;
+
+        let json_data: serde_json::Value = serde_json::from_str(&json_str).map_err(|e| {
+            FieldError::new(
+                format!("Failed to parse JSON data: {}", e),
+                graphql_value!({ "error": e.to_string() }),
+            )
+        })?;
+
+        let result =
+            Ad4mDb::with_global_instance(|db| db.import_from_json(json_data)).map_err(|e| {
+                log::error!("Failed to import database: {}", e);
+                FieldError::new(
+                    format!("Failed to import database: {}", e),
+                    graphql_value!({ "error": e.to_string() }),
+                )
+            })?;
+
+        perspectives::initialize_from_db();
+
+        Ok(result)
+    }
+
     async fn ai_add_model(
         &self,
         context: &RequestContext,
@@ -1419,5 +1481,65 @@ impl Mutation {
             .close_transcription_stream(&stream_id)
             .await?;
         Ok(String::from("true"))
+    }
+
+    async fn runtime_export_perspective(
+        &self,
+        context: &RequestContext,
+        perspective_uuid: String,
+        file_path: String,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+
+        // Export the perspective
+        let serialized = export_perspective(&perspective_uuid).await.map_err(|e| {
+            FieldError::new(
+                "Failed to export perspective",
+                graphql_value!({ "error": e.to_string() }),
+            )
+        })?;
+
+        // Write to file
+        std::fs::write(&file_path, serde_json::to_string_pretty(&serialized)?).map_err(|e| {
+            FieldError::new(
+                "Failed to write export file",
+                graphql_value!({ "error": e.to_string() }),
+            )
+        })?;
+
+        Ok(true)
+    }
+
+    async fn runtime_import_perspective(
+        &self,
+        context: &RequestContext,
+        file_path: String,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+
+        // Read from file
+        let json_str = std::fs::read_to_string(&file_path).map_err(|e| {
+            FieldError::new(
+                format!("Failed to read import file '{}': {}", file_path, e),
+                graphql_value!({ "error": e.to_string() }),
+            )
+        })?;
+
+        let serialized: SerializedPerspective = serde_json::from_str(&json_str).map_err(|e| {
+            FieldError::new(
+                format!("Failed to parse perspective data: {}", e),
+                graphql_value!({ "error": e.to_string() }),
+            )
+        })?;
+
+        // Import the perspective
+        import_perspective(serialized).await.map_err(|e| {
+            FieldError::new(
+                format!("Failed to import perspective: {}", e),
+                graphql_value!({ "error": e.to_string() }),
+            )
+        })?;
+
+        Ok(true)
     }
 }

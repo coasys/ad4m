@@ -50,12 +50,10 @@ const Navigation = ({ did, opened, setOpened }: Props) => {
         variant="tab"
       >
         <j-tab-item value="/apps">Apps</j-tab-item>
-        {expertMode && <j-tab-item value="/language">Languages</j-tab-item>}
-        {expertMode && (
-          <j-tab-item value="/perspective">Perspectives</j-tab-item>
-        )}
+        <j-tab-item value="/perspective">Perspectives</j-tab-item>
         <j-tab-item value="/ai">AI</j-tab-item>
         <j-tab-item value="/settings">Settings</j-tab-item>
+        {expertMode && <j-tab-item value="/language">Languages</j-tab-item>}
       </j-tabs>
 
       <Outlet />

@@ -990,14 +990,80 @@ pub struct VoiceActivityParamsInput {
     pub time_before_speech: Option<i32>,
 }
 
-impl Into<crate::ai_service::VoiceActivityParams> for VoiceActivityParamsInput {
-    fn into(self) -> crate::ai_service::VoiceActivityParams {
+impl From<VoiceActivityParamsInput> for crate::ai_service::VoiceActivityParams {
+    fn from(val: VoiceActivityParamsInput) -> Self {
         crate::ai_service::VoiceActivityParams {
-            start_threshold: self.start_threshold.map(|x| x as f32),
-            start_window: self.start_window.map(|x| x as u64),
-            end_threshold: self.end_threshold.map(|x| x as f32),
-            end_window: self.end_window.map(|x| x as u64),
-            time_before_speech: self.time_before_speech.map(|x| x as u64),
+            start_threshold: val.start_threshold.map(|x| x as f32),
+            start_window: val.start_window.map(|x| x as u64),
+            end_threshold: val.end_threshold.map(|x| x as f32),
+            end_window: val.end_window.map(|x| x as u64),
+            time_before_speech: val.time_before_speech.map(|x| x as u64),
+        }
+    }
+}
+
+#[derive(GraphQLObject, Debug, serde::Serialize)]
+pub struct ImportStats {
+    pub total: i32,
+    pub imported: i32,
+    pub failed: i32,
+    pub omitted: i32,
+    pub errors: Vec<String>,
+}
+
+#[derive(GraphQLObject, Debug, serde::Serialize)]
+pub struct ImportResult {
+    pub perspectives: ImportStats,
+    pub links: ImportStats,
+    pub expressions: ImportStats,
+    pub perspective_diffs: ImportStats,
+    pub notifications: ImportStats,
+    pub models: ImportStats,
+    pub default_models: ImportStats,
+    pub tasks: ImportStats,
+    pub friends: ImportStats,
+    pub trusted_agents: ImportStats,
+    pub known_link_languages: ImportStats,
+}
+
+impl Default for ImportStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ImportStats {
+    pub fn new() -> Self {
+        Self {
+            total: 0,
+            imported: 0,
+            failed: 0,
+            omitted: 0,
+            errors: Vec::new(),
+        }
+    }
+}
+
+impl Default for ImportResult {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ImportResult {
+    pub fn new() -> Self {
+        Self {
+            perspectives: ImportStats::new(),
+            links: ImportStats::new(),
+            expressions: ImportStats::new(),
+            perspective_diffs: ImportStats::new(),
+            notifications: ImportStats::new(),
+            models: ImportStats::new(),
+            default_models: ImportStats::new(),
+            tasks: ImportStats::new(),
+            friends: ImportStats::new(),
+            trusted_agents: ImportStats::new(),
+            known_link_languages: ImportStats::new(),
         }
     }
 }

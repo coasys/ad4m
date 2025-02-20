@@ -10,6 +10,7 @@ import { cardStyle, listStyle } from "./styles";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { nanoid } from "nanoid";
 import ActionButton from "./ActionButton";
+import { open, save, confirm } from '@tauri-apps/plugin-dialog';
 
 type Props = {
   opened: boolean;
@@ -28,20 +29,55 @@ const PerspectiveMenu = ({
   } = useContext(Ad4minContext);
 
   const deletePerspective = async (id: string) => {
-    await client!.perspective.remove(id);
+    const perspective = await client!.perspective.byUUID(id);
+    const name = perspective?.name || "Untitled Perspective";
+    if (await confirm(`Are you sure you want to delete perspective ${name}?`)) {
+      await client!.perspective.remove(id);
+      await reload();
+    }
+  };
 
-    await reload();
+  const exportPerspective = async () => {
+    try {
+      const perspective = await client!.perspective.byUUID(uuid);
+      const name = perspective?.name || "Untitled Perspective";
+      const filePath = await save({
+        filters: [{
+          name: 'Perspective',
+          extensions: ['json']
+        }],
+        defaultPath: name+'.json'
+      });
+      
+      if (filePath) {
+        await client!.runtime.exportPerspective(uuid, filePath);
+        alert('Perspective exported successfully');
+      }
+    } catch (e) {
+      console.error('Failed to export perspective:', e);
+      alert('Failed to export perspective: ' + e);
+    }
   };
 
   return (
-    <j-button
-      variant="ghost"
-      square
-      size="xs"
-      onClick={() => deletePerspective(uuid)}
-    >
-      <j-icon name="x"></j-icon>
-    </j-button>
+    <j-flex direction="column" gap="100">
+      <j-button
+        variant="ghost"
+        size="xs"
+        onClick={() => deletePerspective(uuid)}
+      >
+        <j-icon name="x"></j-icon>
+        delete 
+      </j-button>
+      <j-button
+        variant="ghost"
+        size="xs"
+        onClick={exportPerspective}
+      >
+        <j-icon name="download"></j-icon>
+        export
+      </j-button>
+    </j-flex>
   );
 };
 
@@ -161,6 +197,27 @@ const Perspectives = (props: Props) => {
     setPerspectiveModalOpen(false);
   };
 
+  const importPerspective = async () => {
+    try {
+      const filePath = await open({
+        multiple: false,
+        filters: [{
+          name: 'Perspective',
+          extensions: ['json']
+        }]
+      });
+
+      if (filePath && typeof filePath === 'string') {
+        await client!.runtime.importPerspective(filePath);
+        await fetchPerspective(); // Refresh the list
+        alert('Perspective imported successfully');
+      }
+    } catch (e) {
+      console.error('Failed to import perspective:', e);
+      alert('Failed to import perspective: ' + e);
+    }
+  };
+
   const langs = useMemo(
     () => languages.map((e) => ({ label: e!.name, value: e!.address })),
     [languages]
@@ -174,6 +231,11 @@ const Perspectives = (props: Props) => {
             title="Add perspective"
             onClick={() => setPerspectiveModalOpen(true)}
             icon="folder-plus"
+          />
+          <ActionButton
+            title="Import perspective"
+            onClick={importPerspective}
+            icon="upload"
           />
         </j-flex>
       </j-box>
@@ -200,7 +262,7 @@ const Perspectives = (props: Props) => {
                 <j-text variant="label" size="300">
                   UUID
                 </j-text>
-                <j-input size="sm" value={e.uuid} readonly>
+                <j-input size="sm" value={e?.uuid} readonly>
                   <j-button
                     slot="end"
                     size="xs"
@@ -273,20 +335,21 @@ const Perspectives = (props: Props) => {
                   onChange={(e: any) => setLinkLanguage(e.target.value)}
                 >
                   {langs.map((e) => (
-                    <j-menu-item label={e.label} value={e.value}>
-                      {" "}
-                      {e.label}{" "}
+                    <j-menu-item key={e.value}>
+                      <j-text>{e.label}</j-text>
+                      <input type="hidden" value={e.value} />
                     </j-menu-item>
                   ))}
                 </j-select>
                 <j-select
+                  multiple
                   value={linkLanguages}
                   onChange={(e: any) => setLinkLanguages(e.target.value)}
                 >
                   {langs.map((e) => (
-                    <j-menu-item label={e.label} value={e.value}>
-                      {" "}
-                      {e.label}{" "}
+                    <j-menu-item key={e.value}>
+                      <j-text>{e.label}</j-text>
+                      <input type="hidden" value={e.value} />
                     </j-menu-item>
                   ))}
                 </j-select>
