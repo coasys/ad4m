@@ -1260,6 +1260,7 @@ impl Mutation {
         })?;
 
         Ad4mDb::with_global_instance(|db| db.import_from_json(json_data)).map_err(|e| {
+            log::error!("Failed to import database: {}", e);
             FieldError::new(
                 format!("Failed to import database: {}", e),
                 graphql_value!({ "error": e.to_string() }),

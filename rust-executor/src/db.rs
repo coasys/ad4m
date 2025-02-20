@@ -1,6 +1,5 @@
 use crate::graphql::graphql_types::{
-    AIModelLoadingStatus, EntanglementProof, LinkStatus, ModelInput, NotificationInput,
-    PerspectiveExpression, PerspectiveHandle, SentMessage,
+    AIModelLoadingStatus, EntanglementProof, LinkStatus, ModelInput, NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage
 };
 use crate::types::{
     AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
@@ -11,6 +10,7 @@ use deno_core::error::AnyError;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use uuid::Uuid;
 use std::str::FromStr;
 use url::Url;
 
@@ -1535,6 +1535,7 @@ impl Ad4mDb {
     }
 
     pub fn import_from_json(&self, data: serde_json::Value) -> Ad4mDbResult<()> {
+        log::info!("Importing DB data from JSON");
         let data = data
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("Invalid JSON data"))?;
@@ -1544,14 +1545,20 @@ impl Ad4mDb {
             let perspectives: Vec<serde_json::Value> =
                 serde_json::from_value(perspectives.clone())?;
             for perspective in perspectives {
+                log::info!("Importing perspective: {} ({})", perspective.get("name").and_then(|n| n.as_str()).unwrap_or("<unknown>"), perspective.get("uuid").and_then(|u| u.as_str()).unwrap_or("<unknown>"));
+                let state = if perspective.get("shared_url").is_some() {
+                    serde_json::to_string(&PerspectiveState::NeighbourhoodCreationInitiated).expect("to serialize PerspectiveState")
+                } else {
+                    serde_json::to_string(&PerspectiveState::Private).expect("to serialize PerspectiveState")
+                };
                 self.conn.execute(
                     "INSERT INTO perspective_handle (uuid, name, neighbourhood, shared_url, state) VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![
-                        perspective["uuid"].as_str().unwrap_or(""),
+                        perspective["uuid"].as_str().unwrap_or(Uuid::new_v4().to_string().as_str()),
                         perspective["name"].as_str(),
                         perspective.get("neighbourhood").and_then(|n| n.as_str()),  // Fixed: properly handle optional JSON string
                         perspective["shared_url"].as_str(),
-                        perspective["state"].as_str().unwrap_or("")
+                        state.as_str()
                     ],
                 )?;
             }
@@ -1560,6 +1567,7 @@ impl Ad4mDb {
         // Import links
         if let Some(links) = data.get("links") {
             let links: Vec<(LinkSchema, String, String)> = serde_json::from_value(links.clone())?;
+            log::debug!("Importing {} links", links.len());
             for (link, signature, key) in links {
                 self.conn.execute(
                     "INSERT INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status) 
@@ -1579,9 +1587,11 @@ impl Ad4mDb {
             }
         }
 
+
         // Import expressions
         if let Some(expressions) = data.get("expressions") {
             let expressions: Vec<ExpressionSchema> = serde_json::from_value(expressions.clone())?;
+            log::debug!("Importing {} expressions", expressions.len());
             for expr in expressions {
                 self.conn.execute(
                     "INSERT INTO expression (url, data) VALUES (?1, ?2)",
@@ -1593,6 +1603,7 @@ impl Ad4mDb {
         // Import perspective_diffs
         if let Some(diffs) = data.get("perspective_diffs") {
             let diffs: Vec<serde_json::Value> = serde_json::from_value(diffs.clone())?;
+            log::debug!("Importing {} perspective_diffs", diffs.len());
             for diff in diffs {
                 self.conn.execute(
                     "INSERT INTO perspective_diff (perspective, additions, removals, is_pending) VALUES (?1, ?2, ?3, ?4)",
@@ -1610,7 +1621,9 @@ impl Ad4mDb {
         if let Some(notifications) = data.get("notifications") {
             let notifications: Vec<serde_json::Value> =
                 serde_json::from_value(notifications.clone())?;
+            log::debug!("Importing {} notifications", notifications.len());
             for notification in notifications {
+                log::debug!("Importing notification: {}", notification.get("id").and_then(|id| id.as_str()).unwrap_or("<unknown>"));
                 self.conn.execute(
                     "INSERT INTO notifications (id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted) 
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -1633,6 +1646,7 @@ impl Ad4mDb {
         // Import tasks
         if let Some(tasks) = data.get("tasks") {
             let tasks: Vec<serde_json::Value> = serde_json::from_value(tasks.clone())?;
+            log::debug!("Importing {} tasks", tasks.len());
             for task in tasks {
                 self.conn.execute(
                     "INSERT OR REPLACE INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at) 
@@ -1654,7 +1668,9 @@ impl Ad4mDb {
         // Import models
         if let Some(models) = data.get("models") {
             let models: Vec<serde_json::Value> = serde_json::from_value(models.clone())?;
+            log::debug!("Importing {} models", models.len());
             for model in models {
+                log::debug!("Importing model: {}", model.get("name").and_then(|n| n.as_str()).unwrap_or("<unknown>"));
                 self.conn.execute(
                     "INSERT INTO models (id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name) 
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
@@ -1681,6 +1697,7 @@ impl Ad4mDb {
         if let Some(model_status) = data.get("model_status") {
             let model_status: Vec<serde_json::Value> =
                 serde_json::from_value(model_status.clone())?;
+            log::debug!("Importing {} model_status", model_status.len());
             for status in model_status {
                 self.conn.execute(
                     "INSERT INTO model_status (model, progress, status, downloaded, loaded) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1698,6 +1715,7 @@ impl Ad4mDb {
         // Import friends
         if let Some(friends) = data.get("friends") {
             let friends: Vec<String> = serde_json::from_value(friends.clone())?;
+            log::debug!("Importing {} friends", friends.len());
             for friend in friends {
                 self.conn
                     .execute("INSERT INTO friends (friend) VALUES (?1)", params![friend])?;
@@ -1707,6 +1725,7 @@ impl Ad4mDb {
         // Import trusted agents
         if let Some(agents) = data.get("trusted_agents") {
             let agents: Vec<String> = serde_json::from_value(agents.clone())?;
+            log::debug!("Importing {} trusted agents", agents.len());
             for agent in agents {
                 self.conn.execute(
                     "INSERT INTO trusted_agent (agent) VALUES (?1)",
@@ -1718,6 +1737,7 @@ impl Ad4mDb {
         // Import known link languages
         if let Some(languages) = data.get("known_link_languages") {
             let languages: Vec<String> = serde_json::from_value(languages.clone())?;
+            log::debug!("Importing {} known link languages", languages.len());
             for language in languages {
                 self.conn.execute(
                     "INSERT INTO known_link_languages (language) VALUES (?1)",
