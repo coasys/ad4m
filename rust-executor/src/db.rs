@@ -1573,7 +1573,7 @@ impl Ad4mDb {
                             .get("uuid")
                             .and_then(|u| u.as_str())
                             .unwrap_or("<unknown>");
-                        match {
+                        let result = {
                             let state = if perspective.get("shared_url").is_some() {
                                 serde_json::to_string(
                                     &PerspectiveState::NeighbourhoodCreationInitiated,
@@ -1593,7 +1593,9 @@ impl Ad4mDb {
                                     perspective["state"].as_str().unwrap_or(state.as_str())
                                 ],
                             )
-                        } {
+                        };
+
+                        match result {
                             Ok(_) => {
                                 log::info!("Successfully imported perspective: {} ({})", name, uuid)
                             }
