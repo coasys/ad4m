@@ -447,6 +447,8 @@ mod tests {
         assert_eq!(imported_links[0].author, test_link.author);
         assert_eq!(imported_links[0].data.source, test_link.data.source);
         assert_eq!(imported_links[0].proof.signature, test_link.proof.signature);
+
+        remove_perspective(&handle.uuid).await;
     }
 
     // Additional tests for other functions can be added here
