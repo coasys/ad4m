@@ -324,7 +324,29 @@ export default function runtimeTests(testContext: TestContext) {
 
             // Import the database
             const imported = await ad4mClient.runtime.importDb(exportPath)
-            expect(imported).to.be.true
+            expect(imported).to.have.property('perspectives')
+            expect(imported).to.have.property('links')
+            expect(imported).to.have.property('expressions')
+            expect(imported).to.have.property('perspectiveDiffs')
+            expect(imported).to.have.property('notifications')
+            expect(imported).to.have.property('models')
+            expect(imported).to.have.property('defaultModels')
+            expect(imported).to.have.property('tasks')
+            expect(imported).to.have.property('friends')
+            expect(imported).to.have.property('trustedAgents')
+            expect(imported).to.have.property('knownLinkLanguages')
+
+            // Each property should have the ImportStats structure
+            const checkImportStats = (stats: any) => {
+                expect(stats).to.have.property('total')
+                expect(stats).to.have.property('imported')
+                expect(stats).to.have.property('failed')
+                expect(stats).to.have.property('omitted')
+                expect(stats).to.have.property('errors')
+                expect(stats.errors).to.be.an('array')
+            }
+
+            Object.values(imported).forEach(checkImportStats)
 
             // Verify data was restored
             const trustedAgents = await ad4mClient.runtime.getTrustedAgents()
