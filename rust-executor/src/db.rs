@@ -1486,24 +1486,26 @@ impl Ad4mDb {
         })?.collect::<Result<Vec<_>, _>>()?;
         export_data.insert("models".to_string(), serde_json::to_value(models)?);
 
-        // Export model_status
-        let model_status: Vec<serde_json::Value> = self
-            .conn
-            .prepare("SELECT model, progress, status, downloaded, loaded FROM model_status")?
-            .query_map([], |row| {
-                Ok(serde_json::json!({
-                    "model": row.get::<_, String>(0)?,
-                    "progress": row.get::<_, f64>(1)?,
-                    "status": row.get::<_, String>(2)?,
-                    "downloaded": row.get::<_, bool>(3)?,
-                    "loaded": row.get::<_, bool>(4)?
-                }))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        export_data.insert(
-            "model_status".to_string(),
-            serde_json::to_value(model_status)?,
-        );
+        // Nah, we don't need to export model_status
+        // It's kinda transient, but in the DB so the model loading percentage is not lost over restarts
+        // but doesn't make sense to import it into another instance
+        // let model_status: Vec<serde_json::Value> = self
+        //     .conn
+        //     .prepare("SELECT model, progress, status, downloaded, loaded FROM model_status")?
+        //     .query_map([], |row| {
+        //         Ok(serde_json::json!({
+        //             "model": row.get::<_, String>(0)?,
+        //             "progress": row.get::<_, f64>(1)?,
+        //             "status": row.get::<_, String>(2)?,
+        //             "downloaded": row.get::<_, bool>(3)?,
+        //             "loaded": row.get::<_, bool>(4)?
+        //         }))
+        //     })?
+        //     .collect::<Result<Vec<_>, _>>()?;
+        // export_data.insert(
+        //     "model_status".to_string(),
+        //     serde_json::to_value(model_status)?,
+        // );
 
         // Export friends
         let mut stmt = self.conn.prepare("SELECT friend FROM friends")?;
@@ -1693,24 +1695,24 @@ impl Ad4mDb {
             }
         }
 
-        // Import model_status
-        if let Some(model_status) = data.get("model_status") {
-            let model_status: Vec<serde_json::Value> =
-                serde_json::from_value(model_status.clone())?;
-            log::debug!("Importing {} model_status", model_status.len());
-            for status in model_status {
-                self.conn.execute(
-                    "INSERT INTO model_status (model, progress, status, downloaded, loaded) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        status["model"].as_str().unwrap_or(""),
-                        status["progress"].as_f64().unwrap_or(0.0),
-                        status["status"].as_str().unwrap_or(""),
-                        status["downloaded"].as_bool().unwrap_or(false),
-                        status["loaded"].as_bool().unwrap_or(false)
-                    ],
-                )?;
-            }
-        }
+        // Don't need model_status, see above in export
+        // if let Some(model_status) = data.get("model_status") {
+        //     let model_status: Vec<serde_json::Value> =
+        //         serde_json::from_value(model_status.clone())?;
+        //     log::debug!("Importing {} model_status", model_status.len());
+        //     for status in model_status {
+        //         self.conn.execute(
+        //             "INSERT INTO model_status (model, progress, status, downloaded, loaded) VALUES (?1, ?2, ?3, ?4, ?5)",
+        //             params![
+        //                 status["model"].as_str().unwrap_or(""),
+        //                 status["progress"].as_f64().unwrap_or(0.0),
+        //                 status["status"].as_str().unwrap_or(""),
+        //                 status["downloaded"].as_bool().unwrap_or(false),
+        //                 status["loaded"].as_bool().unwrap_or(false)
+        //             ],
+        //         )?;
+        //     }
+        // }
 
         // Import friends
         if let Some(friends) = data.get("friends") {
@@ -1890,10 +1892,6 @@ mod tests {
         };
         let model_id = db.add_model(&model_input).unwrap();
 
-        // Add model status
-        db.create_or_update_model_status(&model_id, 0.5, "loading", true, false)
-            .unwrap();
-
         // 2. Export all data
         let exported_data = db.export_all_to_json().unwrap();
 
@@ -1938,13 +1936,6 @@ mod tests {
         let imported_model = models.first().unwrap();
         assert_eq!(imported_model.id, model_id);
         assert_eq!(imported_model.name, "Test Model");
-
-        // Verify model status
-        let model_status = import_db.get_model_status(&model_id).unwrap().unwrap();
-        assert_eq!(model_status.progress, 0.5);
-        assert_eq!(model_status.status, "loading");
-        assert_eq!(model_status.downloaded, true);
-        assert_eq!(model_status.loaded, false);
 
         // Verify perspectives
         let imported_perspectives = import_db.get_all_perspectives().unwrap();
