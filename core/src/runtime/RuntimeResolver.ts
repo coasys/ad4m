@@ -168,7 +168,7 @@ export class ImportResult {
     expressions: ImportStats;
 
     @Field()
-    perspective_diffs: ImportStats;
+    perspectiveDiffs: ImportStats;
 
     @Field()
     notifications: ImportStats;
@@ -177,7 +177,7 @@ export class ImportResult {
     models: ImportStats;
 
     @Field()
-    default_models: ImportStats;
+    defaultModels: ImportStats;
 
     @Field()
     tasks: ImportStats;
@@ -186,10 +186,10 @@ export class ImportResult {
     friends: ImportStats;
 
     @Field()
-    trusted_agents: ImportStats;
+    trustedAgents: ImportStats;
 
     @Field()
-    known_link_languages: ImportStats;
+    knownLinkLanguages: ImportStats;
 }
 
 /**

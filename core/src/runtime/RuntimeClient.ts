@@ -304,14 +304,14 @@ export class RuntimeClient {
                     perspectives { total imported failed omitted errors }
                     links { total imported failed omitted errors }
                     expressions { total imported failed omitted errors }
-                    perspective_diffs { total imported failed omitted errors }
+                    perspectiveDiffs { total imported failed omitted errors }
                     notifications { total imported failed omitted errors }
                     models { total imported failed omitted errors }
-                    default_models { total imported failed omitted errors }
+                    defaultModels { total imported failed omitted errors }
                     tasks { total imported failed omitted errors }
                     friends { total imported failed omitted errors }
-                    trusted_agents { total imported failed omitted errors }
-                    known_link_languages { total imported failed omitted errors }
+                    trustedAgents { total imported failed omitted errors }
+                    knownLinkLanguages { total imported failed omitted errors }
                 }
             }`,
             variables: { filePath }

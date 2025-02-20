@@ -1,9 +1,9 @@
-import { Agent, Literal } from "@coasys/ad4m";
+import { Agent, ImportResult, ImportStats, Literal } from "@coasys/ad4m";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { open } from "@tauri-apps/plugin-shell";
-import { save as dialogSave, open as dialogOpen } from "@tauri-apps/plugin-dialog";
+import { save as dialogSave, open as dialogOpen, message as dialogMessage, type MessageDialogOptions } from "@tauri-apps/plugin-dialog";
 import { useCallback, useContext, useEffect, useState } from "react";
 import QRCode from "react-qr-code";
 import { PREDICATE_FIRSTNAME, PREDICATE_LASTNAME, PREDICATE_USERNAME } from "../constants/triples";
@@ -289,14 +289,14 @@ const Profile = (props: Props) => {
             `- ${importResult.perspectives.imported} of ${importResult.perspectives.total} perspectives`,
             `- ${importResult.links.imported} of ${importResult.links.total} links`,
             `- ${importResult.expressions.imported} of ${importResult.expressions.total} expressions`,
-            `- ${importResult.perspective_diffs.imported} of ${importResult.perspective_diffs.total} perspective diffs`,
+            `- ${importResult.perspectiveDiffs.imported} of ${importResult.perspectiveDiffs.total} perspective diffs`,
             `- ${importResult.notifications.imported} of ${importResult.notifications.total} notifications`,
             `- ${importResult.models.imported} of ${importResult.models.total} models`,
-            `- ${importResult.default_models.imported} of ${importResult.default_models.total} default models`,
+            `- ${importResult.defaultModels.imported} of ${importResult.defaultModels.total} default models`,
             `- ${importResult.tasks.imported} of ${importResult.tasks.total} tasks`,
             `- ${importResult.friends.imported} of ${importResult.friends.total} friends`,
-            `- ${importResult.trusted_agents.imported} of ${importResult.trusted_agents.total} trusted agents`,
-            `- ${importResult.known_link_languages.imported} of ${importResult.known_link_languages.total} known link languages`,
+            `- ${importResult.trustedAgents.imported} of ${importResult.trustedAgents.total} trusted agents`,
+            `- ${importResult.knownLinkLanguages.imported} of ${importResult.knownLinkLanguages.total} known link languages`,
           ];
 
           // Add error summary if there are any errors
