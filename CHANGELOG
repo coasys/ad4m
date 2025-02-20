@@ -24,6 +24,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Fix for crash when removing .ad4m directory after using multiple agent feature [PR#556](https://github.com/coasys/ad4m/pull/556)
 - Fix error after spawning AI task [PR#559](https://github.com/coasys/ad4m/pull/559)
 - Fix some problems with perspective.removeLinks() with a proper implementation [PR#563](https://github.com/coasys/ad4m/pull/563)
+- Ad4mConnect detects running local ADAM agent on first open - no need to click try again [](https://github.com/coasys/ad4m/pull/570)
 
 ### Added
 - Prolog predicates needed in new Flux mention notification trigger:
@@ -50,6 +51,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Models can now be added directly from Huggingface without changing the code, just providing repo and filename in the launcher [PR562](https://github.com/coasys/ad4m/pull/562)
 - Models can also be added straight from a local file [PR#565](https://github.com/coasys/ad4m/pull/565)
 - Enable fine-tuning of voice detection parameters for transcription streams [PR#566](https://github.com/coasys/ad4m/pull/566)
+- Neighbourhood p2p signal: optional loopback sending signals to all connected apps/UIs of the sending agent [PR#568](https://github.com/coasys/ad4m/pull/568)
 - DB and Perspective to JSON exports and imports [PR#569](https://github.com/coasys/ad4m/pull/569)
 
 ### Changed
