@@ -5,9 +5,7 @@ use crate::{
     ai_service::AIService,
     neighbourhoods::{self, install_neighbourhood},
     perspectives::{
-        add_perspective, export_perspective, get_perspective, import_perspective,
-        perspective_instance::{PerspectiveInstance, SdnaType},
-        remove_perspective, update_perspective, SerializedPerspective,
+        self, add_perspective, export_perspective, get_perspective, import_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective, SerializedPerspective
     },
     types::{AITask, DecoratedLinkExpression, Link, LinkExpression, ModelType},
 };
@@ -1266,6 +1264,8 @@ impl Mutation {
                 graphql_value!({ "error": e.to_string() }),
             )
         })?;
+
+        perspectives::initialize_from_db();
 
         Ok(result)
     }
