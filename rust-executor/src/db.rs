@@ -1352,18 +1352,23 @@ impl Ad4mDb {
         let mut export_data = serde_json::Map::new();
 
         // Export perspectives
-        let perspectives: Vec<serde_json::Value> = self.conn.prepare(
-            "SELECT uuid, name, neighbourhood, shared_url, state FROM perspective_handle"
-        )?.query_map([], |row| {
-            Ok(serde_json::json!({
-                "uuid": row.get::<_, String>(0)?,
-                "name": row.get::<_, Option<String>>(1)?,
-                "neighbourhood": row.get::<_, Option<String>>(2)?,
-                "shared_url": row.get::<_, Option<String>>(3)?,
-                "state": row.get::<_, String>(4)?
-            }))
-        })?.collect::<Result<Vec<_>, _>>()?;
-        export_data.insert("perspectives".to_string(), serde_json::to_value(perspectives)?);
+        let perspectives: Vec<serde_json::Value> = self
+            .conn
+            .prepare("SELECT uuid, name, neighbourhood, shared_url, state FROM perspective_handle")?
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "uuid": row.get::<_, String>(0)?,
+                    "name": row.get::<_, Option<String>>(1)?,
+                    "neighbourhood": row.get::<_, Option<String>>(2)?,
+                    "shared_url": row.get::<_, Option<String>>(3)?,
+                    "state": row.get::<_, String>(4)?
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        export_data.insert(
+            "perspectives".to_string(),
+            serde_json::to_value(perspectives)?,
+        );
 
         // Export links
         let links: Vec<(LinkSchema, String, String)> = self.conn.prepare(
@@ -1536,7 +1541,8 @@ impl Ad4mDb {
 
         // Import perspectives
         if let Some(perspectives) = data.get("perspectives") {
-            let perspectives: Vec<serde_json::Value> = serde_json::from_value(perspectives.clone())?;
+            let perspectives: Vec<serde_json::Value> =
+                serde_json::from_value(perspectives.clone())?;
             for perspective in perspectives {
                 self.conn.execute(
                     "INSERT INTO perspective_handle (uuid, name, neighbourhood, shared_url, state) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1754,8 +1760,10 @@ mod tests {
 
     #[test]
     fn test_export_import_all_tables() {
-        use crate::graphql::graphql_types::{DecoratedNeighbourhoodExpression, PerspectiveState, Perspective, Neighbourhood};
-        use crate::types::{DecoratedExpressionProof};
+        use crate::graphql::graphql_types::{
+            DecoratedNeighbourhoodExpression, Neighbourhood, Perspective, PerspectiveState,
+        };
+        use crate::types::DecoratedExpressionProof;
 
         // Initialize test database
         let db = Ad4mDb::new(":memory:").unwrap();
@@ -1807,16 +1815,18 @@ mod tests {
             shared_url: Some("test-shared-url".to_string()),
             state: PerspectiveState::Synced,
         };
-        
+
         db.add_perspective(&perspective1).unwrap();
         db.add_perspective(&perspective2).unwrap();
 
         // Add some links to the perspectives
         let link1 = construct_dummy_link_expression(LinkStatus::Shared);
         let link2 = construct_dummy_link_expression(LinkStatus::Local);
-        
-        db.add_link(&perspective1.uuid, &link1, &LinkStatus::Shared).unwrap();
-        db.add_link(&perspective2.uuid, &link2, &LinkStatus::Local).unwrap();
+
+        db.add_link(&perspective1.uuid, &link1, &LinkStatus::Shared)
+            .unwrap();
+        db.add_link(&perspective2.uuid, &link2, &LinkStatus::Local)
+            .unwrap();
 
         // Add notifications
         let notification = NotificationInput {
@@ -1919,9 +1929,10 @@ mod tests {
         // Verify perspectives
         let imported_perspectives = import_db.get_all_perspectives().unwrap();
         assert_eq!(imported_perspectives.len(), 2);
-        
+
         // Find and verify first perspective
-        let imported_perspective1 = imported_perspectives.iter()
+        let imported_perspective1 = imported_perspectives
+            .iter()
             .find(|p| p.name == Some("Test Perspective 1".to_string()))
             .unwrap();
         assert_eq!(imported_perspective1.uuid, perspective1.uuid);
@@ -1929,12 +1940,24 @@ mod tests {
         assert_eq!(imported_perspective1.state, PerspectiveState::Private);
 
         // Find and verify second perspective
-        let imported_perspective2 = imported_perspectives.iter()
+        let imported_perspective2 = imported_perspectives
+            .iter()
             .find(|p| p.name == Some("Test Perspective 2".to_string()))
             .unwrap();
         assert_eq!(imported_perspective2.uuid, perspective2.uuid);
-        assert_eq!(imported_perspective2.neighbourhood.as_ref().unwrap().data.link_language, "test-link-language");
-        assert_eq!(imported_perspective2.shared_url, Some("test-shared-url".to_string()));
+        assert_eq!(
+            imported_perspective2
+                .neighbourhood
+                .as_ref()
+                .unwrap()
+                .data
+                .link_language,
+            "test-link-language"
+        );
+        assert_eq!(
+            imported_perspective2.shared_url,
+            Some("test-shared-url".to_string())
+        );
         assert_eq!(imported_perspective2.state, PerspectiveState::Synced);
 
         // Verify perspective links

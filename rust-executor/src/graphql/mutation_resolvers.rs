@@ -1486,12 +1486,12 @@ impl Mutation {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
 
         // Export the perspective
-        let serialized = export_perspective(&perspective_uuid)
-            .await
-            .map_err(|e| FieldError::new(
+        let serialized = export_perspective(&perspective_uuid).await.map_err(|e| {
+            FieldError::new(
                 "Failed to export perspective",
                 graphql_value!({ "error": e.to_string() }),
-            ))?;
+            )
+        })?;
 
         // Write to file
         std::fs::write(&file_path, serde_json::to_string_pretty(&serialized)?).map_err(|e| {
@@ -1527,14 +1527,12 @@ impl Mutation {
         })?;
 
         // Import the perspective
-        import_perspective(serialized)
-            .await
-            .map_err(|e| {
-                FieldError::new(
-                    format!("Failed to import perspective: {}", e),
-                    graphql_value!({ "error": e.to_string() }),
-                )
-            })?;
+        import_perspective(serialized).await.map_err(|e| {
+            FieldError::new(
+                format!("Failed to import perspective: {}", e),
+                graphql_value!({ "error": e.to_string() }),
+            )
+        })?;
 
         Ok(true)
     }
