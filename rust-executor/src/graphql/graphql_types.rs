@@ -1026,6 +1026,12 @@ pub struct ImportResult {
     pub known_link_languages: ImportStats,
 }
 
+impl Default for ImportStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ImportStats {
     pub fn new() -> Self {
         Self {
@@ -1035,6 +1041,12 @@ impl ImportStats {
             omitted: 0,
             errors: Vec::new(),
         }
+    }
+}
+
+impl Default for ImportResult {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

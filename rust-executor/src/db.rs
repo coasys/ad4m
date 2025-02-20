@@ -1639,21 +1639,6 @@ impl Ad4mDb {
                     result.links.total = links.len() as i32;
                     log::debug!("Importing {} links", links.len());
                     for (link, signature, key) in links {
-                        let link_expr = serde_json::json!({
-                            "author": link.author,
-                            "timestamp": link.timestamp,
-                            "data": {
-                                "source": link.source,
-                                "predicate": link.predicate,
-                                "target": link.target
-                            },
-                            "proof": {
-                                "signature": signature,
-                                "key": key,
-                                "valid": true
-                            }
-                        });
-
                         match self.conn.execute(
                             "INSERT INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                             params![
