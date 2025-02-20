@@ -278,8 +278,52 @@ const Profile = (props: Props) => {
       });
       
       if (filePath && client) {
-        await client.runtime.importDb(filePath);
-        setImportStatus("Import successful!");
+        const result = await client.runtime.importDb(filePath.toString());
+        
+        if (result && typeof result === 'object') {
+          const importResult = result as ImportResult;
+          
+          // Create a summary message
+          const summary = [
+            `Successfully imported:`,
+            `- ${importResult.perspectives.imported} of ${importResult.perspectives.total} perspectives`,
+            `- ${importResult.links.imported} of ${importResult.links.total} links`,
+            `- ${importResult.expressions.imported} of ${importResult.expressions.total} expressions`,
+            `- ${importResult.perspective_diffs.imported} of ${importResult.perspective_diffs.total} perspective diffs`,
+            `- ${importResult.notifications.imported} of ${importResult.notifications.total} notifications`,
+            `- ${importResult.models.imported} of ${importResult.models.total} models`,
+            `- ${importResult.default_models.imported} of ${importResult.default_models.total} default models`,
+            `- ${importResult.tasks.imported} of ${importResult.tasks.total} tasks`,
+            `- ${importResult.friends.imported} of ${importResult.friends.total} friends`,
+            `- ${importResult.trusted_agents.imported} of ${importResult.trusted_agents.total} trusted agents`,
+            `- ${importResult.known_link_languages.imported} of ${importResult.known_link_languages.total} known link languages`,
+          ];
+
+          // Add error summary if there are any errors
+          const totalErrors = Object.values(importResult).reduce((sum: number, stats: ImportStats) => {
+            return sum + (stats.errors?.length || 0);
+          }, 0);
+
+          if (totalErrors > 0) {
+            summary.push("\nErrors encountered:");
+            Object.entries(importResult).forEach(([category, stats]) => {
+              const typedStats = stats as ImportStats;
+              if (typedStats.errors && typedStats.errors.length > 0) {
+                summary.push(`\n${category}:`);
+                typedStats.errors.forEach((error: string) => summary.push(`- ${error}`));
+              }
+            });
+          }
+
+          // Show dialog with results
+          const dialogOptions: MessageDialogOptions = {
+            title: "Import Results"
+          };
+
+          await dialogMessage(summary.join('\n'), dialogOptions);
+
+          setImportStatus("Import completed");
+        }
       }
       setTimeout(() => setImportStatus(""), 3000);
     } catch (error) {

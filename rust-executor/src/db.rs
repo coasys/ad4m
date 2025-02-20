@@ -1,6 +1,5 @@
 use crate::graphql::graphql_types::{
-    AIModelLoadingStatus, EntanglementProof, LinkStatus, ModelInput, NotificationInput,
-    PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage,
+    AIModelLoadingStatus, EntanglementProof, ImportResult, LinkStatus, ModelInput, NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage
 };
 use crate::types::{
     AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
@@ -719,7 +718,7 @@ impl Ad4mDb {
 
         // Delete all pending diffs associated with this perspective
         self.conn
-            .execute("DELETE FROM pending_diff WHERE perspective = ?1", [uuid])?;
+            .execute("DELETE FROM perspective_diff WHERE perspective = ?1", [uuid])?;
 
         Ok(())
     }
@@ -1553,16 +1552,19 @@ impl Ad4mDb {
         Ok(serde_json::Value::Object(export_data))
     }
 
-    pub fn import_from_json(&self, data: serde_json::Value) -> Ad4mDbResult<()> {
+    pub fn import_from_json(&self, data: serde_json::Value) -> Ad4mDbResult<ImportResult> {
         log::info!("Importing DB data from JSON");
         let data = data
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("Invalid JSON data"))?;
 
+        let mut result = ImportResult::new();
+
         // Import perspectives first since other items may depend on them
         if let Some(perspectives) = data.get("perspectives") {
             match serde_json::from_value::<Vec<serde_json::Value>>(perspectives.clone()) {
                 Ok(perspectives) => {
+                    result.perspectives.total = perspectives.len() as i32;
                     log::info!("Importing {} perspectives", perspectives.len());
                     for perspective in perspectives {
                         let name = perspective
@@ -1573,7 +1575,7 @@ impl Ad4mDb {
                             .get("uuid")
                             .and_then(|u| u.as_str())
                             .unwrap_or("<unknown>");
-                        let result = {
+                        let result_status = {
                             let state = if perspective.get("shared_url").is_some() {
                                 serde_json::to_string(
                                     &PerspectiveState::NeighbourhoodCreationInitiated,
@@ -1595,20 +1597,29 @@ impl Ad4mDb {
                             )
                         };
 
-                        match result {
+                        match result_status {
                             Ok(_) => {
+                                result.perspectives.imported += 1;
                                 log::info!("Successfully imported perspective: {} ({})", name, uuid)
                             }
-                            Err(e) => log::warn!(
-                                "Failed to import perspective {} ({}): {}",
-                                name,
-                                uuid,
-                                e
-                            ),
+                            Err(e) => {
+                                result.perspectives.failed += 1;
+                                result.perspectives.errors.push(format!("Failed to import perspective {} ({}): {}", name, uuid, e));
+                                log::warn!(
+                                    "Failed to import perspective {} ({}): {}",
+                                    name,
+                                    uuid,
+                                    e
+                                )
+                            }
                         }
                     }
                 }
-                Err(e) => log::warn!("Failed to parse perspectives: {}", e),
+                Err(e) => {
+                    result.perspectives.failed = 1;
+                    result.perspectives.errors.push(format!("Failed to parse perspectives: {}", e));
+                    log::warn!("Failed to parse perspectives: {}", e)
+                }
             }
         }
 
@@ -1616,31 +1627,26 @@ impl Ad4mDb {
         if let Some(links) = data.get("links") {
             match serde_json::from_value::<Vec<(LinkSchema, String, String)>>(links.clone()) {
                 Ok(links) => {
+                    result.links.total = links.len() as i32;
                     log::debug!("Importing {} links", links.len());
                     for (link, signature, key) in links {
-                        // Check if perspective exists
-                        let perspective_exists = self
-                            .conn
-                            .query_row(
-                                "SELECT 1 FROM perspective_handle WHERE uuid = ?1",
-                                params![link.perspective],
-                                |_| Ok(true),
-                            )
-                            .optional()
-                            .unwrap_or(Some(false))
-                            .unwrap_or(false);
-
-                        if !perspective_exists {
-                            log::info!(
-                                "Omitting link import because perspective {} does not exist",
-                                link.perspective
-                            );
-                            continue;
-                        }
+                        let link_expr = serde_json::json!({
+                            "author": link.author,
+                            "timestamp": link.timestamp,
+                            "data": {
+                                "source": link.source,
+                                "predicate": link.predicate,
+                                "target": link.target
+                            },
+                            "proof": {
+                                "signature": signature,
+                                "key": key,
+                                "valid": true
+                            }
+                        });
 
                         match self.conn.execute(
-                            "INSERT INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status) 
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                            "INSERT INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                             params![
                                 link.perspective,
                                 link.source,
@@ -1653,12 +1659,20 @@ impl Ad4mDb {
                                 link.status
                             ],
                         ) {
-                            Ok(_) => (),
-                            Err(e) => log::warn!("Failed to import link for perspective {}: {}", link.perspective, e),
+                            Ok(_) => result.links.imported += 1,
+                            Err(e) => {
+                                result.links.failed += 1;
+                                result.links.errors.push(format!("Failed to import link: {}", e));
+                                log::warn!("Failed to import link: {}", e)
+                            }
                         }
                     }
                 }
-                Err(e) => log::warn!("Failed to parse links: {}", e),
+                Err(e) => {
+                    result.links.failed = 1;
+                    result.links.errors.push(format!("Failed to parse links: {}", e));
+                    log::warn!("Failed to parse links: {}", e)
+                }
             }
         }
 
@@ -1666,18 +1680,27 @@ impl Ad4mDb {
         if let Some(expressions) = data.get("expressions") {
             match serde_json::from_value::<Vec<ExpressionSchema>>(expressions.clone()) {
                 Ok(expressions) => {
+                    result.expressions.total = expressions.len() as i32;
                     log::debug!("Importing {} expressions", expressions.len());
                     for expr in expressions {
                         match self.conn.execute(
                             "INSERT INTO expression (url, data) VALUES (?1, ?2)",
                             params![expr.url, expr.data.to_string()],
                         ) {
-                            Ok(_) => (),
-                            Err(e) => log::warn!("Failed to import expression {}: {}", expr.url, e),
+                            Ok(_) => result.expressions.imported += 1,
+                            Err(e) => {
+                                result.expressions.failed += 1;
+                                result.expressions.errors.push(format!("Failed to import expression {}: {}", expr.url, e));
+                                log::warn!("Failed to import expression {}: {}", expr.url, e)
+                            }
                         }
                     }
                 }
-                Err(e) => log::warn!("Failed to parse expressions: {}", e),
+                Err(e) => {
+                    result.expressions.failed = 1;
+                    result.expressions.errors.push(format!("Failed to parse expressions: {}", e));
+                    log::warn!("Failed to parse expressions: {}", e)
+                }
             }
         }
 
@@ -1685,6 +1708,7 @@ impl Ad4mDb {
         if let Some(diffs) = data.get("perspective_diffs") {
             match serde_json::from_value::<Vec<serde_json::Value>>(diffs.clone()) {
                 Ok(diffs) => {
+                    result.perspective_diffs.total = diffs.len() as i32;
                     log::debug!("Importing {} perspective_diffs", diffs.len());
                     for diff in diffs {
                         let perspective_id = diff["perspective"].as_str().unwrap_or("");
@@ -1702,6 +1726,7 @@ impl Ad4mDb {
                             .unwrap_or(false);
 
                         if !perspective_exists {
+                            result.perspective_diffs.omitted += 1;
                             log::info!("Omitting perspective diff import because perspective {} does not exist", perspective_id);
                             continue;
                         }
@@ -1715,12 +1740,20 @@ impl Ad4mDb {
                                 diff["is_pending"].as_bool().unwrap_or(false)
                             ],
                         ) {
-                            Ok(_) => (),
-                            Err(e) => log::warn!("Failed to import perspective diff: {}", e),
+                            Ok(_) => result.perspective_diffs.imported += 1,
+                            Err(e) => {
+                                result.perspective_diffs.failed += 1;
+                                result.perspective_diffs.errors.push(format!("Failed to import perspective diff: {}", e));
+                                log::warn!("Failed to import perspective diff: {}", e)
+                            }
                         }
                     }
                 }
-                Err(e) => log::warn!("Failed to parse perspective diffs: {}", e),
+                Err(e) => {
+                    result.perspective_diffs.failed = 1;
+                    result.perspective_diffs.errors.push(format!("Failed to parse perspective diffs: {}", e));
+                    log::warn!("Failed to parse perspective diffs: {}", e)
+                }
             }
         }
 
@@ -1728,6 +1761,7 @@ impl Ad4mDb {
         if let Some(notifications) = data.get("notifications") {
             match serde_json::from_value::<Vec<serde_json::Value>>(notifications.clone()) {
                 Ok(notifications) => {
+                    result.notifications.total = notifications.len() as i32;
                     log::debug!("Importing {} notifications", notifications.len());
                     for notification in notifications {
                         let id = notification
@@ -1750,12 +1784,20 @@ impl Ad4mDb {
                                 notification["granted"].as_bool().unwrap_or(false)
                             ],
                         ) {
-                            Ok(_) => (),
-                            Err(e) => log::warn!("Failed to import notification {}: {}", id, e),
+                            Ok(_) => result.notifications.imported += 1,
+                            Err(e) => {
+                                result.notifications.failed += 1;
+                                result.notifications.errors.push(format!("Failed to import notification {}: {}", id, e));
+                                log::warn!("Failed to import notification {}: {}", id, e)
+                            }
                         }
                     }
                 }
-                Err(e) => log::warn!("Failed to parse notifications: {}", e),
+                Err(e) => {
+                    result.notifications.failed = 1;
+                    result.notifications.errors.push(format!("Failed to parse notifications: {}", e));
+                    log::warn!("Failed to parse notifications: {}", e)
+                }
             }
         }
 
@@ -1763,6 +1805,7 @@ impl Ad4mDb {
         if let Some(models) = data.get("models") {
             match serde_json::from_value::<Vec<serde_json::Value>>(models.clone()) {
                 Ok(models) => {
+                    result.models.total = models.len() as i32;
                     log::debug!("Importing {} models", models.len());
                     for model in models {
                         let name = model
@@ -1788,12 +1831,20 @@ impl Ad4mDb {
                                 model["local_tokenizer_file_name"].as_str()
                             ],
                         ) {
-                            Ok(_) => log::debug!("Successfully imported model: {}", name),
-                            Err(e) => log::warn!("Failed to import model {}: {}", name, e),
+                            Ok(_) => result.models.imported += 1,
+                            Err(e) => {
+                                result.models.failed += 1;
+                                result.models.errors.push(format!("Failed to import model {}: {}", name, e));
+                                log::warn!("Failed to import model {}: {}", name, e)
+                            }
                         }
                     }
                 }
-                Err(e) => log::warn!("Failed to parse models: {}", e),
+                Err(e) => {
+                    result.models.failed = 1;
+                    result.models.errors.push(format!("Failed to parse models: {}", e));
+                    log::warn!("Failed to parse models: {}", e)
+                }
             }
         }
 
@@ -1801,6 +1852,7 @@ impl Ad4mDb {
         if let Some(default_models) = data.get("default_models") {
             match serde_json::from_value::<Vec<serde_json::Value>>(default_models.clone()) {
                 Ok(default_models) => {
+                    result.default_models.total = default_models.len() as i32;
                     log::debug!("Importing {} default model mappings", default_models.len());
                     for default_model in default_models {
                         let model_type =
@@ -1812,16 +1864,24 @@ impl Ad4mDb {
                                 default_model["model_id"].as_str().unwrap_or("")
                             ],
                         ) {
-                            Ok(_) => (),
-                            Err(e) => log::warn!(
-                                "Failed to import default model mapping for type {}: {}",
-                                model_type,
-                                e
-                            ),
+                            Ok(_) => result.default_models.imported += 1,
+                            Err(e) => {
+                                result.default_models.failed += 1;
+                                result.default_models.errors.push(format!("Failed to import default model mapping for type {}: {}", model_type, e));
+                                log::warn!(
+                                    "Failed to import default model mapping for type {}: {}",
+                                    model_type,
+                                    e
+                                )
+                            }
                         }
                     }
                 }
-                Err(e) => log::warn!("Failed to parse default models: {}", e),
+                Err(e) => {
+                    result.default_models.failed = 1;
+                    result.default_models.errors.push(format!("Failed to parse default models: {}", e));
+                    log::warn!("Failed to parse default models: {}", e)
+                }
             }
         }
 
@@ -1829,6 +1889,7 @@ impl Ad4mDb {
         if let Some(tasks) = data.get("tasks") {
             match serde_json::from_value::<Vec<serde_json::Value>>(tasks.clone()) {
                 Ok(tasks) => {
+                    result.tasks.total = tasks.len() as i32;
                     log::debug!("Importing {} tasks", tasks.len());
                     for task in tasks {
                         let name = task
@@ -1849,12 +1910,20 @@ impl Ad4mDb {
                                 task["updated_at"].as_str().unwrap_or("")
                             ],
                         ) {
-                            Ok(_) => (),
-                            Err(e) => log::warn!("Failed to import task {}: {}", name, e),
+                            Ok(_) => result.tasks.imported += 1,
+                            Err(e) => {
+                                result.tasks.failed += 1;
+                                result.tasks.errors.push(format!("Failed to import task {}: {}", name, e));
+                                log::warn!("Failed to import task {}: {}", name, e)
+                            }
                         }
                     }
                 }
-                Err(e) => log::warn!("Failed to parse tasks: {}", e),
+                Err(e) => {
+                    result.tasks.failed = 1;
+                    result.tasks.errors.push(format!("Failed to parse tasks: {}", e));
+                    log::warn!("Failed to parse tasks: {}", e)
+                }
             }
         }
 
@@ -1881,18 +1950,27 @@ impl Ad4mDb {
         if let Some(friends) = data.get("friends") {
             match serde_json::from_value::<Vec<String>>(friends.clone()) {
                 Ok(friends) => {
+                    result.friends.total = friends.len() as i32;
                     log::debug!("Importing {} friends", friends.len());
                     for friend in friends {
                         match self
                             .conn
                             .execute("INSERT INTO friends (friend) VALUES (?1)", params![friend])
                         {
-                            Ok(_) => (),
-                            Err(e) => log::warn!("Failed to import friend {}: {}", friend, e),
+                            Ok(_) => result.friends.imported += 1,
+                            Err(e) => {
+                                result.friends.failed += 1;
+                                result.friends.errors.push(format!("Failed to import friend {}: {}", friend, e));
+                                log::warn!("Failed to import friend {}: {}", friend, e)
+                            }
                         }
                     }
                 }
-                Err(e) => log::warn!("Failed to parse friends: {}", e),
+                Err(e) => {
+                    result.friends.failed = 1;
+                    result.friends.errors.push(format!("Failed to parse friends: {}", e));
+                    log::warn!("Failed to parse friends: {}", e)
+                }
             }
         }
 
@@ -1900,18 +1978,27 @@ impl Ad4mDb {
         if let Some(agents) = data.get("trusted_agents") {
             match serde_json::from_value::<Vec<String>>(agents.clone()) {
                 Ok(agents) => {
+                    result.trusted_agents.total = agents.len() as i32;
                     log::debug!("Importing {} trusted agents", agents.len());
                     for agent in agents {
                         match self.conn.execute(
                             "INSERT INTO trusted_agent (agent) VALUES (?1)",
                             params![agent],
                         ) {
-                            Ok(_) => (),
-                            Err(e) => log::warn!("Failed to import trusted agent {}: {}", agent, e),
+                            Ok(_) => result.trusted_agents.imported += 1,
+                            Err(e) => {
+                                result.trusted_agents.failed += 1;
+                                result.trusted_agents.errors.push(format!("Failed to import trusted agent {}: {}", agent, e));
+                                log::warn!("Failed to import trusted agent {}: {}", agent, e)
+                            }
                         }
                     }
                 }
-                Err(e) => log::warn!("Failed to parse trusted agents: {}", e),
+                Err(e) => {
+                    result.trusted_agents.failed = 1;
+                    result.trusted_agents.errors.push(format!("Failed to parse trusted agents: {}", e));
+                    log::warn!("Failed to parse trusted agents: {}", e)
+                }
             }
         }
 
@@ -1919,26 +2006,35 @@ impl Ad4mDb {
         if let Some(languages) = data.get("known_link_languages") {
             match serde_json::from_value::<Vec<String>>(languages.clone()) {
                 Ok(languages) => {
+                    result.known_link_languages.total = languages.len() as i32;
                     log::debug!("Importing {} known link languages", languages.len());
                     for language in languages {
                         match self.conn.execute(
                             "INSERT INTO known_link_languages (language) VALUES (?1)",
                             params![language],
                         ) {
-                            Ok(_) => (),
-                            Err(e) => log::warn!(
-                                "Failed to import known link language {}: {}",
-                                language,
-                                e
-                            ),
+                            Ok(_) => result.known_link_languages.imported += 1,
+                            Err(e) => {
+                                result.known_link_languages.failed += 1;
+                                result.known_link_languages.errors.push(format!("Failed to import known link language {}: {}", language, e));
+                                log::warn!(
+                                    "Failed to import known link language {}: {}",
+                                    language,
+                                    e
+                                )
+                            }
                         }
                     }
                 }
-                Err(e) => log::warn!("Failed to parse known link languages: {}", e),
+                Err(e) => {
+                    result.known_link_languages.failed = 1;
+                    result.known_link_languages.errors.push(format!("Failed to parse known link languages: {}", e));
+                    log::warn!("Failed to parse known link languages: {}", e)
+                }
             }
         }
 
-        Ok(())
+        Ok(result)
     }
 }
 

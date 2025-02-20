@@ -138,6 +138,60 @@ export class TriggeredNotification {
     triggerMatch: string;
 }
 
+@ObjectType()
+export class ImportStats {
+    @Field()
+    total: number;
+
+    @Field()
+    imported: number;
+
+    @Field()
+    failed: number;
+
+    @Field()
+    omitted: number;
+
+    @Field(type => [String])
+    errors: string[];
+}
+
+@ObjectType()
+export class ImportResult {
+    @Field()
+    perspectives: ImportStats;
+
+    @Field()
+    links: ImportStats;
+
+    @Field()
+    expressions: ImportStats;
+
+    @Field()
+    perspective_diffs: ImportStats;
+
+    @Field()
+    notifications: ImportStats;
+
+    @Field()
+    models: ImportStats;
+
+    @Field()
+    default_models: ImportStats;
+
+    @Field()
+    tasks: ImportStats;
+
+    @Field()
+    friends: ImportStats;
+
+    @Field()
+    trusted_agents: ImportStats;
+
+    @Field()
+    known_link_languages: ImportStats;
+}
+
 /**
  * Resolver classes are used here to define the GraphQL schema 
  * (through the type-graphql annotations)

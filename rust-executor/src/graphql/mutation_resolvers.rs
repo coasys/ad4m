@@ -1241,7 +1241,7 @@ impl Mutation {
         &self,
         context: &RequestContext,
         file_path: String,
-    ) -> FieldResult<bool> {
+    ) -> FieldResult<ImportResult> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
 
         // Read from file
@@ -1259,7 +1259,7 @@ impl Mutation {
             )
         })?;
 
-        Ad4mDb::with_global_instance(|db| db.import_from_json(json_data)).map_err(|e| {
+        let result = Ad4mDb::with_global_instance(|db| db.import_from_json(json_data)).map_err(|e| {
             log::error!("Failed to import database: {}", e);
             FieldError::new(
                 format!("Failed to import database: {}", e),
@@ -1267,7 +1267,7 @@ impl Mutation {
             )
         })?;
 
-        Ok(true)
+        Ok(result)
     }
 
     async fn ai_add_model(

@@ -30,3 +30,4 @@ export * from './subject/SubjectEntity'
 export * from "./agent/AgentClient";
 export * from "./ai/AIClient"
 export * from "./ai/Tasks"
+export * from "./runtime/RuntimeResolver"

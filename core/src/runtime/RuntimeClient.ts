@@ -1,7 +1,7 @@
 import { ApolloClient, gql } from "@apollo/client/core"
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import unwrapApolloResult from "../unwrapApolloResult"
-import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification } from "./RuntimeResolver"
+import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult } from "./RuntimeResolver"
 
 const PERSPECTIVE_EXPRESSION_FIELDS = `
 author
@@ -297,10 +297,22 @@ export class RuntimeClient {
         return runtimeExportDb
     }
 
-    async importDb(filePath: string): Promise<boolean> {
+    async importDb(filePath: string): Promise<ImportResult> {
         const { runtimeImportDb } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation runtimeImportDb($filePath: String!) {
-                runtimeImportDb(filePath: $filePath)
+                runtimeImportDb(filePath: $filePath) {
+                    perspectives { total imported failed omitted errors }
+                    links { total imported failed omitted errors }
+                    expressions { total imported failed omitted errors }
+                    perspective_diffs { total imported failed omitted errors }
+                    notifications { total imported failed omitted errors }
+                    models { total imported failed omitted errors }
+                    default_models { total imported failed omitted errors }
+                    tasks { total imported failed omitted errors }
+                    friends { total imported failed omitted errors }
+                    trusted_agents { total imported failed omitted errors }
+                    known_link_languages { total imported failed omitted errors }
+                }
             }`,
             variables: { filePath }
         }))

@@ -1001,3 +1001,57 @@ impl From<VoiceActivityParamsInput> for crate::ai_service::VoiceActivityParams {
         }
     }
 }
+
+#[derive(GraphQLObject, Debug, serde::Serialize)]
+pub struct ImportStats {
+    pub total: i32,
+    pub imported: i32,
+    pub failed: i32,
+    pub omitted: i32,
+    pub errors: Vec<String>,
+}
+
+#[derive(GraphQLObject, Debug, serde::Serialize)]
+pub struct ImportResult {
+    pub perspectives: ImportStats,
+    pub links: ImportStats,
+    pub expressions: ImportStats,
+    pub perspective_diffs: ImportStats,
+    pub notifications: ImportStats,
+    pub models: ImportStats,
+    pub default_models: ImportStats,
+    pub tasks: ImportStats,
+    pub friends: ImportStats,
+    pub trusted_agents: ImportStats,
+    pub known_link_languages: ImportStats,
+}
+
+impl ImportStats {
+    pub fn new() -> Self {
+        Self {
+            total: 0,
+            imported: 0,
+            failed: 0,
+            omitted: 0,
+            errors: Vec::new(),
+        }
+    }
+}
+
+impl ImportResult {
+    pub fn new() -> Self {
+        Self {
+            perspectives: ImportStats::new(),
+            links: ImportStats::new(),
+            expressions: ImportStats::new(),
+            perspective_diffs: ImportStats::new(),
+            notifications: ImportStats::new(),
+            models: ImportStats::new(),
+            default_models: ImportStats::new(),
+            tasks: ImportStats::new(),
+            friends: ImportStats::new(),
+            trusted_agents: ImportStats::new(),
+            known_link_languages: ImportStats::new(),
+        }
+    }
+}
