@@ -293,19 +293,13 @@ const Profile = (props: Props) => {
   return (
     <div>
       <j-box px="500" my="500">
-        <j-toggle full="" checked={expertMode} onChange={(e) => toggleExpertMode()}>
-          Advanced mode
-        </j-toggle>
-      </j-box>
-
-      <j-box px="500" my="500">
         <j-toggle
           checked={!!proxy}
           onChange={(e) => {
             e.target.checked ? setupProxy(e) : stopProxy(e);
           }}
         >
-          Proxy
+          Enable remote access via proxy
         </j-toggle>
 
         {loadingProxy && <j-spinner size="sm"></j-spinner>}
@@ -317,7 +311,7 @@ const Profile = (props: Props) => {
               <ActionButton title="QR Code" onClick={showProxyQRCode} icon="qr-code-scan" />
               <ActionButton
                 title="Open GraphQL"
-                onClick={() => open(url.replace("ws", "http"))}
+                onClick={() => open(proxy.replace("wss", "https").replace("graphql", "playground"))}
                 icon="box-arrow-up-right"
               />
             </j-flex>
@@ -326,21 +320,52 @@ const Profile = (props: Props) => {
       </j-box>
 
       <j-box px="500" my="500">
-        <j-button onClick={() => settrustedAgentModalOpen(true)} full variant="secondary">
-          <j-icon size="sm" slot="start" name="shield-check"></j-icon>
-          Show trusted agents
+        <j-button onClick={openLogs} full variant="primary">
+          <j-icon size="sm" slot="start" name="clipboard"></j-icon>
+          Show logs
         </j-button>
+      </j-box>
+
+      <j-box px="500" my="500">
+        <j-button onClick={() => setShowAgentSelection(true)} full variant="secondary">
+          <j-icon size="sm" slot="start" name="server"></j-icon>
+          Switch/create agent
+        </j-button>
+      </j-box>
+
+      <j-box px="500" my="500">
+        <j-toggle full="" checked={expertMode} onChange={(e) => toggleExpertMode()}>
+          Advanced mode
+        </j-toggle>
       </j-box>
 
       {expertMode && (
         <div>
+          <j-box px="500" my="500">
+            <j-button onClick={handleExport} full variant="ghost">
+              <j-icon size="sm" slot="start" name="download"></j-icon>
+              {exportStatus || "Export Database"}
+            </j-button>
+          </j-box>
+          <j-box px="500" my="500">
+            <j-button onClick={handleImport} full variant="ghost">
+              <j-icon size="sm" slot="start" name="upload"></j-icon>
+              {importStatus || "Import Database"}
+            </j-button>
+          </j-box>
+          <j-box px="500" my="500">
+            <j-button onClick={() => setClearAgentModalOpen(true)} full variant="ghost">
+              <j-icon size="sm" slot="start" name="trash"></j-icon>
+              Delete Agent
+            </j-button>
+          </j-box>
           <j-box px="500" my="500">
             <j-button
               onClick={() => {
                 getAgentInfo();
               }}
               full
-              variant="secondary"
+              variant="ghost"
             >
               <j-icon size="sm" slot="start" name={!copied ? "clipboard" : "clipboard-check"}></j-icon>
               Copy Holochain Agent Info(s)
@@ -353,47 +378,22 @@ const Profile = (props: Props) => {
                 setShowAddHcAgentInfos(true);
               }}
               full
-              variant="secondary"
+              variant="ghost"
             >
               <j-icon size="sm" slot="start" name="shield-check"></j-icon>
               Add Holochain Agent Info(s)
             </j-button>
           </j-box>
+          <j-box px="500" my="500">
+            <j-button onClick={() => settrustedAgentModalOpen(true)} full variant="ghost">
+              <j-icon size="sm" slot="start" name="shield-check"></j-icon>
+              Show trusted agents
+            </j-button>
+          </j-box>
+          <j-box px="500" my="500">
+          </j-box>
         </div>
       )}
-
-      <j-box px="500" my="500">
-        <j-button onClick={openLogs} full variant="secondary">
-          <j-icon size="sm" slot="start" name="clipboard"></j-icon>
-          Show logs
-        </j-button>
-      </j-box>
-
-      <j-box px="500" my="500">
-        <j-button onClick={() => setShowAgentSelection(true)} full variant="secondary">
-          <j-icon size="sm" slot="start" name="server"></j-icon>
-          Select agent
-        </j-button>
-      </j-box>
-
-      <j-box px="500" my="500">
-        <j-button onClick={() => setClearAgentModalOpen(true)} full variant="primary">
-          <j-icon size="sm" slot="start" name="trash"></j-icon>
-          Delete Agent
-        </j-button>
-      </j-box>
-      <j-box px="500" my="500">
-        <j-button onClick={handleExport} full variant="ghost">
-          <j-icon size="sm" slot="start" name="download"></j-icon>
-          {exportStatus || "Export Database"}
-        </j-button>
-      </j-box>
-      <j-box px="500" my="500">
-        <j-button onClick={handleImport} full variant="ghost">
-          <j-icon size="sm" slot="start" name="upload"></j-icon>
-          {importStatus || "Import Database"}
-        </j-button>
-      </j-box>
 
       {showAddHcAgentInfos && (
         <j-modal open={showAddHcAgentInfos} onToggle={(e: any) => setAddHcAgentInfos(e.target.open)}>
