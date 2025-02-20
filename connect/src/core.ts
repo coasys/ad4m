@@ -6,7 +6,7 @@ import {
 import { createClient, Client as WSClient } from "graphql-ws";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { Ad4mClient, CapabilityInput } from "@coasys/ad4m";
-import { checkPort, connectWebSocket, removeForVersion, setForVersion } from "./utils";
+import { checkPort, connectWebSocket, DEFAULT_PORT, removeForVersion, setForVersion } from "./utils";
 import autoBind from "auto-bind";
 
 export type Ad4mConnectOptions = {
@@ -38,7 +38,8 @@ export type ConnectionStates =
   | "error"
   | "port_not_found"
   | "not_connected"
-  | "disconnected";
+  | "disconnected"
+  | "checking_local";
 
 export default class Ad4mConnect {
   activeSocket: WebSocket = null;
@@ -51,7 +52,7 @@ export default class Ad4mConnect {
   requestId?: string;
   url: string;
   token: string;
-  port = 12000;
+  port = DEFAULT_PORT;
   capabilities: CapabilityInput[] = [];
   appName: string;
   appDesc: string;
@@ -142,22 +143,32 @@ export default class Ad4mConnect {
   async connect(url?: string): Promise<Ad4mClient> {
     try {
       if (url) {
-        await connectWebSocket(url, 10000);
+        await connectWebSocket(url);
         this.setUrl(url);
         const client = this.buildClient();
         await this.checkAuth();
         return client;
       } else {
-        const client = await this.ensureConnection();
-        await this.checkAuth();
-        return client;
+        // Try local connection first
+        this.notifyConnectionChange("checking_local");
+        try {
+          // Quick check for local agent
+          await connectWebSocket(`ws://localhost:${this.port}/graphql`, 2000);
+          const client = this.buildClient();
+          await this.checkAuth();
+          return client;
+        } catch {
+          // If local connection fails, proceed with port scanning
+          const client = await this.ensureConnection();
+          await this.checkAuth();
+          return client;
+        }
       }
     } catch {
       this.notifyConnectionChange("not_connected");
       this.notifyAuthChange("unauthenticated");
     }
   }
-
 
   async loginToHosting(email: string, password: string) {
     try {
@@ -267,7 +278,7 @@ export default class Ad4mConnect {
     try {
       this.notifyConnectionChange("connecting");
 
-      await connectWebSocket(this.url, 10000);
+      await connectWebSocket(this.url);
       return this.buildClient();
     } catch (e) {
       this.notifyConnectionChange("not_connected");
@@ -277,7 +288,7 @@ export default class Ad4mConnect {
 
   async findPort(): Promise<number> {
     const ports = [...Array(10).keys()].map((_, i) => {
-      return checkPort(12000 + i);
+      return checkPort(DEFAULT_PORT + i);
     });
 
     const results = await Promise.allSettled(ports);
@@ -328,21 +339,32 @@ export default class Ad4mConnect {
           this.notifyConnectionChange("connected");
           this.checkAuth();
         },
-        closed: async () => {
-          if (!this.requestedRestart) {
-            if (!this.token) {
+        closed: async (e: CloseEvent) => {
+          // If the connection was closed cleanly, which happens on every
+          // first connection, don't treat this as a disconnect
+          if(e.wasClean) {
+            return
+          }
+
+          // Iff the user explicitly requested a restart, also don't treat 
+          // this as a disconnect (handling the disconnect makes sense when an
+          // established connection gets lost after the first handshake)
+          if (this.requestedRestart) {
+            return
+          }
+
+          if (!this.token) {
+            this.notifyConnectionChange(!this.token ? "not_connected" : "disconnected");
+            this.notifyAuthChange("unauthenticated");
+            this.requestedRestart = false;
+          } else {
+            const client = await this.connect();
+            if (client) {
+              this.ad4mClient = client;
+            } else {
               this.notifyConnectionChange(!this.token ? "not_connected" : "disconnected");
               this.notifyAuthChange("unauthenticated");
               this.requestedRestart = false;
-            } else {
-              const client = await this.connect();
-              if (client) {
-                this.ad4mClient = client;
-              } else {
-                this.notifyConnectionChange(!this.token ? "not_connected" : "disconnected");
-                this.notifyAuthChange("unauthenticated");
-                this.requestedRestart = false;
-              }
             }
           }
         },
@@ -444,7 +466,7 @@ export default class Ad4mConnect {
 
   clearState() {
     this.setToken(null);
-    this.setPort(12000);
+    this.setPort(DEFAULT_PORT);
     this.notifyConnectionChange("not_connected");
     this.notifyAuthChange("unauthenticated");
   }

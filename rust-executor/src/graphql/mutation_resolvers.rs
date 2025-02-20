@@ -546,6 +546,7 @@ impl Mutation {
         context: &RequestContext,
         payload: PerspectiveInput,
         #[allow(non_snake_case)] perspectiveUUID: String,
+        loopback: Option<bool>,
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
@@ -556,7 +557,7 @@ impl Mutation {
                 "No perspective found with uuid {}",
                 uuid
             )))?
-            .send_broadcast(perspective.into())
+            .send_broadcast(perspective.into(), loopback.unwrap_or(false))
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
         Ok(true)
@@ -567,6 +568,7 @@ impl Mutation {
         context: &RequestContext,
         payload: PerspectiveUnsignedInput,
         #[allow(non_snake_case)] perspectiveUUID: String,
+        loopback: Option<bool>,
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
@@ -587,7 +589,7 @@ impl Mutation {
                 "No perspective found with uuid {}",
                 uuid
             )))?
-            .send_broadcast(perspective.into())
+            .send_broadcast(perspective.into(), loopback.unwrap_or(false))
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
         Ok(true)

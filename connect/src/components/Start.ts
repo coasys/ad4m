@@ -1,5 +1,5 @@
 import { html } from "lit";
-import { getForVersion } from "../utils";
+import { getForVersion, DEFAULT_PORT } from "../utils";
 
 export default function Start({
   connect,
@@ -10,7 +10,7 @@ export default function Start({
   scanQrcode,
   hosting
 }) {
-  const url = getForVersion('ad4murl') || "http://localhost:12000";
+  const url = getForVersion('ad4murl') || `http://localhost:${DEFAULT_PORT}`;
   const isLocal = url.includes("localhost");
 
   function clickLink(e: Event) {
@@ -25,35 +25,56 @@ export default function Start({
       ${!hasClickedDownload
         ? html`
           <div class="text-center">
-          ${isMobile
-            ? html`<button class="button" @click=${() => scanQrcode()}>
-                Connect with QR
-              </button> `
-            : html`<a
-                class="button"
-                target="_blank"
-                @click=${clickLink}
-                href="https://ad4m.dev/download"
-              >
-                Download AD4M
-              </a>`}
-              ${hosting ? html`<p>Or</p>` : ""}
-              ${hosting ? html`<button class="button" @click=${() => changeState("hosting")}>Use hosted AD4M (alpha)</button>` : ""}
+            <h1 class="heading">Could not connect to AD4M</h1>
+            ${isLocal ? html`
+              <p style="color: #b9b9b9; font-size: 15px; text-align: center; margin: 30px 0;">
+                Please make sure you have the ADAM Launcher running on your computer and there are no browser restrictions ("Shields") blocking your connection to ADAM on localhost.
+                <br/>
+                <br/>
+                (Safari users: please use a different browser for now. Safari is very strict about this and we are working on a solution.)
+              </p>
+              ` : html`
+              <p style="color: #b9b9b9; font-size: 15px; text-align: center; margin: 30px 0;">
+                Looks like the remote executor you are trying to connect to is not reachable.
+                <br/>
+                <br/>
+                Please try connecting to a different remote executor or check your connection settings.
+              </p>
+              `
+            }
+            ${isMobile
+              ? html`<button class="button" @click=${() => scanQrcode()}>
+                  Connect with QR
+                </button>`
+              : html`<a
+                  class="button"
+                  target="_blank"
+                  @click=${clickLink}
+                  href="https://github.com/coasys/ad4m/releases"
+                >
+                  Download AD4M
+                </a>
+              `
+            }
+            ${hosting ? html`<p>Or</p>` : ""}
+            ${hosting ? html`<button class="button" @click=${() => changeState("hosting")}>Use hosted AD4M (alpha)</button>` : ""}
           </div>
-            <div class="text-center">
-              <button class="button button--link " @click=${() => connect()}>
-                Try again
-              </button>
-              or
-              <button
-                class="button button--link "
-                @click=${() => changeState("settings")}
-              >
-                Change connection settings
-              </button>
 
-            </div>`
-        : html`<div class="text-center">
+          <div style="display: flex; flex-direction: column; align-items: center; gap: 20px; margin-top: -30px">
+            or
+            <button class="button button--secondary" @click=${() => connect()}>
+              Try reconnecting
+            </button>
+            or
+            <button
+              class="button button--secondary "
+              @click=${() => changeState("settings")}
+            >
+              Change connection settings
+            </button>
+          </div>
+        ` : html`
+          <div class="text-center">
             <a class="button" target="_blank" @click=${() => connect()}>
               Connect to ADAM
             </a>
@@ -61,25 +82,14 @@ export default function Start({
               Please connect to ADAM once you have downloaded and setup your
               ADAM agent
             </p>
-          </div>`}
-
-          ${isLocal ? html`
-            <p style="height: 60px; color: red; font-size: 14px; text-align: center; margin: 0; margin-top: -30px;">
-              Please make sure you have the ADAM Launcher running on your computer and there are no browser restrictions ("Shields") blocking your connection to ADAM on localhost.
-              (Safari users: please use a different browser for now. Safari is very strict about this and we are working on a solution.)
-            </p>
-            ` : html`
-            <p style="height: 60px; color: red; font-size: 14px; text-align: center; margin: 0; margin-top: -30px;">
-              Looks like the remote executor you are trying to connect to is not reachable.
-              Please try connecting to a different remote executor or check your connection settings.
-            </p>
-            `
-          }
+          </div>
+        `
+      }
 
       <div class="text-center">
-        <a class="button button--link" _target="blank" href="https://ad4m.dev"
-          >Learn more about ADAM</a
-        >
+        <a class="button" _target="blank" href="https://ad4m.dev">
+          Learn more about ADAM
+        </a>
       </div>
     </div>
   `;
