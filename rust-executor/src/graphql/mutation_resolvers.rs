@@ -5,7 +5,9 @@ use crate::{
     ai_service::AIService,
     neighbourhoods::{self, install_neighbourhood},
     perspectives::{
-        self, add_perspective, export_perspective, get_perspective, import_perspective, perspective_instance::{PerspectiveInstance, SdnaType}, remove_perspective, update_perspective, SerializedPerspective
+        self, add_perspective, export_perspective, get_perspective, import_perspective,
+        perspective_instance::{PerspectiveInstance, SdnaType},
+        remove_perspective, update_perspective, SerializedPerspective,
     },
     types::{AITask, DecoratedLinkExpression, Link, LinkExpression, ModelType},
 };
@@ -1257,13 +1259,14 @@ impl Mutation {
             )
         })?;
 
-        let result = Ad4mDb::with_global_instance(|db| db.import_from_json(json_data)).map_err(|e| {
-            log::error!("Failed to import database: {}", e);
-            FieldError::new(
-                format!("Failed to import database: {}", e),
-                graphql_value!({ "error": e.to_string() }),
-            )
-        })?;
+        let result =
+            Ad4mDb::with_global_instance(|db| db.import_from_json(json_data)).map_err(|e| {
+                log::error!("Failed to import database: {}", e);
+                FieldError::new(
+                    format!("Failed to import database: {}", e),
+                    graphql_value!({ "error": e.to_string() }),
+                )
+            })?;
 
         perspectives::initialize_from_db();
 

@@ -1,5 +1,6 @@
 use crate::graphql::graphql_types::{
-    AIModelLoadingStatus, EntanglementProof, ImportResult, LinkStatus, ModelInput, NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage
+    AIModelLoadingStatus, EntanglementProof, ImportResult, LinkStatus, ModelInput,
+    NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage,
 };
 use crate::types::{
     AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
@@ -717,8 +718,10 @@ impl Ad4mDb {
             .execute("DELETE FROM link WHERE perspective = ?1", [uuid])?;
 
         // Delete all pending diffs associated with this perspective
-        self.conn
-            .execute("DELETE FROM perspective_diff WHERE perspective = ?1", [uuid])?;
+        self.conn.execute(
+            "DELETE FROM perspective_diff WHERE perspective = ?1",
+            [uuid],
+        )?;
 
         Ok(())
     }
@@ -1604,7 +1607,10 @@ impl Ad4mDb {
                             }
                             Err(e) => {
                                 result.perspectives.failed += 1;
-                                result.perspectives.errors.push(format!("Failed to import perspective {} ({}): {}", name, uuid, e));
+                                result.perspectives.errors.push(format!(
+                                    "Failed to import perspective {} ({}): {}",
+                                    name, uuid, e
+                                ));
                                 log::warn!(
                                     "Failed to import perspective {} ({}): {}",
                                     name,
@@ -1617,7 +1623,10 @@ impl Ad4mDb {
                 }
                 Err(e) => {
                     result.perspectives.failed = 1;
-                    result.perspectives.errors.push(format!("Failed to parse perspectives: {}", e));
+                    result
+                        .perspectives
+                        .errors
+                        .push(format!("Failed to parse perspectives: {}", e));
                     log::warn!("Failed to parse perspectives: {}", e)
                 }
             }
@@ -1670,7 +1679,10 @@ impl Ad4mDb {
                 }
                 Err(e) => {
                     result.links.failed = 1;
-                    result.links.errors.push(format!("Failed to parse links: {}", e));
+                    result
+                        .links
+                        .errors
+                        .push(format!("Failed to parse links: {}", e));
                     log::warn!("Failed to parse links: {}", e)
                 }
             }
@@ -1690,7 +1702,10 @@ impl Ad4mDb {
                             Ok(_) => result.expressions.imported += 1,
                             Err(e) => {
                                 result.expressions.failed += 1;
-                                result.expressions.errors.push(format!("Failed to import expression {}: {}", expr.url, e));
+                                result.expressions.errors.push(format!(
+                                    "Failed to import expression {}: {}",
+                                    expr.url, e
+                                ));
                                 log::warn!("Failed to import expression {}: {}", expr.url, e)
                             }
                         }
@@ -1698,7 +1713,10 @@ impl Ad4mDb {
                 }
                 Err(e) => {
                     result.expressions.failed = 1;
-                    result.expressions.errors.push(format!("Failed to parse expressions: {}", e));
+                    result
+                        .expressions
+                        .errors
+                        .push(format!("Failed to parse expressions: {}", e));
                     log::warn!("Failed to parse expressions: {}", e)
                 }
             }
@@ -1751,7 +1769,10 @@ impl Ad4mDb {
                 }
                 Err(e) => {
                     result.perspective_diffs.failed = 1;
-                    result.perspective_diffs.errors.push(format!("Failed to parse perspective diffs: {}", e));
+                    result
+                        .perspective_diffs
+                        .errors
+                        .push(format!("Failed to parse perspective diffs: {}", e));
                     log::warn!("Failed to parse perspective diffs: {}", e)
                 }
             }
@@ -1795,7 +1816,10 @@ impl Ad4mDb {
                 }
                 Err(e) => {
                     result.notifications.failed = 1;
-                    result.notifications.errors.push(format!("Failed to parse notifications: {}", e));
+                    result
+                        .notifications
+                        .errors
+                        .push(format!("Failed to parse notifications: {}", e));
                     log::warn!("Failed to parse notifications: {}", e)
                 }
             }
@@ -1842,7 +1866,10 @@ impl Ad4mDb {
                 }
                 Err(e) => {
                     result.models.failed = 1;
-                    result.models.errors.push(format!("Failed to parse models: {}", e));
+                    result
+                        .models
+                        .errors
+                        .push(format!("Failed to parse models: {}", e));
                     log::warn!("Failed to parse models: {}", e)
                 }
             }
@@ -1867,7 +1894,10 @@ impl Ad4mDb {
                             Ok(_) => result.default_models.imported += 1,
                             Err(e) => {
                                 result.default_models.failed += 1;
-                                result.default_models.errors.push(format!("Failed to import default model mapping for type {}: {}", model_type, e));
+                                result.default_models.errors.push(format!(
+                                    "Failed to import default model mapping for type {}: {}",
+                                    model_type, e
+                                ));
                                 log::warn!(
                                     "Failed to import default model mapping for type {}: {}",
                                     model_type,
@@ -1879,7 +1909,10 @@ impl Ad4mDb {
                 }
                 Err(e) => {
                     result.default_models.failed = 1;
-                    result.default_models.errors.push(format!("Failed to parse default models: {}", e));
+                    result
+                        .default_models
+                        .errors
+                        .push(format!("Failed to parse default models: {}", e));
                     log::warn!("Failed to parse default models: {}", e)
                 }
             }
@@ -1921,7 +1954,10 @@ impl Ad4mDb {
                 }
                 Err(e) => {
                     result.tasks.failed = 1;
-                    result.tasks.errors.push(format!("Failed to parse tasks: {}", e));
+                    result
+                        .tasks
+                        .errors
+                        .push(format!("Failed to parse tasks: {}", e));
                     log::warn!("Failed to parse tasks: {}", e)
                 }
             }
@@ -1960,7 +1996,10 @@ impl Ad4mDb {
                             Ok(_) => result.friends.imported += 1,
                             Err(e) => {
                                 result.friends.failed += 1;
-                                result.friends.errors.push(format!("Failed to import friend {}: {}", friend, e));
+                                result
+                                    .friends
+                                    .errors
+                                    .push(format!("Failed to import friend {}: {}", friend, e));
                                 log::warn!("Failed to import friend {}: {}", friend, e)
                             }
                         }
@@ -1968,7 +2007,10 @@ impl Ad4mDb {
                 }
                 Err(e) => {
                     result.friends.failed = 1;
-                    result.friends.errors.push(format!("Failed to parse friends: {}", e));
+                    result
+                        .friends
+                        .errors
+                        .push(format!("Failed to parse friends: {}", e));
                     log::warn!("Failed to parse friends: {}", e)
                 }
             }
@@ -1988,7 +2030,10 @@ impl Ad4mDb {
                             Ok(_) => result.trusted_agents.imported += 1,
                             Err(e) => {
                                 result.trusted_agents.failed += 1;
-                                result.trusted_agents.errors.push(format!("Failed to import trusted agent {}: {}", agent, e));
+                                result.trusted_agents.errors.push(format!(
+                                    "Failed to import trusted agent {}: {}",
+                                    agent, e
+                                ));
                                 log::warn!("Failed to import trusted agent {}: {}", agent, e)
                             }
                         }
@@ -1996,7 +2041,10 @@ impl Ad4mDb {
                 }
                 Err(e) => {
                     result.trusted_agents.failed = 1;
-                    result.trusted_agents.errors.push(format!("Failed to parse trusted agents: {}", e));
+                    result
+                        .trusted_agents
+                        .errors
+                        .push(format!("Failed to parse trusted agents: {}", e));
                     log::warn!("Failed to parse trusted agents: {}", e)
                 }
             }
@@ -2016,7 +2064,10 @@ impl Ad4mDb {
                             Ok(_) => result.known_link_languages.imported += 1,
                             Err(e) => {
                                 result.known_link_languages.failed += 1;
-                                result.known_link_languages.errors.push(format!("Failed to import known link language {}: {}", language, e));
+                                result.known_link_languages.errors.push(format!(
+                                    "Failed to import known link language {}: {}",
+                                    language, e
+                                ));
                                 log::warn!(
                                     "Failed to import known link language {}: {}",
                                     language,
@@ -2028,7 +2079,10 @@ impl Ad4mDb {
                 }
                 Err(e) => {
                     result.known_link_languages.failed = 1;
-                    result.known_link_languages.errors.push(format!("Failed to parse known link languages: {}", e));
+                    result
+                        .known_link_languages
+                        .errors
+                        .push(format!("Failed to parse known link languages: {}", e));
                     log::warn!("Failed to parse known link languages: {}", e)
                 }
             }
