@@ -1,5 +1,6 @@
 use crate::graphql::graphql_types::{
-    AIModelLoadingStatus, EntanglementProof, LinkStatus, ModelInput, NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage
+    AIModelLoadingStatus, EntanglementProof, LinkStatus, ModelInput, NotificationInput,
+    PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage,
 };
 use crate::types::{
     AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
@@ -10,9 +11,9 @@ use deno_core::error::AnyError;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use uuid::Uuid;
 use std::str::FromStr;
 use url::Url;
+use uuid::Uuid;
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -1487,15 +1488,20 @@ impl Ad4mDb {
         export_data.insert("models".to_string(), serde_json::to_value(models)?);
 
         // Export default_models
-        let default_models: Vec<serde_json::Value> = self.conn.prepare(
-            "SELECT model_type, model_id FROM default_models"
-        )?.query_map([], |row| {
-            Ok(serde_json::json!({
-                "model_type": row.get::<_, String>(0)?,
-                "model_id": row.get::<_, String>(1)?
-            }))
-        })?.collect::<Result<Vec<_>, _>>()?;
-        export_data.insert("default_models".to_string(), serde_json::to_value(default_models)?);
+        let default_models: Vec<serde_json::Value> = self
+            .conn
+            .prepare("SELECT model_type, model_id FROM default_models")?
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "model_type": row.get::<_, String>(0)?,
+                    "model_id": row.get::<_, String>(1)?
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        export_data.insert(
+            "default_models".to_string(),
+            serde_json::to_value(default_models)?,
+        );
 
         // Nah, we don't need to export model_status
         // It's kinda transient, but in the DB so the model loading percentage is not lost over restarts
@@ -1559,15 +1565,24 @@ impl Ad4mDb {
                 Ok(perspectives) => {
                     log::info!("Importing {} perspectives", perspectives.len());
                     for perspective in perspectives {
-                        let name = perspective.get("name").and_then(|n| n.as_str()).unwrap_or("<unknown>");
-                        let uuid = perspective.get("uuid").and_then(|u| u.as_str()).unwrap_or("<unknown>");
+                        let name = perspective
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("<unknown>");
+                        let uuid = perspective
+                            .get("uuid")
+                            .and_then(|u| u.as_str())
+                            .unwrap_or("<unknown>");
                         match (|| {
                             let state = if perspective.get("shared_url").is_some() {
-                                serde_json::to_string(&PerspectiveState::NeighbourhoodCreationInitiated)
+                                serde_json::to_string(
+                                    &PerspectiveState::NeighbourhoodCreationInitiated,
+                                )
                             } else {
                                 serde_json::to_string(&PerspectiveState::Private)
-                            }.expect("to serialize PerspectiveState");
-                            
+                            }
+                            .expect("to serialize PerspectiveState");
+
                             self.conn.execute(
                                 "INSERT INTO perspective_handle (uuid, name, neighbourhood, shared_url, state) VALUES (?1, ?2, ?3, ?4, ?5)",
                                 params![
@@ -1579,8 +1594,15 @@ impl Ad4mDb {
                                 ],
                             )
                         })() {
-                            Ok(_) => log::info!("Successfully imported perspective: {} ({})", name, uuid),
-                            Err(e) => log::warn!("Failed to import perspective {} ({}): {}", name, uuid, e),
+                            Ok(_) => {
+                                log::info!("Successfully imported perspective: {} ({})", name, uuid)
+                            }
+                            Err(e) => log::warn!(
+                                "Failed to import perspective {} ({}): {}",
+                                name,
+                                uuid,
+                                e
+                            ),
                         }
                     }
                 }
@@ -1595,14 +1617,22 @@ impl Ad4mDb {
                     log::debug!("Importing {} links", links.len());
                     for (link, signature, key) in links {
                         // Check if perspective exists
-                        let perspective_exists = self.conn.query_row(
-                            "SELECT 1 FROM perspective_handle WHERE uuid = ?1",
-                            params![link.perspective],
-                            |_| Ok(true)
-                        ).optional().unwrap_or(Some(false)).unwrap_or(false);
+                        let perspective_exists = self
+                            .conn
+                            .query_row(
+                                "SELECT 1 FROM perspective_handle WHERE uuid = ?1",
+                                params![link.perspective],
+                                |_| Ok(true),
+                            )
+                            .optional()
+                            .unwrap_or(Some(false))
+                            .unwrap_or(false);
 
                         if !perspective_exists {
-                            log::info!("Omitting link import because perspective {} does not exist", link.perspective);
+                            log::info!(
+                                "Omitting link import because perspective {} does not exist",
+                                link.perspective
+                            );
                             continue;
                         }
 
@@ -1656,13 +1686,18 @@ impl Ad4mDb {
                     log::debug!("Importing {} perspective_diffs", diffs.len());
                     for diff in diffs {
                         let perspective_id = diff["perspective"].as_str().unwrap_or("");
-                        
+
                         // Check if perspective exists
-                        let perspective_exists = self.conn.query_row(
-                            "SELECT 1 FROM perspective_handle WHERE uuid = ?1",
-                            params![perspective_id],
-                            |_| Ok(true)
-                        ).optional().unwrap_or(Some(false)).unwrap_or(false);
+                        let perspective_exists = self
+                            .conn
+                            .query_row(
+                                "SELECT 1 FROM perspective_handle WHERE uuid = ?1",
+                                params![perspective_id],
+                                |_| Ok(true),
+                            )
+                            .optional()
+                            .unwrap_or(Some(false))
+                            .unwrap_or(false);
 
                         if !perspective_exists {
                             log::info!("Omitting perspective diff import because perspective {} does not exist", perspective_id);
@@ -1693,7 +1728,10 @@ impl Ad4mDb {
                 Ok(notifications) => {
                     log::debug!("Importing {} notifications", notifications.len());
                     for notification in notifications {
-                        let id = notification.get("id").and_then(|id| id.as_str()).unwrap_or("<unknown>");
+                        let id = notification
+                            .get("id")
+                            .and_then(|id| id.as_str())
+                            .unwrap_or("<unknown>");
                         match self.conn.execute(
                             "INSERT INTO notifications (id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted) 
                              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -1725,7 +1763,10 @@ impl Ad4mDb {
                 Ok(models) => {
                     log::debug!("Importing {} models", models.len());
                     for model in models {
-                        let name = model.get("name").and_then(|n| n.as_str()).unwrap_or("<unknown>");
+                        let name = model
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("<unknown>");
                         match self.conn.execute(
                             "INSERT INTO models (id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name) 
                              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
@@ -1760,7 +1801,8 @@ impl Ad4mDb {
                 Ok(default_models) => {
                     log::debug!("Importing {} default model mappings", default_models.len());
                     for default_model in default_models {
-                        let model_type = default_model["model_type"].as_str().unwrap_or("<unknown>");
+                        let model_type =
+                            default_model["model_type"].as_str().unwrap_or("<unknown>");
                         match self.conn.execute(
                             "INSERT INTO default_models (model_type, model_id) VALUES (?1, ?2)",
                             params![
@@ -1769,7 +1811,11 @@ impl Ad4mDb {
                             ],
                         ) {
                             Ok(_) => (),
-                            Err(e) => log::warn!("Failed to import default model mapping for type {}: {}", model_type, e),
+                            Err(e) => log::warn!(
+                                "Failed to import default model mapping for type {}: {}",
+                                model_type,
+                                e
+                            ),
                         }
                     }
                 }
@@ -1783,7 +1829,10 @@ impl Ad4mDb {
                 Ok(tasks) => {
                     log::debug!("Importing {} tasks", tasks.len());
                     for task in tasks {
-                        let name = task.get("name").and_then(|n| n.as_str()).unwrap_or("<unknown>");
+                        let name = task
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("<unknown>");
                         match self.conn.execute(
                             "INSERT OR REPLACE INTO tasks (id, name, model_id, system_prompt, prompt_examples, metadata, created_at, updated_at) 
                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -1832,7 +1881,10 @@ impl Ad4mDb {
                 Ok(friends) => {
                     log::debug!("Importing {} friends", friends.len());
                     for friend in friends {
-                        match self.conn.execute("INSERT INTO friends (friend) VALUES (?1)", params![friend]) {
+                        match self
+                            .conn
+                            .execute("INSERT INTO friends (friend) VALUES (?1)", params![friend])
+                        {
                             Ok(_) => (),
                             Err(e) => log::warn!("Failed to import friend {}: {}", friend, e),
                         }
@@ -1848,7 +1900,10 @@ impl Ad4mDb {
                 Ok(agents) => {
                     log::debug!("Importing {} trusted agents", agents.len());
                     for agent in agents {
-                        match self.conn.execute("INSERT INTO trusted_agent (agent) VALUES (?1)", params![agent]) {
+                        match self.conn.execute(
+                            "INSERT INTO trusted_agent (agent) VALUES (?1)",
+                            params![agent],
+                        ) {
                             Ok(_) => (),
                             Err(e) => log::warn!("Failed to import trusted agent {}: {}", agent, e),
                         }
@@ -1864,9 +1919,16 @@ impl Ad4mDb {
                 Ok(languages) => {
                     log::debug!("Importing {} known link languages", languages.len());
                     for language in languages {
-                        match self.conn.execute("INSERT INTO known_link_languages (language) VALUES (?1)", params![language]) {
+                        match self.conn.execute(
+                            "INSERT INTO known_link_languages (language) VALUES (?1)",
+                            params![language],
+                        ) {
                             Ok(_) => (),
-                            Err(e) => log::warn!("Failed to import known link language {}: {}", language, e),
+                            Err(e) => log::warn!(
+                                "Failed to import known link language {}: {}",
+                                language,
+                                e
+                            ),
                         }
                     }
                 }
