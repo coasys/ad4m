@@ -54,6 +54,12 @@ fn link_status_from_input(status: Option<String>) -> Result<LinkStatus, FieldErr
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuerySubscription {
+    subscription_id: String,
+    result: String,
+}
+
 #[graphql_object(context = RequestContext)]
 impl Mutation {
     async fn add_trusted_agents(
@@ -983,6 +989,42 @@ impl Mutation {
             .get_subject_data(subject_class, expression_address)
             .await?;
         Ok(result)
+    }
+
+    async fn perspective_subscribe_query(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        query: String,
+    ) -> FieldResult<QuerySubscription> {
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
+
+        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let (subscription_id, result_string) = perspective.subscribe_and_query(query).await?;
+
+        Ok(QuerySubscription {
+            subscription_id,
+            result: result_string,
+        })
+    }
+
+    async fn perspective_keepalive_query(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        subscription_id: String,
+    ) -> FieldResult<bool> {
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
+
+        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        perspective.keepalive_query(subscription_id).await?;
+        Ok(true)
     }
 
     async fn runtime_add_friends(

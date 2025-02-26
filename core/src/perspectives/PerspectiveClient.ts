@@ -154,6 +154,31 @@ export class PerspectiveClient {
         return JSON.parse(perspectiveQueryProlog)
     }
 
+    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: string }> {
+        const { perspectiveSubscribeQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveSubscribeQuery($uuid: String!, $query: String!) {
+                perspectiveSubscribeQuery(uuid: $uuid, query: $query) {
+                    subscriptionId
+                    result
+                }
+            }`,
+            variables: { uuid, query }
+        }))
+
+        return perspectiveSubscribeQuery
+    }
+
+    async keepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
+        const { perspectiveKeepAliveQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveKeepAliveQuery($uuid: String!, $subscriptionId: String!) {
+                perspectiveKeepAliveQuery(uuid: $uuid, subscriptionId: $subscriptionId)
+            }`,
+            variables: { uuid, subscriptionId }
+        }))
+
+        return perspectiveKeepAliveQuery
+    }
+
     async add(name: string): Promise<PerspectiveProxy> {
         const { perspectiveAdd } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveAdd($name: String!) {

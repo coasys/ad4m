@@ -17,6 +17,7 @@ use crate::pubsub::{
     get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC,
     PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
     PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
+    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
 };
 use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
@@ -31,13 +32,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
-use tokio::time::sleep;
+use tokio::time::{sleep, Instant};
 use tokio::{join, time};
+use uuid;
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;
 static IMMEDIATE_COMMITS_COUNT: usize = 20;
+static QUERY_SUBSCRIPTION_TIMEOUT: u64 = 300; // 5 minutes in seconds
+static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub enum SdnaType {
@@ -136,6 +140,14 @@ pub struct Parameter {
 }
 
 #[derive(Clone)]
+struct SubscribedQuery {
+    query: String,
+    last_result: String,
+    last_keepalive: Instant,
+    subscription_id: String,
+}
+
+#[derive(Clone)]
 pub struct PerspectiveInstance {
     pub persisted: Arc<Mutex<PerspectiveHandle>>,
 
@@ -152,6 +164,7 @@ pub struct PerspectiveInstance {
     links_have_changed: Arc<Mutex<bool>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
+    subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
 }
 
 impl PerspectiveInstance {
@@ -171,6 +184,7 @@ impl PerspectiveInstance {
             links_have_changed: Arc::new(Mutex::new(false)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)), // Default to 3 immediate commits
+            subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1772,6 +1786,78 @@ impl PerspectiveInstance {
             .join(", ");
 
         Ok(format!("{{ {} }}", stringified))
+    }
+
+    pub async fn subscribe_and_query(&self, query: String) -> Result<(String, String), AnyError> {
+        let subscription_id = uuid::Uuid::new_v4().to_string();
+        let initial_result = self.prolog_query(query.clone()).await?;
+        let result_string = prolog_resolution_to_string(initial_result);
+
+        let subscribed_query = SubscribedQuery {
+            query,
+            last_result: result_string.clone(),
+            last_keepalive: Instant::now(),
+            subscription_id: subscription_id.clone(),
+        };
+
+        self.subscribed_queries.lock().await.insert(subscription_id.clone(), subscribed_query);
+        Ok((subscription_id, result_string))
+    }
+
+    async fn check_subscribed_queries(&self) {
+        let mut queries_to_remove = Vec::new();
+        let mut queries_with_changes = Vec::new();
+        let uuid = self.persisted.lock().await.uuid.clone();
+
+        {
+            let mut queries = self.subscribed_queries.lock().await;
+            let now = Instant::now();
+
+            for (id, query) in queries.iter_mut() {
+                // Check for timeout
+                if now.duration_since(query.last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
+                    queries_to_remove.push(id.clone());
+                    continue;
+                }
+
+                // Check for changes
+                if let Ok(result) = self.prolog_query(query.query.clone()).await {
+                    let result_string = prolog_resolution_to_string(result);
+                    if result_string != query.last_result {
+                        query.last_result = result_string.clone();
+                        queries_with_changes.push((id.clone(), result_string));
+                    }
+                }
+            }
+
+            // Remove timed out queries
+            for id in queries_to_remove {
+                queries.remove(&id);
+            }
+        }
+
+        // Publish changes
+        for (id, result) in queries_with_changes {
+            let payload = serde_json::json!({
+                "subscriptionId": id,
+                "uuid": uuid,
+                "result": result
+            });
+            get_global_pubsub()
+                .await
+                .publish(
+                    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
+                    &payload.to_string(),
+                )
+                .await;
+        }
+    }
+
+    async fn subscribed_queries_loop(&self) {
+        while !*self.is_teardown.lock().await {
+            self.check_subscribed_queries().await;
+            sleep(Duration::from_millis(QUERY_SUBSCRIPTION_CHECK_INTERVAL)).await;
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-import { Arg, Mutation, PubSub, Query, Resolver, Subscription } from "type-graphql";
+import { Arg, Mutation, PubSub, Query, Resolver, Root, Subscription, ObjectType, Field } from "type-graphql";
 import { LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkExpressionUpdated, LinkInput, LinkMutations } from "../links/Links";
 import { Neighbourhood, NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 import { LinkQuery } from "./LinkQuery";
@@ -18,6 +18,17 @@ testLink.proof = {
     signature: '',
     key: '',
     valid: true
+}
+
+export const PERSPECTIVE_QUERY_SUBSCRIPTION = "PERSPECTIVE_QUERY_SUBSCRIPTION"
+
+@ObjectType()
+export class QuerySubscription {
+    @Field()
+    subscriptionId: string;
+
+    @Field()
+    result: string;
 }
 
 /**
@@ -72,8 +83,23 @@ export default class PerspectiveResolver {
     }
 
     @Query(returns => String)
-    perspectiveQueryProlog(@Arg('uuid') uuid: string, @Arg('query') query: String): string {
+    async perspectiveQueryProlog(
+        @Arg('uuid') uuid: string, 
+        @Arg('query') query: string
+    ): Promise<string> {
         return `[{"X": 1}]`
+    }
+
+    @Mutation(returns => QuerySubscription)
+    async perspectiveSubscribeQuery(
+        @Arg('uuid') uuid: string,
+        @Arg('query') query: string
+    ): Promise<QuerySubscription> {
+        const result = `[{"X": 1}]`
+        return {
+            subscriptionId: "test-subscription-id",
+            result: result
+        }
     }
 
     @Mutation(returns => PerspectiveHandle)
@@ -249,5 +275,27 @@ export default class PerspectiveResolver {
     @Subscription({topics: PERSPECTIVE_SYNC_STATE_CHANGE, nullable: false})
     perspectiveSyncStateChange(@Arg('uuid') uuid: string): PerspectiveState {
         return PerspectiveState.Synced
+    }
+
+    @Mutation(returns => Boolean)
+    perspectiveKeepAliveQuery(
+        @Arg('uuid') uuid: string,
+        @Arg('subscriptionId') subscriptionId: string
+    ): boolean {
+        return true
+    }
+
+    @Subscription({
+        topics: PERSPECTIVE_QUERY_SUBSCRIPTION,
+        filter: ({ payload, args }) => 
+            payload.subscriptionId === args.subscriptionId && 
+            payload.uuid === args.uuid
+    })
+    perspectiveQuerySubscription(
+        @Arg('uuid') uuid: string,
+        @Arg('subscriptionId') subscriptionId: string,
+        @Root() payload: { subscriptionId: string, uuid: string, result: string }
+    ): string {
+        return payload.result
     }
 }
