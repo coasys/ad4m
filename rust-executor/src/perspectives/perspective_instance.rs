@@ -145,7 +145,6 @@ struct SubscribedQuery {
     query: String,
     last_result: String,
     last_keepalive: Instant,
-    subscription_id: String,
 }
 
 #[derive(Clone)]
@@ -1799,7 +1798,6 @@ impl PerspectiveInstance {
             query,
             last_result: result_string.clone(),
             last_keepalive: Instant::now(),
-            subscription_id: subscription_id.clone(),
         };
 
         self.subscribed_queries.lock().await.insert(subscription_id.clone(), subscribed_query);
