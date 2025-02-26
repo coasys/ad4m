@@ -1805,6 +1805,16 @@ impl PerspectiveInstance {
         Ok((subscription_id, result_string))
     }
 
+    pub async fn keepalive_query(&self, subscription_id: String) -> Result<(), AnyError> {
+        let mut queries = self.subscribed_queries.lock().await;
+        if let Some(query) = queries.get_mut(&subscription_id) {
+            query.last_keepalive = Instant::now();
+            Ok(())
+        } else {
+            Err(anyhow!("Subscription not found"))
+        }
+    }
+
     async fn check_subscribed_queries(&self) {
         let mut queries_to_remove = Vec::new();
         let mut queries_with_changes = Vec::new();
