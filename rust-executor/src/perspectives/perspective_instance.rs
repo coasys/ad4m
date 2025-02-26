@@ -194,6 +194,7 @@ impl PerspectiveInstance {
             self.notification_check_loop(),
             self.nh_sync_loop(),
             self.pending_diffs_loop(),
+            self.check_subscribed_queries()
         );
     }
 
