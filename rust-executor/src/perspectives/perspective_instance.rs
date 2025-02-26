@@ -7,8 +7,8 @@ use crate::agent::{self, create_signed_expression};
 use crate::graphql::graphql_types::{
     DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery,
     LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle,
-    PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveState, PerspectiveStateFilter,
-    PerspectiveQuerySubscriptionFilter,
+    PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveQuerySubscriptionFilter,
+    PerspectiveState, PerspectiveStateFilter,
 };
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
@@ -17,8 +17,8 @@ use crate::prolog_service::engine::PrologEngine;
 use crate::pubsub::{
     get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC,
     PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
-    PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
-    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
+    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
+    RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
 use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
@@ -1800,7 +1800,10 @@ impl PerspectiveInstance {
             last_keepalive: Instant::now(),
         };
 
-        self.subscribed_queries.lock().await.insert(subscription_id.clone(), subscribed_query);
+        self.subscribed_queries
+            .lock()
+            .await
+            .insert(subscription_id.clone(), subscribed_query);
         Ok((subscription_id, result_string))
     }
 
