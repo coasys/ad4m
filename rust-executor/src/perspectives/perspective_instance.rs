@@ -8,6 +8,7 @@ use crate::graphql::graphql_types::{
     DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery,
     LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle,
     PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveState, PerspectiveStateFilter,
+    PerspectiveQuerySubscriptionFilter,
 };
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
@@ -1849,16 +1850,16 @@ impl PerspectiveInstance {
 
         // Publish changes
         for (id, result) in queries_with_changes {
-            let payload = serde_json::json!({
-                "subscriptionId": id,
-                "uuid": uuid,
-                "result": result
-            });
+            let filter = PerspectiveQuerySubscriptionFilter {
+                uuid: uuid.clone(),
+                subscription_id: id,
+                result,
+            };
             get_global_pubsub()
                 .await
                 .publish(
-                    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
-                    &payload.to_string(),
+                    &PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC.to_string(),
+                    &serde_json::to_string(&filter).unwrap(),
                 )
                 .await;
         }

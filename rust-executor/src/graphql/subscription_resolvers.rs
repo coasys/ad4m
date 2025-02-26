@@ -300,23 +300,13 @@ impl Subscription {
             Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
-                let receiver = pubsub.subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC).await;
-                let stream = WatchStream::from_changes(receiver)
-                    .filter_map(move |msg| {
-                        let payload: Result<serde_json::Value, _> = serde_json::from_str(&msg);
-                        match payload {
-                            Ok(payload) => {
-                                if payload["uuid"].as_str().map(|s| s == uuid).unwrap_or(false) &&
-                                   payload["subscriptionId"].as_str().map(|s| s == subscription_id).unwrap_or(false) {
-                                    Some(Ok(payload["result"].to_string()))
-                                } else {
-                                    None
-                                }
-                            }
-                            Err(_) => None
-                        }
-                    });
-                Box::pin(stream)
+                let topic = &PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC;
+                subscribe_and_process::<PerspectiveQuerySubscriptionFilter>(
+                    pubsub,
+                    topic.to_string(),
+                    Some(subscription_id),
+                )
+                .await
             }
         }
     }

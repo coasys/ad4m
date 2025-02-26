@@ -1074,3 +1074,24 @@ pub struct QuerySubscription {
     pub subscription_id: String,
     pub result: String,
 }
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct PerspectiveQuerySubscriptionFilter {
+    pub uuid: String,
+    pub subscription_id: String,
+    pub result: String,
+}
+
+impl GetValue for PerspectiveQuerySubscriptionFilter {
+    type Value = String;
+
+    fn get_value(&self) -> Self::Value {
+        self.result.clone()
+    }
+}
+
+impl GetFilter for PerspectiveQuerySubscriptionFilter {
+    fn get_filter(&self) -> Option<String> {
+        Some(self.subscription_id.clone())
+    }
+}
