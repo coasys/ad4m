@@ -15,6 +15,11 @@ import { gql } from "@apollo/client/core";
 
 type QueryCallback = (result: string) => void;
 
+// Generic subscription interface that matches Apollo's Subscription
+interface Unsubscribable {
+    unsubscribe(): void;
+}
+
 /** Proxy object for a subscribed Prolog query that provides real-time updates
  * 
  * This class handles:
@@ -46,9 +51,10 @@ export class QuerySubscriptionProxy {
     #subscriptionId: string;
     #client: PerspectiveClient;
     #callbacks: Set<QueryCallback>;
-    #keepaliveInterval: NodeJS.Timeout;
-    #subscription?: ZenObservable.Subscription;
+    #keepaliveTimer: number;
+    #subscription?: Unsubscribable;
     #latestResult: string;
+    #disposed: boolean = false;
 
     /** Creates a new query subscription
      * @param uuid - The UUID of the perspective
@@ -86,14 +92,24 @@ export class QuerySubscriptionProxy {
             error: (e) => console.error('Error in query subscription:', e)
         });
 
-        // Start keepalive loop
-        this.#keepaliveInterval = setInterval(async () => {
+        // Start keepalive loop using platform-agnostic setTimeout
+        const keepaliveLoop = async () => {
+            if (this.#disposed) return;
+            
             try {
                 await this.#client.keepAliveQuery(this.#uuid, this.#subscriptionId);
             } catch (e) {
                 console.error('Error in keepalive:', e);
             }
-        }, 30000); // Send keepalive every 30 seconds
+
+            // Schedule next keepalive if not disposed
+            if (!this.#disposed) {
+                this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
+            }
+        };
+
+        // Start the first keepalive loop
+        this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
     }
 
     /** Get the latest query result
@@ -146,7 +162,7 @@ export class QuerySubscriptionProxy {
     /** Clean up the subscription and stop keepalive signals
      * 
      * This method:
-     * 1. Stops the keepalive interval
+     * 1. Stops the keepalive timer
      * 2. Unsubscribes from GraphQL subscription updates
      * 3. Clears all registered callbacks
      * 
@@ -154,7 +170,8 @@ export class QuerySubscriptionProxy {
      * will not receive any more updates. The instance should be discarded.
      */
     dispose() {
-        clearInterval(this.#keepaliveInterval);
+        this.#disposed = true;
+        clearTimeout(this.#keepaliveTimer);
         if (this.#subscription) {
             this.#subscription.unsubscribe();
         }
