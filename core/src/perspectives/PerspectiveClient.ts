@@ -168,6 +168,28 @@ export class PerspectiveClient {
         return perspectiveSubscribeQuery
     }
 
+    subscribeToQueryUpdates(subscriptionId: string, onData: (result: string) => void): () => void {
+        const subscription = this.#apolloClient.subscribe({
+            query: gql`
+                subscription perspectiveQuerySubscription($subscriptionId: String!) {
+                    perspectiveQuerySubscription(subscriptionId: $subscriptionId)
+                }
+            `,
+            variables: {
+                subscriptionId
+            }
+        }).subscribe({
+            next: (result) => {
+                if (result.data && result.data.perspectiveQuerySubscription) {
+                    onData(result.data.perspectiveQuerySubscription);
+                }
+            },
+            error: (e) => console.error('Error in query subscription:', e)
+        });
+
+        return () => subscription.unsubscribe();
+    }
+
     async keepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
         const { perspectiveKeepAliveQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveKeepAliveQuery($uuid: String!, $subscriptionId: String!) {

@@ -52,7 +52,7 @@ export class QuerySubscriptionProxy {
     #client: PerspectiveClient;
     #callbacks: Set<QueryCallback>;
     #keepaliveTimer: number;
-    #subscription?: Unsubscribable;
+    #unsubscribe?: () => void;
     #latestResult: string;
     #disposed: boolean = false;
 
@@ -73,24 +73,13 @@ export class QuerySubscriptionProxy {
         this.#notifyCallbacks(initialResult);
 
         // Subscribe to query updates
-        this.#subscription = (this.#client as any).apolloClient.subscribe({
-            query: gql`
-                subscription perspectiveQuerySubscription($subscriptionId: String!) {
-                    perspectiveQuerySubscription(subscriptionId: $subscriptionId)
-                }
-            `,
-            variables: {
-                subscriptionId: this.#subscriptionId
+        this.#unsubscribe = this.#client.subscribeToQueryUpdates(
+            this.#subscriptionId,
+            (result) => {
+                this.#latestResult = result;
+                this.#notifyCallbacks(result);
             }
-        }).subscribe({
-            next: (result) => {
-                if (result.data && result.data.perspectiveQuerySubscription) {
-                    this.#latestResult = result.data.perspectiveQuerySubscription;
-                    this.#notifyCallbacks(this.#latestResult);
-                }
-            },
-            error: (e) => console.error('Error in query subscription:', e)
-        });
+        );
 
         // Start keepalive loop using platform-agnostic setTimeout
         const keepaliveLoop = async () => {
@@ -172,8 +161,8 @@ export class QuerySubscriptionProxy {
     dispose() {
         this.#disposed = true;
         clearTimeout(this.#keepaliveTimer);
-        if (this.#subscription) {
-            this.#subscription.unsubscribe();
+        if (this.#unsubscribe) {
+            this.#unsubscribe();
         }
         this.#callbacks.clear();
     }
