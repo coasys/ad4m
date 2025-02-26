@@ -228,23 +228,198 @@ export class SubjectEntity {
    * 
    * @throws Will throw an error if the subject entity cannot be converted to a subject class, or if the subject proxies cannot be gotten.
    */
-  static async all(perspective: PerspectiveProxy) {
-    let subjectClass = await perspective.stringOrTemplateObjectToSubjectClass(this)
-    const proxies = await perspective.getAllSubjectProxies(subjectClass)
+  // static async all(perspective: PerspectiveProxy) {
+  //   let subjectClass = await perspective.stringOrTemplateObjectToSubjectClass(this)
+  //   const proxies = await perspective.getAllSubjectProxies(subjectClass)
 
-    const instances = []
+  //   const instances = []
 
-    if (proxies) {
-      for (const proxy of proxies) {
-        // @ts-ignore
-        const instance = new this(perspective, proxy.X)
-        instances.push(await instance.get())
+  //   if (proxies) {
+  //     for (const proxy of proxies) {
+  //       // @ts-ignore
+  //       const instance = new this(perspective, proxy.X)
+  //       instances.push(await instance.get())
+  //     }
+
+  //     return instances;
+  //   }
+
+  //   return []
+  // }
+
+  // {
+  //   attributes: ['id', 'type', 'title', 'author', 'timestamp'],
+  //   where: { id: [1, 2, 3, 4, 5], type: 'poll' },
+  //   order: ['id', 'descending'],
+  //   limit: 10,
+  //   offset: 30,
+  // }
+
+  static async all(perspective: PerspectiveProxy, query?: any) {
+    console.log("SubjectEntity.all() query", query)
+    let subjectClass = await perspective.stringOrTemplateObjectToSubjectClass(this);
+    
+    // Build the base Prolog query
+    let baseQuery = `subject_class("${subjectClass}", C), instance(C, Base)`;
+    let selectProperties = [];
+    let whereConditions = [];
+    
+    // Process the query parameters
+    if (query) {
+      // Handle property selection (attributes)
+      if (query.attributes && Array.isArray(query.attributes)) {
+        for (const attr of query.attributes) {
+          const varName = attr.charAt(0).toUpperCase() + attr.slice(1);
+          selectProperties.push(`property_getter(C, Base, "${attr}", ${varName})`);
+        }
+      } else {
+        // If no attributes specified, get all properties of the subject class
+        const propertiesQuery = `findall(Prop, property(C, Prop), Props)`;
+        const properties = await perspective.infer(`subject_class("${subjectClass}", C), ${propertiesQuery}`);
+        
+        if (properties && properties.length > 0 && properties[0].Props) {
+          for (const prop of properties[0].Props) {
+            const varName = prop.charAt(0).toUpperCase() + prop.slice(1);
+            selectProperties.push(`property_getter(C, Base, "${prop}", ${varName})`);
+          }
+        }
       }
-
-      return instances;
+  
+      // Handle where conditions
+      if (query.where) {
+        for (const [key, value] of Object.entries(query.where)) {
+          if (Array.isArray(value)) {
+            // Handle array of values (IN condition)
+            const valueList = value.map(v => typeof v === 'string' ? `"${v}"` : v).join(', ');
+            whereConditions.push(`property_getter(C, Base, "${key}", TempVal), member(TempVal, [${valueList}])`);
+          } else {
+            // Handle simple equality
+            const formattedValue = typeof value === 'string' ? `"${value}"` : value;
+            whereConditions.push(`property_getter(C, Base, "${key}", ${formattedValue})`);
+          }
+        }
+      }
+    } else {
+      // If no query specified, get all properties
+      const propertiesQuery = `findall(Prop, property(C, Prop), Props)`;
+      const properties = await perspective.infer(`subject_class("${subjectClass}", C), ${propertiesQuery}`);
+      
+      if (properties && properties.length > 0 && properties[0].Props) {
+        for (const prop of properties[0].Props) {
+          const varName = prop.charAt(0).toUpperCase() + prop.slice(1);
+          selectProperties.push(`property_getter(C, Base, "${prop}", ${varName})`);
+        }
+      }
     }
+  
+    // Create the complete query
+    let prologQuery = `findall([Base`;
+    
+    // Create a mapping of variable names to property names
+    let varToPropertyMap = {};
+    if (query && query.attributes && Array.isArray(query.attributes)) {
+      query.attributes.forEach(attr => {
+        const varName = attr.charAt(0).toUpperCase() + attr.slice(1);
+        prologQuery += `, ${varName}`;
+        varToPropertyMap[varName] = attr;
+      });
+    } else {
+      const properties = await perspective.infer(`subject_class("${subjectClass}", C), findall(Prop, property(C, Prop), Props)`);
+      if (properties && properties.length > 0 && properties[0].Props) {
+        for (const prop of properties[0].Props) {
+          const varName = prop.charAt(0).toUpperCase() + prop.slice(1);
+          prologQuery += `, ${varName}`;
+          varToPropertyMap[varName] = prop;
+        }
+      }
+    }
+    
+    prologQuery += `], (${baseQuery}`;
+    
+    // Add property getter conditions
+    if (selectProperties.length > 0) {
+      prologQuery += `, ${selectProperties.join(', ')}`;
+    }
+    
+    // Add where conditions
+    if (whereConditions.length > 0) {
+      prologQuery += `, ${whereConditions.join(', ')}`;
+    }
+    
+    prologQuery += `), Results)`;
+    
+    // Handle sorting
+    if (query?.order && Array.isArray(query.order)) {
+      const [orderField, direction] = query.order;
+      const needsReverse = direction === 'descending';
+      
+      prologQuery += `, sort_with_key(Results, ${orderField}, SortedResults)`;
+      
+      if (needsReverse) {
+        prologQuery += `, reverse(SortedResults, OrderedResults)`;
+      } else {
+        prologQuery += `, OrderedResults = SortedResults`;
+      }
+    } else {
+      prologQuery += `, OrderedResults = Results`;
+    }
+    
+    // Handle pagination (limit and offset)
+    if (query && query.limit !== undefined) {
+      const offset = query.offset || 0;
+      
+      if (offset > 0) {
+        prologQuery += `, length(OrderedResults, TotalLength), 
+                       (TotalLength > ${offset} -> 
+                          append(_, Skip, OrderedResults), 
+                          length(Skip, ${offset}), 
+                          (Skip = [] -> FinalResults = [] ; 
+                            append(PageResults, _, Skip), 
+                            length(PageResults, ${query.limit}), 
+                            FinalResults = PageResults) ; 
+                          FinalResults = [])`;
+      } else {
+        prologQuery += `, append(PageResults, _, OrderedResults), 
+                       length(PageResults, ${query.limit}), 
+                       FinalResults = PageResults`;
+      }
+    } else {
+      prologQuery += `, FinalResults = OrderedResults`;
+    }
+    
+    // Execute the Prolog query
+    const prologResults = await perspective.infer(prologQuery);
 
-    return []
+    console.log("Prolog results", prologResults);
+    
+    if (!prologResults || prologResults.length === 0 || !prologResults[0].FinalResults) {
+      return [];
+    }
+    
+    // Convert the Prolog results to objects
+    const instances = [];
+    for (const result of prologResults[0].FinalResults) {
+      const baseExpr = result[0];
+      
+      // @ts-ignore
+      const instance = new this(perspective, baseExpr);
+      
+      // Instead of calling instance.get(), construct the object directly
+      const data = {};
+      
+      let idx = 1;
+      for (const varName in varToPropertyMap) {
+        const propName = varToPropertyMap[varName];
+        data[propName] = result[idx++];
+      }
+      
+      // Assign properties directly to instance
+      Object.assign(instance, data);
+      
+      instances.push(instance);
+    }
+    
+    return instances;
   }
 
   /**
