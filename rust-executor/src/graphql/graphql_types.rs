@@ -1067,3 +1067,10 @@ impl ImportResult {
         }
     }
 }
+
+
+#[derive(GraphQLObject, Debug, Clone, Serialize, Deserialize)]
+pub struct QuerySubscription {
+    pub subscription_id: String,
+    pub result: String,
+}

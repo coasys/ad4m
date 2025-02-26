@@ -54,12 +54,6 @@ fn link_status_from_input(status: Option<String>) -> Result<LinkStatus, FieldErr
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QuerySubscription {
-    subscription_id: String,
-    result: String,
-}
-
 #[graphql_object(context = RequestContext)]
 impl Mutation {
     async fn add_trusted_agents(
