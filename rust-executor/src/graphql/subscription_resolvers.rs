@@ -10,8 +10,8 @@ use crate::{
         AI_MODEL_LOADING_STATUS, AI_TRANSCRIPTION_TEXT_TOPIC, APPS_CHANGED,
         EXCEPTION_OCCURRED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
         PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC,
-        PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_REMOVED_TOPIC,
-        PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
+        PERSPECTIVE_LINK_UPDATED_TOPIC, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
+        PERSPECTIVE_REMOVED_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
         RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
     },
     types::{DecoratedLinkExpression, TriggeredNotification},
@@ -285,6 +285,26 @@ impl Subscription {
                 let pubsub = get_global_pubsub().await;
                 let topic = &AI_MODEL_LOADING_STATUS;
                 subscribe_and_process::<AIModelLoadingStatus>(pubsub, topic.to_string(), None).await
+            }
+        }
+    }
+
+    async fn perspective_query_subscription(
+        &self,
+        context: &RequestContext,
+        subscription_id: String,
+    ) -> Pin<Box<dyn Stream<Item = FieldResult<String>> + Send>> {
+        match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
+            Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
+            Ok(_) => {
+                let pubsub = get_global_pubsub().await;
+                let topic = &PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC;
+                subscribe_and_process::<PerspectiveQuerySubscriptionFilter>(
+                    pubsub,
+                    topic.to_string(),
+                    Some(subscription_id),
+                )
+                .await
             }
         }
     }

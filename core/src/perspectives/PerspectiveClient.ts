@@ -154,6 +154,53 @@ export class PerspectiveClient {
         return JSON.parse(perspectiveQueryProlog)
     }
 
+    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: string }> {
+        const { perspectiveSubscribeQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveSubscribeQuery($uuid: String!, $query: String!) {
+                perspectiveSubscribeQuery(uuid: $uuid, query: $query) {
+                    subscriptionId
+                    result
+                }
+            }`,
+            variables: { uuid, query }
+        }))
+
+        return perspectiveSubscribeQuery
+    }
+
+    subscribeToQueryUpdates(subscriptionId: string, onData: (result: string) => void): () => void {
+        const subscription = this.#apolloClient.subscribe({
+            query: gql`
+                subscription perspectiveQuerySubscription($subscriptionId: String!) {
+                    perspectiveQuerySubscription(subscriptionId: $subscriptionId)
+                }
+            `,
+            variables: {
+                subscriptionId
+            }
+        }).subscribe({
+            next: (result) => {
+                if (result.data && result.data.perspectiveQuerySubscription) {
+                    onData(result.data.perspectiveQuerySubscription);
+                }
+            },
+            error: (e) => console.error('Error in query subscription:', e)
+        });
+
+        return () => subscription.unsubscribe();
+    }
+
+    async keepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
+        const { perspectiveKeepAliveQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveKeepAliveQuery($uuid: String!, $subscriptionId: String!) {
+                perspectiveKeepAliveQuery(uuid: $uuid, subscriptionId: $subscriptionId)
+            }`,
+            variables: { uuid, subscriptionId }
+        }))
+
+        return perspectiveKeepAliveQuery
+    }
+
     async add(name: string): Promise<PerspectiveProxy> {
         const { perspectiveAdd } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveAdd($name: String!) {

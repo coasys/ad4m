@@ -10,6 +10,163 @@ import { collectionAdderToName, collectionRemoverToName, collectionSetterToName 
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 import { AIClient } from "../ai/AIClient";
+import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
+import { gql } from "@apollo/client/core";
+
+type QueryCallback = (result: string) => void;
+
+// Generic subscription interface that matches Apollo's Subscription
+interface Unsubscribable {
+    unsubscribe(): void;
+}
+
+/** Proxy object for a subscribed Prolog query that provides real-time updates
+ * 
+ * This class handles:
+ * - Keeping the subscription alive by sending periodic keepalive signals
+ * - Managing callbacks for result updates
+ * - Subscribing to query updates via GraphQL subscriptions
+ * - Maintaining the latest query result
+ * 
+ * The subscription will remain active as long as keepalive signals are sent.
+ * Make sure to call dispose() when you're done with the subscription to clean up
+ * resources and stop keepalive signals.
+ * 
+ * Example usage:
+ * ```typescript
+ * const subscription = await perspective.subscribeInfer("my_query(X)");
+ * console.log("Initial result:", subscription.result);
+ * 
+ * // Set up callback for updates
+ * const removeCallback = subscription.onResult(result => {
+ *     console.log("New result:", result);
+ * });
+ * 
+ * // Later: clean up
+ * subscription.dispose();
+ * ```
+ */
+export class QuerySubscriptionProxy {
+    #uuid: string;
+    #subscriptionId: string;
+    #client: PerspectiveClient;
+    #callbacks: Set<QueryCallback>;
+    #keepaliveTimer: number;
+    #unsubscribe?: () => void;
+    #latestResult: string;
+    #disposed: boolean = false;
+
+    /** Creates a new query subscription
+     * @param uuid - The UUID of the perspective
+     * @param subscriptionId - The ID returned by the subscription mutation
+     * @param initialResult - The initial query result
+     * @param client - The PerspectiveClient instance to use for communication
+     */
+    constructor(uuid: string, subscriptionId: string, initialResult: string, client: PerspectiveClient) {
+        this.#uuid = uuid;
+        this.#subscriptionId = subscriptionId;
+        this.#client = client;
+        this.#callbacks = new Set();
+        this.#latestResult = initialResult;
+
+        // Call all callbacks with initial result
+        this.#notifyCallbacks(initialResult);
+
+        // Subscribe to query updates
+        this.#unsubscribe = this.#client.subscribeToQueryUpdates(
+            this.#subscriptionId,
+            (result) => {
+                this.#latestResult = result;
+                this.#notifyCallbacks(result);
+            }
+        );
+
+        // Start keepalive loop using platform-agnostic setTimeout
+        const keepaliveLoop = async () => {
+            if (this.#disposed) return;
+            
+            try {
+                await this.#client.keepAliveQuery(this.#uuid, this.#subscriptionId);
+            } catch (e) {
+                console.error('Error in keepalive:', e);
+            }
+
+            // Schedule next keepalive if not disposed
+            if (!this.#disposed) {
+                this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
+            }
+        };
+
+        // Start the first keepalive loop
+        this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
+    }
+
+    /** Get the latest query result
+     * 
+     * This returns the most recent result from the query, which could be either:
+     * - The initial result from when the subscription was created
+     * - The latest update received through the subscription
+     * 
+     * @returns The latest query result as a string (usually a JSON array of bindings)
+     */
+    get result(): string {
+        return this.#latestResult;
+    }
+
+    /** Add a callback that will be called whenever new results arrive
+     * 
+     * The callback will be called immediately with the current result,
+     * and then again each time the query results change.
+     * 
+     * @param callback - Function that takes a result string and processes it
+     * @returns A function that can be called to remove this callback
+     * 
+     * Example:
+     * ```typescript
+     * const removeCallback = subscription.onResult(result => {
+     *     const bindings = JSON.parse(result);
+     *     console.log("New bindings:", bindings);
+     * });
+     * 
+     * // Later: stop receiving updates
+     * removeCallback();
+     * ```
+     */
+    onResult(callback: QueryCallback): () => void {
+        this.#callbacks.add(callback);
+        return () => this.#callbacks.delete(callback);
+    }
+
+    /** Internal method to notify all callbacks of a new result */
+    #notifyCallbacks(result: string) {
+        for (const callback of this.#callbacks) {
+            try {
+                callback(result);
+            } catch (e) {
+                console.error('Error in query subscription callback:', e);
+            }
+        }
+    }
+
+    /** Clean up the subscription and stop keepalive signals
+     * 
+     * This method:
+     * 1. Stops the keepalive timer
+     * 2. Unsubscribes from GraphQL subscription updates
+     * 3. Clears all registered callbacks
+     * 
+     * After calling this method, the subscription is no longer active and
+     * will not receive any more updates. The instance should be discarded.
+     */
+    dispose() {
+        this.#disposed = true;
+        clearTimeout(this.#keepaliveTimer);
+        if (this.#unsubscribe) {
+            this.#unsubscribe();
+        }
+        this.#callbacks.clear();
+    }
+}
 
 type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
 
@@ -574,6 +731,22 @@ export class PerspectiveProxy {
 
     get ai(): AIClient {
         return this.#client.aiClient
+    }
+
+    /** Subscribe to a Prolog query and get updates when the results change.
+     * Returns a QuerySubscriptionProxy that handles keepalive and allows registering callbacks.
+     * The initial and subsequent results can be accessed via the result property.
+     * 
+     * Make sure to call dispose() on the subscription when you're done with it
+     */
+    async subscribeInfer(query: string): Promise<QuerySubscriptionProxy> {
+        const result = await this.#client.subscribeQuery(this.uuid, query);
+        return new QuerySubscriptionProxy(
+            this.uuid,
+            result.subscriptionId,
+            result.result,
+            this.#client
+        );
     }
 
 }
