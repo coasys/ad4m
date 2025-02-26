@@ -288,11 +288,9 @@ export default class PerspectiveResolver {
     @Subscription({
         topics: PERSPECTIVE_QUERY_SUBSCRIPTION,
         filter: ({ payload, args }) => 
-            payload.subscriptionId === args.subscriptionId && 
-            payload.uuid === args.uuid
+            payload.subscriptionId === args.subscriptionId
     })
     perspectiveQuerySubscription(
-        @Arg('uuid') uuid: string,
         @Arg('subscriptionId') subscriptionId: string,
         @Root() payload: { subscriptionId: string, uuid: string, result: string }
     ): string {

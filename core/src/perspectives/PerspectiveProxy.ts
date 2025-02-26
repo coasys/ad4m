@@ -69,12 +69,11 @@ export class QuerySubscriptionProxy {
         // Subscribe to query updates
         this.#subscription = (this.#client as any).apolloClient.subscribe({
             query: gql`
-                subscription perspectiveQuerySubscription($uuid: String!, $subscriptionId: String!) {
-                    perspectiveQuerySubscription(uuid: $uuid, subscriptionId: $subscriptionId)
+                subscription perspectiveQuerySubscription($subscriptionId: String!) {
+                    perspectiveQuerySubscription(subscriptionId: $subscriptionId)
                 }
             `,
             variables: {
-                uuid: this.#uuid,
                 subscriptionId: this.#subscriptionId
             }
         }).subscribe({

@@ -293,7 +293,6 @@ impl Subscription {
     async fn perspective_query_subscription(
         &self,
         context: &RequestContext,
-        uuid: String,
         subscription_id: String,
     ) -> Pin<Box<dyn Stream<Item = FieldResult<String>> + Send>> {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
