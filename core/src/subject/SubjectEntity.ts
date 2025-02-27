@@ -60,11 +60,9 @@ export class SubjectEntity {
     return this.#perspective;
   }
 
-  private async getData(id?: string) {
-    const tempId = id ?? this.#baseExpression;
-    let data = await this.#perspective.getSubjectData(this.#subjectClass, tempId)
+  private async getData() {
+    let data = await this.#perspective.getSubjectData(this.#subjectClass, this.#baseExpression)
     Object.assign(this, data);
-    this.#baseExpression = tempId;
     return this
   }
 
