@@ -21,6 +21,17 @@ export class SubjectEntity {
   author: string;
   timestamp: string;
 
+  static classNamesByPerspectiveID: { [key: string]: string } = {};
+
+  static async getClassName(perspective: PerspectiveProxy) {
+    const perspectiveID = perspective.uuid;
+    if (!this.classNamesByPerspectiveID[perspectiveID]) {
+      this.classNamesByPerspectiveID[perspectiveID] = await perspective.stringOrTemplateObjectToSubjectClass(this)
+    }
+
+    return this.classNamesByPerspectiveID[perspectiveID]
+  }
+
 
     /**
      * Constructs a new subject.
@@ -254,10 +265,10 @@ export class SubjectEntity {
   //   limit: 10,
   //   offset: 30,
   // }
-
+  
   static async all(perspective: PerspectiveProxy, query?: any) {
     console.log("SubjectEntity.all() query", query)
-    let subjectClass = await perspective.stringOrTemplateObjectToSubjectClass(this);
+    let subjectClass = await this.getClassName(perspective)
     
     // Build the base Prolog query
     let baseQuery = `subject_class("${subjectClass}", C), instance(C, Base)`;
