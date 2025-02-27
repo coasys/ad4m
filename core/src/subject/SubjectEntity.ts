@@ -60,10 +60,81 @@ export class SubjectEntity {
     return this.#perspective;
   }
 
+  private static async propertyGettersQuery(perspective: PerspectiveProxy) {
+    const subjectClass = await this.getClassName(perspective);
+    return `
+      subject_class("${subjectClass}", C),
+      property(C, PropertyName),
+      property_getter(C, Base, PropertyName, Value)
+    `;
+  }
+
   private async getData() {
-    let data = await this.#perspective.getSubjectData(this.#subjectClass, this.#baseExpression)
-    Object.assign(this, data);
-    return this
+    // Builds an object with all the properties of the subject and saves it to the instance
+    const prologQuery = `
+      findall([PropertyName, Value], (
+        % Constrain results to this instance
+        Base = "${this.#baseExpression}",
+        ${await SubjectEntity.propertyGettersQuery(this.#perspective)}
+      ), Properties)
+    `;
+    
+    const result = await this.#perspective.infer(prologQuery);
+    
+    if (result?.[0]?.Properties) {
+      // Map properties to object
+      const propsObj = {};
+      for (const [propName, value] of result[0].Properties) {
+        propsObj[propName] = value;
+      }
+      
+      Object.assign(this, propsObj);
+    }
+    
+    return this;
+  }
+
+  // static async findOne(perspective: PerspectiveProxy, query?: any) {
+  //   let prologQuery = await this.getPropertiesQuery(perspective);
+  //   const result = (await perspective.infer(prologQuery))[0];
+  // }
+
+  static async findAll(perspective: PerspectiveProxy, query?: any) {
+    // Find all instances of the subject entity that match the query
+    const prologQuery = `
+      findall([Base, Properties], (
+        % Get all instances of this class
+        subject_class("${await this.getClassName(perspective)}", C),
+        instance(C, Base),
+        
+        % For each instance, get all properties
+        findall([PropertyName, Value], (
+          ${await this.propertyGettersQuery(perspective)}
+        ), Properties)
+      ), AllInstances)
+    `;
+    
+    const result = await perspective.infer(prologQuery);
+    
+    if (!result?.[0]?.AllInstances) {
+      return [];
+    }
+    
+    // Map results to instances
+    return result[0].AllInstances.map(([base, properties]) => {
+      // Instantiate instance
+      const instance = new this(perspective, base);
+      
+      // Convert properties array to object
+      const propsObj = {};
+      for (const [propName, value] of properties) {
+        propsObj[propName] = value;
+      }
+      
+      // Assign properties to instance
+      Object.assign(instance, propsObj);
+      return instance;
+    });
   }
 
   private async setProperty(key: string, value: any) {

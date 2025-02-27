@@ -818,6 +818,49 @@ describe("Prolog + Literals", () => {
                     // @ts-ignore
                     expect(recipe2.timestamp).to.not.be.undefined;
                 })
+
+                it("get() returns all subject entity properties (via getData())", async () => {
+                    let root = Literal.from("getData test").toUrl()
+                    const recipe = new Recipe(perspective!, root)
+
+                    recipe.name = "recipe://getData_test";
+                    recipe.booleanTest = true;
+                    recipe.comments = ['recipe://comment1', 'recipe://comment2'];
+                    recipe.local = "recipe://local_test";
+                    recipe.resolve = "Resolved literal value";
+
+                    await recipe.save();
+
+                    const data = await recipe.get();
+
+                    expect(data.name).to.equal("recipe://getData_test");
+                    expect(data.booleanTest).to.equal(true);
+                    expect(data.comments).to.deep.equal(['recipe://comment1', 'recipe://comment2']);
+                    expect(data.local).to.equal("recipe://local_test");
+                    expect(data.resolve).to.equal("Resolved literal value");
+
+                    await recipe.delete();
+                })
+
+                it("findAll() returns populated instances", async () => {
+                    let root1 = Literal.from("findAll test 1").toUrl()
+                    let root2 = Literal.from("findAll test 2").toUrl()
+                    
+                    const recipe1 = new Recipe(perspective!, root1)
+                    recipe1.name = "recipe://findAll_test1";
+                    await recipe1.save();
+
+                    const recipe2 = new Recipe(perspective!, root2)
+                    recipe2.name = "recipe://findAll_test2";
+                    await recipe2.save();
+
+                    // Test findAll
+                    const recipes = await Recipe.findAll(perspective!, [root1, root2]);
+
+                    expect(recipes.length).to.equal(2);
+                    expect(recipes[0].name).to.equal("recipe://findAll_test1");
+                    expect(recipes[1].name).to.equal("recipe://findAll_test2");
+                })
             })
         })
     })
