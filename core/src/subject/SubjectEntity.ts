@@ -65,14 +65,15 @@ export class SubjectEntity {
     return `
       subject_class("${subjectClass}", C),
       property(C, PropertyName),
-      property_getter(C, Base, PropertyName, Value)
+      property_getter(C, Base, PropertyName, Value),
+      (property_resolve(C, PropertyName) -> Resolve = true ; Resolve = false)
     `;
   }
 
   private async getData() {
     // Builds an object with all the properties of the subject and saves it to the instance
     const prologQuery = `
-      findall([PropertyName, Value], (
+      findall([PropertyName, Value, Resolve], (
         % Constrain results to this instance
         Base = "${this.#baseExpression}",
         ${await SubjectEntity.propertyGettersQuery(this.#perspective)}
@@ -84,8 +85,11 @@ export class SubjectEntity {
     if (result?.[0]?.Properties) {
       // Map properties to object
       const propsObj = {};
-      for (const [propName, value] of result[0].Properties) {
+      for (const [propName, value, resolve] of result[0].Properties) {
         propsObj[propName] = value;
+        if (resolve) {
+          propsObj[propName] = await this.#perspective.getExpression(value)
+        }
       }
       
       Object.assign(this, propsObj);
@@ -334,7 +338,7 @@ export class SubjectEntity {
   //   limit: 10,
   //   offset: 30,
   // }
-  
+
   static async all(perspective: PerspectiveProxy, query?: any) {
     console.log("SubjectEntity.all() query", query)
     let subjectClass = await this.getClassName(perspective)
