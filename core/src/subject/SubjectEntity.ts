@@ -8,6 +8,8 @@ export type QueryPartialEntity<T> = {
   [P in keyof T]?: T[P] | (() => string);
 };
 
+type Property = [name: string, value: any, resolve: boolean];
+
 
 /**
  * Class representing a subject entity.
@@ -70,9 +72,24 @@ export class SubjectEntity {
     `;
   }
 
+  private static async mapPropertiesToInstance(perspective: PerspectiveProxy, instance: object, properties: Property[]) {
+    // Map properties to object
+    const propsObject = Object.fromEntries(
+      await Promise.all(
+        properties.map(async ([name, value, resolve]) => {
+          // Resolve the value if necessary
+          const finalValue = resolve ? (await perspective.getExpression(value)).data : value;
+          return [name, finalValue];
+        })
+      )
+    );
+
+    // Assign properties to instance
+    Object.assign(instance, propsObject);
+  }
+
   private async getData() {
     // Builds an object with all the properties of the subject and saves it to the instance
-
     const prologQuery = `
       findall([PropertyName, Value, Resolve], (
         % Constrain results to this instance
@@ -84,14 +101,7 @@ export class SubjectEntity {
     const result = await this.#perspective.infer(prologQuery);
     
     if (result?.[0]?.Properties) {
-      // Map properties to object
-      const propsObj = {};
-      for (const [propName, value, resolve] of result[0].Properties) {
-        propsObj[propName] = value;
-        if (resolve) propsObj[propName] = (await this.#perspective.getExpression(value)).data
-      }
-      
-      Object.assign(this, propsObj);
+      await SubjectEntity.mapPropertiesToInstance(this.#perspective, this, result[0].Properties);
     }
     
     return this;
@@ -126,21 +136,13 @@ export class SubjectEntity {
     }
     
     // Map results to instances
-    return await Promise.all(result[0].AllInstances.map(async([base, properties]) => {
-      // Instantiate instance
+    const allInstances = await Promise.all(result[0].AllInstances.map(async([base, properties]) => {
       const instance = new this(perspective, base);
-      
-      // Convert properties array to object
-      const propsObj = {};
-      for (const [propName, value, resolve] of properties) {
-        propsObj[propName] = value;
-        if (resolve) propsObj[propName] = (await perspective.getExpression(value)).data
-      }
-      
-      // Assign properties to instance
-      Object.assign(instance, propsObj);
+      await SubjectEntity.mapPropertiesToInstance(perspective, instance, properties);
       return instance;
     }));
+
+    return allInstances;
   }
 
   private async setProperty(key: string, value: any) {
