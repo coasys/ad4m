@@ -8,7 +8,7 @@ export type QueryPartialEntity<T> = {
   [P in keyof T]?: T[P] | (() => string);
 };
 
-type Property = [name: string, value: any, resolve: boolean];
+type ValueTuple = [name: string, value: any, resolve?: boolean];
 
 /**
  * Class representing a subject entity.
@@ -61,7 +61,7 @@ export class SubjectEntity {
     return this.#perspective;
   }
 
-  private static async propertyGettersQuery(subjectClassName: string) {
+  private static async propertyGetterQuery(subjectClassName: string) {
     return `
       subject_class("${subjectClassName}", C),
       property(C, PropertyName),
@@ -70,15 +70,23 @@ export class SubjectEntity {
     `;
   }
 
-  private static async mapPropertiesToInstance(
+  private static async collectionGetterQuery(subjectClassName: string) {
+    return `
+      subject_class("${subjectClassName}", C),
+      collection(C, CollectionName),
+      collection_getter(C, Base, CollectionName, Values)
+    `;
+  }
+
+  private static async assignValuesToInstance(
     perspective: PerspectiveProxy,
     instance: object,
-    properties: Property[]
+    values: ValueTuple[]
   ) {
     // Map properties to object
     const propsObject = Object.fromEntries(
       await Promise.all(
-        properties.map(async ([name, value, resolve]) => {
+        values.map(async ([name, value, resolve]) => {
           // Resolve the value if necessary
           const finalValue = resolve ? (await perspective.getExpression(value)).data : value;
           return [name, finalValue];
@@ -102,18 +110,23 @@ export class SubjectEntity {
       sort(AllLinks, SortedLinks),
       SortedLinks = [[Timestamp, Author]|_],
       
-      % Collect all properties
+      % Get properties
       findall([PropertyName, Value, Resolve], (
-        ${await SubjectEntity.propertyGettersQuery(this.#subjectClassName)}
-      ), Properties)
+        ${await SubjectEntity.propertyGetterQuery(this.#subjectClassName)}
+      ), Properties),
+
+      % Get collections
+      findall([CollectionName, Values], (
+        ${await SubjectEntity.collectionGetterQuery(this.#subjectClassName)}
+      ), Collections)
     `;
 
     const result = await this.#perspective.infer(prologQuery);
 
     if (result?.[0]) {
-      const { Properties, Timestamp, Author } = result?.[0]
-      const properties = [...Properties, ['timestamp', Timestamp], ['author', Author]]
-      await SubjectEntity.mapPropertiesToInstance(this.#perspective, this, properties);
+      const { Properties, Collections, Timestamp, Author } = result?.[0]
+      const values = [...Properties, ...Collections, ['timestamp', Timestamp], ['author', Author]]
+      await SubjectEntity.assignValuesToInstance(this.#perspective, this, values);
     }
 
     return this;
@@ -139,7 +152,7 @@ export class SubjectEntity {
         
         % For each instance, get all properties
         findall([PropertyName, Value, Resolve], (
-          ${await this.propertyGettersQuery(subjectClassName)}
+          ${await this.propertyGetterQuery(subjectClassName)}
         ), Properties)
       ), AllInstances)
     `;
@@ -152,7 +165,7 @@ export class SubjectEntity {
     const allInstances = await Promise.all(
       result[0].AllInstances.map(async ([base, properties]) => {
         const instance = new this(perspective, base);
-        await SubjectEntity.mapPropertiesToInstance(perspective, instance, properties);
+        await SubjectEntity.assignValuesToInstance(perspective, instance, properties);
         return instance;
       })
     );
