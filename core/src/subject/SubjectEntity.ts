@@ -63,16 +63,20 @@ export class SubjectEntity {
 
   private static async propertyGetterQuery() {
     return `
-      property(SubjectClass, PropertyName),
-      property_getter(SubjectClass, Base, PropertyName, Value),
-      (property_resolve(SubjectClass, PropertyName) -> Resolve = true ; Resolve = false)
+      findall([PropertyName, Value, Resolve], (
+        property(SubjectClass, PropertyName),
+        property_getter(SubjectClass, Base, PropertyName, Value),
+        (property_resolve(SubjectClass, PropertyName) -> Resolve = true ; Resolve = false)
+      ), Properties)
     `;
   }
 
   private static async collectionGetterQuery() {
     return `
-      collection(SubjectClass, CollectionName),
-      collection_getter(SubjectClass, Base, CollectionName, Values)
+      findall([CollectionName, Values], (
+        collection(SubjectClass, CollectionName),
+        collection_getter(SubjectClass, Base, CollectionName, Values)
+      ), Collections)
     `;
   }
 
@@ -110,14 +114,10 @@ export class SubjectEntity {
       SortedLinks = [[Timestamp, Author]|_],
       
       % Get properties
-      findall([PropertyName, Value, Resolve], (
-        ${await SubjectEntity.propertyGetterQuery()}
-      ), Properties),
+      ${await SubjectEntity.propertyGetterQuery()},
 
       % Get collections
-      findall([CollectionName, Values], (
-        ${await SubjectEntity.collectionGetterQuery()}
-      ), Collections)
+      ${await SubjectEntity.collectionGetterQuery()}
     `;
 
     const result = await this.#perspective.infer(prologQuery);
@@ -155,14 +155,10 @@ export class SubjectEntity {
         SortedLinks = [[Timestamp, Author]|_],
         
         % Get properties for each instance
-        findall([PropertyName, Value, Resolve], (
-          ${await this.propertyGetterQuery()}
-        ), Properties),
+        ${await SubjectEntity.propertyGetterQuery()},
 
         % Get collections for each instance
-        findall([CollectionName, Values], (
-          ${await this.collectionGetterQuery()}
-        ), Collections)
+        ${await SubjectEntity.collectionGetterQuery()}
       ), AllInstances)
     `;
 
