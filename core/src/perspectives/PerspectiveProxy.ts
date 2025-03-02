@@ -450,7 +450,7 @@ export class PerspectiveProxy {
         }
     }
 
-    async stringOrTemplateObjectToSubjectClass<T>(subjectClass: T): Promise<string> {
+    async stringOrTemplateObjectToSubjectClassName<T>(subjectClass: T): Promise<string> {
         if(typeof subjectClass === "string")
             return subjectClass
         else {
@@ -505,7 +505,7 @@ export class PerspectiveProxy {
      * @param exprAddr The address of the expression to be turned into a subject instance
      */
     async removeSubject<T>(subjectClass: T, exprAddr: string) {
-        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
+        let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
         let result = await this.infer(`subject_class("${className}", C), destructor(C, Actions)`)
         if(!result.length) {
             throw "No constructor found for given subject class: " + className
@@ -522,7 +522,7 @@ export class PerspectiveProxy {
      * that matches the given properties will be used.
     */
     async isSubjectInstance<T>(expression: string, subjectClass: T): Promise<boolean> {
-        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
+        let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
         let isInstance = false;
         const maxAttempts = 5;
         let attempts = 0;
@@ -549,7 +549,7 @@ export class PerspectiveProxy {
         if(!await this.isSubjectInstance(base, subjectClass)) {
             throw `Expression ${base} is not a subject instance of given class: ${JSON.stringify(subjectClass)}`
         }
-        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
+        let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
         let subject = new Subject(this, base, className)
         await subject.init()
         return subject as unknown as T

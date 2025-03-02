@@ -7,18 +7,18 @@ import { collectionSetterToName, collectionToAdderName, collectionToRemoverName,
  */
 export class Subject {
     #baseExpression: string;
-    #subjectClass: string;
+    #subjectClassName: string;
     #perspective: PerspectiveProxy
 
     /**
      * Constructs a new subject.
      * @param perspective - The perspective that the subject belongs to.
      * @param baseExpression - The base expression of the subject.
-     * @param subjectClass - The class of the subject.
+     * @param subjectClassName - The class name of the subject.
      */
-    constructor(perspective: PerspectiveProxy, baseExpression: string, subjectClass: string) {
+    constructor(perspective: PerspectiveProxy, baseExpression: string, subjectClassName: string) {
         this.#baseExpression = baseExpression
-        this.#subjectClass = subjectClass
+        this.#subjectClassName = subjectClassName
         this.#perspective = perspective
     }
 
@@ -36,21 +36,21 @@ export class Subject {
      */
     async init() {
         // Check if the subject is a valid instance of the subject class
-        let isInstance = await this.#perspective.isSubjectInstance(this.#baseExpression, this.#subjectClass)
+        let isInstance = await this.#perspective.isSubjectInstance(this.#baseExpression, this.#subjectClassName)
         if(!isInstance) {
-            throw `Not a valid subject instance of ${this.#subjectClass} for ${this.#baseExpression}`
+            throw `Not a valid subject instance of ${this.#subjectClassName} for ${this.#baseExpression}`
         }
 
         // Define properties and collections dynamically
-        let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property(C, Property)`)
+        let results = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), property(C, Property)`)
         let properties = results.map(result => result.Property)
         
         for(let p of properties) {
-            const resolveExpressionURI = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve(C, "${p}")`)
+            const resolveExpressionURI = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), property_resolve(C, "${p}")`)
             Object.defineProperty(this, p, {
                 configurable: true,
                 get: async () => {
-                    let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_getter(C, "${this.#baseExpression}", "${p}", Value)`)
+                    let results = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), property_getter(C, "${this.#baseExpression}", "${p}", Value)`)
                     if(results && results.length > 0) {
                         let expressionURI = results[0].Value
                         if(resolveExpressionURI) {
@@ -81,13 +81,13 @@ export class Subject {
         }
 
         // Define setters
-        const setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_setter(C, Property, Setter)`)
+        const setters = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), property_setter(C, Property, Setter)`)
 
         for(let setter of (setters ? setters : [])) {
             if(setter) {
                 const property = setter.Property
                 const actions = eval(setter.Setter)
-                const resolveLanguageResults = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve_language(C, "${property}", Language)`)
+                const resolveLanguageResults = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), property_resolve_language(C, "${property}", Language)`)
                 let resolveLanguage
                 if(resolveLanguageResults && resolveLanguageResults.length > 0) {
                     resolveLanguage = resolveLanguageResults[0].Language
@@ -102,7 +102,7 @@ export class Subject {
         }
         
         // Define collections
-        let results2 = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection(C, Collection)`)
+        let results2 = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), collection(C, Collection)`)
         if(!results2) results2 = []
         let collections = results2.map(result => result.Collection)
 
@@ -110,7 +110,7 @@ export class Subject {
             Object.defineProperty(this, c, {
                 configurable: true,
                 get: async () => {
-                    let results = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_getter(C, "${this.#baseExpression}", "${c}", Value)`)
+                    let results = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), collection_getter(C, "${this.#baseExpression}", "${c}", Value)`)
                     if(results && results.length > 0 && results[0].Value) {
                         let collectionContent = results[0].Value.filter((v: any) => v !== "" && v !== '')
                         return collectionContent
@@ -122,7 +122,7 @@ export class Subject {
         }
 
         // Define collection adders
-        let adders = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_adder(C, Collection, Adder)`)
+        let adders = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), collection_adder(C, Collection, Adder)`)
         if(!adders) adders = []
 
         for(let adder of adders) {
@@ -140,7 +140,7 @@ export class Subject {
         }
 
         // Define collection removers
-        let removers = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_remover(C, Collection, Remover)`)
+        let removers = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), collection_remover(C, Collection, Remover)`)
         if(!removers) removers = []
 
         for(let remover of removers) {
@@ -158,7 +158,7 @@ export class Subject {
         }
 
         // Define collection setters
-        let collectionSetters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_setter(C, Collection, Setter)`)
+        let collectionSetters = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), collection_setter(C, Collection, Setter)`)
         if(!collectionSetters) collectionSetters = []
 
         for(let collectionSetter of collectionSetters) {

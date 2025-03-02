@@ -15,7 +15,7 @@ export type QueryPartialEntity<T> = {
  */
 export class SubjectEntity {
   #baseExpression: string;
-  #subjectClass: string;
+  #subjectClassName: string;
   #source: string;
   #perspective: PerspectiveProxy
   author: string;
@@ -24,9 +24,10 @@ export class SubjectEntity {
   static classNamesByPerspectiveID: { [key: string]: string } = {};
 
   static async getClassName(perspective: PerspectiveProxy) {
+    // cache the class name for the perspective
     const perspectiveID = perspective.uuid;
     if (!this.classNamesByPerspectiveID[perspectiveID]) {
-      this.classNamesByPerspectiveID[perspectiveID] = await perspective.stringOrTemplateObjectToSubjectClass(this)
+      this.classNamesByPerspectiveID[perspectiveID] = await perspective.stringOrTemplateObjectToSubjectClassName(this)
     }
 
     return this.classNamesByPerspectiveID[perspectiveID]
@@ -60,10 +61,9 @@ export class SubjectEntity {
     return this.#perspective;
   }
 
-  private static async propertyGettersQuery(perspective: PerspectiveProxy) {
-    const subjectClass = await this.getClassName(perspective);
+  private static async propertyGettersQuery(subjectClassName: string) {
     return `
-      subject_class("${subjectClass}", C),
+      subject_class("${subjectClassName}", C),
       property(C, PropertyName),
       property_getter(C, Base, PropertyName, Value),
       (property_resolve(C, PropertyName) -> Resolve = true ; Resolve = false)
@@ -72,11 +72,12 @@ export class SubjectEntity {
 
   private async getData() {
     // Builds an object with all the properties of the subject and saves it to the instance
+
     const prologQuery = `
       findall([PropertyName, Value, Resolve], (
         % Constrain results to this instance
         Base = "${this.#baseExpression}",
-        ${await SubjectEntity.propertyGettersQuery(this.#perspective)}
+        ${await SubjectEntity.propertyGettersQuery(this.#subjectClassName)}
       ), Properties)
     `;
     
@@ -87,9 +88,7 @@ export class SubjectEntity {
       const propsObj = {};
       for (const [propName, value, resolve] of result[0].Properties) {
         propsObj[propName] = value;
-        if (resolve) {
-          propsObj[propName] = await this.#perspective.getExpression(value)
-        }
+        if (resolve) propsObj[propName] = (await this.#perspective.getExpression(value)).data
       }
       
       Object.assign(this, propsObj);
@@ -105,15 +104,17 @@ export class SubjectEntity {
 
   static async findAll(perspective: PerspectiveProxy, query?: any) {
     // Find all instances of the subject entity that match the query
+    const subjectClassName = await this.getClassName(perspective);
+
     const prologQuery = `
       findall([Base, Properties], (
         % Get all instances of this class
-        subject_class("${await this.getClassName(perspective)}", C),
+        subject_class("${subjectClassName}", C),
         instance(C, Base),
         
         % For each instance, get all properties
-        findall([PropertyName, Value], (
-          ${await this.propertyGettersQuery(perspective)}
+        findall([PropertyName, Value, Resolve], (
+          ${await this.propertyGettersQuery(subjectClassName)}
         ), Properties)
       ), AllInstances)
     `;
@@ -125,27 +126,28 @@ export class SubjectEntity {
     }
     
     // Map results to instances
-    return result[0].AllInstances.map(([base, properties]) => {
+    return await Promise.all(result[0].AllInstances.map(async([base, properties]) => {
       // Instantiate instance
       const instance = new this(perspective, base);
       
       // Convert properties array to object
       const propsObj = {};
-      for (const [propName, value] of properties) {
+      for (const [propName, value, resolve] of properties) {
         propsObj[propName] = value;
+        if (resolve) propsObj[propName] = (await perspective.getExpression(value)).data
       }
       
       // Assign properties to instance
       Object.assign(instance, propsObj);
       return instance;
-    });
+    }));
   }
 
   private async setProperty(key: string, value: any) {
-    const setters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_setter(C, "${key}", Setter)`)
+    const setters = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), property_setter(C, "${key}", Setter)`)
     if (setters && setters.length > 0) {
       const actions = eval(setters[0].Setter)
-      const resolveLanguageResults = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), property_resolve_language(C, "${key}", Language)`)
+      const resolveLanguageResults = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), property_resolve_language(C, "${key}", Language)`)
       let resolveLanguage
       if (resolveLanguageResults && resolveLanguageResults.length > 0) {
         resolveLanguage = resolveLanguageResults[0].Language
@@ -159,7 +161,7 @@ export class SubjectEntity {
   }
 
   private async setCollectionSetter(key: string, value: any) {
-    let collectionSetters = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_setter(C, "${singularToPlural(key)}", Setter)`)
+    let collectionSetters = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), collection_setter(C, "${singularToPlural(key)}", Setter)`)
     if (!collectionSetters) collectionSetters = []
 
     if (collectionSetters.length > 0) {
@@ -176,7 +178,7 @@ export class SubjectEntity {
   }
 
   private async setCollectionAdder(key: string, value: any) {
-    let adders = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_adder(C, "${singularToPlural(key)}", Adder)`)
+    let adders = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), collection_adder(C, "${singularToPlural(key)}", Adder)`)
     if (!adders) adders = []
 
     if (adders.length > 0) {
@@ -192,7 +194,7 @@ export class SubjectEntity {
   }
 
   private async setCollectionRemover(key: string, value: any) {
-    let removers = await this.#perspective.infer(`subject_class("${this.#subjectClass}", C), collection_remover(C, "${singularToPlural(key)}", Remover)`)
+    let removers = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), collection_remover(C, "${singularToPlural(key)}", Remover)`)
     if (!removers) removers = []
 
     if (removers.length > 0) {
@@ -219,8 +221,6 @@ export class SubjectEntity {
    * @throws Will throw an error if the subject entity cannot be converted to a subject class, or if the subject cannot be created, or if the link cannot be added, or if the subject entity cannot be updated.
    */
   async save() {
-    this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
-
     await this.#perspective.createSubject(this, this.#baseExpression);
 
     await this.#perspective.add(
@@ -246,10 +246,9 @@ export class SubjectEntity {
    * @throws Will throw an error if the subject entity cannot be converted to a subject class, or if a property cannot be set, or if a collection cannot be set, or if the data of the subject entity cannot be gotten.
    */
   async update() {
-    this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
+    this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this)
 
     const entries = Object.entries(this);
-
     for (const [key, value] of entries) {
       if (value !== undefined && value !== null) {
         if (value?.action) {
@@ -285,7 +284,7 @@ export class SubjectEntity {
    * @throws Will throw an error if the subject entity cannot be converted to a subject class, or if the data of the subject entity cannot be gotten.
    */
   async get() {
-    this.#subjectClass = await this.#perspective.stringOrTemplateObjectToSubjectClass(this)
+    this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this)
 
     return await this.getData()
   }
@@ -313,8 +312,8 @@ export class SubjectEntity {
    * @throws Will throw an error if the subject entity cannot be converted to a subject class, or if the subject proxies cannot be gotten.
    */
   // static async all(perspective: PerspectiveProxy) {
-  //   let subjectClass = await perspective.stringOrTemplateObjectToSubjectClass(this)
-  //   const proxies = await perspective.getAllSubjectProxies(subjectClass)
+  //   let subjectClassName = await perspective.stringOrTemplateObjectToSubjectClassName(this)
+  //   const proxies = await perspective.getAllSubjectProxies(subjectClassName)
 
   //   const instances = []
 
@@ -341,10 +340,10 @@ export class SubjectEntity {
 
   static async all(perspective: PerspectiveProxy, query?: any) {
     console.log("SubjectEntity.all() query", query)
-    let subjectClass = await this.getClassName(perspective)
+    let subjectClassName = await this.getClassName(perspective)
     
     // Build the base Prolog query
-    let baseQuery = `subject_class("${subjectClass}", C), instance(C, Base)`;
+    let baseQuery = `subject_class("${subjectClassName}", C), instance(C, Base)`;
     let selectProperties = [];
     let whereConditions = [];
     
@@ -359,7 +358,7 @@ export class SubjectEntity {
       } else {
         // If no attributes specified, get all properties of the subject class
         const propertiesQuery = `findall(Prop, property(C, Prop), Props)`;
-        const properties = await perspective.infer(`subject_class("${subjectClass}", C), ${propertiesQuery}`);
+        const properties = await perspective.infer(`subject_class("${subjectClassName}", C), ${propertiesQuery}`);
         
         if (properties && properties.length > 0 && properties[0].Props) {
           for (const prop of properties[0].Props) {
@@ -386,7 +385,7 @@ export class SubjectEntity {
     } else {
       // If no query specified, get all properties
       const propertiesQuery = `findall(Prop, property(C, Prop), Props)`;
-      const properties = await perspective.infer(`subject_class("${subjectClass}", C), ${propertiesQuery}`);
+      const properties = await perspective.infer(`subject_class("${subjectClassName}", C), ${propertiesQuery}`);
       
       if (properties && properties.length > 0 && properties[0].Props) {
         for (const prop of properties[0].Props) {
@@ -408,7 +407,7 @@ export class SubjectEntity {
         varToPropertyMap[varName] = attr;
       });
     } else {
-      const properties = await perspective.infer(`subject_class("${subjectClass}", C), findall(Prop, property(C, Prop), Props)`);
+      const properties = await perspective.infer(`subject_class("${subjectClassName}", C), findall(Prop, property(C, Prop), Props)`);
       if (properties && properties.length > 0 && properties[0].Props) {
         for (const prop of properties[0].Props) {
           const varName = prop.charAt(0).toUpperCase() + prop.slice(1);
@@ -520,10 +519,10 @@ export class SubjectEntity {
    */
   static async query(perspective: PerspectiveProxy, query?: SubjectEntityQueryParam) {
     const source = query?.source || "ad4m://self";
-    let subjectClass = await perspective.stringOrTemplateObjectToSubjectClass(this)
+    let subjectClassName = await perspective.stringOrTemplateObjectToSubjectClassName(this)
 
     let res = [];
-    let instanceConditions = `subject_class("${subjectClass}", C), instance(C, Base), link("${source}", Predicate, Base, Timestamp, Author)`
+    let instanceConditions = `subject_class("${subjectClassName}", C), instance(C, Base), link("${source}", Predicate, Base, Timestamp, Author)`
 
     if (query) {  
       if(query.where) {
