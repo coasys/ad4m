@@ -61,20 +61,18 @@ export class SubjectEntity {
     return this.#perspective;
   }
 
-  private static async propertyGetterQuery(subjectClassName: string) {
+  private static async propertyGetterQuery() {
     return `
-      subject_class("${subjectClassName}", C),
-      property(C, PropertyName),
-      property_getter(C, Base, PropertyName, Value),
-      (property_resolve(C, PropertyName) -> Resolve = true ; Resolve = false)
+      property(SubjectClass, PropertyName),
+      property_getter(SubjectClass, Base, PropertyName, Value),
+      (property_resolve(SubjectClass, PropertyName) -> Resolve = true ; Resolve = false)
     `;
   }
 
-  private static async collectionGetterQuery(subjectClassName: string) {
+  private static async collectionGetterQuery() {
     return `
-      subject_class("${subjectClassName}", C),
-      collection(C, CollectionName),
-      collection_getter(C, Base, CollectionName, Values)
+      collection(SubjectClass, CollectionName),
+      collection_getter(SubjectClass, Base, CollectionName, Values)
     `;
   }
 
@@ -102,8 +100,9 @@ export class SubjectEntity {
   private async getData() {
     // Builds an object with all the properties of the subject (including timestamp & author) and saves it to the instance
     const prologQuery = `
-      % Define Base
+      % Define the Base and SubjectClass
       Base = "${this.#baseExpression}",
+      subject_class("${this.#subjectClassName}", SubjectClass),
       
       % Get timestamp and author from earliest link mentioning this base
       findall([T, A], link(Base, _, _, T, A), AllLinks),
@@ -112,12 +111,12 @@ export class SubjectEntity {
       
       % Get properties
       findall([PropertyName, Value, Resolve], (
-        ${await SubjectEntity.propertyGetterQuery(this.#subjectClassName)}
+        ${await SubjectEntity.propertyGetterQuery()}
       ), Properties),
 
       % Get collections
       findall([CollectionName, Values], (
-        ${await SubjectEntity.collectionGetterQuery(this.#subjectClassName)}
+        ${await SubjectEntity.collectionGetterQuery()}
       ), Collections)
     `;
 
@@ -147,12 +146,12 @@ export class SubjectEntity {
     const prologQuery = `
       findall([Base, Properties], (
         % Get all instances of this class
-        subject_class("${subjectClassName}", C),
-        instance(C, Base),
+        subject_class("${subjectClassName}", SubjectClass),
+        instance(SubjectClass, Base),
         
         % For each instance, get all properties
         findall([PropertyName, Value, Resolve], (
-          ${await this.propertyGetterQuery(subjectClassName)}
+          ${await this.propertyGetterQuery()}
         ), Properties)
       ), AllInstances)
     `;
