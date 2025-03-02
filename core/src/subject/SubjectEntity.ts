@@ -144,7 +144,7 @@ export class SubjectEntity {
     const subjectClassName = await this.getClassName(perspective);
 
     const prologQuery = `
-      findall([Base, Properties], (
+      findall([Base, Properties, Collections], (
         % Get all instances of this class
         subject_class("${subjectClassName}", SubjectClass),
         instance(SubjectClass, Base),
@@ -152,7 +152,12 @@ export class SubjectEntity {
         % For each instance, get all properties
         findall([PropertyName, Value, Resolve], (
           ${await this.propertyGetterQuery()}
-        ), Properties)
+        ), Properties),
+
+        % For each instance, get all collections
+        findall([CollectionName, Values], (
+          ${await this.collectionGetterQuery()}
+        ), Collections)
       ), AllInstances)
     `;
 
@@ -162,9 +167,10 @@ export class SubjectEntity {
 
     // Map results to instances
     const allInstances = await Promise.all(
-      result[0].AllInstances.map(async ([base, properties]) => {
-        const instance = new this(perspective, base);
-        await SubjectEntity.assignValuesToInstance(perspective, instance, properties);
+      result[0].AllInstances.map(async ([Base, Properties, Collections]) => {
+        const instance = new this(perspective, Base);
+        const values = [...Properties, ...Collections];
+        await SubjectEntity.assignValuesToInstance(perspective, instance, values);
         return instance;
       })
     );
