@@ -90,20 +90,30 @@ export class SubjectEntity {
     Object.assign(instance, propsObject);
   }
 
+  // todo: only return Properties, Timestamp, & Author from prolog query (Base, AllLinks, and SortLinks not required)
   private async getData() {
-    // Builds an object with all the properties of the subject and saves it to the instance
+    // Builds an object with all the properties of the subject (including timestamp & author) and saves it to the instance
     const prologQuery = `
+      % Define Base
+      Base = "${this.#baseExpression}",
+      
+      % Get timestamp and author from earliest link mentioning this base
+      findall([T, A], link(Base, _, _, T, A), AllLinks),
+      sort(AllLinks, SortedLinks),
+      SortedLinks = [[Timestamp, Author]|_],
+      
+      % Collect all properties
       findall([PropertyName, Value, Resolve], (
-        % Constrain results to this instance
-        Base = "${this.#baseExpression}",
         ${await SubjectEntity.propertyGettersQuery(this.#subjectClassName)}
       ), Properties)
     `;
 
     const result = await this.#perspective.infer(prologQuery);
 
-    if (result?.[0]?.Properties) {
-      await SubjectEntity.mapPropertiesToInstance(this.#perspective, this, result[0].Properties);
+    if (result?.[0]) {
+      const { Properties, Timestamp, Author } = result?.[0]
+      const properties = [...Properties, ['timestamp', Timestamp], ['author', Author]]
+      await SubjectEntity.mapPropertiesToInstance(this.#perspective, this, properties);
     }
 
     return this;
@@ -114,6 +124,9 @@ export class SubjectEntity {
   //   const result = (await perspective.infer(prologQuery))[0];
   // }
 
+  // todo:
+  // + needs to include timestamp & author
+  // + add source prop
   static async findAll(perspective: PerspectiveProxy, query?: any) {
     // Find all instances of the subject entity that match the query
     const subjectClassName = await this.getClassName(perspective);
@@ -250,11 +263,7 @@ export class SubjectEntity {
     await this.#perspective.createSubject(this, this.#baseExpression);
 
     await this.#perspective.add(
-      new Link({
-        source: this.#source,
-        predicate: "ad4m://has_child",
-        target: this.baseExpression,
-      })
+      new Link({ source: this.#source, predicate: "ad4m://has_child", target: this.baseExpression })
     );
 
     await this.update();
