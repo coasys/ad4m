@@ -10,29 +10,47 @@ export type QueryPartialEntity<T> = {
 
 type ValueTuple = [name: string, value: any, resolve?: boolean];
 
+const AUTHOR = `
+  % Gets the author and timestamp of a SubjectEntity instance (based on the first link mentioning the base)
+  findall([A], link(Base, _, _, _, A), AllLinks),
+  sort(AllLinks, SortedLinks),
+  SortedLinks = [[Author]|_]
+`;
+
+const TIMESTAMP = `
+  % Gets the author and timestamp of a SubjectEntity instance (based on the first link mentioning the base)
+  findall([T], link(Base, _, _, T, _), AllLinks),
+  sort(AllLinks, SortedLinks),
+  SortedLinks = [[Timestamp]|_]
+`;
+
 const AUTHOR_AND_TIMESTAMP = `
   % Gets the author and timestamp of a SubjectEntity instance (based on the first link mentioning the base)
   findall([T, A], link(Base, _, _, T, A), AllLinks),
   sort(AllLinks, SortedLinks),
   SortedLinks = [[Timestamp, Author]|_]
-`
+`;
 
-const PROPERTIES = `
-  % Gets the name, value, and resolve boolean for each property on a SubjectEntity instance
-  findall([PropertyName, PropertyValue, Resolve], (
-    property(SubjectClass, PropertyName),
-    property_getter(SubjectClass, Base, PropertyName, PropertyValue),
-    (property_resolve(SubjectClass, PropertyName) -> Resolve = true ; Resolve = false)
-  ), Properties)
-`
+function buildPropertiesQuery(properties?: string[]) {
+  return `
+    % Gets the name, value, and resolve boolean for all (or some) properties on a SubjectEntity instance
+    findall([PropertyName, PropertyValue, Resolve], (
+      % Constrain to specified properties if provided
+      ${properties ? `member(PropertyName, [${properties.map((attr) => `"${attr}"`).join(", ")}]),` : ""}
+      property(SubjectClass, PropertyName),
+      property_getter(SubjectClass, Base, PropertyName, PropertyValue),
+      (property_resolve(SubjectClass, PropertyName) -> Resolve = true ; Resolve = false)
+    ), Properties)
+  `;
+}
 
-const COLLECTIONS = `
-  % Gets the name and array of values for each collection on a SubjectEntity instance
+const ALL_COLLECTIONS = `
+  % Gets the name and array of values for all collections on a SubjectEntity instance
   findall([CollectionName, CollectionValues], (
     collection(SubjectClass, CollectionName),
     collection_getter(SubjectClass, Base, CollectionName, CollectionValues)
   ), Collections)
-`
+`;
 
 /**
  * Class representing a subject entity.
@@ -87,7 +105,7 @@ export class SubjectEntity {
 
   private static async assignValuesToInstance(
     perspective: PerspectiveProxy,
-    instance: object,
+    instance: SubjectEntity,
     values: ValueTuple[]
   ) {
     // Map properties to object
@@ -111,15 +129,15 @@ export class SubjectEntity {
       Base = "${this.#baseExpression}",
       subject_class("${this.#subjectClassName}", SubjectClass),
       ${AUTHOR_AND_TIMESTAMP},
-      ${PROPERTIES},
-      ${COLLECTIONS}
+      ${buildPropertiesQuery()},
+      ${ALL_COLLECTIONS}
     `;
 
     const result = await this.#perspective.infer(prologQuery);
 
     if (result?.[0]) {
-      const { Properties, Collections, Timestamp, Author } = result?.[0]
-      const values = [...Properties, ...Collections, ['timestamp', Timestamp], ['author', Author]]
+      const { Properties, Collections, Timestamp, Author } = result?.[0];
+      const values = [...Properties, ...Collections, ["timestamp", Timestamp], ["author", Author]];
       await SubjectEntity.assignValuesToInstance(this.#perspective, this, values);
     }
 
@@ -132,19 +150,42 @@ export class SubjectEntity {
   // }
 
   // todo:
-  // + needs to include timestamp & author
   // + add source prop
+  // + get queries prop working with:
+  //    + collections
+  //    + where
+  //    + order
+  //    + limit
+  //    + offset
+  //    + include
   static async findAll(perspective: PerspectiveProxy, query?: any) {
     // Find all instances of the subject entity that match the query
     const subjectClassName = await this.getClassName(perspective);
+
+    // Set default queries
+    let propertiesQuery = buildPropertiesQuery();
+    let authorAndTimestampQuery = AUTHOR_AND_TIMESTAMP;
+
+    const requestedProperties = Array.isArray(query?.properties) ? query.properties : null;
+    if (requestedProperties) {
+      // Update properties query
+      propertiesQuery = buildPropertiesQuery(requestedProperties);
+      // Todo: update collections query
+      // Update author and timestamp query
+      const includeAuthor = requestedProperties.includes("author");
+      const includeTimestamp = requestedProperties.includes("timestamp");
+      if (includeAuthor && !includeTimestamp) authorAndTimestampQuery = AUTHOR;
+      else if (!includeAuthor && includeTimestamp) authorAndTimestampQuery = TIMESTAMP;
+      else if (!includeAuthor && !includeTimestamp) authorAndTimestampQuery = "";
+    }
+
+    const queries = [propertiesQuery, authorAndTimestampQuery].filter((q) => q);
 
     const prologQuery = `
       findall([Base, Properties, Collections, Timestamp, Author], (
         subject_class("${subjectClassName}", SubjectClass),
         instance(SubjectClass, Base),
-        ${AUTHOR_AND_TIMESTAMP},
-        ${PROPERTIES},
-        ${COLLECTIONS}
+        ${queries.join(", ")}
       ), AllInstances)
     `;
 
@@ -155,8 +196,17 @@ export class SubjectEntity {
     // Map results to instances
     const allInstances = await Promise.all(
       result[0].AllInstances.map(async ([Base, Properties, Collections, Timestamp, Author]) => {
-        const instance = new this(perspective, Base);
-        const values = [...Properties, ...Collections, ['timestamp', Timestamp], ['author', Author]];
+        const instance = new this(perspective, Base) as any;
+        if (requestedProperties) {
+          // remove unrequested attributes from instance
+          Object.keys(instance).forEach((key) => {
+            if (!requestedProperties.includes(key)) delete instance[key];
+          });
+        }
+        // const values = [...Properties, ...Collections, ['timestamp', Timestamp], ['author', Author]];
+        const values = [...Properties];
+        if (!requestedProperties || requestedProperties.includes("timestamp")) values.push(["timestamp", Timestamp]);
+        if (!requestedProperties || requestedProperties.includes("author")) values.push(["author", Author]);
         await SubjectEntity.assignValuesToInstance(perspective, instance, values);
         return instance;
       })

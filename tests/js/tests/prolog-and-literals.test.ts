@@ -929,6 +929,46 @@ describe("Prolog + Literals", () => {
                     await recipe1.delete();
                     await recipe2.delete();
                 })
+
+                it("findAll() works with properties query", async () => {
+                    // Clear all previous recipes
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of allRecipes) await recipe.delete();
+                    
+                    let root = Literal.from("findAll test 1").toUrl()
+                    const recipe = new Recipe(perspective!, root);
+                    recipe.name = "recipe://test_name";
+                    recipe.booleanTest = true;
+                    await recipe.save();
+
+                    const me = await ad4m!.agent.me();
+
+                    // Test recipes with all properties
+                    const recipesWithAllAttributes = await Recipe.findAll(perspective!);
+                    expect(recipesWithAllAttributes[0].name).to.equal("recipe://test_name")
+                    expect(recipesWithAllAttributes[0].booleanTest).to.equal(true)
+                    expect(recipesWithAllAttributes[0].author).to.equal(me!.did)
+                    
+                    // Test recipes with name only
+                    const recipesWithNameOnly = await Recipe.findAll(perspective!, { properties: ["name"] });
+                    expect(recipesWithNameOnly[0].name).to.equal("recipe://test_name")
+                    expect(recipesWithNameOnly[0].booleanTest).to.be.undefined
+                    expect(recipesWithNameOnly[0].author).to.be.undefined
+
+                    // Test recipes with name and booleanTest only
+                    const recipesWithTypeAndBooleanTestOnly = await Recipe.findAll(perspective!, { properties: ["name", "booleanTest"] });
+                    expect(recipesWithTypeAndBooleanTestOnly[0].name).to.equal("recipe://test_name")
+                    expect(recipesWithTypeAndBooleanTestOnly[0].booleanTest).to.equal(true)
+                    expect(recipesWithTypeAndBooleanTestOnly[0].author).to.be.undefined
+
+                    // Test recipes with author only
+                    const recipesWithAuthorOnly = await Recipe.findAll(perspective!, { properties: ["author"] });
+                    expect(recipesWithAuthorOnly[0].name).to.be.undefined
+                    expect(recipesWithAuthorOnly[0].booleanTest).to.be.undefined
+                    expect(recipesWithAuthorOnly[0].author).to.equal(me!.did)
+
+                    await recipe.delete();
+                })
             })
         })
     })
