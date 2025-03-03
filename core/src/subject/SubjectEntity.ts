@@ -19,18 +19,18 @@ const AUTHOR_AND_TIMESTAMP = `
 
 const PROPERTIES = `
   % Gets the name, value, and resolve boolean for each property on a SubjectEntity instance
-  findall([PropertyName, Value, Resolve], (
+  findall([PropertyName, PropertyValue, Resolve], (
     property(SubjectClass, PropertyName),
-    property_getter(SubjectClass, Base, PropertyName, Value),
+    property_getter(SubjectClass, Base, PropertyName, PropertyValue),
     (property_resolve(SubjectClass, PropertyName) -> Resolve = true ; Resolve = false)
   ), Properties)
 `
 
 const COLLECTIONS = `
   % Gets the name and array of values for each collection on a SubjectEntity instance
-  findall([CollectionName, Values], (
+  findall([CollectionName, CollectionValues], (
     collection(SubjectClass, CollectionName),
-    collection_getter(SubjectClass, Base, CollectionName, Values)
+    collection_getter(SubjectClass, Base, CollectionName, CollectionValues)
   ), Collections)
 `
 
@@ -106,7 +106,7 @@ export class SubjectEntity {
 
   // todo: only return Properties, Timestamp, & Author from prolog query (Base, AllLinks, and SortLinks not required)
   private async getData() {
-    // Builds an object with all the properties of the subject (including timestamp & author) and saves it to the instance
+    // Builds an object with all the author, timestamp, properties, & collections on the SubjectEntity and saves it to the instance
     const prologQuery = `
       Base = "${this.#baseExpression}",
       subject_class("${this.#subjectClassName}", SubjectClass),
@@ -140,11 +140,8 @@ export class SubjectEntity {
 
     const prologQuery = `
       findall([Base, Properties, Collections, Timestamp, Author], (
-        % Find all instances of this subject class
         subject_class("${subjectClassName}", SubjectClass),
         instance(SubjectClass, Base),
-      
-        % Include the author, timestamp, properties, and collections on each instance
         ${AUTHOR_AND_TIMESTAMP},
         ${PROPERTIES},
         ${COLLECTIONS}
