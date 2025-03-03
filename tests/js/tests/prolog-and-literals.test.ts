@@ -601,7 +601,6 @@ describe("Prolog + Literals", () => {
                         resolveLanguage: "literal"
                     })
                     resolve: string = ""
-
                 }
 
                 before(async () => {
@@ -643,7 +642,7 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("find()", async () => {
-                    const recipes = await Recipe.all(perspective!);
+                    const recipes = await Recipe.findAll(perspective!);
 
                     expect(recipes.length).to.equal(1)
                 })
@@ -661,7 +660,6 @@ describe("Prolog + Literals", () => {
                     const recipe2 = new Recipe(perspective!, root);
 
                     await recipe2.get();
-                    console.log("comments:", recipe2.comments)
 
                     expect(recipe2.comments.length).to.equal(2)
                 })
@@ -722,39 +720,39 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("delete()", async () => {
-                    const recipe2 = await Recipe.all(perspective!);
+                    const recipes = await Recipe.findAll(perspective!);
 
-                    expect(recipe2.length).to.equal(4)
+                    expect(recipes.length).to.equal(4)
 
-                    await recipe2[0].delete();
+                    await recipes[0].delete();
 
-                    const recipe3 = await Recipe.all(perspective!);
+                    const updatedRecipies = await Recipe.findAll(perspective!);
 
-                    expect(recipe3.length).to.equal(3)
+                    expect(updatedRecipies.length).to.equal(3)
                 })
 
                 it("can constrain collection entries through 'where' clause with prolog condition", async () => {
-                    let root = Literal.from("Active record implementation collection test with where").toUrl()
-                    const recipe = new Recipe(perspective!, root)
+                    let root = Literal.from("Active record implementation collection test with where").toUrl();
+                    const recipe = new Recipe(perspective!, root);
 
-                    let recipeEntries = Literal.from("test recipes").toUrl()
+                    let recipeEntries = Literal.from("test recipes").toUrl();
 
-                    recipe.entries = [recipeEntries]
+                    recipe.entries = [recipeEntries];
                     // @ts-ignore
-                    recipe.comments = ['recipe://test', 'recipe://test1']
+                    recipe.comments = ['recipe://test', 'recipe://test1'];
                     recipe.name = "recipe://collection_test";
 
-                    await recipe.save()
+                    await recipe.save();
 
-                    await perspective?.add(new Link({source: recipeEntries, predicate: "recipe://has_ingredient", target: "recipe://test"}))
+                    await perspective?.add(new Link({source: recipeEntries, predicate: "recipe://has_ingredient", target: "recipe://test"}));
 
-                    await recipe.get()
+                    await recipe.get();
 
                     const recipe2 = new Recipe(perspective!, root);
 
                     await recipe2.get();
 
-                    expect(recipe2.ingredients.length).to.equal(1)
+                    expect(recipe2.ingredients.length).to.equal(1);
                 })
 
                 it("can implement the resolveLanguage property type", async () => {
@@ -764,7 +762,6 @@ describe("Prolog + Literals", () => {
                     recipe.resolve = "Test name literal";
 
                     await recipe.save();
-                    await recipe.get();
 
                     //@ts-ignore
                     let links = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://resolve"}))
@@ -842,24 +839,95 @@ describe("Prolog + Literals", () => {
                     await recipe.delete();
                 })
 
-                it("findAll() returns populated instances", async () => {
+                it("findAll() returns properties on instances", async () => {
+                    // Clear all previous recipes
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of allRecipes) await recipe.delete();
+                    
                     let root1 = Literal.from("findAll test 1").toUrl()
                     let root2 = Literal.from("findAll test 2").toUrl()
                     
                     const recipe1 = new Recipe(perspective!, root1)
                     recipe1.name = "recipe://findAll_test1";
+                    recipe1.resolve = "Resolved literal value 1";
                     await recipe1.save();
 
                     const recipe2 = new Recipe(perspective!, root2)
                     recipe2.name = "recipe://findAll_test2";
+                    recipe2.resolve = "Resolved literal value 2";
                     await recipe2.save();
 
                     // Test findAll
-                    const recipes = await Recipe.findAll(perspective!, [root1, root2]);
+                    const recipes = await Recipe.findAll(perspective!);
 
                     expect(recipes.length).to.equal(2);
                     expect(recipes[0].name).to.equal("recipe://findAll_test1");
+                    expect(recipes[0].resolve).to.equal("Resolved literal value 1");
                     expect(recipes[1].name).to.equal("recipe://findAll_test2");
+                    expect(recipes[1].resolve).to.equal("Resolved literal value 2");
+
+                    await recipe1.delete();
+                    await recipe2.delete();
+                })
+
+                it("findAll() returns collections on instances", async () => {
+                    // Clear all previous recipes
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of allRecipes) await recipe.delete();
+                    
+                    let root1 = Literal.from("findAll test 1").toUrl()
+                    let root2 = Literal.from("findAll test 2").toUrl()
+                    
+                    const recipe1 = new Recipe(perspective!, root1)
+                    recipe1.comments = ["Recipe 1: Comment 1", "Recipe 1: Comment 2"];
+                    await recipe1.save();
+
+                    const recipe2 = new Recipe(perspective!, root2)
+                    recipe2.comments = ["Recipe 2: Comment 1", "Recipe 2: Comment 2"];
+                    await recipe2.save();
+
+                    // Test findAll
+                    const recipes = await Recipe.findAll(perspective!);
+
+                    expect(recipes.length).to.equal(2);
+                    expect(recipes[0].comments.length).to.equal(2);
+                    expect(recipes[0].comments[0]).to.equal("Recipe 1: Comment 1");
+                    expect(recipes[0].comments[1]).to.equal("Recipe 1: Comment 2");
+
+                    expect(recipes[1].comments.length).to.equal(2);
+                    expect(recipes[1].comments[0]).to.equal("Recipe 2: Comment 1");
+                    expect(recipes[1].comments[1]).to.equal("Recipe 2: Comment 2");
+
+                    await recipe1.delete();
+                    await recipe2.delete();
+                })
+
+                it("findAll() returns author & timestamp on instances", async () => {
+                    // Clear all previous recipes
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of allRecipes) await recipe.delete();
+                    
+                    let root1 = Literal.from("findAll test 1").toUrl()
+                    let root2 = Literal.from("findAll test 2").toUrl()
+                    
+                    const recipe1 = new Recipe(perspective!, root1);
+                    recipe1.name = "recipe://findAll_test1";
+                    await recipe1.save();
+
+                    const recipe2 = new Recipe(perspective!, root2);
+                    recipe2.name = "recipe://findAll_test2";
+                    await recipe2.save();
+
+                    const recipes = await Recipe.findAll(perspective!);
+
+                    const me = await ad4m!.agent.me();
+                    expect(recipes[0].author).to.equal(me!.did)
+                    expect(recipes[0].timestamp).to.not.be.undefined;
+                    expect(recipes[1].author).to.equal(me!.did)
+                    expect(recipes[1].timestamp).to.not.be.undefined;
+
+                    await recipe1.delete();
+                    await recipe2.delete();
                 })
             })
         })
