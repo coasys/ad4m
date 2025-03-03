@@ -10,30 +10,30 @@ export type QueryPartialEntity<T> = {
 
 type ValueTuple = [name: string, value: any, resolve?: boolean];
 
-const AUTHOR = `
-  % Gets the author and timestamp of a SubjectEntity instance (based on the first link mentioning the base)
-  findall([A], link(Base, _, _, _, A), AllLinks),
-  sort(AllLinks, SortedLinks),
-  SortedLinks = [[Author]|_]
-`;
+// todo: only return Timestamp & Author from query (Base, AllLinks, and SortLinks not required)
+function buildAuthorAndTimestampQuery(options?: string[]) {
+  // Gets the author and/or timestamp of a SubjectEntity instance (based on the first link mentioning the base)
+  // If no options are provided, both author and timestamp are included
+  const includeAuthor = !options || options.includes("author");
+  const includeTimestamp = !options || options.includes("timestamp");
 
-const TIMESTAMP = `
-  % Gets the author and timestamp of a SubjectEntity instance (based on the first link mentioning the base)
-  findall([T], link(Base, _, _, T, _), AllLinks),
-  sort(AllLinks, SortedLinks),
-  SortedLinks = [[Timestamp]|_]
-`;
+  if (!includeAuthor && !includeTimestamp) return "";
 
-const AUTHOR_AND_TIMESTAMP = `
-  % Gets the author and timestamp of a SubjectEntity instance (based on the first link mentioning the base)
-  findall([T, A], link(Base, _, _, T, A), AllLinks),
-  sort(AllLinks, SortedLinks),
-  SortedLinks = [[Timestamp, Author]|_]
-`;
+  const variables = [];
+  if (includeTimestamp) variables.push("Timestamp");
+  if (includeAuthor) variables.push("Author");
+
+  return `
+    findall([${variables.map((v) => v[0]).join(", ")}], link(Base, _, _, ${includeTimestamp ? "T" : "_"}, ${includeAuthor ? "A" : "_"}), AllLinks),
+    sort(AllLinks, SortedLinks),
+    SortedLinks = [[${variables.join(", ")}]|_]
+  `;
+}
 
 function buildPropertiesQuery(properties?: string[]) {
+  // Gets the name, value, and resolve boolean for all (or some) properties on a SubjectEntity instance
+  // If no properties are provided, all properties are included
   return `
-    % Gets the name, value, and resolve boolean for all (or some) properties on a SubjectEntity instance
     findall([PropertyName, PropertyValue, Resolve], (
       % Constrain to specified properties if provided
       ${properties ? `member(PropertyName, [${properties.map((name) => `"${name}"`).join(", ")}]),` : ""}
@@ -45,8 +45,9 @@ function buildPropertiesQuery(properties?: string[]) {
 }
 
 function buildCollectionsQuery(collections?: string[]) {
+  // Gets the name and array of values for all (or some) collections on a SubjectEntity instance
+  // If no collections are provided, all collections are included
   return `
-    % Gets the name and array of values for all (or some) collections on a SubjectEntity instance
     findall([CollectionName, CollectionValues], (
       % Constrain to specified collections if provided
       ${collections ? `member(CollectionName, [${collections.map((name) => `"${name}"`).join(", ")}]),` : ""}
@@ -126,18 +127,16 @@ export class SubjectEntity {
     Object.assign(instance, propsObject);
   }
 
-  // todo: only return Properties, Timestamp, & Author from prolog query (Base, AllLinks, and SortLinks not required)
   private async getData() {
-    // Builds an object with all the author, timestamp, properties, & collections on the SubjectEntity and saves it to the instance
-    const prologQuery = `
+    // Builds an object with the author, timestamp, all properties, & all collections on the SubjectEntity and saves it to the instance
+    const subQueries = [buildPropertiesQuery(), buildCollectionsQuery(), buildAuthorAndTimestampQuery()];
+    const fullQuery = `
       Base = "${this.#baseExpression}",
       subject_class("${this.#subjectClassName}", SubjectClass),
-      ${AUTHOR_AND_TIMESTAMP},
-      ${buildPropertiesQuery()},
-      ${buildCollectionsQuery()}
+      ${subQueries.join(", ")}
     `;
 
-    const result = await this.#perspective.infer(prologQuery);
+    const result = await this.#perspective.infer(fullQuery);
 
     if (result?.[0]) {
       const { Properties, Collections, Timestamp, Author } = result?.[0];
@@ -156,7 +155,6 @@ export class SubjectEntity {
   // todo:
   // + add source prop
   // + get queries prop working with:
-  //    + collections
   //    + where
   //    + order
   //    + limit
@@ -166,34 +164,21 @@ export class SubjectEntity {
     // Find all instances of the subject entity that match the query
     const subjectClassName = await this.getClassName(perspective);
 
-    // Set default queries
-    let propertiesQuery = buildPropertiesQuery();
-    let collectionsQuery = buildCollectionsQuery();
-    let authorAndTimestampQuery = AUTHOR_AND_TIMESTAMP;
-
-    // Update properties query
-    const requestedProperties = Array.isArray(query?.properties) ? query.properties : null;
-    if (requestedProperties) {
-      propertiesQuery = buildPropertiesQuery(requestedProperties);
-      // Update author and timestamp query
-      const includeAuthor = requestedProperties.includes("author");
-      const includeTimestamp = requestedProperties.includes("timestamp");
-      if (includeAuthor && !includeTimestamp) authorAndTimestampQuery = AUTHOR;
-      else if (!includeAuthor && includeTimestamp) authorAndTimestampQuery = TIMESTAMP;
-      else if (!includeAuthor && !includeTimestamp) authorAndTimestampQuery = "";
-    }
-
-    // Update collections query
-    const requestedCollections = Array.isArray(query?.collections) ? query.collections : null;
-    if (requestedCollections) collectionsQuery = buildCollectionsQuery(requestedCollections);
+    // Build sub queries
+    const requestedProperties = Array.isArray(query?.properties) ? query.properties : undefined;
+    const requestedCollections = Array.isArray(query?.collections) ? query.collections : undefined;
+    const subQueries = [
+      buildPropertiesQuery(requestedProperties),
+      buildAuthorAndTimestampQuery(requestedProperties),
+      buildCollectionsQuery(requestedCollections),
+    ];
 
     // Build full query
-    const subQueries = [propertiesQuery, collectionsQuery, authorAndTimestampQuery].filter((q) => q);
     const fullQuery = `
       findall([Base, Properties, Collections, Timestamp, Author], (
         subject_class("${subjectClassName}", SubjectClass),
         instance(SubjectClass, Base),
-        ${subQueries.join(", ")}
+        ${subQueries.filter((q) => q).join(", ")}
       ), AllInstances)
     `;
 
