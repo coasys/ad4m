@@ -969,6 +969,35 @@ describe("Prolog + Literals", () => {
 
                     await recipe.delete();
                 })
+
+                it("findAll() works with collections query", async () => {
+                    // Clear all previous recipes
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of allRecipes) await recipe.delete();
+                    
+                    let root = Literal.from("findAll test 1").toUrl()
+                    const recipe = new Recipe(perspective!, root);
+                    recipe.comments = ["Recipe 1: Comment 1", "Recipe 1: Comment 2"];
+                    recipe.entries = ["Recipe 1: Entry 1", "Recipe 1: Entry 2"];
+                    await recipe.save();
+
+                    // Test recipes with all collections
+                    const recipesWithAllCollections = await Recipe.findAll(perspective!);
+                    expect(recipesWithAllCollections[0].comments.length).to.equal(2)
+                    expect(recipesWithAllCollections[0].entries.length).to.equal(2)
+                    
+                    // Test recipes with comments only
+                    const recipesWithCommentsOnly = await Recipe.findAll(perspective!, { collections: ["comments"] });
+                    expect(recipesWithCommentsOnly[0].comments.length).to.equal(2)
+                    expect(recipesWithCommentsOnly[0].entries).to.be.undefined
+
+                    // Test recipes with entries only
+                    const recipesWithEntriesOnly = await Recipe.findAll(perspective!, { collections: ["entries"] });
+                    expect(recipesWithEntriesOnly[0].comments).to.be.undefined
+                    expect(recipesWithEntriesOnly[0].entries.length).to.equal(2)
+
+                    await recipe.delete();
+                })
             })
         })
     })

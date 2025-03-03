@@ -36,7 +36,7 @@ function buildPropertiesQuery(properties?: string[]) {
     % Gets the name, value, and resolve boolean for all (or some) properties on a SubjectEntity instance
     findall([PropertyName, PropertyValue, Resolve], (
       % Constrain to specified properties if provided
-      ${properties ? `member(PropertyName, [${properties.map((attr) => `"${attr}"`).join(", ")}]),` : ""}
+      ${properties ? `member(PropertyName, [${properties.map((name) => `"${name}"`).join(", ")}]),` : ""}
       property(SubjectClass, PropertyName),
       property_getter(SubjectClass, Base, PropertyName, PropertyValue),
       (property_resolve(SubjectClass, PropertyName) -> Resolve = true ; Resolve = false)
@@ -44,13 +44,17 @@ function buildPropertiesQuery(properties?: string[]) {
   `;
 }
 
-const ALL_COLLECTIONS = `
-  % Gets the name and array of values for all collections on a SubjectEntity instance
-  findall([CollectionName, CollectionValues], (
-    collection(SubjectClass, CollectionName),
-    collection_getter(SubjectClass, Base, CollectionName, CollectionValues)
-  ), Collections)
-`;
+function buildCollectionsQuery(collections?: string[]) {
+  return `
+    % Gets the name and array of values for all (or some) collections on a SubjectEntity instance
+    findall([CollectionName, CollectionValues], (
+      % Constrain to specified collections if provided
+      ${collections ? `member(CollectionName, [${collections.map((name) => `"${name}"`).join(", ")}]),` : ""}
+      collection(SubjectClass, CollectionName),
+      collection_getter(SubjectClass, Base, CollectionName, CollectionValues)
+    ), Collections)
+  `;
+}
 
 /**
  * Class representing a subject entity.
@@ -130,7 +134,7 @@ export class SubjectEntity {
       subject_class("${this.#subjectClassName}", SubjectClass),
       ${AUTHOR_AND_TIMESTAMP},
       ${buildPropertiesQuery()},
-      ${ALL_COLLECTIONS}
+      ${buildCollectionsQuery()}
     `;
 
     const result = await this.#perspective.infer(prologQuery);
@@ -164,13 +168,13 @@ export class SubjectEntity {
 
     // Set default queries
     let propertiesQuery = buildPropertiesQuery();
+    let collectionsQuery = buildCollectionsQuery();
     let authorAndTimestampQuery = AUTHOR_AND_TIMESTAMP;
 
+    // Update properties query
     const requestedProperties = Array.isArray(query?.properties) ? query.properties : null;
     if (requestedProperties) {
-      // Update properties query
       propertiesQuery = buildPropertiesQuery(requestedProperties);
-      // Todo: update collections query
       // Update author and timestamp query
       const includeAuthor = requestedProperties.includes("author");
       const includeTimestamp = requestedProperties.includes("timestamp");
@@ -179,32 +183,36 @@ export class SubjectEntity {
       else if (!includeAuthor && !includeTimestamp) authorAndTimestampQuery = "";
     }
 
-    const queries = [propertiesQuery, authorAndTimestampQuery].filter((q) => q);
+    // Update collections query
+    const requestedCollections = Array.isArray(query?.collections) ? query.collections : null;
+    if (requestedCollections) collectionsQuery = buildCollectionsQuery(requestedCollections);
 
-    const prologQuery = `
+    // Build full query
+    const subQueries = [propertiesQuery, collectionsQuery, authorAndTimestampQuery].filter((q) => q);
+    const fullQuery = `
       findall([Base, Properties, Collections, Timestamp, Author], (
         subject_class("${subjectClassName}", SubjectClass),
         instance(SubjectClass, Base),
-        ${queries.join(", ")}
+        ${subQueries.join(", ")}
       ), AllInstances)
     `;
 
-    const result = await perspective.infer(prologQuery);
+    const result = await perspective.infer(fullQuery);
 
     if (!result?.[0]?.AllInstances) return [];
 
     // Map results to instances
+    const requestedAttribtes = [...(requestedProperties || []), ...(requestedCollections || [])];
     const allInstances = await Promise.all(
       result[0].AllInstances.map(async ([Base, Properties, Collections, Timestamp, Author]) => {
         const instance = new this(perspective, Base) as any;
-        if (requestedProperties) {
+        if (requestedAttribtes.length) {
           // remove unrequested attributes from instance
           Object.keys(instance).forEach((key) => {
-            if (!requestedProperties.includes(key)) delete instance[key];
+            if (!requestedAttribtes.includes(key)) delete instance[key];
           });
         }
-        // const values = [...Properties, ...Collections, ['timestamp', Timestamp], ['author', Author]];
-        const values = [...Properties];
+        const values = [...Properties, ...Collections];
         if (!requestedProperties || requestedProperties.includes("timestamp")) values.push(["timestamp", Timestamp]);
         if (!requestedProperties || requestedProperties.includes("author")) values.push(["author", Author]);
         await SubjectEntity.assignValuesToInstance(perspective, instance, values);
