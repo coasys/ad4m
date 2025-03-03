@@ -10,6 +10,30 @@ export type QueryPartialEntity<T> = {
 
 type ValueTuple = [name: string, value: any, resolve?: boolean];
 
+const AUTHOR_AND_TIMESTAMP = `
+  % Gets the author and timestamp of a SubjectEntity instance (based on the first link mentioning the base)
+  findall([T, A], link(Base, _, _, T, A), AllLinks),
+  sort(AllLinks, SortedLinks),
+  SortedLinks = [[Timestamp, Author]|_]
+`
+
+const PROPERTIES = `
+  % Gets the name, value, and resolve boolean for each property on a SubjectEntity instance
+  findall([PropertyName, Value, Resolve], (
+    property(SubjectClass, PropertyName),
+    property_getter(SubjectClass, Base, PropertyName, Value),
+    (property_resolve(SubjectClass, PropertyName) -> Resolve = true ; Resolve = false)
+  ), Properties)
+`
+
+const COLLECTIONS = `
+  % Gets the name and array of values for each collection on a SubjectEntity instance
+  findall([CollectionName, Values], (
+    collection(SubjectClass, CollectionName),
+    collection_getter(SubjectClass, Base, CollectionName, Values)
+  ), Collections)
+`
+
 /**
  * Class representing a subject entity.
  * Can extend this class to create a new subject entity to add methods interact with SDNA and much better experience then using the bare bone methods.
@@ -61,33 +85,6 @@ export class SubjectEntity {
     return this.#perspective;
   }
 
-  private static authorAndTimeStampQuery() {
-    return `
-      findall([T, A], link(Base, _, _, T, A), AllLinks),
-      sort(AllLinks, SortedLinks),
-      SortedLinks = [[Timestamp, Author]|_]
-    `;
-  }
-
-  private static propertyGetterQuery() {
-    return `
-      findall([PropertyName, Value, Resolve], (
-        property(SubjectClass, PropertyName),
-        property_getter(SubjectClass, Base, PropertyName, Value),
-        (property_resolve(SubjectClass, PropertyName) -> Resolve = true ; Resolve = false)
-      ), Properties)
-    `;
-  }
-
-  private static collectionGetterQuery() {
-    return `
-      findall([CollectionName, Values], (
-        collection(SubjectClass, CollectionName),
-        collection_getter(SubjectClass, Base, CollectionName, Values)
-      ), Collections)
-    `;
-  }
-
   private static async assignValuesToInstance(
     perspective: PerspectiveProxy,
     instance: object,
@@ -111,18 +108,11 @@ export class SubjectEntity {
   private async getData() {
     // Builds an object with all the properties of the subject (including timestamp & author) and saves it to the instance
     const prologQuery = `
-      % Define the Base and SubjectClass
       Base = "${this.#baseExpression}",
       subject_class("${this.#subjectClassName}", SubjectClass),
-      
-      % Get timestamp and author from earliest link mentioning this base
-      ${SubjectEntity.authorAndTimeStampQuery()},
-      
-      % Get properties
-      ${SubjectEntity.propertyGetterQuery()},
-
-      % Get collections
-      ${SubjectEntity.collectionGetterQuery()}
+      ${AUTHOR_AND_TIMESTAMP},
+      ${PROPERTIES},
+      ${COLLECTIONS}
     `;
 
     const result = await this.#perspective.infer(prologQuery);
@@ -150,18 +140,14 @@ export class SubjectEntity {
 
     const prologQuery = `
       findall([Base, Properties, Collections, Timestamp, Author], (
-        % Get all instances of this class
+        % Find all instances of this subject class
         subject_class("${subjectClassName}", SubjectClass),
         instance(SubjectClass, Base),
-
-        % Get timestamp and author for each instance
-         ${SubjectEntity.authorAndTimeStampQuery()},
-        
-        % Get properties for each instance
-        ${SubjectEntity.propertyGetterQuery()},
-
-        % Get collections for each instance
-        ${SubjectEntity.collectionGetterQuery()}
+      
+        % Include the author, timestamp, properties, and collections on each instance
+        ${AUTHOR_AND_TIMESTAMP},
+        ${PROPERTIES},
+        ${COLLECTIONS}
       ), AllInstances)
     `;
 
