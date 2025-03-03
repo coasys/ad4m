@@ -61,7 +61,15 @@ export class SubjectEntity {
     return this.#perspective;
   }
 
-  private static async propertyGetterQuery() {
+  private static authorAndTimeStampQuery() {
+    return `
+      findall([T, A], link(Base, _, _, T, A), AllLinks),
+      sort(AllLinks, SortedLinks),
+      SortedLinks = [[Timestamp, Author]|_]
+    `;
+  }
+
+  private static propertyGetterQuery() {
     return `
       findall([PropertyName, Value, Resolve], (
         property(SubjectClass, PropertyName),
@@ -71,7 +79,7 @@ export class SubjectEntity {
     `;
   }
 
-  private static async collectionGetterQuery() {
+  private static collectionGetterQuery() {
     return `
       findall([CollectionName, Values], (
         collection(SubjectClass, CollectionName),
@@ -95,7 +103,6 @@ export class SubjectEntity {
         })
       )
     );
-
     // Assign properties to instance
     Object.assign(instance, propsObject);
   }
@@ -109,15 +116,13 @@ export class SubjectEntity {
       subject_class("${this.#subjectClassName}", SubjectClass),
       
       % Get timestamp and author from earliest link mentioning this base
-      findall([T, A], link(Base, _, _, T, A), AllLinks),
-      sort(AllLinks, SortedLinks),
-      SortedLinks = [[Timestamp, Author]|_],
+      ${SubjectEntity.authorAndTimeStampQuery()},
       
       % Get properties
-      ${await SubjectEntity.propertyGetterQuery()},
+      ${SubjectEntity.propertyGetterQuery()},
 
       % Get collections
-      ${await SubjectEntity.collectionGetterQuery()}
+      ${SubjectEntity.collectionGetterQuery()}
     `;
 
     const result = await this.#perspective.infer(prologQuery);
@@ -150,15 +155,13 @@ export class SubjectEntity {
         instance(SubjectClass, Base),
 
         % Get timestamp and author for each instance
-        findall([T, A], link(Base, _, _, T, A), AllLinks),
-        sort(AllLinks, SortedLinks),
-        SortedLinks = [[Timestamp, Author]|_],
+         ${SubjectEntity.authorAndTimeStampQuery()},
         
         % Get properties for each instance
-        ${await SubjectEntity.propertyGetterQuery()},
+        ${SubjectEntity.propertyGetterQuery()},
 
         % Get collections for each instance
-        ${await SubjectEntity.collectionGetterQuery()}
+        ${SubjectEntity.collectionGetterQuery()}
       ), AllInstances)
     `;
 
