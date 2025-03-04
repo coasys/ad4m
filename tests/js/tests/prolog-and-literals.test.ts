@@ -1042,6 +1042,49 @@ describe("Prolog + Literals", () => {
                     await recipe2.delete();
                     await recipe3.delete();
                 })
+
+                it("findAll() works with a mix of query constraints", async () => {
+                    // Clear previous recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+                    
+                    // Create recipies
+                    const recipe1 = new Recipe(perspective!);
+                    recipe1.name = "recipe://test_name_1";
+                    recipe1.booleanTest = true;
+                    recipe1.comments = ["Recipe 1: Comment 1", "Recipe 1: Comment 2"];
+                    recipe1.entries = ["Recipe 1: Entry 1", "Recipe 1: Entry 2"];
+                    await recipe1.save();
+
+                    const recipe2 = new Recipe(perspective!);
+                    recipe2.name = "recipe://test_name_2";
+                    recipe2.comments = ["Recipe 2: Comment 1", "Recipe 2: Comment 2"];
+                    recipe2.entries = ["Recipe 2: Entry 1", "Recipe 2: Entry 2"];
+                    await recipe2.save();
+
+                    // Check all recipes are there
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    expect(allRecipes.length).to.equal(2);
+
+                    // Test with where, properties, and collections
+                    const recipes1 = await Recipe.findAll(perspective!, { where: { name: "recipe://test_name_1" }, properties: ["name"], collections: ["comments"] });
+                    expect(recipes1.length).to.equal(1);
+                    expect(recipes1[0].name).to.equal("recipe://test_name_1");
+                    expect(recipes1[0].booleanTest).to.be.undefined;
+                    expect(recipes1[0].comments.length).to.equal(2);
+                    expect(recipes1[0].entries).to.be.undefined;
+
+                    // Test with different where, properties, and collections
+                    const recipes2 = await Recipe.findAll(perspective!, { where: { name: "recipe://test_name_2" }, properties: ["booleanTest"], collections: ["entries"] });
+                    expect(recipes2.length).to.equal(1);
+                    expect(recipes2[0].name).to.be.undefined;
+                    expect(recipes2[0].booleanTest).to.equal(false);
+                    expect(recipes2[0].comments).to.be.undefined;
+                    expect(recipes2[0].entries.length).to.equal(2);
+
+                    await recipe1.delete();
+                    await recipe2.delete();
+                })
             })
         })
     })
