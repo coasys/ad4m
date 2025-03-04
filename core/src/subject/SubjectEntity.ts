@@ -71,40 +71,53 @@ function buildCollectionsQuery(collections?: string[]): string {
   `;
 }
 
-// Todo: handle arrays of numbers (currently only works with strings)
+// Todo:
+// + handle arrays of numbers (currently only works with strings)
 function buildWhereQuery(where?: WhereCondition): string {
-  // Constrains the query to instances that match the provided conditions
+  // Constrains the query to instances that match the provided where conditions
   const conditions = [];
   if (where) {
     for (const [key, value] of Object.entries(where)) {
       if (typeof value === "object" && !Array.isArray(value)) {
         // Handle where operations
         if (value.not) {
-          if (["author", "timestamp"].includes(key)) {
-            // If the key is author or timestamp, constrain via prolog variables generated in buildAuthorAndTimestampQuery instead of using the property getter
-            conditions.push(`${capitalize(key)} \\= ${key === "author" ? `"${value.not}"` : value.not}`);
-          } else {
+          if (Array.isArray(value.not)) {
             // If the value is an array, ensure none of the properties in the array match the key
-            if (Array.isArray(value.not))
+            if (["author", "timestamp"].includes(key)) {
+              conditions.push(
+                `\\+ member(${capitalize(key)}, [${value.not.map((v) => (key === "author" ? `"${v}"` : v)).join(", ")}])`
+              );
+              // alternate valid approach (better for short lists: < 10 items)
+              // value.not.map((v) => `${capitalize(key)} \\= ${key === "author" ? `"${v}"` : v}`).join(", ")
+            } else {
               conditions.push(
                 `property_getter(SubjectClass, Base, "${key}", V), \\+ member(V, [${value.not.map((v) => `"${v}"`).join(", ")}])`
               );
+            }
+          } else {
             // Otherwise ensure the value does not match the key
+            if (["author", "timestamp"].includes(key))
+              conditions.push(`${capitalize(key)} \\= ${key === "author" ? `"${value.not}"` : value.not}`);
             else conditions.push(`\\+ property_getter(SubjectClass, Base, "${key}", "${value.not}")`);
           }
         }
       } else {
         // Handle standard equality conditions
-        if (["author", "timestamp"].includes(key)) {
-          // If the key is author or timestamp, constrain via prolog variables generated in buildAuthorAndTimestampQuery instead of using the property getter
-          conditions.push(`${capitalize(key)} = ${key === "author" ? `"${value}"` : value}`);
-        } else {
+        if (Array.isArray(value)) {
           // If the value is an array, ensure at least one property in the array matches the key
-          if (Array.isArray(value))
+          if (["author", "timestamp"].includes(key)) {
+            conditions.push(
+              `member(${capitalize(key)}, [${value.map((v) => (key === "author" ? `"${v}"` : v)).join(", ")}])`
+            );
+          } else {
             conditions.push(
               `property_getter(SubjectClass, Base, "${key}", V), member(V, [${value.map((v) => `"${v}"`).join(", ")}])`
             );
+          }
+        } else {
           // Otherwise ensure the value matches the key
+          if (["author", "timestamp"].includes(key))
+            conditions.push(`${capitalize(key)} = ${key === "author" ? `"${value}"` : value}`);
           else conditions.push(`property_getter(SubjectClass, Base, "${key}", "${value}")`);
         }
       }
