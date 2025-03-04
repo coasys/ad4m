@@ -11,6 +11,10 @@ export type QueryPartialEntity<T> = {
 type ValueTuple = [name: string, value: any, resolve?: boolean];
 type Query = { properties?: string[]; collections?: string[]; where?: { [key: string]: any } };
 
+function capitalize(word: string): string {
+  return word.charAt(0).toUpperCase() + word.slice(1);
+}
+
 // todo: only return Timestamp & Author from query (Base, AllLinks, and SortLinks not required)
 function buildAuthorAndTimestampQuery(options?: string[]): string {
   // Gets the author and/or timestamp of a SubjectEntity instance (based on the first link mentioning the base)
@@ -69,13 +73,18 @@ function buildWhereQuery(where?: any): string {
   const conditions = [];
   if (where) {
     for (const [key, value] of Object.entries(where)) {
-      // If the value is an array, ensure at least one property in the array matches the key
-      if (Array.isArray(value))
-        conditions.push(
-          `property_getter(SubjectClass, Base, "${key}", V), member(V, [${value.map((v) => `"${v}"`).join(", ")}])`
-        );
-      // Otherwise ensure the value matches the key
-      else conditions.push(`property_getter(SubjectClass, Base, "${key}", "${value}")`);
+      if (["author", "timestamp"].includes(key)) {
+        // If the key is author or timestamp, constrain via prolog variables generated in buildAuthorAndTimestampQuery instead of using the property getter
+        conditions.push(`${capitalize(key)} = ${key === "author" ? `"${value}"` : value}`);
+      } else {
+        // If the value is an array, ensure at least one property in the array matches the key
+        if (Array.isArray(value))
+          conditions.push(
+            `property_getter(SubjectClass, Base, "${key}", V), member(V, [${value.map((v) => `"${v}"`).join(", ")}])`
+          );
+        // Otherwise ensure the value matches the key
+        else conditions.push(`property_getter(SubjectClass, Base, "${key}", "${value}")`);
+      }
     }
   }
   return conditions.join(", ");
@@ -178,7 +187,7 @@ export class SubjectEntity {
   // todo:
   // + add source prop
   // + get queries prop working with:
-  //    + where
+  //    + where (handle does not equal & between)
   //    + order
   //    + limit
   //    + offset

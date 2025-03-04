@@ -1027,7 +1027,7 @@ describe("Prolog + Literals", () => {
                     expect(recipes1.length).to.equal(1);
 
                     // Test where with incorrect name
-                    const recipes2 = await Recipe.findAll(perspective!, { where: { name: "This should not be found" } });
+                    const recipes2 = await Recipe.findAll(perspective!, { where: { name: "This name doesn't exist" } });
                     expect(recipes2.length).to.equal(0);
 
                     // Test where with boolean
@@ -1037,6 +1037,25 @@ describe("Prolog + Literals", () => {
                     // Test where with an array of possible matches
                     const recipes4 = await Recipe.findAll(perspective!, { where: { name: ["recipe://test_name_1", "recipe://test_name_2"] } });
                     expect(recipes4.length).to.equal(2);
+
+                    // Test with author
+                    const me = await ad4m!.agent.me();
+                    // Test where with correct author
+                    const recipes5 = await Recipe.findAll(perspective!, { where: { author: me.did } });
+                    expect(recipes5.length).to.equal(3);
+                    // Test where with incorrect author
+                    const recipes6 = await Recipe.findAll(perspective!, { where: { author: "This author doesn't exist" } });
+                    expect(recipes6.length).to.equal(0);
+
+                    // Test with timestamp
+                    const correctTimestamp = allRecipes[0].timestamp;
+                    const incorrectTimestamp = new Date().getTime();
+                    // Test where with correct timestamp
+                    const recipes7 = await Recipe.findAll(perspective!, { where: { timestamp: correctTimestamp } });
+                    expect(recipes7.length).to.equal(1);
+                    // Test where with incorrect timestamp
+                    const recipes8 = await Recipe.findAll(perspective!, { where: { timestamp: incorrectTimestamp } });
+                    expect(recipes8.length).to.equal(0);
 
                     await recipe1.delete();
                     await recipe2.delete();
