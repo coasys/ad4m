@@ -998,6 +998,50 @@ describe("Prolog + Literals", () => {
 
                     await recipe.delete();
                 })
+
+                it("findAll() works with where query", async () => {
+                    // Clear previous recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+                    
+                    // Create recipies
+                    const recipe1 = new Recipe(perspective!);
+                    recipe1.name = "recipe://test_name_1";
+                    recipe1.booleanTest = true;
+                    await recipe1.save();
+
+                    const recipe2 = new Recipe(perspective!);
+                    recipe2.name = "recipe://test_name_2";
+                    await recipe2.save();
+
+                    const recipe3 = new Recipe(perspective!);
+                    recipe3.name = "recipe://test_name_3";
+                    await recipe3.save();
+
+                    // Check all recipes are there
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    expect(allRecipes.length).to.equal(3)
+
+                    // Test where with correct name
+                    const recipes1 = await Recipe.findAll(perspective!, { where: { name: "recipe://test_name_1" } });
+                    expect(recipes1.length).to.equal(1);
+
+                    // Test where with incorrect name
+                    const recipes2 = await Recipe.findAll(perspective!, { where: { name: "This should not be found" } });
+                    expect(recipes2.length).to.equal(0);
+
+                    // Test where with boolean
+                    const recipes3 = await Recipe.findAll(perspective!, { where: { booleanTest: true } });
+                    expect(recipes3.length).to.equal(1);
+
+                    // Test where with an array of possible matches
+                    const recipes4 = await Recipe.findAll(perspective!, { where: { name: ["recipe://test_name_1", "recipe://test_name_2"] } });
+                    expect(recipes4.length).to.equal(2);
+
+                    await recipe1.delete();
+                    await recipe2.delete();
+                    await recipe3.delete();
+                })
             })
         })
     })

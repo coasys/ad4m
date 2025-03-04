@@ -9,10 +9,10 @@ export type QueryPartialEntity<T> = {
 };
 
 type ValueTuple = [name: string, value: any, resolve?: boolean];
-type Query = { properties?: string[]; collections?: string[] };
+type Query = { properties?: string[]; collections?: string[]; where?: { [key: string]: any } };
 
 // todo: only return Timestamp & Author from query (Base, AllLinks, and SortLinks not required)
-function buildAuthorAndTimestampQuery(options?: string[]) {
+function buildAuthorAndTimestampQuery(options?: string[]): string {
   // Gets the author and/or timestamp of a SubjectEntity instance (based on the first link mentioning the base)
   // If no options are provided, both author and timestamp are included
   const includeAuthor = !options || options.includes("author");
@@ -35,7 +35,7 @@ function buildAuthorAndTimestampQuery(options?: string[]) {
   `;
 }
 
-function buildPropertiesQuery(properties?: string[]) {
+function buildPropertiesQuery(properties?: string[]): string {
   // Gets the name, value, and resolve boolean for all (or some) properties on a SubjectEntity instance
   // If no properties are provided, all are included
   return `
@@ -50,7 +50,7 @@ function buildPropertiesQuery(properties?: string[]) {
   `;
 }
 
-function buildCollectionsQuery(collections?: string[]) {
+function buildCollectionsQuery(collections?: string[]): string {
   // Gets the name and array of values for all (or some) collections on a SubjectEntity instance
   // If no collections are provided, all are included
   return `
@@ -62,6 +62,23 @@ function buildCollectionsQuery(collections?: string[]) {
       collection_getter(SubjectClass, Base, CollectionName, CollectionValues)
     ), Collections)
   `;
+}
+
+function buildWhereQuery(where?: any): string {
+  // Constrains the query to instances that match the provided conditions
+  const conditions = [];
+  if (where) {
+    for (const [key, value] of Object.entries(where)) {
+      // If the value is an array, ensure at least one property in the array matches the key
+      if (Array.isArray(value))
+        conditions.push(
+          `property_getter(SubjectClass, Base, "${key}", V), member(V, [${value.map((v) => `"${v}"`).join(", ")}])`
+        );
+      // Otherwise ensure the value matches the key
+      else conditions.push(`property_getter(SubjectClass, Base, "${key}", "${value}")`);
+    }
+  }
+  return conditions.join(", ");
 }
 
 /**
@@ -136,7 +153,7 @@ export class SubjectEntity {
 
   private async getData() {
     // Builds an object with the author, timestamp, all properties, & all collections on the SubjectEntity and saves it to the instance
-    const subQueries = [buildPropertiesQuery(), buildCollectionsQuery(), buildAuthorAndTimestampQuery()];
+    const subQueries = [buildAuthorAndTimestampQuery(), buildPropertiesQuery(), buildCollectionsQuery()];
     const fullQuery = `
       Base = "${this.#baseExpression}",
       subject_class("${this.#subjectClassName}", SubjectClass),
@@ -170,16 +187,13 @@ export class SubjectEntity {
   static async findAll(perspective: PerspectiveProxy, query?: Query) {
     // Finds all instances of the subject entity that match the query params
 
-    // Build sub queries
-    const requestedProperties = Array.isArray(query?.properties) ? query.properties : undefined;
-    const requestedCollections = Array.isArray(query?.collections) ? query.collections : undefined;
     const subQueries = [
-      buildPropertiesQuery(requestedProperties),
-      buildAuthorAndTimestampQuery(requestedProperties),
-      buildCollectionsQuery(requestedCollections),
+      buildAuthorAndTimestampQuery(query?.properties),
+      buildPropertiesQuery(query?.properties),
+      buildCollectionsQuery(query?.collections),
+      buildWhereQuery(query?.where),
     ];
 
-    // Build full query
     const fullQuery = `
       findall([Base, Properties, Collections, Timestamp, Author], (
         subject_class("${await this.getClassName(perspective)}", SubjectClass),
@@ -192,7 +206,7 @@ export class SubjectEntity {
     if (!result?.[0]?.AllInstances) return [];
 
     // Map results to instances
-    const requestedAttribtes = [...(requestedProperties || []), ...(requestedCollections || [])];
+    const requestedAttribtes = [...(query?.properties || []), ...(query?.collections || [])];
     const allInstances = await Promise.all(
       result[0].AllInstances.map(async ([Base, Properties, Collections, Timestamp, Author]) => {
         const instance = new this(perspective, Base) as any;
@@ -204,8 +218,8 @@ export class SubjectEntity {
         }
         // Collect values to assign to instance
         const values = [...Properties, ...Collections];
-        if (!requestedProperties || requestedProperties.includes("timestamp")) values.push(["timestamp", Timestamp]);
-        if (!requestedProperties || requestedProperties.includes("author")) values.push(["author", Author]);
+        if (!query?.properties || query.properties.includes("timestamp")) values.push(["timestamp", Timestamp]);
+        if (!query?.properties || query.properties.includes("author")) values.push(["author", Author]);
         await SubjectEntity.assignValuesToInstance(perspective, instance, values);
 
         return instance;
