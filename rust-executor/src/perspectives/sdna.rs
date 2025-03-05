@@ -242,7 +242,12 @@ string([C|Cs]) --> [C], string(Cs).
 
 literal_from_url(Url, Decoded, Scheme) :-
     phrase(parse_url(Scheme, Encoded), Url),
-    phrase(url_decode(Decoded), Encoded).
+    phrase(url_decode(StringValue), Encoded),
+    (Scheme = number ->
+        number_chars(Decoded, StringValue)
+    ;
+        Decoded = StringValue
+    ).
 
 % DCG rule to parse the URL
 parse_url(Scheme, Encoded) -->
