@@ -243,10 +243,17 @@ string([C|Cs]) --> [C], string(Cs).
 literal_from_url(Url, Decoded, Scheme) :-
     phrase(parse_url(Scheme, Encoded), Url),
     phrase(url_decode(StringValue), Encoded),
-    (Scheme = number ->
-        number_chars(Decoded, StringValue)
-    ;
-        Decoded = StringValue
+    (   Scheme = number 
+    ->  number_chars(Decoded, StringValue)
+    ;   (   Scheme = boolean
+        ->  (   StringValue = "true"
+            ->  Decoded = true
+            ;   StringValue = "false"
+            ->  Decoded = false
+            ;   Decoded = false  % Default for invalid boolean
+            )
+        ;   Decoded = StringValue  % For all other schemes
+        )
     ).
 
 % DCG rule to parse the URL
@@ -255,6 +262,7 @@ parse_url(Scheme, Encoded) -->
 
 scheme(string) --> "string".
 scheme(number) --> "number".
+scheme(boolean) --> "boolean".
 scheme(json) --> "json".
 
 url_decode([]) --> [].
