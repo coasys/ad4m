@@ -12,10 +12,16 @@ type ValueTuple = [name: string, value: any, resolve?: boolean];
 type WhereOperation = "not" | "lessThan" | "greaterThan" | "between"; // todo: greaterThanOrEqualTo, lessThanOrEqualTo
 type WhereValue = string | number | boolean | string[] | number[] | { [K in WhereOperation]?: any };
 type WhereCondition = { [key: string]: WhereValue };
-type Query = { properties?: string[]; collections?: string[]; where?: WhereCondition };
+type Query = { source?: string, properties?: string[]; collections?: string[]; where?: WhereCondition };
 
 function capitalize(word: string): string {
   return word.charAt(0).toUpperCase() + word.slice(1);
+}
+
+function buildSourceQuery(source?: string): string {
+  // Constrains the query to instances that have the provided source
+  if (!source) return "";
+  return `triple("${source}", "ad4m://has_child", Base)`;
 }
 
 // todo: only return Timestamp & Author from query (Base, AllLinks, and SortLinks not required)
@@ -265,13 +271,13 @@ export class SubjectEntity {
    */
   static async findAll(perspective: PerspectiveProxy, query?: Query) {
     // todo:
-    // + add source prop
     // + order
     // + limit
     // + offset
     // + include
 
     const subQueries = [
+      buildSourceQuery(query?.source),
       buildAuthorAndTimestampQuery(query?.properties),
       buildPropertiesQuery(query?.properties),
       buildCollectionsQuery(query?.collections),

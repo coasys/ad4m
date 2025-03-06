@@ -917,6 +917,41 @@ describe("Prolog + Literals", () => {
                     await recipe2.delete();
                 })
 
+                it("findAll() works with source prop", async () => {
+                    // Clear all previous recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+
+                    const source1 = Literal.from("Source 1").toUrl()
+                    const source2 = Literal.from("Source 2").toUrl()
+                    
+                    const recipe1 = new Recipe(perspective!, undefined, source1)
+                    recipe1.name = "Recipe 1: Name";
+                    await recipe1.save();
+
+                    const recipe2 = new Recipe(perspective!, undefined, source2)
+                    recipe2.name = "Recipe 2: Name";
+                    await recipe2.save();
+
+                    const recipe3 = new Recipe(perspective!, undefined, source2)
+                    recipe3.name = "Recipe 3: Name";
+                    await recipe3.save();
+
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    expect(allRecipes.length).to.equal(3);
+
+                    const source1Recipes = await Recipe.findAll(perspective!, { source: source1 });
+                    expect(source1Recipes.length).to.equal(1);
+                    expect(source1Recipes[0].name).to.equal("Recipe 1: Name");
+
+                    const source2Recipes = await Recipe.findAll(perspective!, { source: source2 });
+                    expect(source2Recipes.length).to.equal(2);
+
+                    await recipe1.delete();
+                    await recipe2.delete();
+                    await recipe3.delete();
+                })
+
                 it("findAll() works with properties query", async () => {
                     // Clear all previous recipes
                     const allRecipes = await Recipe.findAll(perspective!);
