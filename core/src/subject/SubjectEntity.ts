@@ -9,8 +9,8 @@ export type QueryPartialEntity<T> = {
 };
 
 type ValueTuple = [name: string, value: any, resolve?: boolean];
-type WhereOperation = "not"; // todo: between, greaterThan, lessThan, greaterThanOrEqualTo, lessThanOrEqualTo
-type WhereValue = string | number | boolean | string[] | { [K in WhereOperation]?: any };
+type WhereOperation = "not" | "lessThan" | "greaterThan" | "between"; // todo: greaterThanOrEqualTo, lessThanOrEqualTo
+type WhereValue = string | number | boolean | string[] | number[] | { [K in WhereOperation]?: any };
 type WhereCondition = { [key: string]: WhereValue };
 type Query = { properties?: string[]; collections?: string[]; where?: WhereCondition };
 
@@ -21,6 +21,7 @@ function capitalize(word: string): string {
 // todo: only return Timestamp & Author from query (Base, AllLinks, and SortLinks not required)
 function buildAuthorAndTimestampQuery(options?: string[]): string {
   // Gets the author and/or timestamp of a SubjectEntity instance (based on the first link mentioning the base)
+
   // If no options are provided, both author and timestamp are included
   const includeAuthor = !options || options.includes("author");
   const includeTimestamp = !options || options.includes("timestamp");
@@ -50,11 +51,28 @@ function buildPropertiesQuery(properties?: string[]): string {
       % Constrain to specified properties if provided
       ${properties ? `member(PropertyName, [${properties.map((name) => `"${name}"`).join(", ")}]),` : ""}
 
+      % Get the property name and resolve boolean
       property(SubjectClass, PropertyName),
       property_getter(SubjectClass, Base, PropertyName, PropertyValue),
       (property_resolve(SubjectClass, PropertyName) -> Resolve = true ; Resolve = false)
     ), Properties)
   `;
+
+  // Works with literal_from_url
+  // return `
+  //   findall([PropertyName, PropertyValue, Resolve], (
+  //     % Constrain to specified properties if provided
+  //     ${properties ? `member(PropertyName, [${properties.map((name) => `"${name}"`).join(", ")}]),` : ""}
+
+  //     % Get the property name, URI, and resolve boolean
+  //     property(SubjectClass, PropertyName),
+  //     property_getter(SubjectClass, Base, PropertyName, PropertyURI),
+  //     (property_resolve(SubjectClass, PropertyName) -> Resolve = true ; Resolve = false),
+
+  //     % Decode the property value from the URI
+  //     literal_from_url(PropertyURI, PropertyValue, _)
+  //   ), Properties)
+  // `;
 }
 
 function buildCollectionsQuery(collections?: string[]): string {
@@ -73,57 +91,117 @@ function buildCollectionsQuery(collections?: string[]): string {
 
 // Todo:
 // + handle arrays of numbers (currently only works with strings)
-function buildWhereQuery(where?: WhereCondition): string {
+// function buildWhereQuery(where?: WhereCondition): string {
+//   // Constrains the query to instances that match the provided where conditions
+//   const conditions = [];
+//   if (where) {
+//     for (const [key, value] of Object.entries(where)) {
+//       if (typeof value === "object" && !Array.isArray(value)) {
+//         // Handle where operations
+//         if (value.not) {
+//           if (Array.isArray(value.not)) {
+//             // If the value is an array, ensure none of the properties in the array match the key
+//             if (["author", "timestamp"].includes(key)) {
+//               conditions.push(
+//                 `\\+ member(${capitalize(key)}, [${value.not.map((v) => (key === "author" ? `"${v}"` : v)).join(", ")}])`
+//               );
+//               // alternate valid approach (better for short lists: < 10 items)
+//               // value.not.map((v) => `${capitalize(key)} \\= ${key === "author" ? `"${v}"` : v}`).join(", ")
+//             } else {
+//               conditions.push(
+//                 `property_getter(SubjectClass, Base, "${key}", V), \\+ member(V, [${value.not.map((v) => `"${v}"`).join(", ")}])`
+//               );
+//             }
+//           } else {
+//             // Otherwise ensure the value does not match the key
+//             if (["author", "timestamp"].includes(key))
+//               conditions.push(`${capitalize(key)} \\= ${key === "author" ? `"${value.not}"` : value.not}`);
+//             else conditions.push(`\\+ property_getter(SubjectClass, Base, "${key}", "${value.not}")`);
+//           }
+//         }
+//       } else {
+//         // Handle standard equality conditions
+//         if (Array.isArray(value)) {
+//           // If the value is an array, ensure at least one property in the array matches the key
+//           if (["author", "timestamp"].includes(key)) {
+//             conditions.push(
+//               `member(${capitalize(key)}, [${value.map((v) => (key === "author" ? `"${v}"` : v)).join(", ")}])`
+//             );
+//           } else {
+//             conditions.push(
+//               `property_getter(SubjectClass, Base, "${key}", V), member(V, [${value.map((v) => `"${v}"`).join(", ")}])`
+//             );
+//           }
+//         } else {
+//           // Otherwise ensure the value matches the key
+//           if (["author", "timestamp"].includes(key))
+//             conditions.push(`${capitalize(key)} = ${key === "author" ? `"${value}"` : value}`);
+//           else conditions.push(`property_getter(SubjectClass, Base, "${key}", "${value}")`);
+//         }
+//       }
+//     }
+//   }
+//   return conditions.join(", ");
+// }
+
+function buildWhereQuery(where: WhereCondition = {}): string {
   // Constrains the query to instances that match the provided where conditions
-  const conditions = [];
-  if (where) {
-    for (const [key, value] of Object.entries(where)) {
-      if (typeof value === "object" && !Array.isArray(value)) {
-        // Handle where operations
-        if (value.not) {
-          if (Array.isArray(value.not)) {
-            // If the value is an array, ensure none of the properties in the array match the key
-            if (["author", "timestamp"].includes(key)) {
-              conditions.push(
-                `\\+ member(${capitalize(key)}, [${value.not.map((v) => (key === "author" ? `"${v}"` : v)).join(", ")}])`
-              );
-              // alternate valid approach (better for short lists: < 10 items)
-              // value.not.map((v) => `${capitalize(key)} \\= ${key === "author" ? `"${v}"` : v}`).join(", ")
-            } else {
-              conditions.push(
-                `property_getter(SubjectClass, Base, "${key}", V), \\+ member(V, [${value.not.map((v) => `"${v}"`).join(", ")}])`
-              );
-            }
-          } else {
-            // Otherwise ensure the value does not match the key
-            if (["author", "timestamp"].includes(key))
-              conditions.push(`${capitalize(key)} \\= ${key === "author" ? `"${value.not}"` : value.not}`);
-            else conditions.push(`\\+ property_getter(SubjectClass, Base, "${key}", "${value.not}")`);
-          }
-        }
-      } else {
-        // Handle standard equality conditions
-        if (Array.isArray(value)) {
-          // If the value is an array, ensure at least one property in the array matches the key
-          if (["author", "timestamp"].includes(key)) {
-            conditions.push(
-              `member(${capitalize(key)}, [${value.map((v) => (key === "author" ? `"${v}"` : v)).join(", ")}])`
-            );
-          } else {
-            conditions.push(
-              `property_getter(SubjectClass, Base, "${key}", V), member(V, [${value.map((v) => `"${v}"`).join(", ")}])`
-            );
-          }
+
+  function formatValue(key, value) {
+    // Base format on type of value by default
+    let isString = typeof value === "string";
+    // Override for special fields
+    if (key === "author") isString = true;
+    if (key === "timestamp") isString = false;
+    // Wrap strings in quotes
+    return isString ? `"${value}"` : value;
+  }
+
+  return Object.entries(where)
+    .map(([key, value]) => {
+      const isSpecial = ["author", "timestamp"].includes(key); // Fields with special handling
+      const getter = `property_getter(SubjectClass, Base, "${key}", URI), literal_from_url(URI, V, _)`;
+
+      const condition = typeof value === "object" && !Array.isArray(value) ? value : {};
+      const { not, lessThan, greaterThan, between } = condition;
+      let constraint = value;
+      if (not !== undefined) constraint = not;
+      if (lessThan !== undefined) constraint = lessThan;
+      if (greaterThan !== undefined) constraint = greaterThan;
+      if (between !== undefined) constraint = between;
+
+      // Handle array values (e.g., { timestamp: ["123", "456"] } or { timestamp: { not: ["123", "456"] } })
+      if (Array.isArray(constraint)) {
+        const prefix = not !== undefined ? "\\+" : ""; // Negation prefix for "not in" list
+        const values = constraint.map((v) => formatValue(key, v)).join(", ");
+        if (isSpecial) {
+          if (between !== undefined)
+            return `${capitalize(key)} >= ${formatValue(key, between[0])}, ${capitalize(key)} =< ${formatValue(key, between[1])}`;
+          else return `${prefix} member(${capitalize(key)}, [${values}])`;
         } else {
-          // Otherwise ensure the value matches the key
-          if (["author", "timestamp"].includes(key))
-            conditions.push(`${capitalize(key)} = ${key === "author" ? `"${value}"` : value}`);
-          else conditions.push(`property_getter(SubjectClass, Base, "${key}", "${value}")`);
+          if (between !== undefined)
+            return `${getter}, V >= ${formatValue(key, between[0])}, V =< ${formatValue(key, between[1])}`;
+          else return `${getter}, ${prefix} member(V, [${values}])`;
         }
       }
-    }
-  }
-  return conditions.join(", ");
+
+      // Handle single-value conditions based on operator
+      if (isSpecial) {
+        // Special fields use direct field names with operators
+        const field = capitalize(key);
+        if (not !== undefined) return `${field} \\= ${formatValue(key, not)}`;
+        if (lessThan !== undefined) return `${field} < ${formatValue(key, lessThan)}`;
+        if (greaterThan !== undefined) return `${field} > ${formatValue(key, greaterThan)}`;
+        return `${field} = ${formatValue(key, constraint)}`; // Default to equality
+      }
+
+      // Non-special fields use property_getter with appropriate operator
+      if (not !== undefined) return `\\+ (${getter}, V = ${formatValue(key, not)})`;
+      if (lessThan !== undefined) return `${getter}, V < ${formatValue(key, lessThan)}`;
+      if (greaterThan !== undefined) return `${getter}, V > ${formatValue(key, greaterThan)}`;
+      return `${getter}, V = ${formatValue(key, constraint)}`; // Default to equality (todo: shouldn't default string with quotes - why it works with numbers atm)
+    })
+    .join(", ");
 }
 
 /**
@@ -182,6 +260,7 @@ export class SubjectEntity {
     instance: SubjectEntity,
     values: ValueTuple[]
   ) {
+    // console.log('values: ', values)
     // Map properties to object
     const propsObject = Object.fromEntries(
       await Promise.all(
@@ -192,6 +271,7 @@ export class SubjectEntity {
         })
       )
     );
+    // console.log('propsObject: ', propsObject)
     // Assign properties to instance
     Object.assign(instance, propsObject);
   }
@@ -246,6 +326,10 @@ export class SubjectEntity {
         ${subQueries.filter((q) => q).join(", ")}
       ), AllInstances)
     `;
+
+    if (query?.where) {
+      console.log("whereQuery!!!", buildWhereQuery(query?.where));
+    }
 
     const result = await perspective.infer(fullQuery);
     if (!result?.[0]?.AllInstances) return [];

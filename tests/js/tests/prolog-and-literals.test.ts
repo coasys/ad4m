@@ -570,6 +570,22 @@ describe("Prolog + Literals", () => {
                     })
                     booleanTest: boolean = false
 
+                    // used in where query tests
+                    // todo: allow boolean type and auto convert to URI
+                    @SubjectProperty({
+                        through: "recipe://boolean_test",
+                        writable: true,
+                    })
+                    boolean: string = ""
+
+                    // used in where query tests
+                    // todo: allow number type and auto convert to URI
+                    @SubjectProperty({
+                        through: "recipe://number",
+                        writable: true,
+                    })
+                    number: string = ""
+
                     //@ts-ignore
                     @SubjectCollection({ through: "recipe://entries" })
                     entries: string[] = []
@@ -1006,16 +1022,21 @@ describe("Prolog + Literals", () => {
                     
                     // Create recipies
                     const recipe1 = new Recipe(perspective!);
-                    recipe1.name = "recipe://test_name_1";
-                    recipe1.booleanTest = true;
+                    recipe1.name = Literal.from("Recipe 1: Name").toUrl();
+                    recipe1.number = Literal.from(5).toUrl();
+                    recipe1.boolean = Literal.from(true).toUrl();
                     await recipe1.save();
 
                     const recipe2 = new Recipe(perspective!);
-                    recipe2.name = "recipe://test_name_2";
+                    recipe2.name = Literal.from("Recipe 2: Name").toUrl();
+                    recipe2.number = Literal.from(10).toUrl();
+                    recipe2.boolean = Literal.from(true).toUrl();
                     await recipe2.save();
 
                     const recipe3 = new Recipe(perspective!);
-                    recipe3.name = "recipe://test_name_3";
+                    recipe3.name = Literal.from("Recipe 3: Name").toUrl();
+                    recipe3.number = Literal.from(15).toUrl();
+                    recipe3.boolean = Literal.from(false).toUrl();
                     await recipe3.save();
 
                     // Check all recipes are there
@@ -1023,7 +1044,7 @@ describe("Prolog + Literals", () => {
                     expect(allRecipes.length).to.equal(3)
 
                     // Test where with valid name
-                    const recipes1 = await Recipe.findAll(perspective!, { where: { name: "recipe://test_name_1" } });
+                    const recipes1 = await Recipe.findAll(perspective!, { where: { name: "Recipe 1: Name" } });
                     expect(recipes1.length).to.equal(1);
 
                     // Test where with invalid name
@@ -1031,35 +1052,39 @@ describe("Prolog + Literals", () => {
                     expect(recipes2.length).to.equal(0);
 
                     // Test where with boolean
-                    const recipes3 = await Recipe.findAll(perspective!, { where: { booleanTest: true } });
-                    expect(recipes3.length).to.equal(1);
+                    const recipes3 = await Recipe.findAll(perspective!, { where: { boolean: true } });
+                    expect(recipes3.length).to.equal(2);
+
+                    // Test where with number
+                    const recipes4 = await Recipe.findAll(perspective!, { where: { number: 5 } });
+                    expect(recipes4.length).to.equal(1);
 
                     // Test where with an array of possible matches
-                    const recipes4 = await Recipe.findAll(perspective!, { where: { name: ["recipe://test_name_1", "recipe://test_name_2"] } });
-                    expect(recipes4.length).to.equal(2);
+                    const recipes5 = await Recipe.findAll(perspective!, { where: { name: ["Recipe 1: Name", "Recipe 2: Name"] } });
+                    expect(recipes5.length).to.equal(2);
 
                     // Test where with author
                     const me = await ad4m!.agent.me();
                     // Test where with valid author
-                    const recipes5 = await Recipe.findAll(perspective!, { where: { author: me.did } });
-                    expect(recipes5.length).to.equal(3);
+                    const recipes6 = await Recipe.findAll(perspective!, { where: { author: me.did } });
+                    expect(recipes6.length).to.equal(3);
                     // Test where with invalid author
-                    const recipes6 = await Recipe.findAll(perspective!, { where: { author: "This author doesn't exist" } });
-                    expect(recipes6.length).to.equal(0);
+                    const recipes7 = await Recipe.findAll(perspective!, { where: { author: "This author doesn't exist" } });
+                    expect(recipes7.length).to.equal(0);
 
                     // Test where with timestamp
                     const validTimestamp1 = allRecipes[0].timestamp;
                     const validTimestamp2 = allRecipes[1].timestamp;
                     const invalidTimestamp = new Date().getTime();
                     // Test where with valid timestamp
-                    const recipes7 = await Recipe.findAll(perspective!, { where: { timestamp: validTimestamp1 } });
-                    expect(recipes7.length).to.equal(1);
+                    const recipes8 = await Recipe.findAll(perspective!, { where: { timestamp: validTimestamp1 } });
+                    expect(recipes8.length).to.equal(1);
                     // Test where with invalid timestamp
-                    const recipes8 = await Recipe.findAll(perspective!, { where: { timestamp: invalidTimestamp } });
-                    expect(recipes8.length).to.equal(0);
+                    const recipes9 = await Recipe.findAll(perspective!, { where: { timestamp: invalidTimestamp } });
+                    expect(recipes9.length).to.equal(0);
                     // Test where with an array of possible timestamp matches
-                    const recipes9 = await Recipe.findAll(perspective!, { where: { timestamp: [validTimestamp1, validTimestamp2] } });
-                    expect(recipes9.length).to.equal(2);
+                    const recipes10 = await Recipe.findAll(perspective!, { where: { timestamp: [validTimestamp1, validTimestamp2] } });
+                    expect(recipes10.length).to.equal(2);
 
                     await recipe1.delete();
                     await recipe2.delete();
@@ -1073,16 +1098,21 @@ describe("Prolog + Literals", () => {
                     
                     // Create recipies
                     const recipe1 = new Recipe(perspective!);
-                    recipe1.name = "recipe://test_name_1";
-                    recipe1.booleanTest = true;
+                    recipe1.name = Literal.from("Recipe 1: Name").toUrl();
+                    recipe1.number = Literal.from(5).toUrl();
+                    recipe1.boolean = Literal.from(true).toUrl();
                     await recipe1.save();
 
                     const recipe2 = new Recipe(perspective!);
-                    recipe2.name = "recipe://test_name_2";
+                    recipe2.name = Literal.from("Recipe 2: Name").toUrl();
+                    recipe2.number = Literal.from(10).toUrl();
+                    recipe2.boolean = Literal.from(true).toUrl();
                     await recipe2.save();
 
                     const recipe3 = new Recipe(perspective!);
-                    recipe3.name = "recipe://test_name_3";
+                    recipe3.name = Literal.from("Recipe 3: Name").toUrl();
+                    recipe3.number = Literal.from(15).toUrl();
+                    recipe3.boolean = Literal.from(false).toUrl();
                     await recipe3.save();
 
                     // Check all recipes are there
@@ -1095,7 +1125,7 @@ describe("Prolog + Literals", () => {
                     const validTimestamp3 = allRecipes[2].timestamp;
 
                     // Test not operation on standard property
-                    const recipes1 = await Recipe.findAll(perspective!, { where: { name: { not: "recipe://test_name_1" } } });
+                    const recipes1 = await Recipe.findAll(perspective!, { where: { name: { not: "Recipe 1: Name" } } });
                     expect(recipes1.length).to.equal(2);
 
                     // Test not operation on author
@@ -1108,14 +1138,85 @@ describe("Prolog + Literals", () => {
                     expect(recipes3.length).to.equal(2);
 
                     // Test not operation with an array of possible string matches
-                    const recipes4 = await Recipe.findAll(perspective!, { where: { name: { not: ["recipe://test_name_1", "recipe://test_name_2"] } } });
+                    const recipes4 = await Recipe.findAll(perspective!, { where: { name: { not: ["Recipe 1: Name", "Recipe 2: Name"] } } });
                     expect(recipes4.length).to.equal(1);
-                    expect(recipes4[0].name).to.equal("recipe://test_name_3");
+                    expect(recipes4[0].name).to.equal(Literal.from("Recipe 3: Name").toUrl());
 
                     // Test not operation with an array of possible timestamp matches
                     const recipes5 = await Recipe.findAll(perspective!, { where: { timestamp: { not: [validTimestamp1, validTimestamp2] } } });
                     expect(recipes5.length).to.equal(1);
                     expect(recipes5[0].timestamp).to.equal(validTimestamp3);
+
+                    await recipe1.delete();
+                    await recipe2.delete();
+                    await recipe3.delete();
+                })
+
+                it("findAll() works with where query lessThan & greaterThan operations", async () => {
+                    // Clear previous recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+
+                    // Create timestamps & recipes
+                    const start = new Date().getTime();
+
+                    const recipe1 = new Recipe(perspective!);
+                    recipe1.name = Literal.from("Recipe 1: Name").toUrl();
+                    recipe1.number = Literal.from(5).toUrl();
+                    await recipe1.save();
+
+                    const mid = new Date().getTime();
+
+                    const recipe2 = new Recipe(perspective!);
+                    recipe2.name = Literal.from("Recipe 2: Name").toUrl();
+                    recipe2.number = Literal.from(10).toUrl();
+                    await recipe2.save();
+
+                    const recipe3 = new Recipe(perspective!);
+                    recipe3.name = Literal.from("Recipe 3: Name").toUrl();
+                    recipe3.number = Literal.from(15).toUrl();
+                    await recipe3.save();
+
+                    const end = new Date().getTime();
+
+                    // Check all recipes are there
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    expect(allRecipes.length).to.equal(3);
+
+                    // 1. Number properties
+                    // Test greater than operation on number property
+                    const recipes1 = await Recipe.findAll(perspective!, { where: { number: { greaterThan: 7 } } });
+                    expect(recipes1.length).to.equal(2);
+
+                    // Test less than operation on number property
+                    const recipes2 = await Recipe.findAll(perspective!, { where: { number: { lessThan: 7 } } });
+                    expect(recipes2.length).to.equal(1);
+
+                    // Test between operation on number property
+                    const recipes3 = await Recipe.findAll(perspective!, { where: { number: { between: [0, 7] } } });
+                    expect(recipes3.length).to.equal(1);
+
+                    // Test between operation on number property with different values
+                    const recipes4 = await Recipe.findAll(perspective!, { where: { number: { between: [8, 20] } } });
+                    expect(recipes4.length).to.equal(2);
+
+
+                    // 2. Timestamps
+                    // Test greater than operation on timestamp
+                    const recipes5 = await Recipe.findAll(perspective!, { where: { timestamp: { greaterThan: mid } } });
+                    expect(recipes5.length).to.equal(2);
+
+                    // Test less than operation on timestamp
+                    const recipes6 = await Recipe.findAll(perspective!, { where: { timestamp: { lessThan: mid } } });
+                    expect(recipes6.length).to.equal(1);
+
+                    // Test between operation on timestamp
+                    const recipes7 = await Recipe.findAll(perspective!, { where: { timestamp: { between: [start, mid] } } });
+                    expect(recipes7.length).to.equal(1);
+
+                    // Test between operation on timestamp with different values
+                    const recipes8 = await Recipe.findAll(perspective!, { where: { timestamp: { between: [mid, end] } } });
+                    expect(recipes8.length).to.equal(2);
 
                     await recipe1.delete();
                     await recipe2.delete();
@@ -1129,14 +1230,15 @@ describe("Prolog + Literals", () => {
                     
                     // Create recipies
                     const recipe1 = new Recipe(perspective!);
-                    recipe1.name = "recipe://test_name_1";
-                    recipe1.booleanTest = true;
+                    recipe1.name = Literal.from("Recipe 1: Name").toUrl();
+                    recipe1.boolean = Literal.from(true).toUrl();
                     recipe1.comments = ["Recipe 1: Comment 1", "Recipe 1: Comment 2"];
                     recipe1.entries = ["Recipe 1: Entry 1", "Recipe 1: Entry 2"];
                     await recipe1.save();
 
                     const recipe2 = new Recipe(perspective!);
-                    recipe2.name = "recipe://test_name_2";
+                    recipe2.name = Literal.from("Recipe 2: Name").toUrl();;
+                    recipe2.boolean = Literal.from(false).toUrl();
                     recipe2.comments = ["Recipe 2: Comment 1", "Recipe 2: Comment 2"];
                     recipe2.entries = ["Recipe 2: Entry 1", "Recipe 2: Entry 2"];
                     await recipe2.save();
@@ -1146,18 +1248,18 @@ describe("Prolog + Literals", () => {
                     expect(allRecipes.length).to.equal(2);
 
                     // Test with where, properties, and collections
-                    const recipes1 = await Recipe.findAll(perspective!, { where: { name: "recipe://test_name_1" }, properties: ["name"], collections: ["comments"] });
+                    const recipes1 = await Recipe.findAll(perspective!, { where: { name: "Recipe 1: Name" }, properties: ["name"], collections: ["comments"] });
                     expect(recipes1.length).to.equal(1);
-                    expect(recipes1[0].name).to.equal("recipe://test_name_1");
-                    expect(recipes1[0].booleanTest).to.be.undefined;
+                    expect(recipes1[0].name).to.equal(Literal.from("Recipe 1: Name").toUrl());
+                    expect(recipes1[0].boolean).to.be.undefined;
                     expect(recipes1[0].comments.length).to.equal(2);
                     expect(recipes1[0].entries).to.be.undefined;
 
                     // Test with different where, properties, and collections
-                    const recipes2 = await Recipe.findAll(perspective!, { where: { name: "recipe://test_name_2" }, properties: ["booleanTest"], collections: ["entries"] });
+                    const recipes2 = await Recipe.findAll(perspective!, { where: { name: "Recipe 2: Name" }, properties: ["boolean"], collections: ["entries"] });
                     expect(recipes2.length).to.equal(1);
                     expect(recipes2[0].name).to.be.undefined;
-                    expect(recipes2[0].booleanTest).to.equal(false);
+                    expect(recipes2[0].boolean).to.equal(Literal.from(false).toUrl());
                     expect(recipes2[0].comments).to.be.undefined;
                     expect(recipes2[0].entries.length).to.equal(2);
 
