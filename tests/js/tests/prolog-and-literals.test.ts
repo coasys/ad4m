@@ -1276,6 +1276,22 @@ describe("Prolog + Literals", () => {
                     await recipe1.delete();
                     await recipe2.delete();
                 })
+
+                it("findAll() works with constraining resolved literal properties", async () => {
+                    // Clear previous recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+                    
+                    // Create a recipe with a resolved literal property
+                    const recipe = new Recipe(perspective!);
+                    recipe.resolve = "Hello World"
+                    await recipe.save();
+
+                    // Test with resolved literal property
+                    const recipes1 = await Recipe.findAll(perspective!, { where: { resolve: "Hello World" } });
+                    expect(recipes1.length).to.equal(1);
+                    expect(recipes1[0].resolve).to.equal("Hello World");                    
+                })
             })
         })
     })

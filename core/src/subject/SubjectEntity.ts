@@ -62,6 +62,59 @@ function buildAuthorAndTimestampQuery(options?: string[]): string {
   `;
 }
 
+// Binds: 
+// - SubjectClass
+// - Base
+// - PropertyName
+// - PropertyUri
+// - PropertyValue
+// - Resolve
+// Not need externally (only for debugging):
+// - LiteralValue
+// - Scheme
+//
+// `PropertyUri is what we get from the property_getter/4.
+// If the property_resolve/2 is true, then we check if the property is a literal
+// and try to resolve it in prolog, binding the resolved value to PropertyValue.
+// `Resolve` is only true if the JS code still needs to resolve it!
+const PROPERTY_RESOLVE_QUERY = `
+  % Get the property name and resolve boolean
+  property(SubjectClass, PropertyName),
+  property_getter(SubjectClass, Base, PropertyName, PropertyUri),
+  ( property_resolve(SubjectClass, PropertyName)
+    % If the property is resolvable, try to resolve it
+    -> (
+      append("literal://", _, PropertyUri)
+      % If the property is a literal, we can resolve it here
+      -> (
+        % so tell JS to not resolve it
+        Resolve = false,
+        literal_from_url(PropertyUri, LiteralValue, Scheme),
+        (
+          (
+            % If it is a JSON literal, 
+            %Scheme = "json",
+            % and it has a 'data' field, use that
+            %string_chars(LiteralValue, Chars),
+            json_property(LiteralValue, "data", PropertyValue),
+            !
+          )
+          ;
+          % Otherwise, just use the literal value
+          PropertyValue = LiteralValue
+        )
+      ), !
+      ;
+      % else (it should be resolved but is not a literal),
+      % pass through URI to JS and tell JS to resolve it
+      (Resolve = true, PropertyValue = PropertyUri)
+    ), !
+    ;
+    % else (no property resolve), just return the URI as the value
+    (Resolve = false, PropertyValue = PropertyUri)
+  ) 
+`;
+
 function buildPropertiesQuery(properties?: string[]): string {
   // Gets the name, value, and resolve boolean for all (or some) properties on a SubjectEntity instance
   // Resolves literals (if property_resolve/2 is true) to their value - either the data field if it is
@@ -71,42 +124,7 @@ function buildPropertiesQuery(properties?: string[]): string {
     findall([PropertyName, PropertyValue, Resolve], (
       % Constrain to specified properties if provided
       ${properties ? `member(PropertyName, [${properties.map((name) => `"${name}"`).join(", ")}]),` : ""}
-
-      % Get the property name and resolve boolean
-      property(SubjectClass, PropertyName),
-      property_getter(SubjectClass, Base, PropertyName, PropertyUri),
-      ( property_resolve(SubjectClass, PropertyName)
-        % If the property is resolvable, try to resolve it
-        -> (
-          append("literal://", _, PropertyUri)
-          % If the property is a literal, we can resolve it here
-          -> (
-            % so tell JS to not resolve it
-            Resolve = false,
-            literal_from_url(PropertyUri, LiteralValue, Scheme),
-            (
-              (
-                % If it is a JSON literal, 
-                %Scheme = "json",
-                % and it has a 'data' field, use that
-                %string_chars(LiteralValue, Chars),
-                json_property(LiteralValue, "data", PropertyValue),
-                !
-              )
-              ;
-              % Otherwise, just use the literal value
-              PropertyValue = LiteralValue
-            )
-          ), !
-          ;
-          % else (it should be resolved but is not a literal),
-          % pass through URI to JS and tell JS to resolve it
-          (Resolve = true, PropertyValue = PropertyUri)
-        ), !
-        ;
-        % else (no property resolve), just return the URI as the value
-        (Resolve = false, PropertyValue = PropertyUri)
-      ) 
+      ${PROPERTY_RESOLVE_QUERY}
     ), Properties)
   `;
 }
@@ -142,7 +160,7 @@ function buildWhereQuery(where: WhereCondition = {}): string {
   return (Object.entries(where) as [string, WhereCondition][])
     .map(([key, value]) => {
       const isSpecial = ["author", "timestamp"].includes(key);
-      const getter = `property_getter(SubjectClass, Base, "${key}", URI), literal_from_url(URI, V, _)`;
+      const getter = `PropertyName = "${key}", ${PROPERTY_RESOLVE_QUERY}, V = PropertyValue`;
       const field = capitalize(key);
 
       // Handle direct array values (for IN conditions)
