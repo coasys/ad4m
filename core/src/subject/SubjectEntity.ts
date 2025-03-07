@@ -9,10 +9,23 @@ export type QueryPartialEntity<T> = {
 };
 
 type ValueTuple = [name: string, value: any, resolve?: boolean];
-type WhereOperation = "not" | "lessThan" | "greaterThan" | "between"; // todo: greaterThanOrEqualTo, lessThanOrEqualTo
-type WhereValue = string | number | boolean | string[] | number[] | { [K in WhereOperation]?: any };
-type WhereCondition = { [key: string]: WhereValue };
-type Query = { source?: string, properties?: string[]; collections?: string[]; where?: WhereCondition };
+type WhereOps = {
+  not: string | number | boolean | string[] | number[];
+  lessThan: number;
+  greaterThan: number;
+  between: [number, number];
+};
+type WhereCondition = string | number | boolean | string[] | number[] | { [K in keyof WhereOps]?: WhereOps[K] };
+
+type Query = {
+  source?: string;
+  properties?: string[];
+  collections?: string[];
+  where?: { [propertyName: string]: WhereCondition };
+  order?: [propertyName: string, direction: "asc" | "desc"];
+  // limit?: number;
+  // offset?: number;
+};
 
 function capitalize(word: string): string {
   return word.charAt(0).toUpperCase() + word.slice(1);
@@ -96,7 +109,7 @@ function buildCollectionsQuery(collections?: string[]): string {
 }
 
 // Todo: greaterThanOrEqualTo, lessThanOrEqualTo
-function buildWhereQuery(where: WhereCondition = {}): string {
+function buildWhereQuery(where: WhereCondition): string {
   // Constrains the query to instances that match the provided where conditions
 
   function formatValue(key, value) {
@@ -109,7 +122,7 @@ function buildWhereQuery(where: WhereCondition = {}): string {
     return isString ? `"${value}"` : value;
   }
 
-  return Object.entries(where)
+  return (Object.entries(where) as [string, WhereCondition][])
     .map(([key, value]) => {
       const isSpecial = ["author", "timestamp"].includes(key);
       const getter = `property_getter(SubjectClass, Base, "${key}", URI), literal_from_url(URI, V, _)`;
@@ -122,41 +135,41 @@ function buildWhereQuery(where: WhereCondition = {}): string {
         else return `${getter}, member(V, [${formattedValues}])`;
       }
 
-      // Handle operation objects
+      // Handle operation object
       if (typeof value === "object" && value !== null) {
-        const ops = value as any;
+        const { not, lessThan, greaterThan, between } = value;
 
         // Handle NOT operation
-        if (ops.not !== undefined) {
-          if (Array.isArray(ops.not)) {
+        if (not !== undefined) {
+          if (Array.isArray(not)) {
             // NOT IN array
-            const formattedValues = ops.not.map((v) => formatValue(key, v)).join(", ");
+            const formattedValues = not.map((v) => formatValue(key, v)).join(", ");
             if (isSpecial) return `\\+ member(${field}, [${formattedValues}])`;
             else return `${getter}, \\+ member(V, [${formattedValues}])`;
           } else {
             // NOT EQUAL
-            if (isSpecial) return `${field} \\= ${formatValue(key, ops.not)}`;
-            else return `\\+ (${getter}, V = ${formatValue(key, ops.not)})`;
+            if (isSpecial) return `${field} \\= ${formatValue(key, not)}`;
+            else return `\\+ (${getter}, V = ${formatValue(key, not)})`;
           }
         }
 
         // Handle LESS THAN
-        if (ops.lessThan !== undefined) {
-          if (isSpecial) return `${field} < ${formatValue(key, ops.lessThan)}`;
-          else return `${getter}, V < ${formatValue(key, ops.lessThan)}`;
+        if (lessThan !== undefined) {
+          if (isSpecial) return `${field} < ${formatValue(key, lessThan)}`;
+          else return `${getter}, V < ${formatValue(key, lessThan)}`;
         }
 
         // Handle GREATER THAN
-        if (ops.greaterThan !== undefined) {
-          if (isSpecial) return `${field} > ${formatValue(key, ops.greaterThan)}`;
-          else return `${getter}, V > ${formatValue(key, ops.greaterThan)}`;
+        if (greaterThan !== undefined) {
+          if (isSpecial) return `${field} > ${formatValue(key, greaterThan)}`;
+          else return `${getter}, V > ${formatValue(key, greaterThan)}`;
         }
 
         // Handle BETWEEN
-        if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
+        if (between !== undefined && Array.isArray(between) && between.length === 2) {
           if (isSpecial)
-            return `${field} >= ${formatValue(key, ops.between[0])}, ${field} =< ${formatValue(key, ops.between[1])}`;
-          else return `${getter}, V >= ${formatValue(key, ops.between[0])}, V =< ${formatValue(key, ops.between[1])}`;
+            return `${field} >= ${formatValue(key, between[0])}, ${field} =< ${formatValue(key, between[1])}`;
+          else return `${getter}, V >= ${formatValue(key, between[0])}, V =< ${formatValue(key, between[1])}`;
         }
       }
 
@@ -292,9 +305,7 @@ export class SubjectEntity {
       ), AllInstances)
     `;
 
-    if (query?.where) {
-      console.log("whereQuery!!!", buildWhereQuery(query?.where));
-    }
+    if (query?.where) console.log("whereQuery!!!", buildWhereQuery(query?.where));
 
     const result = await perspective.infer(fullQuery);
     if (!result?.[0]?.AllInstances) return [];
