@@ -64,6 +64,8 @@ function buildAuthorAndTimestampQuery(options?: string[]): string {
 
 function buildPropertiesQuery(properties?: string[]): string {
   // Gets the name, value, and resolve boolean for all (or some) properties on a SubjectEntity instance
+  // Resolves literals (if property_resolve/2 is true) to their value - either the data field if it is
+  // an Expression in JSON literal, or the direct literal value if it is a simple literal
   // If no properties are provided, all are included
   return `
     findall([PropertyName, PropertyValue, Resolve], (
@@ -72,26 +74,41 @@ function buildPropertiesQuery(properties?: string[]): string {
 
       % Get the property name and resolve boolean
       property(SubjectClass, PropertyName),
-      property_getter(SubjectClass, Base, PropertyName, PropertyValue),
-      (property_resolve(SubjectClass, PropertyName) -> Resolve = true ; Resolve = false)
+      property_getter(SubjectClass, Base, PropertyName, PropertyUri),
+      ( property_resolve(SubjectClass, PropertyName)
+        % If the property is resolvable, try to resolve it
+        -> (
+          append("literal://", _, PropertyUri)
+          % If the property is a literal, we can resolve it here
+          -> (
+            % so tell JS to not resolve it
+            Resolve = false,
+            literal_from_url(PropertyUri, LiteralValue, Scheme),
+            (
+              (
+                % If it is a JSON literal, 
+                %Scheme = "json",
+                % and it has a 'data' field, use that
+                %string_chars(LiteralValue, Chars),
+                json_property(LiteralValue, "data", PropertyValue),
+                !
+              )
+              ;
+              % Otherwise, just use the literal value
+              PropertyValue = LiteralValue
+            )
+          ), !
+          ;
+          % else (it should be resolved but is not a literal),
+          % pass through URI to JS and tell JS to resolve it
+          (Resolve = true, PropertyValue = PropertyUri)
+        ), !
+        ;
+        % else (no property resolve), just return the URI as the value
+        (Resolve = false, PropertyValue = PropertyUri)
+      ) 
     ), Properties)
   `;
-
-  // Works with literal_from_url
-  // return `
-  //   findall([PropertyName, PropertyValue, Resolve], (
-  //     % Constrain to specified properties if provided
-  //     ${properties ? `member(PropertyName, [${properties.map((name) => `"${name}"`).join(", ")}]),` : ""}
-
-  //     % Get the property name, URI, and resolve boolean
-  //     property(SubjectClass, PropertyName),
-  //     property_getter(SubjectClass, Base, PropertyName, PropertyURI),
-  //     (property_resolve(SubjectClass, PropertyName) -> Resolve = true ; Resolve = false),
-
-  //     % Decode the property value from the URI
-  //     literal_from_url(PropertyURI, PropertyValue, _)
-  //   ), Properties)
-  // `;
 }
 
 function buildCollectionsQuery(collections?: string[]): string {

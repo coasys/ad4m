@@ -755,6 +755,10 @@ describe("Prolog + Literals", () => {
                     expect(links.length).to.equal(1)
                     let literal = Literal.fromUrl(links[0].data.target).get()
                     expect(literal.data).to.equal(recipe.resolve)
+
+                    const recipe3 = new Recipe(perspective!, root);
+                    await recipe3.get();
+                    expect(recipe3.resolve).to.equal("Test name literal");
                 })
 
                 it("works with very long property values", async() => {
