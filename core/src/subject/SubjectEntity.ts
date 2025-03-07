@@ -109,7 +109,7 @@ function buildCollectionsQuery(collections?: string[]): string {
 }
 
 // Todo: greaterThanOrEqualTo, lessThanOrEqualTo
-function buildWhereQuery(where: WhereCondition): string {
+function buildWhereQuery(where: WhereCondition = {}): string {
   // Constrains the query to instances that match the provided where conditions
 
   function formatValue(key, value) {
