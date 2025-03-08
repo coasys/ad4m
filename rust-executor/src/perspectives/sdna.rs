@@ -210,6 +210,71 @@ takeN(Rest, NextN, PageRest).
 
     lines.extend(lib.split('\n').map(|s| s.to_string()));
 
+let sorting_predicates = r#"
+:- discontiguous(decorate/4).
+decorate(List, SortKey, Direction, Decorated) :-
+    maplist(decorate_item(SortKey), List, Decorated),
+    (Direction == "ASC" ; Direction == "DESC").
+
+:- discontiguous(decorate_item/2).
+decorate_item("timestamp", [Base, Properties, Collections, Timestamp, Author], [Timestamp, Base, Properties, Collections, Timestamp, Author]) :- !.
+decorate_item(PropertyKey, [Base, Properties, Collections, Timestamp, Author], [KeyValue, Base, Properties, Collections, Timestamp, Author]) :-
+    member([PropertyKey, KeyValue, _], Properties),
+    !.
+decorate_item(_, Item, [0|Item]).  % Default to 0 if key not found
+
+:- discontiguous(undecorate/2).
+undecorate(Decorated, Undecorated) :-
+    maplist(arg(2), Decorated, Undecorated).
+
+:- discontiguous(merge_sort/3).
+merge_sort([], [], _).
+merge_sort([X], [X], _).
+merge_sort(List, Sorted, Direction) :-
+    length(List, Len),
+    Len > 1,
+    split(List, Left, Right),
+    merge_sort(Left, SortedLeft, Direction),
+    merge_sort(Right, SortedRight, Direction),
+    merge(SortedLeft, SortedRight, Sorted, Direction).
+
+:- discontiguous(split/3).
+split(List, Left, Right) :-
+    length(List, Len),
+    Half is Len // 2,
+    length(Left, Half),
+    append(Left, Right, List).
+
+:- discontiguous(merge/4).
+merge([], Right, Right, _).
+merge(Left, [], Left, _).
+merge([X|Xs], [Y|Ys], [X|Merged], "ASC") :-
+    X = [KeyX|_], Y = [KeyY|_],
+    KeyX =< KeyY,
+    merge(Xs, [Y|Ys], Merged, "ASC").
+merge([X|Xs], [Y|Ys], [Y|Merged], "ASC") :-
+    X = [KeyX|_], Y = [KeyY|_],
+    KeyX > KeyY,
+    merge([X|Xs], Ys, Merged, "ASC").
+merge([X|Xs], [Y|Ys], [X|Merged], "DESC") :-
+    X = [KeyX|_], Y = [KeyY|_],
+    KeyX >= KeyY,
+    merge(Xs, [Y|Ys], Merged, "DESC").
+merge([X|Xs], [Y|Ys], [Y|Merged], "DESC") :-
+    X = [KeyX|_], Y = [KeyY|_],
+    KeyX < KeyY,
+    merge([X|Xs], Ys, Merged, "DESC").
+
+% New sort_instances predicate
+:- discontiguous(sort_instances/4).
+sort_instances(UnsortedInstances, SortKey, Direction, SortedInstances) :-
+    decorate(UnsortedInstances, SortKey, Direction, Decorated),
+    merge_sort(Decorated, SortedDecorated, Direction),
+    undecorate(SortedDecorated, SortedInstances).
+"#;
+
+lines.extend(sorting_predicates.split('\n').map(|s| s.to_string()));
+
     let literal_html_string_predicates = r#"
 % Main predicate to remove HTML tags
 remove_html_tags(Input, Output) :-
