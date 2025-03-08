@@ -1285,6 +1285,69 @@ describe("Prolog + Literals", () => {
                     await recipe3.delete();
                 })
 
+                it("findAll() works with limit and offset", async () => {
+                    // Clear previous recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+                    
+                    // Create recipes
+                    const recipe1 = new Recipe(perspective!);
+                    recipe1.name = Literal.from("Recipe 1").toUrl();
+                    await recipe1.save();
+                    
+                    const recipe2 = new Recipe(perspective!);
+                    recipe2.name = Literal.from("Recipe 2").toUrl();
+                    await recipe2.save();
+                    
+                    const recipe3 = new Recipe(perspective!);
+                    recipe3.name = Literal.from("Recipe 3").toUrl();
+                    await recipe3.save();
+                    
+                    const recipe4 = new Recipe(perspective!);
+                    recipe4.name = Literal.from("Recipe 4").toUrl();
+                    await recipe4.save();
+
+                    const recipe5 = new Recipe(perspective!);
+                    recipe5.name = Literal.from("Recipe 5").toUrl();
+                    await recipe5.save();
+
+                    const recipe6 = new Recipe(perspective!);
+                    recipe6.name = Literal.from("Recipe 6").toUrl();
+                    await recipe6.save();
+                    
+                    // Check all recipes are there
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    expect(allRecipes.length).to.equal(6);
+
+                    // Test limit
+                    const recipes1 = await Recipe.findAll(perspective!, { limit: 2 });
+                    expect(recipes1.length).to.equal(2);
+
+                    const recipes2 = await Recipe.findAll(perspective!, { limit: 4 });
+                    expect(recipes2.length).to.equal(4);
+
+                    // Test offset
+                    const recipes3 = await Recipe.findAll(perspective!, { offset: 2 });
+                    expect(recipes3[0].name).to.equal("Recipe 3");
+
+                    const recipes4 = await Recipe.findAll(perspective!, { offset: 4 });
+                    expect(recipes4[0].name).to.equal("Recipe 5");
+
+                    // Test limit and offset
+                    const recipes5 = await Recipe.findAll(perspective!, { limit: 2, offset: 1 });
+                    expect(recipes5.length).to.equal(2);
+                    expect(recipes5[0].name).to.equal("Recipe 2");
+
+                    const recipes6 = await Recipe.findAll(perspective!, { limit: 3, offset: 2 });
+                    expect(recipes6.length).to.equal(3);
+                    expect(recipes6[0].name).to.equal("Recipe 3");
+
+                    
+                    await recipe1.delete();
+                    await recipe2.delete();
+                    await recipe3.delete();
+                })
+
                 it("findAll() works with a mix of query constraints", async () => {
                     // Clear previous recipes
                     const oldRecipes = await Recipe.findAll(perspective!);

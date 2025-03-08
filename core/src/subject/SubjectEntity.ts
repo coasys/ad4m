@@ -24,8 +24,8 @@ type Query = {
   collections?: string[];
   where?: Where;
   order?: Order;
-  // limit?: number;
-  // offset?: number;
+  offset?: number;
+  limit?: number;
 };
 
 function capitalize(word: string): string {
@@ -217,9 +217,19 @@ function buildWhereQuery(where: Where = {}): string {
 }
 
 function buildOrderQuery(order?: Order): string {
-  if (!order) return "AllInstances = UnsortedInstances";
+  if (!order) return "SortedInstances = UnsortedInstances";
   const [propertyName, direction] = Object.entries(order)[0];
-  return `sort_instances(UnsortedInstances, "${propertyName}", "${direction}", AllInstances)`;
+  return `sort_instances(UnsortedInstances, "${propertyName}", "${direction}", SortedInstances)`;
+}
+
+function buildOffsetQuery(offset?: number): string {
+  if (!offset || offset < 0) return "InstancesWithOffset = SortedInstances";
+  return `skipN(SortedInstances, ${offset}, InstancesWithOffset)`;
+}
+
+function buildLimitQuery(limit?: number): string {
+  if (!limit || limit < 0) return "AllInstances = InstancesWithOffset";
+  return `takeN(InstancesWithOffset, ${limit}, AllInstances)`;
 }
 
 /**
@@ -324,30 +334,30 @@ export class SubjectEntity {
    * @returns An array of all subject entity matches.
    *
    */
-  static async findAll(perspective: PerspectiveProxy, query?: Query) {
+  static async findAll(perspective: PerspectiveProxy, query: Query = {}) {
     // todo:
-    // + limit
-    // + offset
     // + include
 
-    const subQueries = [
-      buildSourceQuery(query?.source),
-      buildAuthorAndTimestampQuery(query?.properties),
-      buildPropertiesQuery(query?.properties),
-      buildCollectionsQuery(query?.collections),
-      buildWhereQuery(query?.where),
+    const { source, properties, collections, where, order, offset, limit } = query;
+
+    const instanceQueries = [
+      buildSourceQuery(source),
+      buildAuthorAndTimestampQuery(properties),
+      buildPropertiesQuery(properties),
+      buildCollectionsQuery(collections),
+      buildWhereQuery(where),
     ];
+
+    const resultSetQueries = [buildOrderQuery(order), buildOffsetQuery(offset), buildLimitQuery(limit)];
 
     const fullQuery = `
       findall([Base, Properties, Collections, Timestamp, Author], (
         subject_class("${await this.getClassName(perspective)}", SubjectClass),
         instance(SubjectClass, Base),
-        ${subQueries.filter((q) => q).join(", ")}
+        ${instanceQueries.filter((q) => q).join(", ")}
       ), UnsortedInstances),
-      ${buildOrderQuery(query?.order)}
+      ${resultSetQueries.filter((q) => q).join(", ")}
     `;
-
-    if (query?.where) console.log("whereQuery!!!", buildWhereQuery(query?.where));
 
     const result = await perspective.infer(fullQuery);
     if (!result?.[0]?.AllInstances) return [];
