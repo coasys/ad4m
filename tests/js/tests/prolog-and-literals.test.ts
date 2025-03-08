@@ -1233,6 +1233,58 @@ describe("Prolog + Literals", () => {
                     await recipe3.delete();
                 })
 
+                it("findAll() works with ordering", async () => {
+                    // Clear previous recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+                    
+                    // Create recipes
+                    const recipe1 = new Recipe(perspective!);
+                    recipe1.name = Literal.from("Recipe 1: Name").toUrl();
+                    recipe1.number = Literal.from(10).toUrl();
+                    await recipe1.save();
+                    
+                    const recipe2 = new Recipe(perspective!);
+                    recipe2.name = Literal.from("Recipe 2: Name").toUrl();
+                    recipe2.number = Literal.from(5).toUrl();
+                    await recipe2.save();
+                    
+                    const recipe3 = new Recipe(perspective!);
+                    recipe3.name = Literal.from("Recipe 3: Name").toUrl();
+                    recipe3.number = Literal.from(15).toUrl();
+                    await recipe3.save();
+                    
+                    // Check all recipes are there
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    expect(allRecipes.length).to.equal(3);
+
+                    // Test ordering by number properties
+                    const recipes1 = await Recipe.findAll(perspective!, { order: { number: "ASC" } });
+                    expect(recipes1[0].number).to.equal(5);
+                    expect(recipes1[1].number).to.equal(10);
+                    expect(recipes1[2].number).to.equal(15);
+
+                    const recipes2 = await Recipe.findAll(perspective!, { order: { number: "DESC" } });
+                    expect(recipes2[0].number).to.equal(15);
+                    expect(recipes2[1].number).to.equal(10);
+                    expect(recipes2[2].number).to.equal(5);
+
+                    // Test ordering by timestamp
+                    const recipes3 = await Recipe.findAll(perspective!, { order: { timestamp: "ASC" } });
+                    expect(recipes3[0].name).to.equal("Recipe 1: Name");
+                    expect(recipes3[1].name).to.equal("Recipe 2: Name");
+                    expect(recipes3[2].name).to.equal("Recipe 3: Name");
+
+                    const recipes4 = await Recipe.findAll(perspective!, { order: { timestamp: "DESC" } });
+                    expect(recipes4[0].name).to.equal("Recipe 3: Name");
+                    expect(recipes4[1].name).to.equal("Recipe 2: Name");
+                    expect(recipes4[2].name).to.equal("Recipe 1: Name");
+                    
+                    await recipe1.delete();
+                    await recipe2.delete();
+                    await recipe3.delete();
+                })
+
                 it("findAll() works with a mix of query constraints", async () => {
                     // Clear previous recipes
                     const oldRecipes = await Recipe.findAll(perspective!);
