@@ -16,13 +16,14 @@ type WhereOps = {
   between: [number, number];
 };
 type WhereCondition = string | number | boolean | string[] | number[] | { [K in keyof WhereOps]?: WhereOps[K] };
-
+type Where = { [propertyName: string]: WhereCondition };
+type Order = { [propertyName: string]: "ASC" | "DESC" };
 type Query = {
   source?: string;
   properties?: string[];
   collections?: string[];
-  where?: { [propertyName: string]: WhereCondition };
-  order?: [propertyName: string, direction: "asc" | "desc"];
+  where?: Where;
+  order?: Order;
   // limit?: number;
   // offset?: number;
 };
@@ -62,7 +63,7 @@ function buildAuthorAndTimestampQuery(options?: string[]): string {
   `;
 }
 
-// Binds: 
+// Binds:
 // - SubjectClass
 // - Base
 // - PropertyName
@@ -144,7 +145,7 @@ function buildCollectionsQuery(collections?: string[]): string {
 }
 
 // Todo: greaterThanOrEqualTo, lessThanOrEqualTo
-function buildWhereQuery(where: WhereCondition = {}): string {
+function buildWhereQuery(where: Where = {}): string {
   // Constrains the query to instances that match the provided where conditions
 
   function formatValue(key, value) {
@@ -213,6 +214,12 @@ function buildWhereQuery(where: WhereCondition = {}): string {
       else return `${getter}, V = ${formatValue(key, value)}`;
     })
     .join(", ");
+}
+
+function buildOrderQuery(order?: Order): string {
+  if (!order) return "AllInstances = UnsortedInstances";
+  const [propertyName, direction] = Object.entries(order)[0];
+  return `sort_instances(UnsortedInstances, "${propertyName}", "${direction}", AllInstances)`;
 }
 
 /**
@@ -319,7 +326,6 @@ export class SubjectEntity {
    */
   static async findAll(perspective: PerspectiveProxy, query?: Query) {
     // todo:
-    // + order
     // + limit
     // + offset
     // + include
@@ -337,7 +343,8 @@ export class SubjectEntity {
         subject_class("${await this.getClassName(perspective)}", SubjectClass),
         instance(SubjectClass, Base),
         ${subQueries.filter((q) => q).join(", ")}
-      ), AllInstances)
+      ), UnsortedInstances),
+      ${buildOrderQuery(query?.order)}
     `;
 
     if (query?.where) console.log("whereQuery!!!", buildWhereQuery(query?.where));
