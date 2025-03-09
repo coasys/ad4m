@@ -146,18 +146,12 @@ function buildCollectionsQuery(collections?: string[]): string {
   `;
 }
 
-// Todo: greaterThanOrEqualTo, lessThanOrEqualTo
 function buildWhereQuery(where: Where = {}): string {
   // Constrains the query to instances that match the provided where conditions
 
-  function formatValue(key, value) {
-    // Base format on type of value by default
-    let isString = typeof value === "string";
-    // Override for special fields
-    if (key === "author") isString = true;
-    if (key === "timestamp") isString = false;
+  function formatValue(value) {
     // Wrap strings in quotes
-    return isString ? `"${value}"` : value;
+    return typeof value === "string" ? `"${value}"` : value;
   }
 
   return (Object.entries(where) as [string, WhereCondition][])
@@ -168,7 +162,7 @@ function buildWhereQuery(where: Where = {}): string {
 
       // Handle direct array values (for IN conditions)
       if (Array.isArray(value)) {
-        const formattedValues = value.map((v) => formatValue(key, v)).join(", ");
+        const formattedValues = value.map((v) => formatValue(v)).join(", ");
         if (isSpecial) return `member(${field}, [${formattedValues}])`;
         else return `${getter}, member(V, [${formattedValues}])`;
       }
@@ -181,51 +175,51 @@ function buildWhereQuery(where: Where = {}): string {
         if (not !== undefined) {
           if (Array.isArray(not)) {
             // NOT IN array
-            const formattedValues = not.map((v) => formatValue(key, v)).join(", ");
+            const formattedValues = not.map((v) => formatValue(v)).join(", ");
             if (isSpecial) return `\\+ member(${field}, [${formattedValues}])`;
             else return `${getter}, \\+ member(V, [${formattedValues}])`;
           } else {
             // NOT EQUAL
-            if (isSpecial) return `${field} \\= ${formatValue(key, not)}`;
-            else return `\\+ (${getter}, V = ${formatValue(key, not)})`;
+            if (isSpecial) return `${field} \\= ${formatValue(not)}`;
+            else return `\\+ (${getter}, V = ${formatValue(not)})`;
           }
         }
 
         // Handle BETWEEN
         if (between !== undefined && Array.isArray(between) && between.length === 2) {
           if (isSpecial)
-            return `${field} >= ${formatValue(key, between[0])}, ${field} =< ${formatValue(key, between[1])}`;
-          else return `${getter}, V >= ${formatValue(key, between[0])}, V =< ${formatValue(key, between[1])}`;
+            return `${field} >= ${between[0]}, ${field} =< ${between[1]}`;
+          else return `${getter}, V >= ${between[0]}, V =< ${between[1]}`;
         }
 
         // Handle LESS THAN
         if (lt !== undefined) {
-          if (isSpecial) return `${field} < ${formatValue(key, lt)}`;
-          else return `${getter}, V < ${formatValue(key, lt)}`;
+          if (isSpecial) return `${field} < ${lt}`;
+          else return `${getter}, V < ${lt}`;
         }
 
         // Handle LESS THAN OR EQUAL TO
         if (lte !== undefined) {
-          if (isSpecial) return `${field} =< ${formatValue(key, lte)}`;
-          else return `${getter}, V =< ${formatValue(key, lte)}`;
+          if (isSpecial) return `${field} =< ${lte}`;
+          else return `${getter}, V =< ${lte}`;
         }
 
         // Handle GREATER THAN
         if (gt !== undefined) {
-          if (isSpecial) return `${field} > ${formatValue(key, gt)}`;
-          else return `${getter}, V > ${formatValue(key, gt)}`;
+          if (isSpecial) return `${field} > ${gt}`;
+          else return `${getter}, V > ${gt}`;
         }
 
         // Handle GREATER THAN OR EQUAL TO
         if (gte !== undefined) {
-          if (isSpecial) return `${field} >= ${formatValue(key, gte)}`;
-          else return `${getter}, V >= ${formatValue(key, gte)}`;
+          if (isSpecial) return `${field} >= ${gte}`;
+          else return `${getter}, V >= ${gte}`;
         }
       }
 
       // Default to direct equality
-      if (isSpecial) return `${field} = ${formatValue(key, value)}`;
-      else return `${getter}, V = ${formatValue(key, value)}`;
+      if (isSpecial) return `${field} = ${formatValue(value)}`;
+      else return `${getter}, V = ${formatValue(value)}`;
     })
     .join(", ");
 }
