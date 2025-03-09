@@ -11,9 +11,11 @@ export type QueryPartialEntity<T> = {
 type ValueTuple = [name: string, value: any, resolve?: boolean];
 type WhereOps = {
   not: string | number | boolean | string[] | number[];
-  lessThan: number;
-  greaterThan: number;
   between: [number, number];
+  lt: number; // less than
+  lte: number; // less than or equal to
+  gt: number; // greater than
+  gte: number; // greater than or equal to
 };
 type WhereCondition = string | number | boolean | string[] | number[] | { [K in keyof WhereOps]?: WhereOps[K] };
 type Where = { [propertyName: string]: WhereCondition };
@@ -173,7 +175,7 @@ function buildWhereQuery(where: Where = {}): string {
 
       // Handle operation object
       if (typeof value === "object" && value !== null) {
-        const { not, lessThan, greaterThan, between } = value;
+        const { not, between, lt, lte, gt, gte } = value;
 
         // Handle NOT operation
         if (not !== undefined) {
@@ -189,23 +191,35 @@ function buildWhereQuery(where: Where = {}): string {
           }
         }
 
-        // Handle LESS THAN
-        if (lessThan !== undefined) {
-          if (isSpecial) return `${field} < ${formatValue(key, lessThan)}`;
-          else return `${getter}, V < ${formatValue(key, lessThan)}`;
-        }
-
-        // Handle GREATER THAN
-        if (greaterThan !== undefined) {
-          if (isSpecial) return `${field} > ${formatValue(key, greaterThan)}`;
-          else return `${getter}, V > ${formatValue(key, greaterThan)}`;
-        }
-
         // Handle BETWEEN
         if (between !== undefined && Array.isArray(between) && between.length === 2) {
           if (isSpecial)
             return `${field} >= ${formatValue(key, between[0])}, ${field} =< ${formatValue(key, between[1])}`;
           else return `${getter}, V >= ${formatValue(key, between[0])}, V =< ${formatValue(key, between[1])}`;
+        }
+
+        // Handle LESS THAN
+        if (lt !== undefined) {
+          if (isSpecial) return `${field} < ${formatValue(key, lt)}`;
+          else return `${getter}, V < ${formatValue(key, lt)}`;
+        }
+
+        // Handle LESS THAN OR EQUAL TO
+        if (lte !== undefined) {
+          if (isSpecial) return `${field} =< ${formatValue(key, lte)}`;
+          else return `${getter}, V =< ${formatValue(key, lte)}`;
+        }
+
+        // Handle GREATER THAN
+        if (gt !== undefined) {
+          if (isSpecial) return `${field} > ${formatValue(key, gt)}`;
+          else return `${getter}, V > ${formatValue(key, gt)}`;
+        }
+
+        // Handle GREATER THAN OR EQUAL TO
+        if (gte !== undefined) {
+          if (isSpecial) return `${field} >= ${formatValue(key, gte)}`;
+          else return `${getter}, V >= ${formatValue(key, gte)}`;
         }
       }
 

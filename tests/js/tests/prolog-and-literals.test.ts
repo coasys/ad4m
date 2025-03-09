@@ -1162,7 +1162,79 @@ describe("Prolog + Literals", () => {
                     await recipe3.delete();
                 })
 
-                it("findAll() works with where query lessThan & greaterThan operations", async () => {
+                it("findAll() works with where query lt, lte, gt, & gte operations", async () => {
+                    // Clear previous recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+
+                    // Create recipes
+                    const recipe1 = new Recipe(perspective!);
+                    recipe1.name = Literal.from("Recipe 1").toUrl();
+                    recipe1.number = Literal.from(5).toUrl();
+                    await recipe1.save();
+
+                    const recipe2 = new Recipe(perspective!);
+                    recipe2.name = Literal.from("Recipe 2").toUrl();
+                    recipe2.number = Literal.from(10).toUrl();
+                    await recipe2.save();
+
+                    const recipe3 = new Recipe(perspective!);
+                    recipe3.name = Literal.from("Recipe 3").toUrl();
+                    recipe3.number = Literal.from(15).toUrl();
+                    await recipe3.save();
+
+                    const recipe4 = new Recipe(perspective!);
+                    recipe4.name = Literal.from("Recipe 4").toUrl();
+                    recipe4.number = Literal.from(20).toUrl();
+                    await recipe4.save();
+
+                    // Check all recipes are there
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    expect(allRecipes.length).to.equal(4);
+
+                    // 1. Number properties
+                    // Test less than (lt) operation on number property
+                    const recipes1 = await Recipe.findAll(perspective!, { where: { number: { lt: 10 } } });
+                    expect(recipes1.length).to.equal(1);
+
+                    // Test less than or equal to (lte) operation on number property
+                    const recipes2 = await Recipe.findAll(perspective!, { where: { number: { lte: 10 } } });
+                    expect(recipes2.length).to.equal(2);
+                    
+                    // Test greater than (gt) operation on number property
+                    const recipes3 = await Recipe.findAll(perspective!, { where: { number: { gt: 10 } } });
+                    expect(recipes3.length).to.equal(2);
+
+                    // Test greater than or equal to (gte) operation on number property
+                    const recipes4 = await Recipe.findAll(perspective!, { where: { number: { gte: 10 } } });
+                    expect(recipes4.length).to.equal(3);
+
+                    // 2. Timestamps
+                    const recipe2timestamp = allRecipes[1].timestamp;
+
+                    // Test less than (lt) operation on timestamp
+                    const recipes5 = await Recipe.findAll(perspective!, { where: { timestamp: { lt: recipe2timestamp } } });
+                    expect(recipes5.length).to.equal(1);
+
+                    // Test less than or equal to (lte) operation on timestamp
+                    const recipes6 = await Recipe.findAll(perspective!, { where: { timestamp: { lte: recipe2timestamp } } });
+                    expect(recipes6.length).to.equal(2);
+
+                    // Test greater than (gt) operation on timestamp
+                    const recipes7 = await Recipe.findAll(perspective!, { where: { timestamp: { gt: recipe2timestamp } } });
+                    expect(recipes7.length).to.equal(2);
+
+                    // Test greater than (gt) operation on timestamp
+                    const recipes8 = await Recipe.findAll(perspective!, { where: { timestamp: { gte: recipe2timestamp } } });
+                    expect(recipes8.length).to.equal(3);
+
+                    await recipe1.delete();
+                    await recipe2.delete();
+                    await recipe3.delete();
+                    await recipe4.delete();
+                })
+
+                it("findAll() works with where query between operations", async () => {
                     // Clear previous recipes
                     const oldRecipes = await Recipe.findAll(perspective!);
                     for (const recipe of oldRecipes) await recipe.delete();
@@ -1171,19 +1243,19 @@ describe("Prolog + Literals", () => {
                     const start = new Date().getTime();
 
                     const recipe1 = new Recipe(perspective!);
-                    recipe1.name = Literal.from("Recipe 1: Name").toUrl();
+                    recipe1.name = Literal.from("Recipe 1").toUrl();
                     recipe1.number = Literal.from(5).toUrl();
                     await recipe1.save();
 
                     const mid = new Date().getTime();
 
                     const recipe2 = new Recipe(perspective!);
-                    recipe2.name = Literal.from("Recipe 2: Name").toUrl();
+                    recipe2.name = Literal.from("Recipe 2").toUrl();
                     recipe2.number = Literal.from(10).toUrl();
                     await recipe2.save();
 
                     const recipe3 = new Recipe(perspective!);
-                    recipe3.name = Literal.from("Recipe 3: Name").toUrl();
+                    recipe3.name = Literal.from("Recipe 3").toUrl();
                     recipe3.number = Literal.from(15).toUrl();
                     await recipe3.save();
 
@@ -1194,14 +1266,6 @@ describe("Prolog + Literals", () => {
                     expect(allRecipes.length).to.equal(3);
 
                     // 1. Number properties
-                    // Test greater than operation on number property
-                    const recipes1 = await Recipe.findAll(perspective!, { where: { number: { greaterThan: 7 } } });
-                    expect(recipes1.length).to.equal(2);
-
-                    // Test less than operation on number property
-                    const recipes2 = await Recipe.findAll(perspective!, { where: { number: { lessThan: 7 } } });
-                    expect(recipes2.length).to.equal(1);
-
                     // Test between operation on number property
                     const recipes3 = await Recipe.findAll(perspective!, { where: { number: { between: [0, 7] } } });
                     expect(recipes3.length).to.equal(1);
@@ -1210,16 +1274,7 @@ describe("Prolog + Literals", () => {
                     const recipes4 = await Recipe.findAll(perspective!, { where: { number: { between: [8, 20] } } });
                     expect(recipes4.length).to.equal(2);
 
-
                     // 2. Timestamps
-                    // Test greater than operation on timestamp
-                    const recipes5 = await Recipe.findAll(perspective!, { where: { timestamp: { greaterThan: mid } } });
-                    expect(recipes5.length).to.equal(2);
-
-                    // Test less than operation on timestamp
-                    const recipes6 = await Recipe.findAll(perspective!, { where: { timestamp: { lessThan: mid } } });
-                    expect(recipes6.length).to.equal(1);
-
                     // Test between operation on timestamp
                     const recipes7 = await Recipe.findAll(perspective!, { where: { timestamp: { between: [start, mid] } } });
                     expect(recipes7.length).to.equal(1);
@@ -1233,6 +1288,7 @@ describe("Prolog + Literals", () => {
                     await recipe3.delete();
                 })
 
+                // requires literal_from_url(PropertyURI, PropertyValue, _) in properties query
                 it("findAll() works with ordering", async () => {
                     // Clear previous recipes
                     const oldRecipes = await Recipe.findAll(perspective!);
@@ -1240,17 +1296,17 @@ describe("Prolog + Literals", () => {
                     
                     // Create recipes
                     const recipe1 = new Recipe(perspective!);
-                    recipe1.name = Literal.from("Recipe 1: Name").toUrl();
+                    recipe1.name = Literal.from("Recipe 1").toUrl();
                     recipe1.number = Literal.from(10).toUrl();
                     await recipe1.save();
                     
                     const recipe2 = new Recipe(perspective!);
-                    recipe2.name = Literal.from("Recipe 2: Name").toUrl();
+                    recipe2.name = Literal.from("Recipe 2").toUrl();
                     recipe2.number = Literal.from(5).toUrl();
                     await recipe2.save();
                     
                     const recipe3 = new Recipe(perspective!);
-                    recipe3.name = Literal.from("Recipe 3: Name").toUrl();
+                    recipe3.name = Literal.from("Recipe 3").toUrl();
                     recipe3.number = Literal.from(15).toUrl();
                     await recipe3.save();
                     
@@ -1271,20 +1327,21 @@ describe("Prolog + Literals", () => {
 
                     // Test ordering by timestamp
                     const recipes3 = await Recipe.findAll(perspective!, { order: { timestamp: "ASC" } });
-                    expect(recipes3[0].name).to.equal("Recipe 1: Name");
-                    expect(recipes3[1].name).to.equal("Recipe 2: Name");
-                    expect(recipes3[2].name).to.equal("Recipe 3: Name");
+                    expect(recipes3[0].name).to.equal("Recipe 1");
+                    expect(recipes3[1].name).to.equal("Recipe 2");
+                    expect(recipes3[2].name).to.equal("Recipe 3");
 
                     const recipes4 = await Recipe.findAll(perspective!, { order: { timestamp: "DESC" } });
-                    expect(recipes4[0].name).to.equal("Recipe 3: Name");
-                    expect(recipes4[1].name).to.equal("Recipe 2: Name");
-                    expect(recipes4[2].name).to.equal("Recipe 1: Name");
+                    expect(recipes4[0].name).to.equal("Recipe 3");
+                    expect(recipes4[1].name).to.equal("Recipe 2");
+                    expect(recipes4[2].name).to.equal("Recipe 1");
                     
                     await recipe1.delete();
                     await recipe2.delete();
                     await recipe3.delete();
                 })
 
+                // requires literal_from_url(PropertyURI, PropertyValue, _) in properties query
                 it("findAll() works with limit and offset", async () => {
                     // Clear previous recipes
                     const oldRecipes = await Recipe.findAll(perspective!);
@@ -1355,14 +1412,14 @@ describe("Prolog + Literals", () => {
                     
                     // Create recipies
                     const recipe1 = new Recipe(perspective!);
-                    recipe1.name = Literal.from("Recipe 1: Name").toUrl();
+                    recipe1.name = Literal.from("Recipe 1").toUrl();
                     recipe1.boolean = Literal.from(true).toUrl();
                     recipe1.comments = ["Recipe 1: Comment 1", "Recipe 1: Comment 2"];
                     recipe1.entries = ["Recipe 1: Entry 1", "Recipe 1: Entry 2"];
                     await recipe1.save();
 
                     const recipe2 = new Recipe(perspective!);
-                    recipe2.name = Literal.from("Recipe 2: Name").toUrl();;
+                    recipe2.name = Literal.from("Recipe 2").toUrl();;
                     recipe2.boolean = Literal.from(false).toUrl();
                     recipe2.comments = ["Recipe 2: Comment 1", "Recipe 2: Comment 2"];
                     recipe2.entries = ["Recipe 2: Entry 1", "Recipe 2: Entry 2"];
@@ -1373,15 +1430,15 @@ describe("Prolog + Literals", () => {
                     expect(allRecipes.length).to.equal(2);
 
                     // Test with where, properties, and collections
-                    const recipes1 = await Recipe.findAll(perspective!, { where: { name: "Recipe 1: Name" }, properties: ["name"], collections: ["comments"] });
+                    const recipes1 = await Recipe.findAll(perspective!, { where: { name: "Recipe 1" }, properties: ["name"], collections: ["comments"] });
                     expect(recipes1.length).to.equal(1);
-                    expect(recipes1[0].name).to.equal(Literal.from("Recipe 1: Name").toUrl());
+                    expect(recipes1[0].name).to.equal(Literal.from("Recipe 1").toUrl());
                     expect(recipes1[0].boolean).to.be.undefined;
                     expect(recipes1[0].comments.length).to.equal(2);
                     expect(recipes1[0].entries).to.be.undefined;
 
                     // Test with different where, properties, and collections
-                    const recipes2 = await Recipe.findAll(perspective!, { where: { name: "Recipe 2: Name" }, properties: ["boolean"], collections: ["entries"] });
+                    const recipes2 = await Recipe.findAll(perspective!, { where: { name: "Recipe 2" }, properties: ["boolean"], collections: ["entries"] });
                     expect(recipes2.length).to.equal(1);
                     expect(recipes2[0].name).to.be.undefined;
                     expect(recipes2[0].boolean).to.equal(Literal.from(false).toUrl());
