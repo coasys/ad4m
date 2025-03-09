@@ -210,7 +210,7 @@ takeN(Rest, NextN, PageRest).
 
     lines.extend(lib.split('\n').map(|s| s.to_string()));
 
-let sorting_predicates = r#"
+    let sorting_predicates = r#"
 :- discontiguous(decorate/4).
 decorate(List, SortKey, Direction, Decorated) :-
     maplist(decorate_item(SortKey), List, Decorated),
@@ -273,7 +273,7 @@ sort_instances(UnsortedInstances, SortKey, Direction, SortedInstances) :-
     undecorate(SortedDecorated, SortedInstances).
 "#;
 
-lines.extend(sorting_predicates.split('\n').map(|s| s.to_string()));
+    lines.extend(sorting_predicates.split('\n').map(|s| s.to_string()));
 
     let literal_html_string_predicates = r#"
 % Main predicate to remove HTML tags
