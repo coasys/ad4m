@@ -187,33 +187,20 @@ function buildWhereQuery(where: Where = {}): string {
 
         // Handle BETWEEN
         if (between !== undefined && Array.isArray(between) && between.length === 2) {
-          if (isSpecial)
-            return `${field} >= ${between[0]}, ${field} =< ${between[1]}`;
+          if (isSpecial) return `${field} >= ${between[0]}, ${field} =< ${between[1]}`;
           else return `${getter}, V >= ${between[0]}, V =< ${between[1]}`;
         }
 
-        // Handle LESS THAN
-        if (lt !== undefined) {
-          if (isSpecial) return `${field} < ${lt}`;
-          else return `${getter}, V < ${lt}`;
-        }
+        // Handle lt, lte, gt, & gte operations
+        const operators = [
+          { value: lt, symbol: "<" }, // LESS THAN
+          { value: lte, symbol: "=<" }, // LESS THAN OR EQUAL TO
+          { value: gt, symbol: ">" }, // GREATER THAN
+          { value: gte, symbol: ">=" }, // GREATER THAN OR EQUAL TO
+        ];
 
-        // Handle LESS THAN OR EQUAL TO
-        if (lte !== undefined) {
-          if (isSpecial) return `${field} =< ${lte}`;
-          else return `${getter}, V =< ${lte}`;
-        }
-
-        // Handle GREATER THAN
-        if (gt !== undefined) {
-          if (isSpecial) return `${field} > ${gt}`;
-          else return `${getter}, V > ${gt}`;
-        }
-
-        // Handle GREATER THAN OR EQUAL TO
-        if (gte !== undefined) {
-          if (isSpecial) return `${field} >= ${gte}`;
-          else return `${getter}, V >= ${gte}`;
+        for (const { value, symbol } of operators) {
+          if (value !== undefined) return isSpecial ? `${field} ${symbol} ${value}` : `${getter}, V ${symbol} ${value}`;
         }
       }
 
