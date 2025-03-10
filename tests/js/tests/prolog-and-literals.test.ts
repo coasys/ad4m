@@ -560,7 +560,6 @@ describe("Prolog + Literals", () => {
                     @SubjectProperty({
                         through: "recipe://name",
                         writable: true,
-                        resolveLanguage: "literal"
                     })
                     name: string = ""
 
