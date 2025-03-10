@@ -558,8 +558,16 @@ describe("Prolog + Literals", () => {
 
                     //@ts-ignore
                     @SubjectProperty({
+                        through: "recipe://plain",
+                        writable: true,
+                    })
+                    plain: string = ""
+
+                    //@ts-ignore
+                    @SubjectProperty({
                         through: "recipe://name",
                         writable: true,
+                        resolveLanguage: "literal"
                     })
                     name: string = ""
 
@@ -621,7 +629,8 @@ describe("Prolog + Literals", () => {
                     let root = Literal.from("Active record implementation test").toUrl()
 
                     const recipe = new Recipe(perspective!, root)
-                    recipe.name = "recipe://test";
+                    recipe.name = "Save and get test";
+                    recipe.plain = "recipe://test";
                     recipe.booleanTest = false;
 
                     await recipe.save();
@@ -630,7 +639,8 @@ describe("Prolog + Literals", () => {
 
                     await recipe2.get();
 
-                    expect(recipe2.name).to.equal("recipe://test")
+                    expect(recipe2.name).to.equal("Save and get test")
+                    expect(recipe2.plain).to.equal("recipe://test")
                     expect(recipe2.booleanTest).to.equal(false)
                 })
 
@@ -638,7 +648,8 @@ describe("Prolog + Literals", () => {
                     let root = Literal.from("Active record implementation test").toUrl()
 
                     const recipe = new Recipe(perspective!, root)
-                    recipe.name = "recipe://test1";
+                    recipe.name = "Update test";
+                    recipe.plain = "recipe://update_test";
 
                     await recipe.update();
 
@@ -646,7 +657,8 @@ describe("Prolog + Literals", () => {
 
                     await recipe2.get();
 
-                    expect(recipe2.name).to.equal("recipe://test1")
+                    expect(recipe2.name).to.equal("Update test")
+                    expect(recipe2.plain).to.equal("recipe://update_test")
                 })
 
                 it("find()", async () => {
@@ -659,7 +671,7 @@ describe("Prolog + Literals", () => {
                     let root = Literal.from("Active record implementation collection test").toUrl()
                     const recipe = new Recipe(perspective!, root)
 
-                    recipe.name = "recipe://collection_test";
+                    recipe.name = "Collection test";
 
                     recipe.comments = ['recipe://test', 'recipe://test1']
 
@@ -676,7 +688,7 @@ describe("Prolog + Literals", () => {
                     let root = Literal.from("Active record implementation test local link").toUrl()
                     const recipe = new Recipe(perspective!, root)
 
-                    recipe.name = "recipe://locallink";
+                    recipe.name = "Local test";
                     recipe.local = 'recipe://test'
 
                     await recipe.save();
@@ -685,7 +697,7 @@ describe("Prolog + Literals", () => {
 
                     await recipe2.get();
 
-                    expect(recipe2.name).to.equal("recipe://locallink")
+                    expect(recipe2.name).to.equal("Local test")
                     expect(recipe2.local).to.equal("recipe://test")
 
                     // @ts-ignore
@@ -719,7 +731,7 @@ describe("Prolog + Literals", () => {
                     recipe.entries = [recipeEntries];
                     // @ts-ignore
                     recipe.comments = ['recipe://test', 'recipe://test1'];
-                    recipe.name = "recipe://collection_test";
+                    recipe.name = "Collection test";
 
                     await recipe.save();
 
@@ -758,12 +770,12 @@ describe("Prolog + Literals", () => {
                     const recipe = new Recipe(perspective!, root)
 
                     const longName = "This is a very long recipe name that goes on and on with many many characters to test that we can handle long property values without any issues whatsoever and keep going even longer to make absolutely sure we hit at least 300 characters in this test string that just keeps getting longer and longer until we are completely satisfied that it works properly with such lengthy content. But wait, there's more! We need to make this string even longer to properly test the system's ability to handle extremely long property values. Let's add some more meaningful content about recipes - ingredients like flour, sugar, eggs, milk, butter, vanilla extract, baking powder, salt, and detailed instructions for mixing them together in just the right way to create the perfect baked goods. We could go on about preheating the oven to the right temperature, greasing the pans properly, checking for doneness with a toothpick, and letting things cool completely before frosting. The possibilities are endless when it comes to recipe details and instructions that could make this string longer and longer. We want to be absolutely certain that our system can handle property values of any reasonable length without truncating or corrupting the data in any way. This is especially important for recipes where precise instructions and ingredient amounts can make the difference between success and failure in the kitchen. Testing with realistically long content helps ensure our system works reliably in real-world usage scenarios where users might enter detailed information that extends well beyond a few simple sentences."
-                    recipe.name = longName
+                    recipe.plain = longName
                     recipe.resolve = longName
 
                     await recipe.save()
 
-                    let linksName = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://name"}))
+                    let linksName = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://plain"}))
                     expect(linksName.length).to.equal(1)
                     expect(linksName[0].data.target).to.equal(longName)
 
@@ -775,8 +787,8 @@ describe("Prolog + Literals", () => {
                     const recipe2 = new Recipe(perspective!, root)
                     await recipe2.get()
 
-                    expect(recipe2.name.length).to.equal(longName.length)
-                    expect(recipe2.name).to.equal(longName)
+                    expect(recipe2.plain.length).to.equal(longName.length)
+                    expect(recipe2.plain).to.equal(longName)
 
                     expect(recipe2.resolve.length).to.equal(longName.length)
                     expect(recipe2.resolve).to.equal(longName)
@@ -786,7 +798,7 @@ describe("Prolog + Literals", () => {
                     let root = Literal.from("Author and timestamp test").toUrl()
                     const recipe = new Recipe(perspective!, root)
 
-                    recipe.name = "recipe://test";
+                    recipe.name = "author and timestamp test";
                     await recipe.save();
 
                     const recipe2 = new Recipe(perspective!, root);
@@ -803,7 +815,7 @@ describe("Prolog + Literals", () => {
                     let root = Literal.from("getData test").toUrl()
                     const recipe = new Recipe(perspective!, root)
 
-                    recipe.name = "recipe://getData_test";
+                    recipe.name = "getData all test";
                     recipe.booleanTest = true;
                     recipe.comments = ['recipe://comment1', 'recipe://comment2'];
                     recipe.local = "recipe://local_test";
@@ -813,7 +825,7 @@ describe("Prolog + Literals", () => {
 
                     const data = await recipe.get();
 
-                    expect(data.name).to.equal("recipe://getData_test");
+                    expect(data.name).to.equal("getData all test");
                     expect(data.booleanTest).to.equal(true);
                     expect(data.comments).to.deep.equal(['recipe://comment1', 'recipe://comment2']);
                     expect(data.local).to.equal("recipe://local_test");
@@ -831,23 +843,27 @@ describe("Prolog + Literals", () => {
                     let root2 = Literal.from("findAll test 2").toUrl()
                     
                     const recipe1 = new Recipe(perspective!, root1)
-                    recipe1.name = "recipe://findAll_test1";
+                    recipe1.name = "findAll test 1";
                     recipe1.resolve = "Resolved literal value 1";
+                    recipe1.plain = "recipe://findAll_test1";
                     await recipe1.save();
 
                     const recipe2 = new Recipe(perspective!, root2)
-                    recipe2.name = "recipe://findAll_test2";
+                    recipe2.name = "findAll test 2";
                     recipe2.resolve = "Resolved literal value 2";
+                    recipe2.plain = "recipe://findAll_test2";
                     await recipe2.save();
 
                     // Test findAll
                     const recipes = await Recipe.findAll(perspective!);
 
                     expect(recipes.length).to.equal(2);
-                    expect(recipes[0].name).to.equal("recipe://findAll_test1");
+                    expect(recipes[0].name).to.equal("findAll test 1");
                     expect(recipes[0].resolve).to.equal("Resolved literal value 1");
-                    expect(recipes[1].name).to.equal("recipe://findAll_test2");
+                    expect(recipes[1].name).to.equal("findAll test 2");
                     expect(recipes[1].resolve).to.equal("Resolved literal value 2");
+                    expect(recipes[0].plain).to.equal("recipe://findAll_test1");
+                    expect(recipes[1].plain).to.equal("recipe://findAll_test2");
 
                     await recipe1.delete();
                     await recipe2.delete();
@@ -894,11 +910,11 @@ describe("Prolog + Literals", () => {
                     let root2 = Literal.from("findAll test 2").toUrl()
                     
                     const recipe1 = new Recipe(perspective!, root1);
-                    recipe1.name = "recipe://findAll_test1";
+                    recipe1.name = "findAll test 1";
                     await recipe1.save();
 
                     const recipe2 = new Recipe(perspective!, root2);
-                    recipe2.name = "recipe://findAll_test2";
+                    recipe2.name = "findAll test 2";
                     await recipe2.save();
 
                     const recipes = await Recipe.findAll(perspective!);
