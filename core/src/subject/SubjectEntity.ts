@@ -94,24 +94,18 @@ const PROPERTY_RESOLVE_QUERY = `
         Resolve = false,
         literal_from_url(PropertyUri, LiteralValue, Scheme),
         (
-          (
-            % If it is a JSON literal, 
-            %Scheme = "json",
-            % and it has a 'data' field, use that
-            %string_chars(LiteralValue, Chars),
-            json_property(LiteralValue, "data", PropertyValue),
-            !
-          )
-          ;
+          json_property(LiteralValue, "data", Data)
+          % If it is a JSON literal, and it has a 'data' field, use that
+          -> PropertyValue = Data
           % Otherwise, just use the literal value
-          PropertyValue = LiteralValue
+          ; PropertyValue = LiteralValue 
         )
-      ), !
+      )
       ;
       % else (it should be resolved but is not a literal),
       % pass through URI to JS and tell JS to resolve it
       (Resolve = true, PropertyValue = PropertyUri)
-    ), !
+    )
     ;
     % else (no property resolve), just return the URI as the value
     (Resolve = false, PropertyValue = PropertyUri)
