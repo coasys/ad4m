@@ -1252,6 +1252,8 @@ describe("Prolog + Literals", () => {
                     recipe1.number = 5;
                     await recipe1.save();
 
+                    await sleep(1000);
+
                     const mid = new Date().getTime();
 
                     const recipe2 = new Recipe(perspective!);
@@ -1263,6 +1265,8 @@ describe("Prolog + Literals", () => {
                     recipe3.name = "Recipe 3";
                     recipe3.number = 15;
                     await recipe3.save();
+
+                    await sleep(1000);
 
                     const end = new Date().getTime();
 
