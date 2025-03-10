@@ -394,6 +394,9 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
     json_value(Value) --> json_array(Value).
     json_value(Value) --> json_string(Value).
     json_value(Value) --> json_number(Value).
+    json_value(true) --> "true".
+    json_value(false) --> "false".
+    json_value(null) --> "null".
     
     json_array([Value|Values]) -->
         "[", ws, json_value(Value), ws, ("," -> json_value_list(Values) ; {Values=[]}), ws, "]".
@@ -417,8 +420,7 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
     
     json_number(Number) -->
         number_sequence(Chars),
-        { atom_chars(Atom, Chars),
-          atom_number(Atom, Number) }.
+        { number_chars(Number, Chars) }.
     
     string_chars([]) --> [].
     string_chars([C|Cs]) --> [C], { dif(C, '"') }, string_chars(Cs).
