@@ -560,6 +560,7 @@ describe("Prolog + Literals", () => {
                     @SubjectProperty({
                         through: "recipe://name",
                         writable: true,
+                        resolveLanguage: "literal"
                     })
                     name: string = ""
 
@@ -567,24 +568,16 @@ describe("Prolog + Literals", () => {
                     @SubjectProperty({
                         through: "recipe://boolean",
                         writable: true,
+                        resolveLanguage: "literal"
                     })
                     booleanTest: boolean = false
 
-                    // used in where query tests
-                    // todo: allow boolean type and auto convert to URI
-                    @SubjectProperty({
-                        through: "recipe://boolean_test",
-                        writable: true,
-                    })
-                    boolean: string = ""
-
-                    // used in where query tests
-                    // todo: allow number type and auto convert to URI
                     @SubjectProperty({
                         through: "recipe://number",
                         writable: true,
+                        resolveLanguage: "literal"
                     })
-                    number: string = ""
+                    number: number = 0
 
                     //@ts-ignore
                     @SubjectCollection({ through: "recipe://entries" })
@@ -1032,21 +1025,21 @@ describe("Prolog + Literals", () => {
                     
                     // Create recipies
                     const recipe1 = new Recipe(perspective!);
-                    recipe1.name = Literal.from("Recipe 1: Name").toUrl();
-                    recipe1.number = Literal.from(5).toUrl();
-                    recipe1.boolean = Literal.from(true).toUrl();
+                    recipe1.name = "Recipe 1";
+                    recipe1.number = 5;
+                    recipe1.booleanTest = true;
                     await recipe1.save();
 
                     const recipe2 = new Recipe(perspective!);
-                    recipe2.name = Literal.from("Recipe 2: Name").toUrl();
-                    recipe2.number = Literal.from(10).toUrl();
-                    recipe2.boolean = Literal.from(true).toUrl();
+                    recipe2.name = "Recipe 2";
+                    recipe2.number = 10;
+                    recipe2.booleanTest = true;
                     await recipe2.save();
 
                     const recipe3 = new Recipe(perspective!);
-                    recipe3.name = Literal.from("Recipe 3: Name").toUrl();
-                    recipe3.number = Literal.from(15).toUrl();
-                    recipe3.boolean = Literal.from(false).toUrl();
+                    recipe3.name = "Recipe 3";
+                    recipe3.number = 15;
+                    recipe3.booleanTest = false;
                     await recipe3.save();
 
                     // Check all recipes are there
@@ -1054,7 +1047,7 @@ describe("Prolog + Literals", () => {
                     expect(allRecipes.length).to.equal(3)
 
                     // Test where with valid name
-                    const recipes1 = await Recipe.findAll(perspective!, { where: { name: "Recipe 1: Name" } });
+                    const recipes1 = await Recipe.findAll(perspective!, { where: { name: "Recipe 1" } });
                     expect(recipes1.length).to.equal(1);
 
                     // Test where with invalid name
@@ -1062,7 +1055,7 @@ describe("Prolog + Literals", () => {
                     expect(recipes2.length).to.equal(0);
 
                     // Test where with boolean
-                    const recipes3 = await Recipe.findAll(perspective!, { where: { boolean: true } });
+                    const recipes3 = await Recipe.findAll(perspective!, { where: { booleanTest: true } });
                     expect(recipes3.length).to.equal(2);
 
                     // Test where with number
@@ -1070,7 +1063,7 @@ describe("Prolog + Literals", () => {
                     expect(recipes4.length).to.equal(1);
 
                     // Test where with an array of possible matches
-                    const recipes5 = await Recipe.findAll(perspective!, { where: { name: ["Recipe 1: Name", "Recipe 2: Name"] } });
+                    const recipes5 = await Recipe.findAll(perspective!, { where: { name: ["Recipe 1", "Recipe 2"] } });
                     expect(recipes5.length).to.equal(2);
 
                     // Test where with author
@@ -1108,21 +1101,18 @@ describe("Prolog + Literals", () => {
                     
                     // Create recipies
                     const recipe1 = new Recipe(perspective!);
-                    recipe1.name = Literal.from("Recipe 1: Name").toUrl();
-                    recipe1.number = Literal.from(5).toUrl();
-                    recipe1.boolean = Literal.from(true).toUrl();
+                    recipe1.name = "Recipe 1";
+                    recipe1.number = 5;
                     await recipe1.save();
 
                     const recipe2 = new Recipe(perspective!);
-                    recipe2.name = Literal.from("Recipe 2: Name").toUrl();
-                    recipe2.number = Literal.from(10).toUrl();
-                    recipe2.boolean = Literal.from(true).toUrl();
+                    recipe2.name = "Recipe 2";
+                    recipe2.number = 10;
                     await recipe2.save();
 
                     const recipe3 = new Recipe(perspective!);
-                    recipe3.name = Literal.from("Recipe 3: Name").toUrl();
-                    recipe3.number = Literal.from(15).toUrl();
-                    recipe3.boolean = Literal.from(false).toUrl();
+                    recipe3.name = "Recipe 3";
+                    recipe3.number = 15;
                     await recipe3.save();
 
                     // Check all recipes are there
@@ -1135,7 +1125,7 @@ describe("Prolog + Literals", () => {
                     const validTimestamp3 = allRecipes[2].timestamp;
 
                     // Test not operation on standard property
-                    const recipes1 = await Recipe.findAll(perspective!, { where: { name: { not: "Recipe 1: Name" } } });
+                    const recipes1 = await Recipe.findAll(perspective!, { where: { name: { not: "Recipe 1" } } });
                     expect(recipes1.length).to.equal(2);
 
                     // Test not operation on author
@@ -1148,9 +1138,9 @@ describe("Prolog + Literals", () => {
                     expect(recipes3.length).to.equal(2);
 
                     // Test not operation with an array of possible string matches
-                    const recipes4 = await Recipe.findAll(perspective!, { where: { name: { not: ["Recipe 1: Name", "Recipe 2: Name"] } } });
+                    const recipes4 = await Recipe.findAll(perspective!, { where: { name: { not: ["Recipe 1", "Recipe 2"] } } });
                     expect(recipes4.length).to.equal(1);
-                    expect(recipes4[0].name).to.equal(Literal.from("Recipe 3: Name").toUrl());
+                    expect(recipes4[0].name).to.equal("Recipe 3");
 
                     // Test not operation with an array of possible timestamp matches
                     const recipes5 = await Recipe.findAll(perspective!, { where: { timestamp: { not: [validTimestamp1, validTimestamp2] } } });
@@ -1169,23 +1159,23 @@ describe("Prolog + Literals", () => {
 
                     // Create recipes
                     const recipe1 = new Recipe(perspective!);
-                    recipe1.name = Literal.from("Recipe 1").toUrl();
-                    recipe1.number = Literal.from(5).toUrl();
+                    recipe1.name = "Recipe 1";
+                    recipe1.number = 5;
                     await recipe1.save();
 
                     const recipe2 = new Recipe(perspective!);
-                    recipe2.name = Literal.from("Recipe 2").toUrl();
-                    recipe2.number = Literal.from(10).toUrl();
+                    recipe2.name = "Recipe 2";
+                    recipe2.number = 10;
                     await recipe2.save();
 
                     const recipe3 = new Recipe(perspective!);
-                    recipe3.name = Literal.from("Recipe 3").toUrl();
-                    recipe3.number = Literal.from(15).toUrl();
+                    recipe3.name = "Recipe 3";
+                    recipe3.number = 15;
                     await recipe3.save();
 
                     const recipe4 = new Recipe(perspective!);
-                    recipe4.name = Literal.from("Recipe 4").toUrl();
-                    recipe4.number = Literal.from(20).toUrl();
+                    recipe4.name = "Recipe 4";
+                    recipe4.number = 20;
                     await recipe4.save();
 
                     // Check all recipes are there
@@ -1243,20 +1233,20 @@ describe("Prolog + Literals", () => {
                     const start = new Date().getTime();
 
                     const recipe1 = new Recipe(perspective!);
-                    recipe1.name = Literal.from("Recipe 1").toUrl();
-                    recipe1.number = Literal.from(5).toUrl();
+                    recipe1.name = "Recipe 1";
+                    recipe1.number = 5;
                     await recipe1.save();
 
                     const mid = new Date().getTime();
 
                     const recipe2 = new Recipe(perspective!);
-                    recipe2.name = Literal.from("Recipe 2").toUrl();
-                    recipe2.number = Literal.from(10).toUrl();
+                    recipe2.name = "Recipe 2";
+                    recipe2.number = 10;
                     await recipe2.save();
 
                     const recipe3 = new Recipe(perspective!);
-                    recipe3.name = Literal.from("Recipe 3").toUrl();
-                    recipe3.number = Literal.from(15).toUrl();
+                    recipe3.name = "Recipe 3";
+                    recipe3.number = 15;
                     await recipe3.save();
 
                     const end = new Date().getTime();
@@ -1288,122 +1278,120 @@ describe("Prolog + Literals", () => {
                     await recipe3.delete();
                 })
 
-                // // requires literal_from_url(PropertyURI, PropertyValue, _) in properties query
-                // it("findAll() works with ordering", async () => {
-                //     // Clear previous recipes
-                //     const oldRecipes = await Recipe.findAll(perspective!);
-                //     for (const recipe of oldRecipes) await recipe.delete();
+                it("findAll() works with ordering", async () => {
+                    // Clear previous recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
                     
-                //     // Create recipes
-                //     const recipe1 = new Recipe(perspective!);
-                //     recipe1.name = Literal.from("Recipe 1").toUrl();
-                //     recipe1.number = Literal.from(10).toUrl();
-                //     await recipe1.save();
+                    // Create recipes
+                    const recipe1 = new Recipe(perspective!);
+                    recipe1.name = "Recipe 1";
+                    recipe1.number = 10;
+                    await recipe1.save();
                     
-                //     const recipe2 = new Recipe(perspective!);
-                //     recipe2.name = Literal.from("Recipe 2").toUrl();
-                //     recipe2.number = Literal.from(5).toUrl();
-                //     await recipe2.save();
+                    const recipe2 = new Recipe(perspective!);
+                    recipe2.name = "Recipe 2";
+                    recipe2.number = 5;
+                    await recipe2.save();
                     
-                //     const recipe3 = new Recipe(perspective!);
-                //     recipe3.name = Literal.from("Recipe 3").toUrl();
-                //     recipe3.number = Literal.from(15).toUrl();
-                //     await recipe3.save();
+                    const recipe3 = new Recipe(perspective!);
+                    recipe3.name = "Recipe 3";
+                    recipe3.number = 15;
+                    await recipe3.save();
                     
-                //     // Check all recipes are there
-                //     const allRecipes = await Recipe.findAll(perspective!);
-                //     expect(allRecipes.length).to.equal(3);
+                    // Check all recipes are there
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    expect(allRecipes.length).to.equal(3);
 
-                //     // Test ordering by number properties
-                //     const recipes1 = await Recipe.findAll(perspective!, { order: { number: "ASC" } });
-                //     expect(recipes1[0].number).to.equal(5);
-                //     expect(recipes1[1].number).to.equal(10);
-                //     expect(recipes1[2].number).to.equal(15);
+                    // Test ordering by number properties
+                    const recipes1 = await Recipe.findAll(perspective!, { order: { number: "ASC" } });
+                    expect(recipes1[0].number).to.equal(5);
+                    expect(recipes1[1].number).to.equal(10);
+                    expect(recipes1[2].number).to.equal(15);
 
-                //     const recipes2 = await Recipe.findAll(perspective!, { order: { number: "DESC" } });
-                //     expect(recipes2[0].number).to.equal(15);
-                //     expect(recipes2[1].number).to.equal(10);
-                //     expect(recipes2[2].number).to.equal(5);
+                    const recipes2 = await Recipe.findAll(perspective!, { order: { number: "DESC" } });
+                    expect(recipes2[0].number).to.equal(15);
+                    expect(recipes2[1].number).to.equal(10);
+                    expect(recipes2[2].number).to.equal(5);
 
-                //     // Test ordering by timestamp
-                //     const recipes3 = await Recipe.findAll(perspective!, { order: { timestamp: "ASC" } });
-                //     expect(recipes3[0].name).to.equal("Recipe 1");
-                //     expect(recipes3[1].name).to.equal("Recipe 2");
-                //     expect(recipes3[2].name).to.equal("Recipe 3");
+                    // Test ordering by timestamp
+                    const recipes3 = await Recipe.findAll(perspective!, { order: { timestamp: "ASC" } });
+                    expect(recipes3[0].name).to.equal("Recipe 1");
+                    expect(recipes3[1].name).to.equal("Recipe 2");
+                    expect(recipes3[2].name).to.equal("Recipe 3");
 
-                //     const recipes4 = await Recipe.findAll(perspective!, { order: { timestamp: "DESC" } });
-                //     expect(recipes4[0].name).to.equal("Recipe 3");
-                //     expect(recipes4[1].name).to.equal("Recipe 2");
-                //     expect(recipes4[2].name).to.equal("Recipe 1");
+                    const recipes4 = await Recipe.findAll(perspective!, { order: { timestamp: "DESC" } });
+                    expect(recipes4[0].name).to.equal("Recipe 3");
+                    expect(recipes4[1].name).to.equal("Recipe 2");
+                    expect(recipes4[2].name).to.equal("Recipe 1");
                     
-                //     await recipe1.delete();
-                //     await recipe2.delete();
-                //     await recipe3.delete();
-                // })
+                    await recipe1.delete();
+                    await recipe2.delete();
+                    await recipe3.delete();
+                })
 
-                // // requires literal_from_url(PropertyURI, PropertyValue, _) in properties query
-                // it("findAll() works with limit and offset", async () => {
-                //     // Clear previous recipes
-                //     const oldRecipes = await Recipe.findAll(perspective!);
-                //     for (const recipe of oldRecipes) await recipe.delete();
+                it("findAll() works with limit and offset", async () => {
+                    // Clear previous recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
                     
-                //     // Create recipes
-                //     const recipe1 = new Recipe(perspective!);
-                //     recipe1.name = Literal.from("Recipe 1").toUrl();
-                //     await recipe1.save();
+                    // Create recipes
+                    const recipe1 = new Recipe(perspective!);
+                    recipe1.name = "Recipe 1";
+                    await recipe1.save();
                     
-                //     const recipe2 = new Recipe(perspective!);
-                //     recipe2.name = Literal.from("Recipe 2").toUrl();
-                //     await recipe2.save();
+                    const recipe2 = new Recipe(perspective!);
+                    recipe2.name = "Recipe 2";
+                    await recipe2.save();
                     
-                //     const recipe3 = new Recipe(perspective!);
-                //     recipe3.name = Literal.from("Recipe 3").toUrl();
-                //     await recipe3.save();
+                    const recipe3 = new Recipe(perspective!);
+                    recipe3.name = "Recipe 3";
+                    await recipe3.save();
                     
-                //     const recipe4 = new Recipe(perspective!);
-                //     recipe4.name = Literal.from("Recipe 4").toUrl();
-                //     await recipe4.save();
+                    const recipe4 = new Recipe(perspective!);
+                    recipe4.name = "Recipe 4";
+                    await recipe4.save();
 
-                //     const recipe5 = new Recipe(perspective!);
-                //     recipe5.name = Literal.from("Recipe 5").toUrl();
-                //     await recipe5.save();
+                    const recipe5 = new Recipe(perspective!);
+                    recipe5.name = "Recipe 5";
+                    await recipe5.save();
 
-                //     const recipe6 = new Recipe(perspective!);
-                //     recipe6.name = Literal.from("Recipe 6").toUrl();
-                //     await recipe6.save();
+                    const recipe6 = new Recipe(perspective!);
+                    recipe6.name = "Recipe 6";
+                    await recipe6.save();
                     
-                //     // Check all recipes are there
-                //     const allRecipes = await Recipe.findAll(perspective!);
-                //     expect(allRecipes.length).to.equal(6);
+                    // Check all recipes are there
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    expect(allRecipes.length).to.equal(6);
 
-                //     // Test limit
-                //     const recipes1 = await Recipe.findAll(perspective!, { limit: 2 });
-                //     expect(recipes1.length).to.equal(2);
+                    // Test limit
+                    const recipes1 = await Recipe.findAll(perspective!, { limit: 2 });
+                    expect(recipes1.length).to.equal(2);
 
-                //     const recipes2 = await Recipe.findAll(perspective!, { limit: 4 });
-                //     expect(recipes2.length).to.equal(4);
+                    const recipes2 = await Recipe.findAll(perspective!, { limit: 4 });
+                    expect(recipes2.length).to.equal(4);
 
-                //     // Test offset
-                //     const recipes3 = await Recipe.findAll(perspective!, { offset: 2 });
-                //     expect(recipes3[0].name).to.equal("Recipe 3");
+                    // Test offset
+                    const recipes3 = await Recipe.findAll(perspective!, { offset: 2 });
+                    expect(recipes3[0].name).to.equal("Recipe 3");
 
-                //     const recipes4 = await Recipe.findAll(perspective!, { offset: 4 });
-                //     expect(recipes4[0].name).to.equal("Recipe 5");
+                    const recipes4 = await Recipe.findAll(perspective!, { offset: 4 });
+                    expect(recipes4[0].name).to.equal("Recipe 5");
 
-                //     // Test limit and offset
-                //     const recipes5 = await Recipe.findAll(perspective!, { limit: 2, offset: 1 });
-                //     expect(recipes5.length).to.equal(2);
-                //     expect(recipes5[0].name).to.equal("Recipe 2");
+                    // Test limit and offset
+                    const recipes5 = await Recipe.findAll(perspective!, { limit: 2, offset: 1 });
+                    expect(recipes5.length).to.equal(2);
+                    expect(recipes5[0].name).to.equal("Recipe 2");
 
-                //     const recipes6 = await Recipe.findAll(perspective!, { limit: 3, offset: 2 });
-                //     expect(recipes6.length).to.equal(3);
-                //     expect(recipes6[0].name).to.equal("Recipe 3");
+                    const recipes6 = await Recipe.findAll(perspective!, { limit: 3, offset: 2 });
+                    expect(recipes6.length).to.equal(3);
+                    expect(recipes6[0].name).to.equal("Recipe 3");
 
                     
-                //     await recipe1.delete();
-                //     await recipe2.delete();
-                //     await recipe3.delete();
-                // })
+                    await recipe1.delete();
+                    await recipe2.delete();
+                    await recipe3.delete();
+                })
 
                 it("findAll() works with a mix of query constraints", async () => {
                     // Clear previous recipes
@@ -1412,15 +1400,15 @@ describe("Prolog + Literals", () => {
                     
                     // Create recipies
                     const recipe1 = new Recipe(perspective!);
-                    recipe1.name = Literal.from("Recipe 1").toUrl();
-                    recipe1.boolean = Literal.from(true).toUrl();
+                    recipe1.name = "Recipe 1";
+                    recipe1.booleanTest = true;
                     recipe1.comments = ["Recipe 1: Comment 1", "Recipe 1: Comment 2"];
                     recipe1.entries = ["Recipe 1: Entry 1", "Recipe 1: Entry 2"];
                     await recipe1.save();
 
                     const recipe2 = new Recipe(perspective!);
-                    recipe2.name = Literal.from("Recipe 2").toUrl();;
-                    recipe2.boolean = Literal.from(false).toUrl();
+                    recipe2.name = "Recipe 2";;
+                    recipe2.booleanTest = false;
                     recipe2.comments = ["Recipe 2: Comment 1", "Recipe 2: Comment 2"];
                     recipe2.entries = ["Recipe 2: Entry 1", "Recipe 2: Entry 2"];
                     await recipe2.save();
@@ -1432,16 +1420,16 @@ describe("Prolog + Literals", () => {
                     // Test with where, properties, and collections
                     const recipes1 = await Recipe.findAll(perspective!, { where: { name: "Recipe 1" }, properties: ["name"], collections: ["comments"] });
                     expect(recipes1.length).to.equal(1);
-                    expect(recipes1[0].name).to.equal(Literal.from("Recipe 1").toUrl());
-                    expect(recipes1[0].boolean).to.be.undefined;
+                    expect(recipes1[0].name).to.equal("Recipe 1");
+                    expect(recipes1[0].booleanTest).to.be.undefined;
                     expect(recipes1[0].comments.length).to.equal(2);
                     expect(recipes1[0].entries).to.be.undefined;
 
                     // Test with different where, properties, and collections
-                    const recipes2 = await Recipe.findAll(perspective!, { where: { name: "Recipe 2" }, properties: ["boolean"], collections: ["entries"] });
+                    const recipes2 = await Recipe.findAll(perspective!, { where: { name: "Recipe 2" }, properties: ["booleanTest"], collections: ["entries"] });
                     expect(recipes2.length).to.equal(1);
                     expect(recipes2[0].name).to.be.undefined;
-                    expect(recipes2[0].boolean).to.equal(Literal.from(false).toUrl());
+                    expect(recipes2[0].booleanTest).to.equal(false);
                     expect(recipes2[0].comments).to.be.undefined;
                     expect(recipes2[0].entries.length).to.equal(2);
 
@@ -1449,22 +1437,21 @@ describe("Prolog + Literals", () => {
                     await recipe2.delete();
                 })
 
-                // currently not working
-                // it("findAll() works with constraining resolved literal properties", async () => {
-                //     // Clear previous recipes
-                //     const oldRecipes = await Recipe.findAll(perspective!);
-                //     for (const recipe of oldRecipes) await recipe.delete();
+                it("findAll() works with constraining resolved literal properties", async () => {
+                    // Clear previous recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
                     
-                //     // Create a recipe with a resolved literal property
-                //     const recipe = new Recipe(perspective!);
-                //     recipe.resolve = "Hello World"
-                //     await recipe.save();
+                    // Create a recipe with a resolved literal property
+                    const recipe = new Recipe(perspective!);
+                    recipe.resolve = "Hello World"
+                    await recipe.save();
 
-                //     // Test with resolved literal property
-                //     const recipes1 = await Recipe.findAll(perspective!, { where: { resolve: "Hello World" } });
-                //     expect(recipes1.length).to.equal(1);
-                //     expect(recipes1[0].resolve).to.equal("Hello World");                    
-                // })
+                    // Test with resolved literal property
+                    const recipes1 = await Recipe.findAll(perspective!, { where: { resolve: "Hello World" } });
+                    expect(recipes1.length).to.equal(1);
+                    expect(recipes1[0].resolve).to.equal("Hello World");                    
+                })
             })
         })
     })
