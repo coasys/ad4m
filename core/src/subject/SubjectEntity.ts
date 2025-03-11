@@ -316,18 +316,7 @@ export class SubjectEntity {
   //   const result = (await perspective.infer(prologQuery))[0];
   // }
 
-  /**
-   * Gets all instances of the subject entity in the perspective that match the query params .
-   * @param perspective - The perspective that the subject entities belongs to.
-   * @param query - The query object used to define search contraints.
-   *
-   * @returns An array of all subject entity matches.
-   *
-   */
-  static async findAll(perspective: PerspectiveProxy, query: Query = {}) {
-    // todo:
-    // + include
-
+  private static async queryToProlog(perspective: PerspectiveProxy, query: Query) {
     const { source, properties, collections, where, order, offset, limit } = query;
 
     const instanceQueries = [
@@ -349,9 +338,11 @@ export class SubjectEntity {
       ${resultSetQueries.filter((q) => q).join(", ")}
     `;
 
-    const result = await perspective.infer(fullQuery);
-    if (!result?.[0]?.AllInstances) return [];
+    return fullQuery;
+  }
 
+  private static async instancesFromPrologResult(perspective: PerspectiveProxy, query: Query, result: any) {
+    if (!result?.[0]?.AllInstances) return [];
     // Map results to instances
     const requestedAttribtes = [...(query?.properties || []), ...(query?.collections || [])];
     const allInstances = await Promise.all(
@@ -372,7 +363,25 @@ export class SubjectEntity {
         return instance;
       })
     );
+    return allInstances;
+  }
 
+
+  /**
+   * Gets all instances of the subject entity in the perspective that match the query params .
+   * @param perspective - The perspective that the subject entities belongs to.
+   * @param query - The query object used to define search contraints.
+   *
+   * @returns An array of all subject entity matches.
+   *
+   */
+  static async findAll(perspective: PerspectiveProxy, query: Query = {}) {
+    // todo:
+    // + include
+
+    let prologQuery = await this.queryToProlog(perspective, query);
+    const result = await perspective.infer(prologQuery);
+    const allInstances = await this.instancesFromPrologResult(perspective, query, result);
     return allInstances;
   }
 
@@ -571,3 +580,4 @@ export type SubjectEntityQueryParam = {
   // conditions on properties
   where?: { condition?: string } | object;
 };
+
