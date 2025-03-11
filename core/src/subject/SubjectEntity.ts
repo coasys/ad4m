@@ -273,7 +273,7 @@ export class SubjectEntity {
     return this.#perspective;
   }
 
-  private static async assignValuesToInstance(
+  public static async assignValuesToInstance(
     perspective: PerspectiveProxy,
     instance: SubjectEntity,
     values: ValueTuple[]
@@ -316,7 +316,7 @@ export class SubjectEntity {
   //   const result = (await perspective.infer(prologQuery))[0];
   // }
 
-  private static async queryToProlog(perspective: PerspectiveProxy, query: Query) {
+  public static async queryToProlog(perspective: PerspectiveProxy, query: Query) {
     const { source, properties, collections, where, order, offset, limit } = query;
 
     const instanceQueries = [
@@ -341,7 +341,7 @@ export class SubjectEntity {
     return fullQuery;
   }
 
-  private static async instancesFromPrologResult(perspective: PerspectiveProxy, query: Query, result: any) {
+  public static async instancesFromPrologResult(perspective: PerspectiveProxy, query: Query, result: any) {
     if (!result?.[0]?.AllInstances) return [];
     // Map results to instances
     const requestedAttribtes = [...(query?.properties || []), ...(query?.collections || [])];
@@ -384,6 +384,7 @@ export class SubjectEntity {
     const allInstances = await this.instancesFromPrologResult(perspective, query, result);
     return allInstances;
   }
+
 
   private async setProperty(key: string, value: any) {
     const setters = await this.#perspective.infer(
@@ -558,6 +559,14 @@ export class SubjectEntity {
   async delete() {
     await this.#perspective.removeSubject(this, this.#baseExpression);
   }
+
+  /** Query builder for SubjectEntity queries.
+   * Allows building queries with a fluent interface and either running them once
+   * or subscribing to updates.
+   */
+  static query<T extends SubjectEntity>(perspective: PerspectiveProxy): SubjectQueryBuilder<T> {
+    return new SubjectQueryBuilder<T>(perspective, this.name);
+  }
 }
 
 export type SubjectArray<T> =
@@ -580,4 +589,80 @@ export type SubjectEntityQueryParam = {
   // conditions on properties
   where?: { condition?: string } | object;
 };
+
+/** Query builder for SubjectEntity queries.
+ * Allows building queries with a fluent interface and either running them once
+ * or subscribing to updates.
+ */
+export class SubjectQueryBuilder<T extends SubjectEntity> {
+    private perspective: PerspectiveProxy;
+    private subjectClass: string;
+    private queryParams: Query = {};
+
+    constructor(perspective: PerspectiveProxy, subjectClass: string) {
+        this.perspective = perspective;
+        this.subjectClass = subjectClass;
+    }
+
+    where(conditions: Where): SubjectQueryBuilder<T> {
+        this.queryParams.where = conditions;
+        return this;
+    }
+
+    order(orderBy: Order): SubjectQueryBuilder<T> {
+        this.queryParams.order = orderBy;
+        return this;
+    }
+
+    limit(limit: number): SubjectQueryBuilder<T> {
+        this.queryParams.limit = limit;
+        return this;
+    }
+
+    offset(offset: number): SubjectQueryBuilder<T> {
+        this.queryParams.offset = offset;
+        return this;
+    }
+
+    source(source: string): SubjectQueryBuilder<T> {
+        this.queryParams.source = source;
+        return this;
+    }
+
+    properties(properties: string[]): SubjectQueryBuilder<T> {
+        this.queryParams.properties = properties;
+        return this;
+    }
+
+    collections(collections: string[]): SubjectQueryBuilder<T> {
+        this.queryParams.collections = collections;
+        return this;
+    }
+
+    /** Execute the query once and return the results */
+    async run(): Promise<T[]> {
+        const query = await SubjectEntity.queryToProlog(this.perspective, this.queryParams);
+        const result = await this.perspective.infer(query);
+        const allInstances = await SubjectEntity.instancesFromPrologResult(this.perspective, this.queryParams, result);
+        return allInstances;
+    }
+
+    /** Subscribe to the query and receive updates when results change
+     * @param callback Function that will be called with the updated results whenever they change
+     * @returns A function that can be called to unsubscribe
+     */
+    async subscribeAndRun(callback: (results: T[]) => void): Promise<T[]> {
+        const query = await SubjectEntity.queryToProlog(this.perspective, this.queryParams);
+        const subscription = await this.perspective.subscribeInfer(query);
+
+        const processResults = async (result: string) => {
+          let newInstances = await SubjectEntity.instancesFromPrologResult(this.perspective, this.queryParams, result);
+          callback(newInstances);
+        };
+
+        subscription.onResult(processResults);
+        let instances = await SubjectEntity.instancesFromPrologResult(this.perspective, this.queryParams, subscription.result);
+        return instances;
+    }
+}
 
