@@ -1530,7 +1530,7 @@ describe("Prolog + Literals", () => {
 
                 it("query builder works with subscriptions", async () => {
                     // Clear any previous recipes
-                    const recipes = await Recipe.findAll(perspective!);
+                    let recipes = await Recipe.findAll(perspective!);
                     for (const recipe of recipes) {
                         await recipe.delete();
                     }
@@ -1538,7 +1538,8 @@ describe("Prolog + Literals", () => {
                     // Set up subscription for recipes with name "Test Recipe"
                     let updateCount = 0;
                     const query = Recipe.query(perspective!).where({ name: "Test Recipe" });
-                    const initialResults = await query.subscribeAndRun((recipes: SubjectEntity[]) => {
+                    const initialResults = await query.subscribeAndRun((newRecipes: SubjectEntity[]) => {
+                        recipes = newRecipes
                         updateCount++;
                     });
 
@@ -1549,11 +1550,13 @@ describe("Prolog + Literals", () => {
                     // Add matching recipe - should trigger subscription
                     const recipe1 = new Recipe(perspective!);
                     recipe1.name = "Test Recipe";
+                    recipe1.booleanTest = true;
                     await recipe1.save();
 
                     // Wait for subscription to fire
                     await sleep(1000);
                     expect(updateCount).to.equal(1);
+                    expect(recipes.length).to.equal(1);
 
                     // Add another matching recipe - should trigger subscription again
                     const recipe2 = new Recipe(perspective!);
@@ -1562,6 +1565,7 @@ describe("Prolog + Literals", () => {
 
                     await sleep(1000);
                     expect(updateCount).to.equal(2);
+                    expect(recipes.length).to.equal(2);
 
                     // Add non-matching recipe - should not trigger subscription
                     const recipe3 = new Recipe(perspective!);
@@ -1570,10 +1574,17 @@ describe("Prolog + Literals", () => {
 
                     await sleep(1000);
                     expect(updateCount).to.equal(2);
+                    expect(recipes.length).to.equal(2);
 
                     // Clean up
                     await recipe1.delete();
+                    await sleep(1000);
+                    expect(recipes.length).to.equal(1)
+
                     await recipe2.delete();
+                    await sleep(1000);
+                    expect(recipes.length).to.equal(0)
+
                     await recipe3.delete();
                 });
             })

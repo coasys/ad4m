@@ -342,6 +342,14 @@ export class SubjectEntity {
   }
 
   public static async instancesFromPrologResult(perspective: PerspectiveProxy, query: Query, result: any) {
+    if (typeof result === "string") {
+      try {
+        result = JSON.parse(result);
+      } catch (e) {
+        console.error("Error parsing result:", e);
+        return [];
+      }
+    }
     if (!result?.[0]?.AllInstances) return [];
     // Map results to instances
     const requestedAttribtes = [...(query?.properties || []), ...(query?.collections || [])];
