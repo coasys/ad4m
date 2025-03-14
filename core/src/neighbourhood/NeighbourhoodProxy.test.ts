@@ -1,3 +1,4 @@
+import { ApolloClient } from "@apollo/client";
 import { LinkExpression } from "../links/Links";
 import { NeighbourhoodClient } from "./NeighbourhoodClient";
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy";
@@ -6,13 +7,14 @@ describe("NeighbourhoodProxy", () => {
   it("should add multiple signal handlers", async () => {
     const neighbourhoodURI = "did://123";
     const mockApolloClient = {
-      subscribe: () => {
-        return new Promise((resolve) => {
-          setTimeout(() => {
-            resolve({ subscribe: () => {} });
-          }, 10);
-        });
-      },
+      subscribe: () => ({
+        subscribe: () =>
+          new Promise((resolve) => {
+            setTimeout(() => {
+              resolve({});
+            }, 10);
+          }),
+      }),
     } as any;
     const neighbourhoodProxy = new NeighbourhoodProxy(
       new NeighbourhoodClient(mockApolloClient),
