@@ -6,6 +6,7 @@ import { NeighbourhoodProxy } from "./NeighbourhoodProxy";
 describe("NeighbourhoodProxy", () => {
   it("should add multiple signal handlers", async () => {
     const neighbourhoodURI = "did://123";
+
     const mockApolloClient = {
       subscribe: () => ({
         subscribe: () =>
@@ -16,18 +17,29 @@ describe("NeighbourhoodProxy", () => {
           }),
       }),
     } as any;
+
+    const neighbourhoodClient = new NeighbourhoodClient(mockApolloClient);
     const neighbourhoodProxy = new NeighbourhoodProxy(
-      new NeighbourhoodClient(mockApolloClient),
+      neighbourhoodClient,
       neighbourhoodURI
     );
-    const handler1 = (payload: LinkExpression) => {};
-    const handler2 = (payload: LinkExpression) => {};
+
+    let callbacks = 0;
+
+    const handler1 = () => {
+      callbacks++;
+    };
+    const handler2 = () => {
+      callbacks++;
+    };
 
     // Add multiple signal handlers in paralell
     const promise = neighbourhoodProxy.addSignalHandler(handler1);
     neighbourhoodProxy.addSignalHandler(handler2);
     await promise;
 
-    expect(neighbourhoodProxy["signalHandlers"].length).toBe(2);
+    neighbourhoodClient.dispatchSignal(neighbourhoodURI, true);
+
+    expect(callbacks).toBe(2);
   });
 });
