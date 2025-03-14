@@ -5,7 +5,6 @@ import { NeighbourhoodProxy } from "./NeighbourhoodProxy";
 describe("NeighbourhoodProxy", () => {
   it("should add multiple signal handlers", async () => {
     const neighbourhoodURI = "did://123";
-    const subscribeCB = () => {};
     const mockApolloClient = {
       subscribe: () => {
         return new Promise((resolve) => {
