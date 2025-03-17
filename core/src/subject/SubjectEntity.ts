@@ -251,7 +251,7 @@ export class SubjectEntity {
    * Constructs a new subject.
    * @param perspective - The perspective that the subject belongs to.
    * @param baseExpression - The base expression of the subject.
-   * @param soruce - The source of the subject, the expression this instance is linked too.
+   * @param source - The source of the subject, the expression this instance is linked too.
    */
   constructor(perspective: PerspectiveProxy, baseExpression?: string, source?: string) {
     this.#baseExpression = baseExpression ? baseExpression : Literal.from(makeRandomPrologAtom(24)).toUrl();
