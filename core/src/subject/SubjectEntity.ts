@@ -29,6 +29,7 @@ type Query = {
   offset?: number;
   limit?: number;
 };
+export type AllInstancesResult = { AllInstances: SubjectEntity[] }
 
 function capitalize(word: string): string {
   return word.charAt(0).toUpperCase() + word.slice(1);
@@ -316,6 +317,7 @@ export class SubjectEntity {
   //   const result = (await perspective.infer(prologQuery))[0];
   // }
 
+  // Todo: Only return AllInstances (InstancesWithOffset, SortedInstances, & UnsortedInstances not required)
   public static async queryToProlog(perspective: PerspectiveProxy, query: Query) {
     const { source, properties, collections, where, order, offset, limit } = query;
 
@@ -341,15 +343,7 @@ export class SubjectEntity {
     return fullQuery;
   }
 
-  public static async instancesFromPrologResult(perspective: PerspectiveProxy, query: Query, result: any) {
-    if (typeof result === "string") {
-      try {
-        result = JSON.parse(result);
-      } catch (e) {
-        console.error("Error parsing result:", e);
-        return [];
-      }
-    }
+  public static async instancesFromPrologResult(perspective: PerspectiveProxy, query: Query, result: AllInstancesResult) {
     if (!result?.[0]?.AllInstances) return [];
     // Map results to instances
     const requestedAttribtes = [...(query?.properties || []), ...(query?.collections || [])];
@@ -663,7 +657,7 @@ export class SubjectQueryBuilder<T extends SubjectEntity> {
         const query = await SubjectEntity.queryToProlog(this.perspective, this.queryParams);
         const subscription = await this.perspective.subscribeInfer(query);
 
-        const processResults = async (result: string) => {
+        const processResults = async (result: AllInstancesResult) => {
           let newInstances = await SubjectEntity.instancesFromPrologResult(this.perspective, this.queryParams, result);
           callback(newInstances);
         };
@@ -673,4 +667,3 @@ export class SubjectQueryBuilder<T extends SubjectEntity> {
         return instances;
     }
 }
-

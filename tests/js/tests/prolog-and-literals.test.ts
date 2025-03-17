@@ -1473,7 +1473,9 @@ describe("Prolog + Literals", () => {
                     // Test with resolved literal property
                     const recipes1 = await Recipe.findAll(perspective!, { where: { resolve: "Hello World" } });
                     expect(recipes1.length).to.equal(1);
-                    expect(recipes1[0].resolve).to.equal("Hello World");                    
+                    expect(recipes1[0].resolve).to.equal("Hello World");
+                    
+                    await recipe.delete();
                 })
 
                 // it("subscription works with filtered queries", async () => {
@@ -1531,9 +1533,7 @@ describe("Prolog + Literals", () => {
                 it("query builder works with subscriptions", async () => {
                     // Clear any previous recipes
                     let recipes = await Recipe.findAll(perspective!);
-                    for (const recipe of recipes) {
-                        await recipe.delete();
-                    }
+                    for (const recipe of recipes) await recipe.delete();
 
                     // Set up subscription for recipes with name "Test Recipe"
                     let updateCount = 0;
