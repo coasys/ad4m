@@ -166,7 +166,13 @@ export class PerspectiveClient {
             variables: { uuid, query }
         }))
         const { subscriptionId, result } = perspectiveSubscribeQuery
-        return { subscriptionId, result: JSON.parse(result) }
+        let finalResult = result;
+        try {
+            finalResult = JSON.parse(result)
+        } catch (e) {
+            console.error('Error parsing perspectiveSubscribeQuery result:', e)
+        }
+        return { subscriptionId, result: finalResult }
     }
 
     subscribeToQueryUpdates(subscriptionId: string, onData: (result: AllInstancesResult) => void): () => void {
@@ -182,7 +188,13 @@ export class PerspectiveClient {
         }).subscribe({
             next: (result) => {
                 if (result.data && result.data.perspectiveQuerySubscription) {
-                    onData(JSON.parse(result.data.perspectiveQuerySubscription));
+                    let finalResult = result.data.perspectiveQuerySubscription;
+                    try {
+                        finalResult = JSON.parse(result.data.perspectiveQuerySubscription)
+                    } catch (e) {
+                        console.error('Error parsing perspectiveQuerySubscription:', e)
+                    }
+                    onData(finalResult);
                 }
             },
             error: (e) => console.error('Error in query subscription:', e)
