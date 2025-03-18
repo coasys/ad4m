@@ -1254,7 +1254,7 @@ describe("Prolog + Literals", () => {
                     recipe1.number = 5;
                     await recipe1.save();
 
-                    await sleep(1000);
+                    await sleep(2000);
 
                     const mid = new Date().getTime();
 
@@ -1268,7 +1268,7 @@ describe("Prolog + Literals", () => {
                     recipe3.number = 15;
                     await recipe3.save();
 
-                    await sleep(1000);
+                    await sleep(2000);
 
                     const end = new Date().getTime();
 
@@ -1608,7 +1608,7 @@ describe("Prolog + Literals", () => {
                     await note1.delete();
                     await note2.delete();
                 });
-                
+
                 it("query builder works with single query object", async () => {
                     // Clear any previous recipes
                     let recipes = await Recipe.findAll(perspective!);
