@@ -4,10 +4,6 @@ import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomPrologAtom } from "./SDNADecorators";
 import { singularToPlural } from "./util";
 
-export type QueryPartialEntity<T> = {
-  [P in keyof T]?: T[P] | (() => string);
-};
-
 type ValueTuple = [name: string, value: any, resolve?: boolean];
 type WhereOps = {
   not: string | number | boolean | string[] | number[];
@@ -29,7 +25,8 @@ type Query = {
   offset?: number;
   limit?: number;
 };
-export type AllInstancesResult = { AllInstances: SubjectEntity[] }
+
+export type AllInstancesResult = { AllInstances: SubjectEntity[] };
 
 function capitalize(word: string): string {
   return word.charAt(0).toUpperCase() + word.slice(1);
@@ -340,7 +337,11 @@ export class SubjectEntity {
     return fullQuery;
   }
 
-  public static async instancesFromPrologResult(perspective: PerspectiveProxy, query: Query, result: AllInstancesResult) {
+  public static async instancesFromPrologResult(
+    perspective: PerspectiveProxy,
+    query: Query,
+    result: AllInstancesResult
+  ) {
     if (!result?.[0]?.AllInstances) return [];
     // Map results to instances
     const requestedAttribtes = [...(query?.properties || []), ...(query?.collections || [])];
@@ -363,7 +364,6 @@ export class SubjectEntity {
     return allInstances;
   }
 
-
   /**
    * Gets all instances of the subject entity in the perspective that match the query params .
    * @param perspective - The perspective that the subject entities belongs to.
@@ -379,7 +379,6 @@ export class SubjectEntity {
     const allInstances = await this.instancesFromPrologResult(perspective, query, result);
     return allInstances;
   }
-
 
   private async setProperty(key: string, value: any) {
     const setters = await this.#perspective.infer(
@@ -559,8 +558,8 @@ export class SubjectEntity {
    * Allows building queries with a fluent interface and either running them once
    * or subscribing to updates.
    */
-  static query<T extends SubjectEntity>(perspective: PerspectiveProxy): SubjectQueryBuilder<T> {
-    return new SubjectQueryBuilder<T>(perspective, this as any);
+  static query<T extends SubjectEntity>(perspective: PerspectiveProxy, query?: Query): SubjectQueryBuilder<T> {
+    return new SubjectQueryBuilder<T>(perspective, this as any, query);
   }
 }
 
@@ -569,70 +568,71 @@ export class SubjectEntity {
  * or subscribing to updates.
  */
 export class SubjectQueryBuilder<T extends SubjectEntity> {
-    private perspective: PerspectiveProxy;
-    private queryParams: Query = {};
-    private ctor: typeof SubjectEntity;
+  private perspective: PerspectiveProxy;
+  private queryParams: Query = {};
+  private ctor: typeof SubjectEntity;
 
-    constructor(perspective: PerspectiveProxy, ctor: typeof SubjectEntity) {
-        this.perspective = perspective;
-        this.ctor = ctor;
-    }
+  constructor(perspective: PerspectiveProxy, ctor: typeof SubjectEntity, query?: Query) {
+    this.perspective = perspective;
+    this.ctor = ctor;
+    if (query) this.queryParams = query;
+  }
 
-    where(conditions: Where): SubjectQueryBuilder<T> {
-        this.queryParams.where = conditions;
-        return this;
-    }
+  where(conditions: Where): SubjectQueryBuilder<T> {
+    this.queryParams.where = conditions;
+    return this;
+  }
 
-    order(orderBy: Order): SubjectQueryBuilder<T> {
-        this.queryParams.order = orderBy;
-        return this;
-    }
+  order(orderBy: Order): SubjectQueryBuilder<T> {
+    this.queryParams.order = orderBy;
+    return this;
+  }
 
-    limit(limit: number): SubjectQueryBuilder<T> {
-        this.queryParams.limit = limit;
-        return this;
-    }
+  limit(limit: number): SubjectQueryBuilder<T> {
+    this.queryParams.limit = limit;
+    return this;
+  }
 
-    offset(offset: number): SubjectQueryBuilder<T> {
-        this.queryParams.offset = offset;
-        return this;
-    }
+  offset(offset: number): SubjectQueryBuilder<T> {
+    this.queryParams.offset = offset;
+    return this;
+  }
 
-    source(source: string): SubjectQueryBuilder<T> {
-        this.queryParams.source = source;
-        return this;
-    }
+  source(source: string): SubjectQueryBuilder<T> {
+    this.queryParams.source = source;
+    return this;
+  }
 
-    properties(properties: string[]): SubjectQueryBuilder<T> {
-        this.queryParams.properties = properties;
-        return this;
-    }
+  properties(properties: string[]): SubjectQueryBuilder<T> {
+    this.queryParams.properties = properties;
+    return this;
+  }
 
-    collections(collections: string[]): SubjectQueryBuilder<T> {
-        this.queryParams.collections = collections;
-        return this;
-    }
+  collections(collections: string[]): SubjectQueryBuilder<T> {
+    this.queryParams.collections = collections;
+    return this;
+  }
 
-    /** Execute the query once and return the results */
-    async run(): Promise<T[]> {
-        const query = await this.ctor.queryToProlog(this.perspective, this.queryParams);
-        const result = await this.perspective.infer(query);
-        const allInstances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
-        return allInstances as T[];
-    }
+  /** Execute the query once and return the results */
+  async run(): Promise<T[]> {
+    const query = await this.ctor.queryToProlog(this.perspective, this.queryParams);
+    const result = await this.perspective.infer(query);
+    const allInstances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
+    return allInstances as T[];
+  }
 
-    /** Subscribe to the query and receive updates when results change */
-    async subscribeAndRun(callback: (results: T[]) => void): Promise<T[]> {
-        const query = await this.ctor.queryToProlog(this.perspective, this.queryParams);
-        const subscription = await this.perspective.subscribeInfer(query);
+  /** Subscribe to the query and receive updates when results change */
+  async subscribeAndRun(callback: (results: T[]) => void): Promise<T[]> {
+    const query = await this.ctor.queryToProlog(this.perspective, this.queryParams);
+    const subscription = await this.perspective.subscribeInfer(query);
 
-        const processResults = async (result: AllInstancesResult) => {
-            let newInstances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
-            callback(newInstances as T[]);
-        };
+    const processResults = async (result: AllInstancesResult) => {
+        let newInstances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
+        callback(newInstances as T[]);
+    };
 
-        subscription.onResult(processResults);
-        let instances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, subscription.result);
-        return instances as T[];
-    }
+    subscription.onResult(processResults);
+    let instances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, subscription.result);
+    return instances as T[];
+  }
 }
