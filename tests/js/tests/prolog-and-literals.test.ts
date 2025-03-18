@@ -1550,8 +1550,11 @@ describe("Prolog + Literals", () => {
                         name: string = "";
 
                         @SubjectProperty({
-                            through: "note://content",
+                            through: "note1://content",
                             writable: true,
+                            required: true,
+                            initial: "note1://nocontent",
+                            resolveLanguage: "literal"
                         })
                         content1: string = "";
                     }
@@ -1570,8 +1573,11 @@ describe("Prolog + Literals", () => {
                         name: string = "";
 
                         @SubjectProperty({
-                            through: "note://content",
+                            through: "note2://content",
                             writable: true,
+                            required: true,
+                            initial: "note2://nocontent",
+                            resolveLanguage: "literal"
                         })
                         content2: string = "";
                     }
