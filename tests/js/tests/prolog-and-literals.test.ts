@@ -1609,16 +1609,67 @@ describe("Prolog + Literals", () => {
                     await note2.delete();
                 });
 
-                it("query builder works with single query object", async () => {
-                    // Clear any previous recipes
-                    let recipes = await Recipe.findAll(perspective!);
-                    for (const recipe of recipes) await recipe.delete();
+                it("query builder works with single query object, complex query and subscriptions", async () => {
+                    @SDNAClass({
+                        name: "Task"
+                    })
+                    class Task extends SubjectEntity {
+                        @SubjectProperty({
+                            through: "task://description",
+                            writable: true,
+                            required: true,
+                            initial: "task://nodescription",
+                            resolveLanguage: "literal"
+                        })
+                        description: string = "";
 
-                    // Set up subscription for recipes with name "Test Recipe"
+                        @SubjectProperty({
+                            through: "task://dueDate",
+                            writable: true,
+                            resolveLanguage: "literal"
+                        })
+                        dueDate: number = 0;
+
+                        @SubjectProperty({
+                            through: "task://completed",
+                            writable: true,
+                            resolveLanguage: "literal"
+                        })
+                        completed: boolean = false;
+
+                        @SubjectProperty({
+                            through: "task://assignee",
+                            writable: true,
+                            resolveLanguage: "literal"
+                        })
+                        assignee: string = "";
+                    }
+
+                    // Register the Task class
+                    await perspective!.ensureSDNASubjectClass(Task);
+
+                    // Clear any previous tasks
+                    let tasks = await Task.findAll(perspective!);
+                    for (const task of tasks) await task.delete();
+
+                    const tomorrow = new Date();
+                    tomorrow.setDate(tomorrow.getDate() + 1);
+                    const tomorrowTimestamp = tomorrow.getTime();
+
+                    const nextWeek = new Date();
+                    nextWeek.setDate(nextWeek.getDate() + 7);
+                    const nextWeekTimestamp = nextWeek.getTime();
+
+                    // Set up subscription for upcoming incomplete tasks assigned to "alice"
                     let updateCount = 0;
-                    const query = Recipe.query(perspective!, { where: { name: "Test Recipe" } });
-                    const initialResults = await query.subscribeAndRun((newRecipes: SubjectEntity[]) => {
-                        recipes = newRecipes
+                    const initialResults = await (Task.query(perspective!, { 
+                        where: { 
+                            dueDate: { lte: nextWeekTimestamp },
+                            completed: false,
+                            assignee: "alice"
+                        }
+                    })).subscribeAndRun((newTasks: SubjectEntity[]) => {
+                        tasks = newTasks;
                         updateCount++;
                     });
 
@@ -1626,45 +1677,57 @@ describe("Prolog + Literals", () => {
                     expect(initialResults.length).to.equal(0);
                     expect(updateCount).to.equal(0);
 
-                    // Add matching recipe - should trigger subscription
-                    const recipe1 = new Recipe(perspective!);
-                    recipe1.name = "Test Recipe";
-                    recipe1.booleanTest = true;
-                    await recipe1.save();
+                    // Add matching task - should trigger subscription
+                    const task1 = new Task(perspective!);
+                    task1.description = "Urgent task for tomorrow";
+                    task1.dueDate = tomorrowTimestamp;
+                    task1.completed = false;
+                    task1.assignee = "alice";
+                    await task1.save();
+                    
+                    await task1.get();
 
                     // Wait for subscription to fire
                     await sleep(1000);
+
                     expect(updateCount).to.equal(1);
-                    expect(recipes.length).to.equal(1);
+                    expect(tasks.length).to.equal(1);
 
-                    // Add another matching recipe - should trigger subscription again
-                    const recipe2 = new Recipe(perspective!);
-                    recipe2.name = "Test Recipe";
-                    await recipe2.save();
-
-                    await sleep(1000);
-                    expect(updateCount).to.equal(2);
-                    expect(recipes.length).to.equal(2);
-
-                    // Add non-matching recipe - should not trigger subscription
-                    const recipe3 = new Recipe(perspective!);
-                    recipe3.name = "Other Recipe";
-                    await recipe3.save();
+                    // Add another matching task - should trigger subscription again
+                    const task2 = new Task(perspective!);
+                    task2.description = "Another task for next week";
+                    task2.dueDate = nextWeekTimestamp;
+                    task2.completed = false;
+                    task2.assignee = "alice";
+                    await task2.save();
 
                     await sleep(1000);
                     expect(updateCount).to.equal(2);
-                    expect(recipes.length).to.equal(2);
+                    expect(tasks.length).to.equal(2);
+
+                    // Add non-matching task (wrong assignee) - should not trigger subscription
+                    const task3 = new Task(perspective!);
+                    task3.description = "Task assigned to bob";
+                    task3.dueDate = tomorrowTimestamp;
+                    task3.completed = false;
+                    task3.assignee = "bob";
+                    await task3.save();
+
+                    await sleep(1000);
+                    expect(updateCount).to.equal(2);
+                    expect(tasks.length).to.equal(2);
+
+                    // Mark task1 as completed - should trigger subscription to remove it
+                    task1.completed = true;
+                    await task1.update();
+                    await sleep(1000);
+
+                    expect(tasks.length).to.equal(1);   
 
                     // Clean up
-                    await recipe1.delete();
-                    await sleep(1000);
-                    expect(recipes.length).to.equal(1)
-
-                    await recipe2.delete();
-                    await sleep(1000);
-                    expect(recipes.length).to.equal(0)
-
-                    await recipe3.delete();
+                    await task1.delete();
+                    await task2.delete();
+                    await task3.delete();
                 });
             })
         })
