@@ -1539,15 +1539,49 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("query builder works with subscriptions", async () => {
-                    // Clear any previous recipes
-                    let recipes = await Recipe.findAll(perspective!);
-                    for (const recipe of recipes) await recipe.delete();
+                    @SDNAClass({
+                        name: "Notification"
+                    })
+                    class Notification extends SubjectEntity {
+                        @SubjectProperty({
+                            through: "notification://title",
+                            writable: true,
+                            required: true,
+                            initial: "literal://string:notitle",
+                            resolveLanguage: "literal"
+                        })
+                        title: string = "";
 
-                    // Set up subscription for recipes with name "Test Recipe"
+                        @SubjectProperty({
+                            through: "notification://priority",
+                            writable: true,
+                            resolveLanguage: "literal"
+                        })
+                        priority: number = 0;
+
+                        @SubjectProperty({
+                            through: "notification://read",
+                            writable: true,
+                            resolveLanguage: "literal"
+                        })
+                        read: boolean = false;
+                    }
+
+                    // Register the Notification class
+                    await perspective!.ensureSDNASubjectClass(Notification);
+
+                    // Clear any previous notifications
+                    let notifications = await Notification.findAll(perspective!);
+                    for (const notification of notifications) await notification.delete();
+
+                    // Set up subscription for high-priority unread notifications
                     let updateCount = 0;
-                    const query = Recipe.query(perspective!).where({ name: "Test Recipe" });
-                    const initialResults = await query.subscribeAndRun((newRecipes: SubjectEntity[]) => {
-                        recipes = newRecipes
+                    const query = Notification.query(perspective!).where({ 
+                        priority: { gt: 5 },
+                        read: false
+                    });
+                    const initialResults = await query.subscribeAndRun((newNotifications: SubjectEntity[]) => {
+                        notifications = newNotifications;
                         updateCount++;
                     });
 
@@ -1555,45 +1589,50 @@ describe("Prolog + Literals", () => {
                     expect(initialResults.length).to.equal(0);
                     expect(updateCount).to.equal(0);
 
-                    // Add matching recipe - should trigger subscription
-                    const recipe1 = new Recipe(perspective!);
-                    recipe1.name = "Test Recipe";
-                    recipe1.booleanTest = true;
-                    await recipe1.save();
+                    // Add matching notification - should trigger subscription
+                    const notification1 = new Notification(perspective!);
+                    notification1.title = "High priority notification";
+                    notification1.priority = 8;
+                    notification1.read = false;
+                    await notification1.save();
 
                     // Wait for subscription to fire
                     await sleep(1000);
                     expect(updateCount).to.equal(1);
-                    expect(recipes.length).to.equal(1);
+                    expect(notifications.length).to.equal(1);
 
-                    // Add another matching recipe - should trigger subscription again
-                    const recipe2 = new Recipe(perspective!);
-                    recipe2.name = "Test Recipe";
-                    await recipe2.save();
-
-                    await sleep(1000);
-                    expect(updateCount).to.equal(2);
-                    expect(recipes.length).to.equal(2);
-
-                    // Add non-matching recipe - should not trigger subscription
-                    const recipe3 = new Recipe(perspective!);
-                    recipe3.name = "Other Recipe";
-                    await recipe3.save();
+                    // Add another matching notification - should trigger subscription again
+                    const notification2 = new Notification(perspective!);
+                    notification2.title = "Another high priority";
+                    notification2.priority = 7;
+                    notification2.read = false;
+                    await notification2.save();
 
                     await sleep(1000);
                     expect(updateCount).to.equal(2);
-                    expect(recipes.length).to.equal(2);
+                    expect(notifications.length).to.equal(2);
+
+                    // Add non-matching notification (low priority) - should not trigger subscription
+                    const notification3 = new Notification(perspective!);
+                    notification3.title = "Low priority notification";
+                    notification3.priority = 3;
+                    notification3.read = false;
+                    await notification3.save();
+
+                    await sleep(1000);
+                    expect(updateCount).to.equal(2);
+                    expect(notifications.length).to.equal(2);
+
+                    // Mark notification1 as read - should trigger subscription to remove it
+                    notification1.read = true;
+                    await notification1.update();
+                    await sleep(1000);
+                    expect(notifications.length).to.equal(1);
 
                     // Clean up
-                    await recipe1.delete();
-                    await sleep(1000);
-                    expect(recipes.length).to.equal(1)
-
-                    await recipe2.delete();
-                    await sleep(1000);
-                    expect(recipes.length).to.equal(0)
-
-                    await recipe3.delete();
+                    await notification1.delete();
+                    await notification2.delete();
+                    await notification3.delete();
                 });
 
                 it("query builder should filter by subject class", async () => {
