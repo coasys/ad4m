@@ -1533,6 +1533,75 @@ describe("Prolog + Literals", () => {
 
                     await recipe3.delete();
                 });
+
+                it("query builder should filter by subject class", async () => {
+                    // Define a second subject class
+                    @SDNAClass({
+                        name: "Note1"
+                    })
+                    class Note1 extends SubjectEntity {
+                        @SubjectProperty({
+                            through: "note://name",
+                            writable: true,
+                            required: true,
+                            initial: "note://noname",
+                            resolveLanguage: "literal"
+                        })
+                        name: string = "";
+
+                        @SubjectProperty({
+                            through: "note://content",
+                            writable: true,
+                        })
+                        content1: string = "";
+                    }
+
+                    @SDNAClass({
+                        name: "Note2"
+                    })
+                    class Note2 extends SubjectEntity {
+                        @SubjectProperty({
+                            through: "note://name",
+                            writable: true,
+                            required: true,
+                            initial: "note://noname",
+                            resolveLanguage: "literal"
+                        })
+                        name: string = "";
+
+                        @SubjectProperty({
+                            through: "note://content",
+                            writable: true,
+                        })
+                        content2: string = "";
+                    }
+
+                    // Register the Note class
+                    await perspective!.ensureSDNASubjectClass(Note1);
+                    await perspective!.ensureSDNASubjectClass(Note2);
+
+                    // Create instances of both classes with the same name
+                    const note1 = new Note1(perspective!);
+                    note1.name = "Test Item";
+                    await note1.save();
+
+                    const note2 = new Note2(perspective!);
+                    note2.name = "Test Item";
+                    await note2.save();
+
+                    // Query for recipes - this should only return the recipe instance
+                    const note1Query = Note1.query(perspective!).where({ name: "Test Item" });
+                    const note1Results = await note1Query.run();
+                    
+                    console.log("note1Results: ", note1Results)
+                    // This assertion will fail because the query builder doesn't filter by class
+                    expect(note1Results.length).to.equal(1);
+                    expect(note1Results[0]).to.be.instanceOf(Note1);
+
+                    // Clean up
+                    await note1.delete();
+                    await note2.delete();
+                });
             })
         })
     })
