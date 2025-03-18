@@ -224,16 +224,23 @@ export class SubjectEntity {
   author: string;
   timestamp: string;
 
-  static classNamesByPerspectiveID: { [key: string]: string } = {};
+  private static classNamesByClass = new WeakMap<typeof SubjectEntity, { [perspectiveId: string]: string }>();
 
   static async getClassName(perspective: PerspectiveProxy) {
-    // cache the class name for the perspective
-    const perspectiveID = perspective.uuid;
-    if (!this.classNamesByPerspectiveID[perspectiveID]) {
-      this.classNamesByPerspectiveID[perspectiveID] = await perspective.stringOrTemplateObjectToSubjectClassName(this);
+    // Get or create the cache for this class
+    let classCache = this.classNamesByClass.get(this);
+    if (!classCache) {
+      classCache = {};
+      this.classNamesByClass.set(this, classCache);
     }
 
-    return this.classNamesByPerspectiveID[perspectiveID];
+    // Get or create the cached name for this perspective
+    const perspectiveID = perspective.uuid;
+    if (!classCache[perspectiveID]) {
+      classCache[perspectiveID] = await perspective.stringOrTemplateObjectToSubjectClassName(this);
+    }
+
+    return classCache[perspectiveID];
   }
 
   /**
