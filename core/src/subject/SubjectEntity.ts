@@ -551,27 +551,6 @@ export class SubjectEntity {
   }
 }
 
-export type SubjectArray<T> =
-  | T[]
-  | {
-      action: "setter" | "adder" | "remover";
-      value: T[];
-    };
-
-export type SubjectEntityQueryParam = {
-  // The source of the query.
-  source?: string;
-
-  // The size of the query.
-  size?: number;
-
-  // The page of the query.
-  page?: number;
-
-  // conditions on properties
-  where?: { condition?: string } | object;
-};
-
 /** Query builder for SubjectEntity queries.
  * Allows building queries with a fluent interface and either running them once
  * or subscribing to updates.
