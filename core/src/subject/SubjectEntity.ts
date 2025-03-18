@@ -560,7 +560,7 @@ export class SubjectEntity {
    * or subscribing to updates.
    */
   static query<T extends SubjectEntity>(perspective: PerspectiveProxy): SubjectQueryBuilder<T> {
-    return new SubjectQueryBuilder<T>(perspective, this.name);
+    return new SubjectQueryBuilder<T>(perspective, this as any);
   }
 }
 
@@ -570,12 +570,12 @@ export class SubjectEntity {
  */
 export class SubjectQueryBuilder<T extends SubjectEntity> {
     private perspective: PerspectiveProxy;
-    private subjectClass: string;
     private queryParams: Query = {};
+    private ctor: typeof SubjectEntity;
 
-    constructor(perspective: PerspectiveProxy, subjectClass: string) {
+    constructor(perspective: PerspectiveProxy, ctor: typeof SubjectEntity) {
         this.perspective = perspective;
-        this.subjectClass = subjectClass;
+        this.ctor = ctor;
     }
 
     where(conditions: Where): SubjectQueryBuilder<T> {
@@ -615,27 +615,24 @@ export class SubjectQueryBuilder<T extends SubjectEntity> {
 
     /** Execute the query once and return the results */
     async run(): Promise<T[]> {
-        const query = await SubjectEntity.queryToProlog(this.perspective, this.queryParams);
+        const query = await this.ctor.queryToProlog(this.perspective, this.queryParams);
         const result = await this.perspective.infer(query);
-        const allInstances = await SubjectEntity.instancesFromPrologResult(this.perspective, this.queryParams, result);
-        return allInstances;
+        const allInstances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
+        return allInstances as T[];
     }
 
-    /** Subscribe to the query and receive updates when results change
-     * @param callback Function that will be called with the updated results whenever they change
-     * @returns A function that can be called to unsubscribe
-     */
+    /** Subscribe to the query and receive updates when results change */
     async subscribeAndRun(callback: (results: T[]) => void): Promise<T[]> {
-        const query = await SubjectEntity.queryToProlog(this.perspective, this.queryParams);
+        const query = await this.ctor.queryToProlog(this.perspective, this.queryParams);
         const subscription = await this.perspective.subscribeInfer(query);
 
         const processResults = async (result: AllInstancesResult) => {
-          let newInstances = await SubjectEntity.instancesFromPrologResult(this.perspective, this.queryParams, result);
-          callback(newInstances);
+            let newInstances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
+            callback(newInstances as T[]);
         };
 
         subscription.onResult(processResults);
-        let instances = await SubjectEntity.instancesFromPrologResult(this.perspective, this.queryParams, subscription.result);
-        return instances;
+        let instances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, subscription.result);
+        return instances as T[];
     }
 }
