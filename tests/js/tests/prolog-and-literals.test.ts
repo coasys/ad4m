@@ -1476,58 +1476,6 @@ describe("Prolog + Literals", () => {
                     await recipe.delete();
                 })
 
-                // it("subscription works with filtered queries", async () => {
-                //     // Clear any previous recipes
-                //     const recipes = await Recipe.findAll(perspective!);
-                //     for (const recipe of recipes) {
-                //         await recipe.delete();
-                //     }
-
-                //     // Set up subscription for recipes with name "Test Recipe"
-                //     let updateCount = 0;
-                //     const subscription = await perspective!.subscribeInfer(`
-                //         subject_class("Recipe", SubjectClass),
-                //         instance(SubjectClass, Base),
-                //         property(Base, "name", "Test Recipe")
-                //     `);
-                //     subscription.onResult(async (result) => {
-                //         updateCount++;
-                //     });
-
-                //     // Initially no results
-                //     expect(updateCount).to.equal(0);
-
-                //     // Add matching recipe - should trigger subscription
-                //     const recipe1 = new Recipe(perspective!);
-                //     recipe1.name = "Test Recipe";
-                //     await recipe1.save();
-
-                //     // Wait for subscription to fire
-                //     await new Promise(resolve => setTimeout(resolve, 100));
-                //     expect(updateCount).to.equal(1);
-
-                //     // Add another matching recipe - should trigger subscription again
-                //     const recipe2 = new Recipe(perspective!);
-                //     recipe2.name = "Test Recipe";
-                //     await recipe2.save();
-
-                //     await new Promise(resolve => setTimeout(resolve, 100));
-                //     expect(updateCount).to.equal(2);
-
-                //     // Add non-matching recipe - should not trigger subscription
-                //     const recipe3 = new Recipe(perspective!);
-                //     recipe3.name = "Other Recipe";
-                //     await recipe3.save();
-
-                //     await new Promise(resolve => setTimeout(resolve, 100));
-                //     expect(updateCount).to.equal(2);
-
-                //     // Clean up
-                //     await recipe1.delete();
-                //     await recipe2.delete();
-                //     await recipe3.delete();
-                // });
-
                 it("query builder works with subscriptions", async () => {
                     // Clear any previous recipes
                     let recipes = await Recipe.findAll(perspective!);
