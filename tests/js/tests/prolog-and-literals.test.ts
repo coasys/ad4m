@@ -1476,6 +1476,68 @@ describe("Prolog + Literals", () => {
                     await recipe.delete();
                 })
 
+                it("findAll() works with multiple property constraints in one where clause", async () => {
+                    // Clear previous recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+                    
+                    // Create recipes with different combinations of properties
+                    const recipe1 = new Recipe(perspective!);
+                    recipe1.name = "Recipe 1";
+                    recipe1.number = 5;
+                    recipe1.booleanTest = true;
+                    await recipe1.save();
+
+                    const recipe2 = new Recipe(perspective!);
+                    recipe2.name = "Recipe 2"; 
+                    recipe2.number = 10;
+                    recipe2.booleanTest = true;
+                    await recipe2.save();
+
+                    const recipe3 = new Recipe(perspective!);
+                    recipe3.name = "Recipe 3";
+                    recipe3.number = 15;
+                    recipe3.booleanTest = false;
+                    await recipe3.save();
+
+                    // Check all recipes are there
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    expect(allRecipes.length).to.equal(3);
+
+                    // Test where with multiple property constraints
+                    const recipes1 = await Recipe.findAll(perspective!, { 
+                        where: { 
+                            name: "Recipe 1",
+                            number: 5,
+                            booleanTest: true
+                        }
+                    });
+                    expect(recipes1.length).to.equal(1);
+
+                    // Test where with multiple property constraints that match multiple recipes
+                    const recipes2 = await Recipe.findAll(perspective!, {
+                        where: {
+                            number: { gt: 5 },
+                            booleanTest: true
+                        }
+                    });
+                    expect(recipes2.length).to.equal(1);
+                    expect(recipes2[0].name).to.equal("Recipe 2");
+
+                    // Test where with multiple property constraints that match no recipes
+                    const recipes3 = await Recipe.findAll(perspective!, {
+                        where: {
+                            name: "Recipe 1",
+                            booleanTest: false
+                        }
+                    });
+                    expect(recipes3.length).to.equal(0);
+
+                    await recipe1.delete();
+                    await recipe2.delete();
+                    await recipe3.delete();
+                })
+
                 it("query builder works with subscriptions", async () => {
                     // Clear any previous recipes
                     let recipes = await Recipe.findAll(perspective!);
