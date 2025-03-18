@@ -25,6 +25,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Fix error after spawning AI task [PR#559](https://github.com/coasys/ad4m/pull/559)
 - Fix some problems with perspective.removeLinks() with a proper implementation [PR#563](https://github.com/coasys/ad4m/pull/563)
 - Ad4mConnect detects running local ADAM agent on first open - no need to click try again [](https://github.com/coasys/ad4m/pull/570)
+- Fix multiple synchronous addSignalHandler calls losing the first handler - fixing usage of NH.sendSignal() [PR#576](https://github.com/coasys/ad4m/pull/576)
 
 ### Added
 - Prolog predicates needed in new Flux mention notification trigger:
@@ -52,8 +53,9 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Models can also be added straight from a local file [PR#565](https://github.com/coasys/ad4m/pull/565)
 - Enable fine-tuning of voice detection parameters for transcription streams [PR#566](https://github.com/coasys/ad4m/pull/566)
 - Neighbourhood p2p signal: optional loopback sending signals to all connected apps/UIs of the sending agent [PR#568](https://github.com/coasys/ad4m/pull/568)
-- DB and Perspective to JSON exports and imports [PR#569](https://github.com/coasys/ad4m/pull/569)
-
+- DB and Perspective to JSON exports and imports [PR#569](https://github.com/coasys/ad4m/pull/569) 
+- Enhanced SubjectEntity query mechanism with where-queries, that compiles complex queries down to Prolog which can be subscribed to [PR#575](https://github.com/coasys/ad4m/pull/575)
+  
 ### Changed
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
 - Improved performance of SDNA / SubjectClass functions by moving code from client into executor and saving a lot of client <-> executor roundtrips [PR#480](https://github.com/coasys/ad4m/pull/480)
