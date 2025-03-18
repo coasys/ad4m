@@ -546,8 +546,8 @@ export class SubjectEntity {
    * Allows building queries with a fluent interface and either running them once
    * or subscribing to updates.
    */
-  static query<T extends SubjectEntity>(perspective: PerspectiveProxy): SubjectQueryBuilder<T> {
-    return new SubjectQueryBuilder<T>(perspective, this.name);
+  static query<T extends SubjectEntity>(perspective: PerspectiveProxy, query?: Query): SubjectQueryBuilder<T> {
+    return new SubjectQueryBuilder<T>(perspective, this.name, query);
   }
 }
 
@@ -560,9 +560,10 @@ export class SubjectQueryBuilder<T extends SubjectEntity> {
     private subjectClass: string;
     private queryParams: Query = {};
 
-    constructor(perspective: PerspectiveProxy, subjectClass: string) {
+    constructor(perspective: PerspectiveProxy, subjectClass: string, query?: Query) {
         this.perspective = perspective;
         this.subjectClass = subjectClass;
+        if (query) this.queryParams = query;
     }
 
     where(conditions: Where): SubjectQueryBuilder<T> {
