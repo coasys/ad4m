@@ -272,8 +272,14 @@ export class SubjectEntity {
     const propsObject = Object.fromEntries(
       await Promise.all(
         values.map(async ([name, value, resolve]) => {
+          let finalValue = value;
           // Resolve the value if necessary
-          const finalValue = resolve ? (await perspective.getExpression(value)).data : value;
+          if(resolve) {
+            let resolvedExpression = await perspective.getExpression(value)
+            if(resolvedExpression) {
+              finalValue = resolvedExpression.data;
+            }
+          }
           return [name, finalValue];
         })
       )
