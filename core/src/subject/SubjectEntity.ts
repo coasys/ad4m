@@ -52,53 +52,6 @@ function buildAuthorAndTimestampQuery(): string {
   `;
 }
 
-// Binds:
-// - SubjectClass
-// - Base
-// - PropertyName
-// - PropertyUri
-// - PropertyValue
-// - Resolve
-// Not need externally (only for debugging):
-// - LiteralValue
-// - Scheme
-//
-// `PropertyUri is what we get from the property_getter/4.
-// If the property_resolve/2 is true, then we check if the property is a literal
-// and try to resolve it in prolog, binding the resolved value to PropertyValue.
-// `Resolve` is only true if the JS code still needs to resolve it!
-const PROPERTY_RESOLVE_QUERY = `
-  % Get the property name and resolve boolean
-  property(SubjectClass, PropertyName),
-  property_getter(SubjectClass, Base, PropertyName, PropertyUri),
-  ( property_resolve(SubjectClass, PropertyName)
-    % If the property is resolvable, try to resolve it
-    -> (
-      append("literal://", _, PropertyUri)
-      % If the property is a literal, we can resolve it here
-      -> (
-        % so tell JS to not resolve it
-        Resolve = false,
-        literal_from_url(PropertyUri, LiteralValue, Scheme),
-        (
-          json_property(LiteralValue, "data", Data)
-          % If it is a JSON literal, and it has a 'data' field, use that
-          -> PropertyValue = Data
-          % Otherwise, just use the literal value
-          ; PropertyValue = LiteralValue 
-        )
-      )
-      ;
-      % else (it should be resolved but is not a literal),
-      % pass through URI to JS and tell JS to resolve it
-      (Resolve = true, PropertyValue = PropertyUri)
-    )
-    ;
-    % else (no property resolve), just return the URI as the value
-    (Resolve = false, PropertyValue = PropertyUri)
-  ) 
-`;
-
 function buildPropertiesQuery(properties?: string[]): string {
   // Gets the name, value, and resolve boolean for all (or some) properties on a SubjectEntity instance
   // Resolves literals (if property_resolve/2 is true) to their value - either the data field if it is
@@ -108,7 +61,7 @@ function buildPropertiesQuery(properties?: string[]): string {
     findall([PropertyName, PropertyValue, Resolve], (
       % Constrain to specified properties if provided
       ${properties ? `member(PropertyName, [${properties.map((name) => `"${name}"`).join(", ")}]),` : ""}
-      ${PROPERTY_RESOLVE_QUERY}
+      resolve_property(SubjectClass, Base, PropertyName, PropertyValue, Resolve)
     ), Properties)
   `;
 }
@@ -138,7 +91,7 @@ function buildWhereQuery(where: Where = {}): string {
   return (Object.entries(where) as [string, WhereCondition][])
     .map(([key, value]) => {
       const isSpecial = ["author", "timestamp"].includes(key);
-      const getter = `PropertyName = "${key}", ${PROPERTY_RESOLVE_QUERY}, V = PropertyValue`;
+      const getter = `resolve_property(SubjectClass, Base, "${key}", Value${key}, _)`;
       // const getter = `property_getter(SubjectClass, Base, "${key}", URI), literal_from_url(URI, V, _)`;
       const field = capitalize(key);
 
@@ -146,7 +99,7 @@ function buildWhereQuery(where: Where = {}): string {
       if (Array.isArray(value)) {
         const formattedValues = value.map((v) => formatValue(v)).join(", ");
         if (isSpecial) return `member(${field}, [${formattedValues}])`;
-        else return `${getter}, member(V, [${formattedValues}])`;
+        else return `${getter}, member(Value${key}, [${formattedValues}])`;
       }
 
       // Handle operation object
@@ -159,18 +112,18 @@ function buildWhereQuery(where: Where = {}): string {
             // NOT IN array
             const formattedValues = not.map((v) => formatValue(v)).join(", ");
             if (isSpecial) return `\\+ member(${field}, [${formattedValues}])`;
-            else return `${getter}, \\+ member(V, [${formattedValues}])`;
+            else return `${getter}, \\+ member(Value${key}, [${formattedValues}])`;
           } else {
             // NOT EQUAL
             if (isSpecial) return `${field} \\= ${formatValue(not)}`;
-            else return `\\+ (${getter}, V = ${formatValue(not)})`;
+            else return `\\+ (${getter}, Value${key} = ${formatValue(not)})`;
           }
         }
 
         // Handle BETWEEN
         if (between !== undefined && Array.isArray(between) && between.length === 2) {
           if (isSpecial) return `${field} >= ${between[0]}, ${field} =< ${between[1]}`;
-          else return `${getter}, V >= ${between[0]}, V =< ${between[1]}`;
+          else return `${getter}, Value${key} >= ${between[0]}, Value${key} =< ${between[1]}`;
         }
 
         // Handle lt, lte, gt, & gte operations
@@ -182,13 +135,13 @@ function buildWhereQuery(where: Where = {}): string {
         ];
 
         for (const { value, symbol } of operators) {
-          if (value !== undefined) return isSpecial ? `${field} ${symbol} ${value}` : `${getter}, V ${symbol} ${value}`;
+          if (value !== undefined) return isSpecial ? `${field} ${symbol} ${value}` : `${getter}, Value${key} ${symbol} ${value}`;
         }
       }
 
       // Default to direct equality
       if (isSpecial) return `${field} = ${formatValue(value)}`;
-      else return `${getter}, V = ${formatValue(value)}`;
+      else return `${getter}, Value${key} = ${formatValue(value)}`;
     })
     .join(", ");
 }

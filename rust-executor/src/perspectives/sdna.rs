@@ -440,6 +440,47 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
 
     lines.extend(json_parser.split('\n').map(|s| s.to_string()));
 
+    let resolve_property = r#"
+    % Retrieve a property from a subject class
+    % If the property is resolvable, this will try to do the resolution here
+    % which works if it is a literal, otherwise it will pass through the URI to JS
+    % to be resolved later
+    % Resolve is a boolean that tells JS whether to resolve the property or not
+    % If it is false, then the property value is a literal and we did resolve it here
+    % If it is true, then the property value is a URI and it still needs to be resolved
+    resolve_property(SubjectClass, Base, PropertyName, PropertyValue, Resolve) :-
+        % Get the property name and resolve boolean
+        property(SubjectClass, PropertyName),
+        property_getter(SubjectClass, Base, PropertyName, PropertyUri),
+        ( property_resolve(SubjectClass, PropertyName)
+            % If the property is resolvable, try to resolve it
+            -> (
+            append("literal://", _, PropertyUri)
+            % If the property is a literal, we can resolve it here
+            -> (
+                % so tell JS to not resolve it
+                Resolve = false,
+                literal_from_url(PropertyUri, LiteralValue, Scheme),
+                (
+                json_property(LiteralValue, "data", Data)
+                % If it is a JSON literal, and it has a 'data' field, use that
+                -> PropertyValue = Data
+                % Otherwise, just use the literal value
+                ; PropertyValue = LiteralValue 
+                )
+            )
+            ;
+            % else (it should be resolved but is not a literal),
+            % pass through URI to JS and tell JS to resolve it
+            (Resolve = true, PropertyValue = PropertyUri)
+            )
+            ;
+            % else (no property resolve), just return the URI as the value
+            (Resolve = false, PropertyValue = PropertyUri)
+        )."#;
+
+    lines.extend(resolve_property.split('\n').map(|s| s.to_string()));
+
     let assert_link = r#"
     assert_link(Source, Predicate, Target, Timestamp, Author) :-
         \+ link(Source, Predicate, Target, Timestamp, Author),
