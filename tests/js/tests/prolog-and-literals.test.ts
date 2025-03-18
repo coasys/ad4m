@@ -1242,61 +1242,94 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("findAll() works with where query between operations", async () => {
-                    // Clear previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
+                    @SDNAClass({
+                        name: "Task_due"
+                    })
+                    class TaskDue extends SubjectEntity {
+                        @SubjectProperty({
+                            through: "task://title",
+                            writable: true,
+                            required: true,
+                            initial: "task://notitle",
+                            resolveLanguage: "literal"
+                        })
+                        title: string = "";
 
-                    // Create timestamps & recipes
+                        @SubjectProperty({
+                            through: "task://priority",
+                            writable: true,
+                            resolveLanguage: "literal"
+                        })
+                        priority: number = 0;
+
+                        @SubjectProperty({
+                            through: "task://dueDate",
+                            writable: true,
+                            resolveLanguage: "literal"
+                        })
+                        dueDate: number = 0;
+                    }
+
+                    // Register the Task class
+                    await perspective!.ensureSDNASubjectClass(TaskDue);
+
+                    // Clear any previous tasks
+                    let tasks = await TaskDue.findAll(perspective!);
+                    for (const task of tasks) await task.delete();
+
+                    // Create timestamps & tasks
                     const start = new Date().getTime();
 
-                    const recipe1 = new Recipe(perspective!);
-                    recipe1.name = "Recipe 1";
-                    recipe1.number = 5;
-                    await recipe1.save();
+                    const task1 = new TaskDue(perspective!);
+                    task1.title = "Low priority task";
+                    task1.priority = 2;
+                    task1.dueDate = start;
+                    await task1.save();
 
                     await sleep(2000);
 
                     const mid = new Date().getTime();
 
-                    const recipe2 = new Recipe(perspective!);
-                    recipe2.name = "Recipe 2";
-                    recipe2.number = 10;
-                    await recipe2.save();
+                    const task2 = new TaskDue(perspective!);
+                    task2.title = "Medium priority task";
+                    task2.priority = 5;
+                    task2.dueDate = mid + 1;
+                    await task2.save();
 
-                    const recipe3 = new Recipe(perspective!);
-                    recipe3.name = "Recipe 3";
-                    recipe3.number = 15;
-                    await recipe3.save();
+                    const task3 = new TaskDue(perspective!);
+                    task3.title = "High priority task";
+                    task3.priority = 8;
+                    task3.dueDate = mid + 2;
+                    await task3.save();
 
                     await sleep(2000);
 
                     const end = new Date().getTime();
 
-                    // Check all recipes are there
-                    const allRecipes = await Recipe.findAll(perspective!);
-                    expect(allRecipes.length).to.equal(3);
+                    // Check all tasks are there
+                    const allTasks = await TaskDue.findAll(perspective!);
+                    expect(allTasks.length).to.equal(3);
 
-                    // 1. Number properties
-                    // Test between operation on number property
-                    const recipes3 = await Recipe.findAll(perspective!, { where: { number: { between: [0, 7] } } });
-                    expect(recipes3.length).to.equal(1);
+                    // Test between operation on priority
+                    const lowToMediumTasks = await TaskDue.findAll(perspective!, { where: { priority: { between: [1, 5] } } });
+                    expect(lowToMediumTasks.length).to.equal(2);
 
-                    // Test between operation on number property with different values
-                    const recipes4 = await Recipe.findAll(perspective!, { where: { number: { between: [8, 20] } } });
-                    expect(recipes4.length).to.equal(2);
+                    // Test between operation on priority with different values
+                    const mediumToHighTasks = await TaskDue.findAll(perspective!, { where: { priority: { between: [5, 10] } } });
+                    expect(mediumToHighTasks.length).to.equal(2);
 
-                    // 2. Timestamps
-                    // Test between operation on timestamp
-                    const recipes7 = await Recipe.findAll(perspective!, { where: { timestamp: { between: [start, mid] } } });
-                    expect(recipes7.length).to.equal(1);
+                    // Test between operation on dueDate
+                    const earlyTasks = await TaskDue.findAll(perspective!, { where: { dueDate: { between: [start, mid] } } });
+                    expect(earlyTasks.length).to.equal(1);
 
-                    // Test between operation on timestamp with different values
-                    const recipes8 = await Recipe.findAll(perspective!, { where: { timestamp: { between: [mid, end] } } });
-                    expect(recipes8.length).to.equal(2);
+                    // Test between operation on dueDate with different values
+                    const laterTasks = await TaskDue.findAll(perspective!, { where: { dueDate: { between: [mid, end] } } });
+                    expect(laterTasks.length).to.equal(2);
 
-                    await recipe1.delete();
-                    await recipe2.delete();
-                    await recipe3.delete();
+                    // Clean up
+                    await task1.delete();
+                    await task2.delete();
+                    await task3.delete();
                 })
 
                 it("findAll() works with ordering", async () => {
