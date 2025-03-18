@@ -42,27 +42,16 @@ function buildSourceQuery(source?: string): string {
 }
 
 // todo: only return Timestamp & Author from query (Base, AllLinks, and SortLinks not required)
-function buildAuthorAndTimestampQuery(options?: string[]): string {
-  // Gets the author and/or timestamp of a SubjectEntity instance (based on the first link mentioning the base)
-
-  // If no options are provided, both author and timestamp are included
-  const includeAuthor = !options || options.includes("author");
-  const includeTimestamp = !options || options.includes("timestamp");
-
-  if (!includeAuthor && !includeTimestamp) return "";
-
-  const variables = [];
-  if (includeTimestamp) variables.push("Timestamp");
-  if (includeAuthor) variables.push("Author");
-
+function buildAuthorAndTimestampQuery(): string {
+  // Gets the author and timestamp of a SubjectEntity instance (based on the first link mentioning the base)
   return `
     findall(
-      [${variables.map((v) => v[0]).join(", ")}],
-      link(Base, _, _, ${includeTimestamp ? "T" : "_"}, ${includeAuthor ? "A" : "_"}),
+      [T, A],
+      link(Base, _, _, T, A),
       AllLinks
     ),
     sort(AllLinks, SortedLinks),
-    SortedLinks = [[${variables.join(", ")}]|_]
+    SortedLinks = [[Timestamp, Author]|_]
   `;
 }
 
@@ -312,18 +301,13 @@ export class SubjectEntity {
     return this;
   }
 
-  // static async findOne(perspective: PerspectiveProxy, query?: any) {
-  //   let prologQuery = await this.getPropertiesQuery(perspective);
-  //   const result = (await perspective.infer(prologQuery))[0];
-  // }
-
   // Todo: Only return AllInstances (InstancesWithOffset, SortedInstances, & UnsortedInstances not required)
   public static async queryToProlog(perspective: PerspectiveProxy, query: Query) {
     const { source, properties, collections, where, order, offset, limit } = query;
 
     const instanceQueries = [
+      buildAuthorAndTimestampQuery(),
       buildSourceQuery(source),
-      buildAuthorAndTimestampQuery(properties),
       buildPropertiesQuery(properties),
       buildCollectionsQuery(collections),
       buildWhereQuery(where),
@@ -357,9 +341,7 @@ export class SubjectEntity {
           });
         }
         // Collect values to assign to instance
-        const values = [...Properties, ...Collections];
-        if (!query?.properties || query.properties.includes("timestamp")) values.push(["timestamp", Timestamp]);
-        if (!query?.properties || query.properties.includes("author")) values.push(["author", Author]);
+        const values = [...Properties, ...Collections, ["timestamp", Timestamp], ["author", Author]];
         await SubjectEntity.assignValuesToInstance(perspective, instance, values);
 
         return instance;
@@ -378,9 +360,7 @@ export class SubjectEntity {
    *
    */
   static async findAll(perspective: PerspectiveProxy, query: Query = {}) {
-    // todo:
-    // + include
-
+    // todo: set up includes
     let prologQuery = await this.queryToProlog(perspective, query);
     const result = await perspective.infer(prologQuery);
     const allInstances = await this.instancesFromPrologResult(perspective, query, result);

@@ -991,13 +991,11 @@ describe("Prolog + Literals", () => {
                     const recipesWithNameOnly = await Recipe.findAll(perspective!, { properties: ["name"] });
                     expect(recipesWithNameOnly[0].name).to.equal("recipe://test_name")
                     expect(recipesWithNameOnly[0].booleanTest).to.be.undefined
-                    expect(recipesWithNameOnly[0].author).to.be.undefined
 
                     // Test recipes with name and booleanTest only
                     const recipesWithTypeAndBooleanTestOnly = await Recipe.findAll(perspective!, { properties: ["name", "booleanTest"] });
                     expect(recipesWithTypeAndBooleanTestOnly[0].name).to.equal("recipe://test_name")
                     expect(recipesWithTypeAndBooleanTestOnly[0].booleanTest).to.equal(true)
-                    expect(recipesWithTypeAndBooleanTestOnly[0].author).to.be.undefined
 
                     // Test recipes with author only
                     const recipesWithAuthorOnly = await Recipe.findAll(perspective!, { properties: ["author"] });
