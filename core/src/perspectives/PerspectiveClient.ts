@@ -10,6 +10,7 @@ import { Perspective } from "./Perspective";
 import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
+import { AllInstancesResult } from "../subject/SubjectEntity";
 
 const LINK_EXPRESSION_FIELDS = `
 author
@@ -154,7 +155,7 @@ export class PerspectiveClient {
         return JSON.parse(perspectiveQueryProlog)
     }
 
-    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: string }> {
+    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult }> {
         const { perspectiveSubscribeQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveSubscribeQuery($uuid: String!, $query: String!) {
                 perspectiveSubscribeQuery(uuid: $uuid, query: $query) {
@@ -164,11 +165,17 @@ export class PerspectiveClient {
             }`,
             variables: { uuid, query }
         }))
-
-        return perspectiveSubscribeQuery
+        const { subscriptionId, result } = perspectiveSubscribeQuery
+        let finalResult = result;
+        try {
+            finalResult = JSON.parse(result)
+        } catch (e) {
+            console.error('Error parsing perspectiveSubscribeQuery result:', e)
+        }
+        return { subscriptionId, result: finalResult }
     }
 
-    subscribeToQueryUpdates(subscriptionId: string, onData: (result: string) => void): () => void {
+    subscribeToQueryUpdates(subscriptionId: string, onData: (result: AllInstancesResult) => void): () => void {
         const subscription = this.#apolloClient.subscribe({
             query: gql`
                 subscription perspectiveQuerySubscription($subscriptionId: String!) {
@@ -181,7 +188,13 @@ export class PerspectiveClient {
         }).subscribe({
             next: (result) => {
                 if (result.data && result.data.perspectiveQuerySubscription) {
-                    onData(result.data.perspectiveQuerySubscription);
+                    let finalResult = result.data.perspectiveQuerySubscription;
+                    try {
+                        finalResult = JSON.parse(result.data.perspectiveQuerySubscription)
+                    } catch (e) {
+                        console.error('Error parsing perspectiveQuerySubscription:', e)
+                    }
+                    onData(finalResult);
                 }
             },
             error: (e) => console.error('Error in query subscription:', e)

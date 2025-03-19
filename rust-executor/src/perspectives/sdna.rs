@@ -210,6 +210,71 @@ takeN(Rest, NextN, PageRest).
 
     lines.extend(lib.split('\n').map(|s| s.to_string()));
 
+    let sorting_predicates = r#"
+:- discontiguous(decorate/4).
+decorate(List, SortKey, Direction, Decorated) :-
+    maplist(decorate_item(SortKey), List, Decorated),
+    (Direction == "ASC" ; Direction == "DESC").
+
+:- discontiguous(decorate_item/2).
+decorate_item("timestamp", [Base, Properties, Collections, Timestamp, Author], [Timestamp, Base, Properties, Collections, Timestamp, Author]) :- !.
+decorate_item(PropertyKey, [Base, Properties, Collections, Timestamp, Author], [KeyValue, Base, Properties, Collections, Timestamp, Author]) :-
+    member([PropertyKey, KeyValue, _], Properties),
+    !.
+decorate_item(_, Item, [0|Item]).  % Default to 0 if key not found
+
+:- discontiguous(undecorate/2).
+undecorate(Decorated, Undecorated) :-
+    maplist(arg(2), Decorated, Undecorated).
+
+:- discontiguous(merge_sort/3).
+merge_sort([], [], _).
+merge_sort([X], [X], _).
+merge_sort(List, Sorted, Direction) :-
+    length(List, Len),
+    Len > 1,
+    split(List, Left, Right),
+    merge_sort(Left, SortedLeft, Direction),
+    merge_sort(Right, SortedRight, Direction),
+    merge(SortedLeft, SortedRight, Sorted, Direction).
+
+:- discontiguous(split/3).
+split(List, Left, Right) :-
+    length(List, Len),
+    Half is Len // 2,
+    length(Left, Half),
+    append(Left, Right, List).
+
+:- discontiguous(merge/4).
+merge([], Right, Right, _).
+merge(Left, [], Left, _).
+merge([X|Xs], [Y|Ys], [X|Merged], "ASC") :-
+    X = [KeyX|_], Y = [KeyY|_],
+    KeyX =< KeyY,
+    merge(Xs, [Y|Ys], Merged, "ASC").
+merge([X|Xs], [Y|Ys], [Y|Merged], "ASC") :-
+    X = [KeyX|_], Y = [KeyY|_],
+    KeyX > KeyY,
+    merge([X|Xs], Ys, Merged, "ASC").
+merge([X|Xs], [Y|Ys], [X|Merged], "DESC") :-
+    X = [KeyX|_], Y = [KeyY|_],
+    KeyX >= KeyY,
+    merge(Xs, [Y|Ys], Merged, "DESC").
+merge([X|Xs], [Y|Ys], [Y|Merged], "DESC") :-
+    X = [KeyX|_], Y = [KeyY|_],
+    KeyX < KeyY,
+    merge([X|Xs], Ys, Merged, "DESC").
+
+% New sort_instances predicate
+:- discontiguous(sort_instances/4).
+sort_instances(UnsortedInstances, SortKey, Direction, SortedInstances) :-
+    decorate(UnsortedInstances, SortKey, Direction, Decorated),
+    merge_sort(Decorated, SortedDecorated, Direction),
+    undecorate(SortedDecorated, SortedInstances).
+"#;
+
+    lines.extend(sorting_predicates.split('\n').map(|s| s.to_string()));
+
     let literal_html_string_predicates = r#"
 % Main predicate to remove HTML tags
 remove_html_tags(Input, Output) :-
@@ -242,7 +307,19 @@ string([C|Cs]) --> [C], string(Cs).
 
 literal_from_url(Url, Decoded, Scheme) :-
     phrase(parse_url(Scheme, Encoded), Url),
-    phrase(url_decode(Decoded), Encoded).
+    phrase(url_decode(StringValue), Encoded),
+    (   Scheme = number 
+    ->  number_chars(Decoded, StringValue)
+    ;   (   Scheme = boolean
+        ->  (   StringValue = "true"
+            ->  Decoded = true
+            ;   StringValue = "false"
+            ->  Decoded = false
+            ;   Decoded = false  % Default for invalid boolean
+            )
+        ;   Decoded = StringValue  % For all other schemes
+        )
+    ).
 
 % DCG rule to parse the URL
 parse_url(Scheme, Encoded) -->
@@ -250,6 +327,7 @@ parse_url(Scheme, Encoded) -->
 
 scheme(string) --> "string".
 scheme(number) --> "number".
+scheme(boolean) --> "boolean".
 scheme(json) --> "json".
 
 url_decode([]) --> [].
@@ -316,6 +394,9 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
     json_value(Value) --> json_array(Value).
     json_value(Value) --> json_string(Value).
     json_value(Value) --> json_number(Value).
+    json_value(true) --> "true".
+    json_value(false) --> "false".
+    json_value(null) --> "null".
     
     json_array([Value|Values]) -->
         "[", ws, json_value(Value), ws, ("," -> json_value_list(Values) ; {Values=[]}), ws, "]".
@@ -339,8 +420,7 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
     
     json_number(Number) -->
         number_sequence(Chars),
-        { atom_chars(Atom, Chars),
-          atom_number(Atom, Number) }.
+        { number_chars(Number, Chars) }.
     
     string_chars([]) --> [].
     string_chars([C|Cs]) --> [C], { dif(C, '"') }, string_chars(Cs).
@@ -359,6 +439,47 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
     "#;
 
     lines.extend(json_parser.split('\n').map(|s| s.to_string()));
+
+    let resolve_property = r#"
+    % Retrieve a property from a subject class
+    % If the property is resolvable, this will try to do the resolution here
+    % which works if it is a literal, otherwise it will pass through the URI to JS
+    % to be resolved later
+    % Resolve is a boolean that tells JS whether to resolve the property or not
+    % If it is false, then the property value is a literal and we did resolve it here
+    % If it is true, then the property value is a URI and it still needs to be resolved
+    resolve_property(SubjectClass, Base, PropertyName, PropertyValue, Resolve) :-
+        % Get the property name and resolve boolean
+        property(SubjectClass, PropertyName),
+        property_getter(SubjectClass, Base, PropertyName, PropertyUri),
+        ( property_resolve(SubjectClass, PropertyName)
+            % If the property is resolvable, try to resolve it
+            -> (
+            append("literal://", _, PropertyUri)
+            % If the property is a literal, we can resolve it here
+            -> (
+                % so tell JS to not resolve it
+                Resolve = false,
+                literal_from_url(PropertyUri, LiteralValue, Scheme),
+                (
+                json_property(LiteralValue, "data", Data)
+                % If it is a JSON literal, and it has a 'data' field, use that
+                -> PropertyValue = Data
+                % Otherwise, just use the literal value
+                ; PropertyValue = LiteralValue 
+                )
+            )
+            ;
+            % else (it should be resolved but is not a literal),
+            % pass through URI to JS and tell JS to resolve it
+            (Resolve = true, PropertyValue = PropertyUri)
+            )
+            ;
+            % else (no property resolve), just return the URI as the value
+            (Resolve = false, PropertyValue = PropertyUri)
+        )."#;
+
+    lines.extend(resolve_property.split('\n').map(|s| s.to_string()));
 
     let assert_link = r#"
     assert_link(Source, Predicate, Target, Timestamp, Author) :-

@@ -426,13 +426,13 @@ export default function perspectiveTests(testContext: TestContext) {
                 const subscription = await (proxy as any).subscribeInfer('triple(X, _, "todo-ontology://is-todo").')
                 
                 // Check initial result
-                const initialResult = JSON.parse(subscription.result)
+                const initialResult = subscription.result
                 expect(initialResult).to.be.an('array')
                 expect(initialResult.length).to.equal(1)
                 expect(initialResult[0].X).to.equal('note-ipfs://Qm123')
 
                 // Set up callback for updates
-                const updates: string[] = []
+                const updates: any[] = []
                 const unsubscribe = subscription.onResult((result: any) => {
                     updates.push(result)
                 })
@@ -448,7 +448,7 @@ export default function perspectiveTests(testContext: TestContext) {
 
                 // Verify we got an update
                 expect(updates.length).to.be.greaterThan(0)
-                const latestResult = JSON.parse(updates[updates.length - 1])
+                const latestResult = updates[updates.length - 1]
                 expect(latestResult).to.be.an('array')
                 expect(latestResult.length).to.equal(2)
                 expect(latestResult.map((r: any) => r.X)).to.include('note-ipfs://Qm123')

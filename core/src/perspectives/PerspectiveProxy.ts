@@ -12,8 +12,9 @@ import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 import { AIClient } from "../ai/AIClient";
 import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
 import { gql } from "@apollo/client/core";
+import { AllInstancesResult } from "../subject/SubjectEntity";
 
-type QueryCallback = (result: string) => void;
+type QueryCallback = (result: AllInstancesResult) => void;
 
 // Generic subscription interface that matches Apollo's Subscription
 interface Unsubscribable {
@@ -53,7 +54,7 @@ export class QuerySubscriptionProxy {
     #callbacks: Set<QueryCallback>;
     #keepaliveTimer: number;
     #unsubscribe?: () => void;
-    #latestResult: string;
+    #latestResult: AllInstancesResult;
     #disposed: boolean = false;
 
     /** Creates a new query subscription
@@ -62,7 +63,7 @@ export class QuerySubscriptionProxy {
      * @param initialResult - The initial query result
      * @param client - The PerspectiveClient instance to use for communication
      */
-    constructor(uuid: string, subscriptionId: string, initialResult: string, client: PerspectiveClient) {
+    constructor(uuid: string, subscriptionId: string, initialResult: AllInstancesResult, client: PerspectiveClient) {
         this.#uuid = uuid;
         this.#subscriptionId = subscriptionId;
         this.#client = client;
@@ -109,7 +110,7 @@ export class QuerySubscriptionProxy {
      * 
      * @returns The latest query result as a string (usually a JSON array of bindings)
      */
-    get result(): string {
+    get result(): AllInstancesResult {
         return this.#latestResult;
     }
 
@@ -138,7 +139,7 @@ export class QuerySubscriptionProxy {
     }
 
     /** Internal method to notify all callbacks of a new result */
-    #notifyCallbacks(result: string) {
+    #notifyCallbacks(result: AllInstancesResult) {
         for (const callback of this.#callbacks) {
             try {
                 callback(result);
@@ -450,7 +451,7 @@ export class PerspectiveProxy {
         }
     }
 
-    async stringOrTemplateObjectToSubjectClass<T>(subjectClass: T): Promise<string> {
+    async stringOrTemplateObjectToSubjectClassName<T>(subjectClass: T): Promise<string> {
         if(typeof subjectClass === "string")
             return subjectClass
         else {
@@ -505,7 +506,7 @@ export class PerspectiveProxy {
      * @param exprAddr The address of the expression to be turned into a subject instance
      */
     async removeSubject<T>(subjectClass: T, exprAddr: string) {
-        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
+        let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
         let result = await this.infer(`subject_class("${className}", C), destructor(C, Actions)`)
         if(!result.length) {
             throw "No constructor found for given subject class: " + className
@@ -522,7 +523,7 @@ export class PerspectiveProxy {
      * that matches the given properties will be used.
     */
     async isSubjectInstance<T>(expression: string, subjectClass: T): Promise<boolean> {
-        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
+        let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
         let isInstance = false;
         const maxAttempts = 5;
         let attempts = 0;
@@ -549,7 +550,7 @@ export class PerspectiveProxy {
         if(!await this.isSubjectInstance(base, subjectClass)) {
             throw `Expression ${base} is not a subject instance of given class: ${JSON.stringify(subjectClass)}`
         }
-        let className = await this.stringOrTemplateObjectToSubjectClass(subjectClass)
+        let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
         let subject = new Subject(this, base, className)
         await subject.init()
         return subject as unknown as T
