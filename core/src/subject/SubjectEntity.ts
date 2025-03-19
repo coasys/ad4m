@@ -16,7 +16,8 @@ type WhereOps = {
 type WhereCondition = string | number | boolean | string[] | number[] | { [K in keyof WhereOps]?: WhereOps[K] };
 type Where = { [propertyName: string]: WhereCondition };
 type Order = { [propertyName: string]: "ASC" | "DESC" };
-type Query = {
+
+export type Query = {
   source?: string;
   properties?: string[];
   collections?: string[];
@@ -135,7 +136,8 @@ function buildWhereQuery(where: Where = {}): string {
         ];
 
         for (const { value, symbol } of operators) {
-          if (value !== undefined) return isSpecial ? `${field} ${symbol} ${value}` : `${getter}, Value${key} ${symbol} ${value}`;
+          if (value !== undefined)
+            return isSpecial ? `${field} ${symbol} ${value}` : `${getter}, Value${key} ${symbol} ${value}`;
         }
       }
 
@@ -231,9 +233,9 @@ export class SubjectEntity {
         values.map(async ([name, value, resolve]) => {
           let finalValue = value;
           // Resolve the value if necessary
-          if(resolve) {
-            let resolvedExpression = await perspective.getExpression(value)
-            if(resolvedExpression) {
+          if (resolve) {
+            let resolvedExpression = await perspective.getExpression(value);
+            if (resolvedExpression) {
               finalValue = resolvedExpression.data;
             }
           }
@@ -300,21 +302,27 @@ export class SubjectEntity {
     const requestedAttribtes = [...(query?.properties || []), ...(query?.collections || [])];
     const allInstances = await Promise.all(
       result[0].AllInstances.map(async ([Base, Properties, Collections, Timestamp, Author]) => {
-        const instance = new this(perspective, Base) as any;
-        // Remove unrequested attributes from instance
-        if (requestedAttribtes.length) {
-          Object.keys(instance).forEach((key) => {
-            if (!requestedAttribtes.includes(key)) delete instance[key];
-          });
-        }
-        // Collect values to assign to instance
-        const values = [...Properties, ...Collections, ["timestamp", Timestamp], ["author", Author]];
-        await SubjectEntity.assignValuesToInstance(perspective, instance, values);
+        try {
+          const instance = new this(perspective, Base) as any;
+          // Remove unrequested attributes from instance
+          if (requestedAttribtes.length) {
+            Object.keys(instance).forEach((key) => {
+              if (!requestedAttribtes.includes(key)) delete instance[key];
+            });
+          }
+          // Collect values to assign to instance
+          const values = [...Properties, ...Collections, ["timestamp", Timestamp], ["author", Author]];
+          await SubjectEntity.assignValuesToInstance(perspective, instance, values);
 
-        return instance;
+          return instance;
+        } catch (error) {
+          console.error(`Failed to process instance ${Base}:`, error);
+          // Return null for failed instances - we'll filter these out below
+          return null;
+        }
       })
     );
-    return allInstances;
+    return allInstances.filter((instance) => instance !== null);
   }
 
   /**
@@ -327,7 +335,7 @@ export class SubjectEntity {
    */
   static async findAll(perspective: PerspectiveProxy, query: Query = {}) {
     // todo: set up includes
-    let prologQuery = await this.queryToProlog(perspective, query);
+    const prologQuery = await this.queryToProlog(perspective, query);
     const result = await perspective.infer(prologQuery);
     const allInstances = await this.instancesFromPrologResult(perspective, query, result);
     return allInstances;
@@ -580,8 +588,8 @@ export class SubjectQueryBuilder<T extends SubjectEntity> {
     const subscription = await this.perspective.subscribeInfer(query);
 
     const processResults = async (result: AllInstancesResult) => {
-        let newInstances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
-        callback(newInstances as T[]);
+      let newInstances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
+      callback(newInstances as T[]);
     };
 
     subscription.onResult(processResults);
