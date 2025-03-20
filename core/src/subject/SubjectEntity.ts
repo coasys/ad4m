@@ -686,4 +686,26 @@ export class SubjectQueryBuilder<T extends SubjectEntity> {
     subscription.onResult(processResults);
     return  subscription.result?.[0]?.TotalCount || 0;
   }
+
+  async paginate(pageSize: number, pageNumber: number) {
+    const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
+    const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery);
+    const result = await this.perspective.infer(prologQuery);
+    return await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, result);
+  }
+
+  async paginateSubscribe(pageSize: number, pageNumber: number, callback: (results) => void) {
+    const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
+    const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery);
+    const subscription = await this.perspective.subscribeInfer(prologQuery);
+    
+
+    const processResults = async (result: AllInstancesResult) => {
+      const paginatedResult = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result) 
+      callback(paginatedResult);
+    };
+
+    subscription.onResult(processResults);
+    return await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, subscription.result)
+  }
 }

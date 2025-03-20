@@ -1727,6 +1727,58 @@ describe("Prolog + Literals", () => {
                     }
                 })
 
+                it("paginate() and paginateSubscribe() work on the query builder", async () => {
+                    // Clear any existing recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+
+                    // Create test recipes
+                    for (let i = 1; i <= 10; i++) {
+                        const recipe = new Recipe(perspective!);
+                        recipe.name = `Recipe ${i}`;
+                        await recipe.save();
+                    }
+
+                    // Test paginate()
+                    const query = Recipe.query(perspective!);
+                    const page1 = await query.paginate(3, 1);
+                    expect(page1.instances.length).to.equal(3);
+                    expect(page1.count).to.equal(10);
+                    expect(page1.instances[0].name).to.equal("Recipe 1");
+                    expect(page1.instances[2].name).to.equal("Recipe 3");
+
+                    const page2 = await query.paginate(3, 2);
+                    expect(page2.instances.length).to.equal(3);
+                    expect(page2.instances[0].name).to.equal("Recipe 4");
+
+                    const lastPage = await query.paginate(3, 4);
+                    expect(lastPage.instances.length).to.equal(1);
+                    expect(lastPage.instances[0].name).to.equal("Recipe 10");
+
+                    // Test paginateSubscribe()
+                    let lastResult: any = null;
+                    const initialResult = await query.paginateSubscribe(3, 1, (result) => {
+                        lastResult = result;
+                    });
+
+                    expect(initialResult.instances.length).to.equal(3);
+                    expect(initialResult.count).to.equal(10);
+
+                    // Add a new recipe and verify subscription updates
+                    const newRecipe = new Recipe(perspective!);
+                    newRecipe.name = "Recipe 11";
+                    await newRecipe.save();
+
+                    await sleep(2000);
+                    expect(lastResult.count).to.equal(11);
+
+                    // Clean up
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of allRecipes) {
+                        await recipe.delete();
+                    }
+                })
+
                 it("query builder works with subscriptions", async () => {
                     @SDNAClass({
                         name: "Notification"
