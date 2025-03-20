@@ -1571,6 +1571,54 @@ describe("Prolog + Literals", () => {
                     await recipe3.delete();
                 })
 
+                it("findAllAndCount() returns both the retrived instances and a count without limit applied", async () => {
+                    // Clear any old recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+                    
+                    // Create recipes
+                    const recipe1 = new Recipe(perspective!);
+                    recipe1.name = "Recipe 1";
+                    await recipe1.save();
+                    
+                    const recipe2 = new Recipe(perspective!);
+                    recipe2.name = "Recipe 2";
+                    await recipe2.save();
+                    
+                    const recipe3 = new Recipe(perspective!);
+                    recipe3.name = "Recipe 3";
+                    await recipe3.save();
+                    
+                    const recipe4 = new Recipe(perspective!);
+                    recipe4.name = "Recipe 4";
+                    await recipe4.save();
+
+                    const recipe5 = new Recipe(perspective!);
+                    recipe5.name = "Recipe 5";
+                    await recipe5.save();
+
+                    const recipe6 = new Recipe(perspective!);
+                    recipe6.name = "Recipe 6";
+                    await recipe6.save();
+                    
+                    // Check all recipes are there
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    expect(allRecipes.length).to.equal(6);
+
+                    // Test count
+                    const { instances: recipes1, count: count1 } = await Recipe.findAllAndCount(perspective!, { limit: 2, count: true });
+                    expect(recipes1.length).to.equal(2);
+                    expect(count1).to.equal(6);
+
+                    // Test count with where constraints
+                    const { instances: recipes2, count: count2 } = await Recipe.findAllAndCount(perspective!, { where: { name: ["Recipe 1", "Recipe 2", "Recipe 3"] }, limit: 2, count: true });
+                    expect(recipes2.length).to.equal(2);
+                    expect(count2).to.equal(3);
+
+                    // Delete recipies
+                    for (const recipe of allRecipes) await recipe.delete();
+                })
+
                 it("query builder works with subscriptions", async () => {
                     @SDNAClass({
                         name: "Notification"

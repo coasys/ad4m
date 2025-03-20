@@ -20,14 +20,15 @@ type Order = { [propertyName: string]: "ASC" | "DESC" };
 export type Query = {
   source?: string;
   properties?: string[];
-  collections?: string[];
+  collections?: string[]; // replace with include: Query[]
   where?: Where;
   order?: Order;
   offset?: number;
   limit?: number;
+  count?: boolean;
 };
 
-export type AllInstancesResult = { AllInstances: SubjectEntity[] };
+export type AllInstancesResult = { AllInstances: SubjectEntity[], TotalCount?: number };
 
 function capitalize(word: string): string {
   return word.charAt(0).toUpperCase() + word.slice(1);
@@ -159,9 +160,22 @@ function buildOffsetQuery(offset?: number): string {
   return `skipN(SortedInstances, ${offset}, InstancesWithOffset)`;
 }
 
-function buildLimitQuery(limit?: number): string {
-  if (!limit || limit < 0) return "AllInstances = InstancesWithOffset";
-  return `takeN(InstancesWithOffset, ${limit}, AllInstances)`;
+function buildLimitQuery(limit?: number, count?: boolean): string {
+  if (count) {
+    if (!limit || limit < 0) {
+      // No limit, just count and return all
+      return "length(InstancesWithOffset, TotalCount), AllInstances = InstancesWithOffset";
+    }
+    // With limit, count all, then take limited subset
+    return `
+      length(InstancesWithOffset, TotalCount),
+      takeN(InstancesWithOffset, ${limit}, AllInstances)
+    `;
+  } else {
+    // No count requested
+    if (!limit || limit < 0) return "AllInstances = InstancesWithOffset";
+    return `takeN(InstancesWithOffset, ${limit}, AllInstances)`;
+  }
 }
 
 /**
@@ -268,7 +282,7 @@ export class SubjectEntity {
 
   // Todo: Only return AllInstances (InstancesWithOffset, SortedInstances, & UnsortedInstances not required)
   public static async queryToProlog(perspective: PerspectiveProxy, query: Query) {
-    const { source, properties, collections, where, order, offset, limit } = query;
+    const { source, properties, collections, where, order, offset, limit, count } = query;
 
     const instanceQueries = [
       buildAuthorAndTimestampQuery(),
@@ -278,7 +292,7 @@ export class SubjectEntity {
       buildWhereQuery(where),
     ];
 
-    const resultSetQueries = [buildOrderQuery(order), buildOffsetQuery(offset), buildLimitQuery(limit)];
+    const resultSetQueries = [buildOrderQuery(order), buildOffsetQuery(offset), buildLimitQuery(limit, count)];
 
     const fullQuery = `
       findall([Base, Properties, Collections, Timestamp, Author], (
@@ -297,7 +311,7 @@ export class SubjectEntity {
     query: Query,
     result: AllInstancesResult
   ) {
-    if (!result?.[0]?.AllInstances) return [];
+    if (!result?.[0]?.AllInstances) return { instances: [], count: 0};
     // Map results to instances
     const requestedAttribtes = [...(query?.properties || []), ...(query?.collections || [])];
     const allInstances = await Promise.all(
@@ -322,7 +336,7 @@ export class SubjectEntity {
         }
       })
     );
-    return allInstances.filter((instance) => instance !== null);
+    return { instances: allInstances.filter((instance) => instance !== null), count: result[0].TotalCount };
   }
 
   /**
@@ -334,12 +348,29 @@ export class SubjectEntity {
    *
    */
   static async findAll(perspective: PerspectiveProxy, query: Query = {}) {
-    // todo: set up includes
     const prologQuery = await this.queryToProlog(perspective, query);
     const result = await perspective.infer(prologQuery);
-    const allInstances = await this.instancesFromPrologResult(perspective, query, result);
-    return allInstances;
+    const { instances } = await this.instancesFromPrologResult(perspective, query, result);
+    return instances;
   }
+
+  /**
+   * Gets all instances of the subject entity in the perspective that match the query params and includes a count of all matches without limit applied.
+   * @param perspective - The perspective that the subject entities belongs to.
+   * @param query - The query object used to define search contraints.
+   *
+   * @returns An object containing an instances array of all subject entity matches and a count of all matches without limit applied.
+   *
+   */
+  static async findAllAndCount(perspective: PerspectiveProxy, query: Query = {}) {
+    const prologQuery = await this.queryToProlog(perspective, query);
+    const result = await perspective.infer(prologQuery);
+    return await this.instancesFromPrologResult(perspective, query, result);
+  }
+
+  // todo: add paginate(perspective, query, pageSize, pageNumber)
+
+  // todo: add count function
 
   private async setProperty(key: string, value: any) {
     const setters = await this.#perspective.infer(
@@ -574,12 +605,15 @@ export class SubjectQueryBuilder<T extends SubjectEntity> {
     return this;
   }
 
+  // count
+  // paginate
+
   /** Execute the query once and return the results */
   async run(): Promise<T[]> {
     const query = await this.ctor.queryToProlog(this.perspective, this.queryParams);
     const result = await this.perspective.infer(query);
-    const allInstances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
-    return allInstances as T[];
+    const { instances } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
+    return instances as T[];
   }
 
   /** Subscribe to the query and receive updates when results change */
@@ -588,12 +622,12 @@ export class SubjectQueryBuilder<T extends SubjectEntity> {
     const subscription = await this.perspective.subscribeInfer(query);
 
     const processResults = async (result: AllInstancesResult) => {
-      let newInstances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
-      callback(newInstances as T[]);
+      const { instances } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
+      callback(instances as T[]);
     };
 
     subscription.onResult(processResults);
-    let instances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, subscription.result);
+    const { instances } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, subscription.result);
     return instances as T[];
   }
 }
