@@ -10,7 +10,7 @@ import { Perspective } from "./Perspective";
 import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
-import { AllInstancesResult } from "../subject/SubjectEntity";
+import { AllInstancesResult } from "../subject/Ad4mModel";
 
 const LINK_EXPRESSION_FIELDS = `
 author

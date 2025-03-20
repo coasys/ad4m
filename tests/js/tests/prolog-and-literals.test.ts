@@ -5,7 +5,7 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     InstanceQuery, Subject, SubjectProperty,
     SubjectCollection, SubjectFlag,
     SDNAClass,
-    SubjectEntity,
+    Ad4mModel,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
 import { startExecutor, apolloClient } from "../utils/utils";
@@ -548,7 +548,7 @@ describe("Prolog + Literals", () => {
                 @SDNAClass({
                     name: "Recipe"
                 })
-                class Recipe extends SubjectEntity {
+                class Recipe extends Ad4mModel {
                     //@ts-ignore
                     @SubjectFlag({
                         through: "ad4m://type",
@@ -617,10 +617,6 @@ describe("Prolog + Literals", () => {
                         resolveLanguage: "literal"
                     })
                     resolve: string = ""
-
-                    // static query(perspective: PerspectiveProxy) {
-                    //     return SubjectEntity.query<Recipe>(perspective);
-                    // }
                 }
 
                 before(async () => {
@@ -1245,7 +1241,7 @@ describe("Prolog + Literals", () => {
                     @SDNAClass({
                         name: "Task_due"
                     })
-                    class TaskDue extends SubjectEntity {
+                    class TaskDue extends Ad4mModel {
                         @SubjectProperty({
                             through: "task://title",
                             writable: true,
@@ -1783,7 +1779,7 @@ describe("Prolog + Literals", () => {
                     @SDNAClass({
                         name: "Notification"
                     })
-                    class Notification extends SubjectEntity {
+                    class Notification extends Ad4mModel {
                         @SubjectProperty({
                             through: "notification://title",
                             writable: true,
@@ -1883,7 +1879,7 @@ describe("Prolog + Literals", () => {
                     @SDNAClass({
                         name: "Note1"
                     })
-                    class Note1 extends SubjectEntity {
+                    class Note1 extends Ad4mModel {
                         @SubjectProperty({
                             through: "note://name",
                             writable: true,
@@ -1906,7 +1902,7 @@ describe("Prolog + Literals", () => {
                     @SDNAClass({
                         name: "Note2"
                     })
-                    class Note2 extends SubjectEntity {
+                    class Note2 extends Ad4mModel {
                         @SubjectProperty({
                             through: "note://name",
                             writable: true,
@@ -1956,7 +1952,7 @@ describe("Prolog + Literals", () => {
                     @SDNAClass({
                         name: "Task"
                     })
-                    class Task extends SubjectEntity {
+                    class Task extends Ad4mModel {
                         @SubjectProperty({
                             through: "task://description",
                             writable: true,

@@ -26,8 +26,8 @@ export * from "./neighbourhood/NeighbourhoodProxy";
 export * from "./typeDefs";
 export * from "./DID";
 export * from "./utils";
-export * from './subject/SubjectEntity'
 export * from "./agent/AgentClient";
 export * from "./ai/AIClient"
 export * from "./ai/Tasks"
 export * from "./runtime/RuntimeResolver"
+export * from './subject/Ad4mModel'

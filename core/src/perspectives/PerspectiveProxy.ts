@@ -12,7 +12,7 @@ import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 import { AIClient } from "../ai/AIClient";
 import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
 import { gql } from "@apollo/client/core";
-import { AllInstancesResult } from "../subject/SubjectEntity";
+import { AllInstancesResult } from "../subject/Ad4mModel";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 

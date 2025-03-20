@@ -28,7 +28,7 @@ export type Query = {
   count?: boolean;
 };
 
-export type AllInstancesResult = { AllInstances: SubjectEntity[]; TotalCount?: number };
+export type AllInstancesResult = { AllInstances: Ad4mModel[]; TotalCount?: number };
 export type ResultsWithTotalCount<T> = { results: T[]; totalCount?: number };
 export type PaginationResult<T> = { results: T[]; totalCount?: number; pageSize: number; pageNumber: number };
 
@@ -44,7 +44,7 @@ function buildSourceQuery(source?: string): string {
 
 // todo: only return Timestamp & Author from query (Base, AllLinks, and SortLinks not required)
 function buildAuthorAndTimestampQuery(): string {
-  // Gets the author and timestamp of a SubjectEntity instance (based on the first link mentioning the base)
+  // Gets the author and timestamp of a Ad4mModel instance (based on the first link mentioning the base)
   return `
     findall(
       [T, A],
@@ -57,7 +57,7 @@ function buildAuthorAndTimestampQuery(): string {
 }
 
 function buildPropertiesQuery(properties?: string[]): string {
-  // Gets the name, value, and resolve boolean for all (or some) properties on a SubjectEntity instance
+  // Gets the name, value, and resolve boolean for all (or some) properties on a Ad4mModel instance
   // Resolves literals (if property_resolve/2 is true) to their value - either the data field if it is
   // an Expression in JSON literal, or the direct literal value if it is a simple literal
   // If no properties are provided, all are included
@@ -71,7 +71,7 @@ function buildPropertiesQuery(properties?: string[]): string {
 }
 
 function buildCollectionsQuery(collections?: string[]): string {
-  // Gets the name and array of values for all (or some) collections on a SubjectEntity instance
+  // Gets the name and array of values for all (or some) collections on a Ad4mModel instance
   // If no collections are provided, all are included
   return `
     findall([CollectionName, CollectionValues], (
@@ -178,7 +178,7 @@ function buildLimitQuery(limit?: number): string {
  * @example
  * ```typescript
  * @SDNAClass({ name: "Recipe" })
- * class Recipe extends SubjectEntity {
+ * class Recipe extends Ad4mModel {
  *   @SubjectProperty({
  *     through: "recipe://name",
  *     writable: true,
@@ -188,7 +188,7 @@ function buildLimitQuery(limit?: number): string {
  * }
  * ```
  */
-export class SubjectEntity {
+export class Ad4mModel {
   #baseExpression: string;
   #subjectClassName: string;
   #source: string;
@@ -196,7 +196,7 @@ export class SubjectEntity {
   author: string;
   timestamp: string;
 
-  private static classNamesByClass = new WeakMap<typeof SubjectEntity, { [perspectiveId: string]: string }>();
+  private static classNamesByClass = new WeakMap<typeof Ad4mModel, { [perspectiveId: string]: string }>();
 
   static async getClassName(perspective: PerspectiveProxy) {
     // Get or create the cache for this class
@@ -254,7 +254,7 @@ export class SubjectEntity {
 
   public static async assignValuesToInstance(
     perspective: PerspectiveProxy,
-    instance: SubjectEntity,
+    instance: Ad4mModel,
     values: ValueTuple[]
   ) {
     // Map properties to object
@@ -278,7 +278,7 @@ export class SubjectEntity {
   }
 
   private async getData() {
-    // Builds an object with the author, timestamp, all properties, & all collections on the SubjectEntity and saves it to the instance
+    // Builds an object with the author, timestamp, all properties, & all collections on the Ad4mModel and saves it to the instance
     const subQueries = [buildAuthorAndTimestampQuery(), buildPropertiesQuery(), buildCollectionsQuery()];
     const fullQuery = `
       Base = "${this.#baseExpression}",
@@ -290,7 +290,7 @@ export class SubjectEntity {
     if (result?.[0]) {
       const { Properties, Collections, Timestamp, Author } = result?.[0];
       const values = [...Properties, ...Collections, ["timestamp", Timestamp], ["author", Author]];
-      await SubjectEntity.assignValuesToInstance(this.#perspective, this, values);
+      await Ad4mModel.assignValuesToInstance(this.#perspective, this, values);
     }
 
     return this;
@@ -322,8 +322,8 @@ export class SubjectEntity {
     return fullQuery;
   }
 
-  public static async instancesFromPrologResult<T extends SubjectEntity>(
-    this: typeof SubjectEntity & (new (...args: any[]) => T), 
+  public static async instancesFromPrologResult<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy,
     query: Query,
     result: AllInstancesResult
@@ -343,7 +343,7 @@ export class SubjectEntity {
           }
           // Collect values to assign to instance
           const values = [...Properties, ...Collections, ["timestamp", Timestamp], ["author", Author]];
-          await SubjectEntity.assignValuesToInstance(perspective, instance, values);
+          await Ad4mModel.assignValuesToInstance(perspective, instance, values);
 
           return instance;
         } catch (error) {
@@ -357,11 +357,11 @@ export class SubjectEntity {
   }
 
   /**
-   * Gets all instances of the subject entity in the perspective that match the query params.
+   * Gets all instances of the model in the perspective that match the query params.
    * 
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
-   * @returns Array of matching subject entities
+   * @returns Array of matching models
    * 
    * @example
    * ```typescript
@@ -379,8 +379,8 @@ export class SubjectEntity {
    * });
    * ```
    */
-  static async findAll<T extends SubjectEntity>(
-    this: typeof SubjectEntity & (new (...args: any[]) => T), 
+  static async findAll<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy, 
     query: Query = {}
   ): Promise<T[]> {
@@ -406,8 +406,8 @@ export class SubjectEntity {
    * console.log(`Showing 10 of ${totalCount} dessert recipes`);
    * ```
    */
-  static async findAllAndCount<T extends SubjectEntity>(
-    this: typeof SubjectEntity & (new (...args: any[]) => T), 
+  static async findAllAndCount<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy, 
     query: Query = {}
   ): Promise<ResultsWithTotalCount<T>> {
@@ -433,8 +433,8 @@ export class SubjectEntity {
    * console.log(`Page ${page.pageNumber} of recipes, ${page.results.length} items`);
    * ```
    */
-  static async paginate<T extends SubjectEntity>(
-    this: typeof SubjectEntity & (new (...args: any[]) => T), 
+  static async paginate<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy, 
     pageSize: number, 
     pageNumber: number, 
@@ -697,8 +697,8 @@ export class SubjectEntity {
    *   });
    * ```
    */
-  static query<T extends SubjectEntity>(
-    this: typeof SubjectEntity & (new (...args: any[]) => T), 
+  static query<T extends Ad4mModel>(
+    this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy, 
     query?: Query
   ): SubjectQueryBuilder<T> {
@@ -706,7 +706,7 @@ export class SubjectEntity {
   }
 }
 
-/** Query builder for SubjectEntity queries.
+/** Query builder for Ad4mModel queries.
  * Allows building queries with a fluent interface and either running them once
  * or subscribing to updates.
  * 
@@ -726,12 +726,12 @@ export class SubjectEntity {
  * });
  * ```
  */
-export class SubjectQueryBuilder<T extends SubjectEntity> {
+export class SubjectQueryBuilder<T extends Ad4mModel> {
   private perspective: PerspectiveProxy;
   private queryParams: Query = {};
-  private ctor: typeof SubjectEntity;
+  private ctor: typeof Ad4mModel;
 
-  constructor(perspective: PerspectiveProxy, ctor: typeof SubjectEntity, query?: Query) {
+  constructor(perspective: PerspectiveProxy, ctor: typeof Ad4mModel, query?: Query) {
     this.perspective = perspective;
     this.ctor = ctor;
     if (query) this.queryParams = query;
