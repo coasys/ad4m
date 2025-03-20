@@ -174,6 +174,19 @@ function buildLimitQuery(limit?: number): string {
 /**
  * Class representing a subject entity.
  * Can extend this class to create a new subject entity to add methods interact with SDNA and much better experience then using the bare bone methods.
+ * 
+ * @example
+ * ```typescript
+ * @SDNAClass({ name: "Recipe" })
+ * class Recipe extends SubjectEntity {
+ *   @SubjectProperty({
+ *     through: "recipe://name",
+ *     writable: true,
+ *     resolveLanguage: "literal"
+ *   })
+ *   name: string = "";
+ * }
+ * ```
  */
 export class SubjectEntity {
   #baseExpression: string;
@@ -203,10 +216,20 @@ export class SubjectEntity {
   }
 
   /**
-   * Constructs a new subject.
-   * @param perspective - The perspective that the subject belongs to.
-   * @param baseExpression - The base expression of the subject.
-   * @param source - The source of the subject, the expression this instance is linked too.
+   * Constructs a new subject entity instance.
+   * 
+   * @param perspective - The perspective that the subject belongs to
+   * @param baseExpression - Optional base expression for the subject
+   * @param source - Optional source expression this instance is linked to
+   * 
+   * @example
+   * ```typescript
+   * const recipe = new Recipe(perspective);
+   * // or with base expression
+   * const recipe = new Recipe(perspective, "base123");
+   * // or with source
+   * const recipe = new Recipe(perspective, "base123", "source456");
+   * ```
    */
   constructor(perspective: PerspectiveProxy, baseExpression?: string, source?: string) {
     this.#baseExpression = baseExpression ? baseExpression : Literal.from(makeRandomPrologAtom(24)).toUrl();
@@ -334,12 +357,27 @@ export class SubjectEntity {
   }
 
   /**
-   * Gets all instances of the subject entity in the perspective that match the query params .
-   * @param perspective - The perspective that the subject entities belongs to.
-   * @param query - The query object used to define search contraints.
-   *
-   * @returns An array of all subject entity matches.
-   *
+   * Gets all instances of the subject entity in the perspective that match the query params.
+   * 
+   * @param perspective - The perspective to search in
+   * @param query - Optional query parameters to filter results
+   * @returns Array of matching subject entities
+   * 
+   * @example
+   * ```typescript
+   * // Get all recipes
+   * const allRecipes = await Recipe.findAll(perspective);
+   * 
+   * // Get recipes with specific criteria
+   * const recipes = await Recipe.findAll(perspective, {
+   *   where: { 
+   *     name: "Pasta",
+   *     rating: { gt: 4 }
+   *   },
+   *   order: { createdAt: "DESC" },
+   *   limit: 10
+   * });
+   * ```
    */
   static async findAll<T extends SubjectEntity>(
     this: typeof SubjectEntity & (new (...args: any[]) => T), 
@@ -353,12 +391,20 @@ export class SubjectEntity {
   }
 
   /**
-   * Gets all instances of the subject entity in the perspective that match the query params and includes a count of all matches without limit applied.
-   * @param perspective - The perspective that the subject entities belongs to.
-   * @param query - The query object used to define search contraints.
-   *
-   * @returns An object containing an instances array of all subject entity matches and a count of all matches without limit applied.
-   *
+   * Gets all instances with count of total matches without limit applied.
+   * 
+   * @param perspective - The perspective to search in
+   * @param query - Optional query parameters to filter results
+   * @returns Object containing results array and total count
+   * 
+   * @example
+   * ```typescript
+   * const { results, totalCount } = await Recipe.findAllAndCount(perspective, {
+   *   where: { category: "Dessert" },
+   *   limit: 10
+   * });
+   * console.log(`Showing 10 of ${totalCount} dessert recipes`);
+   * ```
    */
   static async findAllAndCount<T extends SubjectEntity>(
     this: typeof SubjectEntity & (new (...args: any[]) => T), 
@@ -371,12 +417,21 @@ export class SubjectEntity {
   }
 
   /**
-   * Helper function to make pagination easier with explicit pageSize & pageNumber props.
-   * @param perspective - The perspective that the subject entities belongs to.
-   * @param query - The query object used to define search contraints.
-   *
-   * @returns An a page of results based on the pageSize & pageNumber props.
-   *
+   * Helper function for pagination with explicit page size and number.
+   * 
+   * @param perspective - The perspective to search in
+   * @param pageSize - Number of items per page
+   * @param pageNumber - Which page to retrieve (1-based)
+   * @param query - Optional additional query parameters
+   * @returns Paginated results with metadata
+   * 
+   * @example
+   * ```typescript
+   * const page = await Recipe.paginate(perspective, 10, 1, {
+   *   where: { category: "Main Course" }
+   * });
+   * console.log(`Page ${page.pageNumber} of recipes, ${page.results.length} items`);
+   * ```
    */
   static async paginate<T extends SubjectEntity>(
     this: typeof SubjectEntity & (new (...args: any[]) => T), 
@@ -410,12 +465,19 @@ export class SubjectEntity {
   }
 
   /**
-   * Gets a count of all instances of the subject entity in the perspective that match the query params.
-   * @param perspective - The perspective that the subject entities belongs to.
-   * @param query - The query object used to define search contraints.
-   *
-   * @returns The count of subject entities matching the query.
-   *
+   * Gets a count of all matching instances.
+   * 
+   * @param perspective - The perspective to search in
+   * @param query - Optional query parameters to filter results
+   * @returns Total count of matching entities
+   * 
+   * @example
+   * ```typescript
+   * const totalRecipes = await Recipe.count(perspective);
+   * const activeRecipes = await Recipe.count(perspective, {
+   *   where: { status: "active" }
+   * });
+   * ```
    */
   static async count(perspective: PerspectiveProxy, query: Query = {}) {
     const result = await perspective.infer(await this.countQueryToProlog(perspective, query));
@@ -512,15 +574,18 @@ export class SubjectEntity {
   }
 
   /**
-   * Save the subject entity.
-   * This method will create a new subject with the base expression and add a new link from the source to the base expression with the predicate "ad4m://has_child".
-   *
-   * If a property has an action, it will perform the action (Only for collections).
-   * If a property is an array and is not empty, it will set the collection.
-   * If a property is not undefined, not null, and not an empty string, it will set the property.
-   *
-   *
-   * @throws Will throw an error if the subject entity cannot be converted to a subject class, or if the subject cannot be created, or if the link cannot be added, or if the subject entity cannot be updated.
+   * Saves the subject entity to the perspective.
+   * Creates a new subject with the base expression and links it to the source.
+   * 
+   * @throws Will throw if subject creation, linking, or updating fails
+   * 
+   * @example
+   * ```typescript
+   * const recipe = new Recipe(perspective);
+   * recipe.name = "Spaghetti";
+   * recipe.ingredients = ["pasta", "tomato sauce"];
+   * await recipe.save();
+   * ```
    */
   async save() {
     await this.#perspective.createSubject(this, this.#baseExpression);
@@ -533,15 +598,16 @@ export class SubjectEntity {
   }
 
   /**
-   * Update the subject entity.
-   *
-   * It will iterate over the properties of the subject entity.
-   *
-   * If a property has an action, it will perform the action (Only for collections).
-   * If a property is an array and is not empty, it will set the collection.
-   * If a property is not undefined, not null, and not an empty string, it will set the property.
-   *
-   * @throws Will throw an error if the subject entity cannot be converted to a subject class, or if a property cannot be set, or if a collection cannot be set, or if the data of the subject entity cannot be gotten.
+   * Updates the subject entity's properties and collections.
+   * 
+   * @throws Will throw if property setting or collection updates fail
+   * 
+   * @example
+   * ```typescript
+   * const recipe = await Recipe.findAll(perspective)[0];
+   * recipe.rating = 5;
+   * await recipe.update();
+   * ```
    */
   async update() {
     this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this);
@@ -575,11 +641,17 @@ export class SubjectEntity {
   }
 
   /**
-   * Get the subject entity with all the properties & collection populated.
-   *
-   * @returns The subject entity.
-   *
-   * @throws Will throw an error if the subject entity cannot be converted to a subject class, or if the data of the subject entity cannot be gotten.
+   * Gets the subject entity with all properties and collections populated.
+   * 
+   * @returns The populated subject entity
+   * @throws Will throw if data retrieval fails
+   * 
+   * @example
+   * ```typescript
+   * const recipe = new Recipe(perspective, existingId);
+   * await recipe.get();
+   * console.log(recipe.name, recipe.ingredients);
+   * ```
    */
   async get() {
     this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this);
@@ -588,18 +660,42 @@ export class SubjectEntity {
   }
 
   /**
-   * Delete the subject entity.
-   * This method will remove the subject from the perspective.
-   *
-   * @throws Will throw an error if the subject entity cannot be removed.
+   * Deletes the subject entity from the perspective.
+   * 
+   * @throws Will throw if removal fails
+   * 
+   * @example
+   * ```typescript
+   * const recipe = await Recipe.findAll(perspective)[0];
+   * await recipe.delete();
+   * ```
    */
   async delete() {
     await this.#perspective.removeSubject(this, this.#baseExpression);
   }
 
-  /** Query builder for SubjectEntity queries.
-   * Allows building queries with a fluent interface and either running them once
-   * or subscribing to updates.
+  /**
+   * Creates a query builder for fluent query construction.
+   * 
+   * @param perspective - The perspective to query
+   * @param query - Optional initial query parameters
+   * @returns A new query builder instance
+   * 
+   * @example
+   * ```typescript
+   * const recipes = await Recipe.query(perspective)
+   *   .where({ category: "Dessert" })
+   *   .order({ rating: "DESC" })
+   *   .limit(5)
+   *   .run();
+   * 
+   * // With real-time updates
+   * await Recipe.query(perspective)
+   *   .where({ status: "cooking" })
+   *   .subscribeAndRun(recipes => {
+   *     console.log("Currently cooking:", recipes);
+   *   });
+   * ```
    */
   static query<T extends SubjectEntity>(
     this: typeof SubjectEntity & (new (...args: any[]) => T), 
