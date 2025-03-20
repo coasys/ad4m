@@ -90,7 +90,7 @@ describe("NeighbourhoodProxy", () => {
 
     // mock trigger signal event
     for (const subscription of subscriptions) {
-      subscription.next(true);
+      subscription.next({ data: { signal: { neighbourhoodSignal: true } } });
     }
 
     // Check that only our second callback was called
