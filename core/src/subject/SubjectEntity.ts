@@ -1,7 +1,7 @@
 import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { makeRandomPrologAtom } from "./SDNADecorators";
+import { makeRandomPrologAtom } from "./decorators";
 import { singularToPlural } from "./util";
 
 type ValueTuple = [name: string, value: any, resolve?: boolean];
