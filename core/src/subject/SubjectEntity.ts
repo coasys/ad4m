@@ -28,7 +28,7 @@ export type Query = {
   count?: boolean;
 };
 
-export type AllInstancesResult = { AllInstances: SubjectEntity[], TotalCount?: number };
+export type AllInstancesResult = { AllInstances: SubjectEntity[]; TotalCount?: number };
 
 function capitalize(word: string): string {
   return word.charAt(0).toUpperCase() + word.slice(1);
@@ -311,7 +311,7 @@ export class SubjectEntity {
     query: Query,
     result: AllInstancesResult
   ) {
-    if (!result?.[0]?.AllInstances) return { instances: [], count: 0};
+    if (!result?.[0]?.AllInstances) return { instances: [], count: 0 };
     // Map results to instances
     const requestedAttribtes = [...(query?.properties || []), ...(query?.collections || [])];
     const allInstances = await Promise.all(
@@ -368,9 +368,34 @@ export class SubjectEntity {
     return await this.instancesFromPrologResult(perspective, query, result);
   }
 
-  // todo: add paginate(perspective, query, pageSize, pageNumber)
+  /**
+   * Gets a count of all instances of the subject entity in the perspective that match the query params.
+   * @param perspective - The perspective that the subject entities belongs to.
+   * @param query - The query object used to define search contraints.
+   *
+   * @returns The count of subject entities matching the query.
+   *
+   */
+  static async count(perspective: PerspectiveProxy, query: Query = {}) {
+    const { source, where, offset } = query;
+    const instanceQueries = [buildAuthorAndTimestampQuery(), buildSourceQuery(source), buildWhereQuery(where)];
+    const resultSetQueries = [buildOrderQuery(), buildOffsetQuery(offset), buildLimitQuery(0, true)];
 
-  // todo: add count function
+    const fullQuery = `
+      findall([Base, Properties, Collections, Timestamp, Author], (
+        subject_class("${await this.getClassName(perspective)}", SubjectClass),
+        instance(SubjectClass, Base),
+        ${instanceQueries.filter((q) => q).join(", ")}
+      ), UnsortedInstances),
+      ${resultSetQueries.filter((q) => q).join(", ")}
+    `;
+
+    const result = await perspective.infer(fullQuery);
+
+    return result?.[0]?.TotalCount || 0;
+  }
+
+  // todo: add paginate(perspective, query, pageSize, pageNumber)
 
   private async setProperty(key: string, value: any) {
     const setters = await this.#perspective.infer(
@@ -627,7 +652,11 @@ export class SubjectQueryBuilder<T extends SubjectEntity> {
     };
 
     subscription.onResult(processResults);
-    const { instances } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, subscription.result);
+    const { instances } = await this.ctor.instancesFromPrologResult(
+      this.perspective,
+      this.queryParams,
+      subscription.result
+    );
     return instances as T[];
   }
 }
