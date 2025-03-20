@@ -29,6 +29,8 @@ export type Query = {
 };
 
 export type AllInstancesResult = { AllInstances: SubjectEntity[]; TotalCount?: number };
+export type ResultsWithTotalCount<T> = { results: T[]; totalCount?: number };
+export type PaginationResult<T> = { results: T[]; totalCount?: number; pageSize: number; pageNumber: number };
 
 function capitalize(word: string): string {
   return word.charAt(0).toUpperCase() + word.slice(1);
@@ -297,12 +299,13 @@ export class SubjectEntity {
     return fullQuery;
   }
 
-  public static async instancesFromPrologResult(
+  public static async instancesFromPrologResult<T extends SubjectEntity>(
+    this: typeof SubjectEntity & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy,
     query: Query,
     result: AllInstancesResult
-  ) {
-    if (!result?.[0]?.AllInstances) return { instances: [], count: 0 };
+  ): Promise<ResultsWithTotalCount<T>> {
+    if (!result?.[0]?.AllInstances) return { results: [], totalCount: 0 };
     // Map results to instances
     const requestedAttribtes = [...(query?.properties || []), ...(query?.collections || [])];
     const allInstances = await Promise.all(
@@ -327,7 +330,7 @@ export class SubjectEntity {
         }
       })
     );
-    return { instances: allInstances.filter((instance) => instance !== null), count: result[0].TotalCount };
+    return { results: allInstances.filter((instance) => instance !== null), totalCount: result[0].TotalCount };
   }
 
   /**
@@ -338,11 +341,15 @@ export class SubjectEntity {
    * @returns An array of all subject entity matches.
    *
    */
-  static async findAll(perspective: PerspectiveProxy, query: Query = {}) {
+  static async findAll<T extends SubjectEntity>(
+    this: typeof SubjectEntity & (new (...args: any[]) => T), 
+    perspective: PerspectiveProxy, 
+    query: Query = {}
+  ): Promise<T[]> {
     const prologQuery = await this.queryToProlog(perspective, query);
     const result = await perspective.infer(prologQuery);
-    const { instances } = await this.instancesFromPrologResult(perspective, query, result);
-    return instances;
+    const { results } = await this.instancesFromPrologResult(perspective, query, result);
+    return results;
   }
 
   /**
@@ -353,7 +360,11 @@ export class SubjectEntity {
    * @returns An object containing an instances array of all subject entity matches and a count of all matches without limit applied.
    *
    */
-  static async findAllAndCount(perspective: PerspectiveProxy, query: Query = {}) {
+  static async findAllAndCount<T extends SubjectEntity>(
+    this: typeof SubjectEntity & (new (...args: any[]) => T), 
+    perspective: PerspectiveProxy, 
+    query: Query = {}
+  ): Promise<ResultsWithTotalCount<T>> {
     const prologQuery = await this.queryToProlog(perspective, query);
     const result = await perspective.infer(prologQuery);
     return await this.instancesFromPrologResult(perspective, query, result);
@@ -367,11 +378,18 @@ export class SubjectEntity {
    * @returns An a page of results based on the pageSize & pageNumber props.
    *
    */
-  static async paginate(perspective: PerspectiveProxy, pageSize: number, pageNumber: number, query?: Query) {
+  static async paginate<T extends SubjectEntity>(
+    this: typeof SubjectEntity & (new (...args: any[]) => T), 
+    perspective: PerspectiveProxy, 
+    pageSize: number, 
+    pageNumber: number, 
+    query?: Query
+  ): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(query || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     const prologQuery = await this.queryToProlog(perspective, paginationQuery);
     const result = await perspective.infer(prologQuery);
-    return await this.instancesFromPrologResult(perspective, paginationQuery, result);
+    const { results, totalCount } = await this.instancesFromPrologResult(perspective, paginationQuery, result);
+    return { results, totalCount, pageSize, pageNumber };
   }
 
   static async countQueryToProlog(perspective: PerspectiveProxy, query: Query = {}) {
@@ -583,7 +601,11 @@ export class SubjectEntity {
    * Allows building queries with a fluent interface and either running them once
    * or subscribing to updates.
    */
-  static query<T extends SubjectEntity>(perspective: PerspectiveProxy, query?: Query): SubjectQueryBuilder<T> {
+  static query<T extends SubjectEntity>(
+    this: typeof SubjectEntity & (new (...args: any[]) => T), 
+    perspective: PerspectiveProxy, 
+    query?: Query
+  ): SubjectQueryBuilder<T> {
     return new SubjectQueryBuilder<T>(perspective, this as any, query);
   }
 }
@@ -638,15 +660,12 @@ export class SubjectQueryBuilder<T extends SubjectEntity> {
     return this;
   }
 
-  // count
-  // paginate
-
   /** Execute the query once and return the results */
   async run(): Promise<T[]> {
     const query = await this.ctor.queryToProlog(this.perspective, this.queryParams);
     const result = await this.perspective.infer(query);
-    const { instances } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
-    return instances as T[];
+    const { results } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
+    return results as T[];
   }
 
   /** Subscribe to the query and receive updates when results change */
@@ -655,17 +674,17 @@ export class SubjectQueryBuilder<T extends SubjectEntity> {
     const subscription = await this.perspective.subscribeInfer(query);
 
     const processResults = async (result: AllInstancesResult) => {
-      const { instances } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
-      callback(instances as T[]);
+      const { results } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
+      callback(results as T[]);
     };
 
     subscription.onResult(processResults);
-    const { instances } = await this.ctor.instancesFromPrologResult(
+    const { results } = await this.ctor.instancesFromPrologResult(
       this.perspective,
       this.queryParams,
       subscription.result
     );
-    return instances as T[];
+    return results as T[];
   }
 
   async count(): Promise<number> {
@@ -687,25 +706,27 @@ export class SubjectQueryBuilder<T extends SubjectEntity> {
     return  subscription.result?.[0]?.TotalCount || 0;
   }
 
-  async paginate(pageSize: number, pageNumber: number) {
+  async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery);
     const result = await this.perspective.infer(prologQuery);
-    return await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, result);
+    const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, result)) as ResultsWithTotalCount<T>;
+    return { results, totalCount, pageSize, pageNumber };
   }
 
-  async paginateSubscribe(pageSize: number, pageNumber: number, callback: (results) => void) {
+  async paginateSubscribe(pageSize: number, pageNumber: number, callback: (results: PaginationResult<T>) => void): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery);
     const subscription = await this.perspective.subscribeInfer(prologQuery);
     
 
-    const processResults = async (result: AllInstancesResult) => {
-      const paginatedResult = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result) 
-      callback(paginatedResult);
+    const processResults = async (r: AllInstancesResult) => {
+      const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, r)) as ResultsWithTotalCount<T>;
+      callback({ results, totalCount, pageSize, pageNumber });
     };
 
     subscription.onResult(processResults);
-    return await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, subscription.result)
+    const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, subscription.result)) as ResultsWithTotalCount<T>;
+    return { results, totalCount, pageSize, pageNumber };
   }
 }

@@ -1217,8 +1217,8 @@ describe("Prolog + Literals", () => {
                     expect(recipes4.length).to.equal(3);
 
                     // 2. Timestamps
-                    const recipe2timestamp = allRecipes[1].timestamp;
-
+                    const recipe2timestamp = parseInt(allRecipes[1].timestamp);
+                    
                     // Test less than (lt) operation on timestamp
                     const recipes5 = await Recipe.findAll(perspective!, { where: { timestamp: { lt: recipe2timestamp } } });
                     expect(recipes5.length).to.equal(1);
@@ -1231,7 +1231,7 @@ describe("Prolog + Literals", () => {
                     const recipes7 = await Recipe.findAll(perspective!, { where: { timestamp: { gt: recipe2timestamp } } });
                     expect(recipes7.length).to.equal(2);
 
-                    // Test greater than (gt) operation on timestamp
+                    // Test greater than or equal to (gte) operation on timestamp
                     const recipes8 = await Recipe.findAll(perspective!, { where: { timestamp: { gte: recipe2timestamp } } });
                     expect(recipes8.length).to.equal(3);
 
@@ -1569,43 +1569,43 @@ describe("Prolog + Literals", () => {
                     expect(allRecipes.length).to.equal(6);
 
                     // Test count with limit
-                    const { instances: recipes1, count: count1 } = await Recipe.findAllAndCount(perspective!, { limit: 2, count: true });
+                    const { results: recipes1, totalCount: count1 } = await Recipe.findAllAndCount(perspective!, { limit: 2, count: true });
                     expect(recipes1.length).to.equal(2);
                     expect(count1).to.equal(6);
 
                     // Test count with offset & limit
-                    const { instances: recipes3, count: count3 } = await Recipe.findAllAndCount(perspective!, { offset: 3, limit: 3, count: true });
+                    const { results: recipes3, totalCount: count3 } = await Recipe.findAllAndCount(perspective!, { offset: 3, limit: 3, count: true });
                     expect(recipes3.length).to.equal(3);
                     expect(count3).to.equal(6);
 
                     // Test count with limit & where constraints
-                    const { instances: recipes2, count: count2 } = await Recipe.findAllAndCount(perspective!, { where: { name: ["Recipe 1", "Recipe 2", "Recipe 3"] }, limit: 2, count: true });
+                    const { results: recipes2, totalCount: count2 } = await Recipe.findAllAndCount(perspective!, { where: { name: ["Recipe 1", "Recipe 2", "Recipe 3"] }, limit: 2, count: true });
                     expect(recipes2.length).to.equal(2);
                     expect(count2).to.equal(3);
 
                     // Test count with offset, limit, & where equality constraint (exists)
-                    const { instances: recipes4, count: count4 } = await Recipe.findAllAndCount(perspective!, { where: { number: 3 }, offset: 3, limit: 3, count: true });
+                    const { results: recipes4, totalCount: count4 } = await Recipe.findAllAndCount(perspective!, { where: { number: 3 }, offset: 3, limit: 3, count: true });
                     console.log('recipes4: ', recipes4);
                     expect(recipes4.length).to.equal(0);
                     expect(count4).to.equal(0);
 
                     // Test count with offset, limit, & where equality constraint (does not exist)
-                    const { instances: recipes5, count: count5 } = await Recipe.findAllAndCount(perspective!, { where: { number: 5 }, offset: 3, limit: 3, count: true });
+                    const { results: recipes5, totalCount: count5 } = await Recipe.findAllAndCount(perspective!, { where: { number: 5 }, offset: 3, limit: 3, count: true });
                     expect(recipes5.length).to.equal(3);
                     expect(count5).to.equal(6);
 
                     // Test count with limit & where not constraint
-                    const { instances: recipes6, count: count6 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 1" } }, limit: 3, count: true });
+                    const { results: recipes6, totalCount: count6 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 1" } }, limit: 3, count: true });
                     expect(recipes6.length).to.equal(3);
                     expect(count6).to.equal(5);
 
                     // Test count with offset, limit, & where not constraint
-                    const { instances: recipes7, count: count7 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 2" } }, offset: 1, limit: 3, count: true });
+                    const { results: recipes7, totalCount: count7 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 2" } }, offset: 1, limit: 3, count: true });
                     expect(recipes7.length).to.equal(3);
                     expect(count7).to.equal(5);
 
                     // Test count with offset, limit, & where constraint
-                    const { instances: recipes8, count: count8 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 4" } }, offset: 3, limit: 3, count: true });
+                    const { results: recipes8, totalCount: count8 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 4" } }, offset: 3, limit: 3, count: true });
                     expect(recipes8.length).to.equal(2);
                     expect(count8).to.equal(5);
 
@@ -1630,14 +1630,14 @@ describe("Prolog + Literals", () => {
                     expect(allRecipes.length).to.equal(6);
 
                     // Test basic pagination (pageSize: 2, pageNumber: 1)
-                    const { instances: recipes1, count: count1 } = await Recipe.paginate(perspective!, 2, 1);
+                    const { results: recipes1, totalCount: count1 } = await Recipe.paginate(perspective!, 2, 1);
                     expect(recipes1.length).to.equal(2);
                     expect(count1).to.equal(6);
                     expect(recipes1[0].name).to.equal("Recipe 1");
                     expect(recipes1[1].name).to.equal("Recipe 2");
 
                     // Test pagination with where constraints (pageSize: 3, pageNumber: 2)
-                    const { instances: recipes2, count: count2 } = await Recipe.paginate(perspective!, 3, 2, { where: { name: { not: "Recipe 4" } } });
+                    const { results: recipes2, totalCount: count2 } = await Recipe.paginate(perspective!, 3, 2, { where: { name: { not: "Recipe 4" } } });
                     expect(recipes2.length).to.equal(2);
                     expect(count2).to.equal(5);
                     expect(recipes2[0].name).to.equal("Recipe 5");
@@ -1742,18 +1742,18 @@ describe("Prolog + Literals", () => {
                     // Test paginate()
                     const query = Recipe.query(perspective!);
                     const page1 = await query.paginate(3, 1);
-                    expect(page1.instances.length).to.equal(3);
-                    expect(page1.count).to.equal(10);
-                    expect(page1.instances[0].name).to.equal("Recipe 1");
-                    expect(page1.instances[2].name).to.equal("Recipe 3");
+                    expect(page1.results.length).to.equal(3);
+                    expect(page1.totalCount).to.equal(10);
+                    expect(page1.results[0].name).to.equal("Recipe 1");
+                    expect(page1.results[2].name).to.equal("Recipe 3");
 
                     const page2 = await query.paginate(3, 2);
-                    expect(page2.instances.length).to.equal(3);
-                    expect(page2.instances[0].name).to.equal("Recipe 4");
+                    expect(page2.results.length).to.equal(3);
+                    expect(page2.results[0].name).to.equal("Recipe 4");
 
                     const lastPage = await query.paginate(3, 4);
-                    expect(lastPage.instances.length).to.equal(1);
-                    expect(lastPage.instances[0].name).to.equal("Recipe 10");
+                    expect(lastPage.results.length).to.equal(1);
+                    expect(lastPage.results[0].name).to.equal("Recipe 10");
 
                     // Test paginateSubscribe()
                     let lastResult: any = null;
@@ -1761,8 +1761,8 @@ describe("Prolog + Literals", () => {
                         lastResult = result;
                     });
 
-                    expect(initialResult.instances.length).to.equal(3);
-                    expect(initialResult.count).to.equal(10);
+                    expect(initialResult.results.length).to.equal(3);
+                    expect(initialResult.totalCount).to.equal(10);
 
                     // Add a new recipe and verify subscription updates
                     const newRecipe = new Recipe(perspective!);
@@ -1770,7 +1770,7 @@ describe("Prolog + Literals", () => {
                     await newRecipe.save();
 
                     await sleep(2000);
-                    expect(lastResult.count).to.equal(11);
+                    expect(lastResult.totalCount).to.equal(11);
 
                     // Clean up
                     const allRecipes = await Recipe.findAll(perspective!);
@@ -1821,7 +1821,7 @@ describe("Prolog + Literals", () => {
                         priority: { gt: 5 },
                         read: false
                     });
-                    const initialResults = await query.subscribeAndRun((newNotifications: SubjectEntity[]) => {
+                    const initialResults = await query.subscribeAndRun((newNotifications) => {
                         notifications = newNotifications;
                         updateCount++;
                     });
@@ -2011,7 +2011,7 @@ describe("Prolog + Literals", () => {
                             completed: false,
                             assignee: "alice"
                         }
-                    })).subscribeAndRun((newTasks: SubjectEntity[]) => {
+                    })).subscribeAndRun((newTasks) => {
                         tasks = newTasks;
                         updateCount++;
                     });
