@@ -661,7 +661,7 @@ export class SubjectQueryBuilder<T extends SubjectEntity> {
   }
 
   /** Execute the query once and return the results */
-  async run(): Promise<T[]> {
+  async get(): Promise<T[]> {
     const query = await this.ctor.queryToProlog(this.perspective, this.queryParams);
     const result = await this.perspective.infer(query);
     const { results } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
@@ -669,7 +669,7 @@ export class SubjectQueryBuilder<T extends SubjectEntity> {
   }
 
   /** Subscribe to the query and receive updates when results change */
-  async subscribeAndRun(callback: (results: T[]) => void): Promise<T[]> {
+  async subscribe(callback: (results: T[]) => void): Promise<T[]> {
     const query = await this.ctor.queryToProlog(this.perspective, this.queryParams);
     const subscription = await this.perspective.subscribeInfer(query);
 

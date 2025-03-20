@@ -1817,14 +1817,16 @@ describe("Prolog + Literals", () => {
 
                     // Set up subscription for high-priority unread notifications
                     let updateCount = 0;
-                    const query = Notification.query(perspective!).where({ 
-                        priority: { gt: 5 },
-                        read: false
-                    });
-                    const initialResults = await query.subscribeAndRun((newNotifications) => {
-                        notifications = newNotifications;
-                        updateCount++;
-                    });
+                    const initialResults = await Notification
+                        .query(perspective!)
+                        .where({ 
+                            priority: { gt: 5 },
+                            read: false
+                        })
+                        .subscribe((newNotifications) => {
+                            notifications = newNotifications;
+                            updateCount++;
+                        });
 
                     // Initially no results
                     expect(initialResults.length).to.equal(0);
@@ -1938,8 +1940,7 @@ describe("Prolog + Literals", () => {
                     await note2.save();
 
                     // Query for recipes - this should only return the recipe instance
-                    const note1Query = Note1.query(perspective!).where({ name: "Test Item" });
-                    const note1Results = await note1Query.run();
+                    const note1Results = await Note1.query(perspective!).where({ name: "Test Item" }).get()
                     
                     console.log("note1Results: ", note1Results)
                     // This assertion will fail because the query builder doesn't filter by class
@@ -2011,7 +2012,7 @@ describe("Prolog + Literals", () => {
                             completed: false,
                             assignee: "alice"
                         }
-                    })).subscribeAndRun((newTasks) => {
+                    })).subscribe((newTasks) => {
                         tasks = newTasks;
                         updateCount++;
                     });
