@@ -118,7 +118,7 @@ function buildWhereQuery(where: Where = {}): string {
           } else {
             // NOT EQUAL
             if (isSpecial) return `${field} \\= ${formatValue(not)}`;
-            else return `\\+ (${getter}, Value${key} = ${formatValue(not)})`;
+            else return `${getter}, Value${key} \\= ${formatValue(not)}`;
           }
         }
 
@@ -149,6 +149,10 @@ function buildWhereQuery(where: Where = {}): string {
     .join(", ");
 }
 
+function buildCountQuery(count?: boolean): string {
+  return count ? "length(UnsortedInstances, TotalCount)" : "";
+}
+
 function buildOrderQuery(order?: Order): string {
   if (!order) return "SortedInstances = UnsortedInstances";
   const [propertyName, direction] = Object.entries(order)[0];
@@ -160,22 +164,9 @@ function buildOffsetQuery(offset?: number): string {
   return `skipN(SortedInstances, ${offset}, InstancesWithOffset)`;
 }
 
-function buildLimitQuery(limit?: number, count?: boolean): string {
-  if (count) {
-    if (!limit || limit < 0) {
-      // No limit, just count and return all
-      return "length(InstancesWithOffset, TotalCount), AllInstances = InstancesWithOffset";
-    }
-    // With limit, count all, then take limited subset
-    return `
-      length(InstancesWithOffset, TotalCount),
-      takeN(InstancesWithOffset, ${limit}, AllInstances)
-    `;
-  } else {
-    // No count requested
-    if (!limit || limit < 0) return "AllInstances = InstancesWithOffset";
-    return `takeN(InstancesWithOffset, ${limit}, AllInstances)`;
-  }
+function buildLimitQuery(limit?: number): string {
+  if (!limit || limit < 0) return "AllInstances = InstancesWithOffset";
+  return `takeN(InstancesWithOffset, ${limit}, AllInstances)`;
 }
 
 /**
@@ -292,7 +283,7 @@ export class SubjectEntity {
       buildWhereQuery(where),
     ];
 
-    const resultSetQueries = [buildOrderQuery(order), buildOffsetQuery(offset), buildLimitQuery(limit, count)];
+    const resultSetQueries = [buildCountQuery(count), buildOrderQuery(order), buildOffsetQuery(offset), buildLimitQuery(limit)];
 
     const fullQuery = `
       findall([Base, Properties, Collections, Timestamp, Author], (
@@ -368,10 +359,25 @@ export class SubjectEntity {
     return await this.instancesFromPrologResult(perspective, query, result);
   }
 
+  /**
+   * Helper function to make pagination easier with explicit pageSize & pageNumber props.
+   * @param perspective - The perspective that the subject entities belongs to.
+   * @param query - The query object used to define search contraints.
+   *
+   * @returns An a page of results based on the pageSize & pageNumber props.
+   *
+   */
+  static async paginate(perspective: PerspectiveProxy, pageSize: number, pageNumber: number, query?: Query) {
+    const paginationQuery = { ...(query || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
+    const prologQuery = await this.queryToProlog(perspective, paginationQuery);
+    const result = await perspective.infer(prologQuery);
+    return await this.instancesFromPrologResult(perspective, paginationQuery, result);
+  }
+
   static async countQueryToProlog(perspective: PerspectiveProxy, query: Query = {}) {
-    const { source, where, offset } = query;
+    const { source, where } = query;
     const instanceQueries = [buildAuthorAndTimestampQuery(), buildSourceQuery(source), buildWhereQuery(where)];
-    const resultSetQueries = [buildOrderQuery(), buildOffsetQuery(offset), buildLimitQuery(0, true)];
+    const resultSetQueries = [buildCountQuery(true), buildOrderQuery(), buildOffsetQuery(), buildLimitQuery()];
 
     const fullQuery = `
       findall([Base, Properties, Collections, Timestamp, Author], (
@@ -398,8 +404,6 @@ export class SubjectEntity {
 
     return result?.[0]?.TotalCount || 0;
   }
-
-  // todo: add paginate(perspective, query, pageSize, pageNumber)
 
   private async setProperty(key: string, value: any) {
     const setters = await this.#perspective.infer(
