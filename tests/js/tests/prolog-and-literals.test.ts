@@ -1591,27 +1591,23 @@ describe("Prolog + Literals", () => {
 
                     // Test count with offset, limit, & where equality constraint (does not exist)
                     const { instances: recipes5, count: count5 } = await Recipe.findAllAndCount(perspective!, { where: { number: 5 }, offset: 3, limit: 3, count: true });
-                    console.log('recipes5: ', recipes5);
                     expect(recipes5.length).to.equal(3);
                     expect(count5).to.equal(6);
 
-                    // Test count with limit & where constraint
+                    // Test count with limit & where not constraint
                     const { instances: recipes6, count: count6 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 1" } }, limit: 3, count: true });
-                    console.log('recipes6: ', recipes6);
                     expect(recipes6.length).to.equal(3);
                     expect(count6).to.equal(5);
 
-                    // Test count with offset, limit, & where constraint
+                    // Test count with offset, limit, & where not constraint
                     const { instances: recipes7, count: count7 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 2" } }, offset: 1, limit: 3, count: true });
-                    console.log('recipes7: ', recipes7);
                     expect(recipes7.length).to.equal(3);
                     expect(count7).to.equal(5);
 
-                    // // Test count with offset, limit, & where constraint
-                    // const { instances: recipes7, count: count7 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 4" } }, offset: 3, limit: 3, count: true });
-                    // console.log('recipes7: ', recipes7);
-                    // expect(recipes7.length).to.equal(2);
-                    // expect(count7).to.equal(5);
+                    // Test count with offset, limit, & where constraint
+                    const { instances: recipes8, count: count8 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 4" } }, offset: 3, limit: 3, count: true });
+                    expect(recipes8.length).to.equal(2);
+                    expect(count8).to.equal(5);
 
                     // Delete recipies
                     for (const recipe of allRecipes) await recipe.delete();
@@ -1635,20 +1631,15 @@ describe("Prolog + Literals", () => {
 
                     // Test basic pagination (pageSize: 2, pageNumber: 1)
                     const { instances: recipes1, count: count1 } = await Recipe.paginate(perspective!, 2, 1);
-                    console.log('recipes1: ', recipes1)
                     expect(recipes1.length).to.equal(2);
                     expect(count1).to.equal(6);
                     expect(recipes1[0].name).to.equal("Recipe 1");
                     expect(recipes1[1].name).to.equal("Recipe 2");
 
                     // Test pagination with where constraints (pageSize: 3, pageNumber: 2)
-                    // const { instances: recipes2, count: count2 } = await Recipe.paginate(perspective!, 3, 2);
                     const { instances: recipes2, count: count2 } = await Recipe.paginate(perspective!, 3, 2, { where: { name: { not: "Recipe 4" } } });
-                    // const { instances: recipes2, count: count2 } = await Recipe.paginate(perspective!, 3, 2, { where: { name: ["Recipe 1", "Recipe 2", "Recipe 3", "Recipe 5", "Recipe 6"] } });
-                    console.log('recipes2: ', recipes2)
-                    console.log('count2: ', count2)
                     expect(recipes2.length).to.equal(2);
-                    expect(count2).to.equal(6);
+                    expect(count2).to.equal(5);
                     expect(recipes2[0].name).to.equal("Recipe 5");
                     expect(recipes2[1].name).to.equal("Recipe 6");
 
