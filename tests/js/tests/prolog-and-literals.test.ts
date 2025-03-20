@@ -2,15 +2,17 @@ import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
 import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE,
-    InstanceQuery, Subject, SubjectProperty,
-    SubjectCollection, SubjectFlag,
-    SDNAClass,
+    InstanceQuery, Subject,
     Ad4mModel,
+    Flag,
+    Property,
+    ReadOnly,
+    Collection,
+    ModelOptions,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
 import { startExecutor, apolloClient } from "../utils/utils";
 import path from "path";
-import fs from "fs";
 import { fileURLToPath } from 'url';
 import fetch from 'node-fetch'
 
@@ -258,12 +260,12 @@ describe("Prolog + Literals", () => {
         })
 
         describe("SDNA creation decorators", () => {
-            @SDNAClass({
+            @ModelOptions({
                 name: "Message"
             })
             class Message {
                 //@ts-ignore
-                @SubjectFlag({
+                @Flag({
                     through: "ad4m://type",
                     value: "ad4m://message"
                 })
@@ -274,17 +276,16 @@ describe("Prolog + Literals", () => {
                 static async all(perspective: PerspectiveProxy): Promise<Message[]> { return [] }
 
                 //@ts-ignore
-                @SubjectProperty({
+                @Property({
                     through: "todo://state",
                     initial: "todo://ready",
-                    writable: true,
                 })
                 body: string = ""
             }
 
             // This class matches the SDNA in ./sdna/subject.pl
             // and this test proves the decorators create the exact same SDNA code
-            @SDNAClass({
+            @ModelOptions({
                 name: "Todo"
             })
             class Todo {
@@ -316,45 +317,37 @@ describe("Prolog + Literals", () => {
                 static async allSelf(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
                 //@ts-ignore
-                @SubjectProperty({
+                @Property({
                     through: "todo://state",
-                    initial:"todo://ready",
-                    writable: true,
-                    required: true
+                    initial: "todo://ready",
                 })
                 state: string = ""
 
-                //@ts-ignore
-                @SubjectProperty({
+                @Property({
                     through: "todo://has_title",
                     writable: true,
                     resolveLanguage: "literal"
                 })
                 title: string = ""
 
-                @SubjectProperty({
+                @ReadOnly({
                     getter: `triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true`
                 })
                 isLiked: boolean = false
 
-                //@ts-ignore
-                @SubjectCollection({ through: "todo://comment" })
-                // @ts-ignore
+                @Collection({ through: "todo://comment" })
                 comments: string[] = []
 
-                //@ts-ignore
-                @SubjectCollection({ through: "flux://entry_type" })
+                @Collection({ through: "flux://entry_type" })
                 entries: string[] = []
 
-                //@ts-ignore
-                @SubjectCollection({
+                @Collection({
                     through: "flux://entry_type",
                     where: { isInstance: Message }
                 })
                 messages: string[] = []
 
-                //@ts-ignore
-                @SubjectCollection({
+                @Collection({
                     through: "flux://entry_type",
                     where: { condition: `triple(Target, "flux://has_reaction", "flux://thumbsup")` }
                 })
@@ -444,11 +437,13 @@ describe("Prolog + Literals", () => {
             it("can easily be initialized with PerspectiveProxy.ensureSDNASubjectClass()", async () => {
                 expect(await perspective!.getSdna()).to.have.lengthOf(1)
 
-                @SDNAClass({
+                @ModelOptions({
                     name: "Test"
                 })
                 class Test {
-                    @SubjectProperty({through: "test://test_numer"})
+                    @Property({
+                        through: "test://test_numer"
+                    })
                     number: number = 0
                 }
 
@@ -545,75 +540,59 @@ describe("Prolog + Literals", () => {
             })
 
             describe("Active record implementation", () => {
-                @SDNAClass({
+                @ModelOptions({
                     name: "Recipe"
                 })
                 class Recipe extends Ad4mModel {
-                    //@ts-ignore
-                    @SubjectFlag({
+                    @Flag({
                         through: "ad4m://type",
                         value: "ad4m://recipe"
                     })
                     type: string = ""
 
-                    //@ts-ignore
-                    @SubjectProperty({
+                    @Property({
                         through: "recipe://plain",
-                        writable: true,
                     })
                     plain: string = ""
 
-                    //@ts-ignore
-                    @SubjectProperty({
+                    @Property({
                         through: "recipe://name",
-                        writable: true,
                         resolveLanguage: "literal"
                     })
                     name: string = ""
 
-                    // @ts-ignore
-                    @SubjectProperty({
+                    @Property({
                         through: "recipe://boolean",
-                        writable: true,
                         resolveLanguage: "literal"
                     })
                     booleanTest: boolean = false
 
-                    @SubjectProperty({
+                    @Property({
                         through: "recipe://number",
-                        writable: true,
                         resolveLanguage: "literal"
                     })
                     number: number = 0
 
-                    //@ts-ignore
-                    @SubjectCollection({ through: "recipe://entries" })
+                    @Collection({ through: "recipe://entries" })
                     entries: string[] = []
 
-                    // @ts-ignore
-                    @SubjectCollection({
+                    @Collection({
                         through: "recipe://entries",
                         where: { condition: `triple(Target, "recipe://has_ingredient", "recipe://test")` }
                     })
-                    // @ts-ignore
-                    ingredients: [];
+                    ingredients: string[] = []
 
-                    //@ts-ignore
-                    @SubjectCollection({ through: "recipe://comment" })
-                    // @ts-ignore
+                    @Collection({ through: "recipe://comment" })
                     comments: string[] = []
 
-                    //@ts-ignore
-                    @SubjectProperty({
+                    @Property({
                         through: "recipe://local",
-                        writable: true,
                         local: true
                     })
                     local: string = ""
 
-                    @SubjectProperty({
+                    @Property({
                         through: "recipe://resolve",
-                        writable: true,
                         resolveLanguage: "literal"
                     })
                     resolve: string = ""
@@ -1238,29 +1217,25 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("findAll() works with where query between operations", async () => {
-                    @SDNAClass({
+                    @ModelOptions({
                         name: "Task_due"
                     })
                     class TaskDue extends Ad4mModel {
-                        @SubjectProperty({
+                        @Property({
                             through: "task://title",
-                            writable: true,
-                            required: true,
-                            initial: "task://notitle",
                             resolveLanguage: "literal"
                         })
                         title: string = "";
 
-                        @SubjectProperty({
+                        @Property({
                             through: "task://priority",
                             writable: true,
                             resolveLanguage: "literal"
                         })
                         priority: number = 0;
 
-                        @SubjectProperty({
+                        @Property({
                             through: "task://dueDate",
-                            writable: true,
                             resolveLanguage: "literal"
                         })
                         dueDate: number = 0;
@@ -1776,29 +1751,24 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("query builder works with subscriptions", async () => {
-                    @SDNAClass({
+                    @ModelOptions({
                         name: "Notification"
                     })
                     class Notification extends Ad4mModel {
-                        @SubjectProperty({
+                        @Property({
                             through: "notification://title",
-                            writable: true,
-                            required: true,
-                            initial: "literal://string:notitle",
                             resolveLanguage: "literal"
                         })
                         title: string = "";
 
-                        @SubjectProperty({
+                        @Property({
                             through: "notification://priority",
-                            writable: true,
                             resolveLanguage: "literal"
                         })
                         priority: number = 0;
 
-                        @SubjectProperty({
+                        @Property({
                             through: "notification://read",
-                            writable: true,
                             resolveLanguage: "literal"
                         })
                         read: boolean = false;
@@ -1876,47 +1846,35 @@ describe("Prolog + Literals", () => {
 
                 it("query builder should filter by subject class", async () => {
                     // Define a second subject class
-                    @SDNAClass({
+                    @ModelOptions({
                         name: "Note1"
                     })
                     class Note1 extends Ad4mModel {
-                        @SubjectProperty({
+                        @Property({
                             through: "note://name",
-                            writable: true,
-                            required: true,
-                            initial: "note://noname",
                             resolveLanguage: "literal"
                         })
                         name: string = "";
 
-                        @SubjectProperty({
+                        @Property({
                             through: "note1://content",
-                            writable: true,
-                            required: true,
-                            initial: "note1://nocontent",
                             resolveLanguage: "literal"
                         })
                         content1: string = "";
                     }
 
-                    @SDNAClass({
+                    @ModelOptions({
                         name: "Note2"
                     })
                     class Note2 extends Ad4mModel {
-                        @SubjectProperty({
+                        @Property({
                             through: "note://name",
-                            writable: true,
-                            required: true,
-                            initial: "note://noname",
                             resolveLanguage: "literal"
                         })
                         name: string = "";
 
-                        @SubjectProperty({
+                        @Property({
                             through: "note2://content",
-                            writable: true,
-                            required: true,
-                            initial: "note2://nocontent",
                             resolveLanguage: "literal"
                         })
                         content2: string = "";
@@ -1949,37 +1907,31 @@ describe("Prolog + Literals", () => {
                 });
 
                 it("query builder works with single query object, complex query and subscriptions", async () => {
-                    @SDNAClass({
+                    @ModelOptions({
                         name: "Task"
                     })
                     class Task extends Ad4mModel {
-                        @SubjectProperty({
+                        @Property({
                             through: "task://description",
-                            writable: true,
-                            required: true,
-                            initial: "task://nodescription",
                             resolveLanguage: "literal"
                         })
                         description: string = "";
 
-                        @SubjectProperty({
+                        @Property({
                             through: "task://dueDate",
-                            writable: true,
                             resolveLanguage: "literal"
                         })
                         dueDate: number = 0;
 
 
-                        @SubjectProperty({
+                        @Property({
                             through: "task://completed",
-                            writable: true,
                             resolveLanguage: "literal"
                         })
                         completed: boolean = false;
 
-                        @SubjectProperty({
+                        @Property({
                             through: "task://assignee",
-                            writable: true,
                             resolveLanguage: "literal"
                         })
                         assignee: string = "";

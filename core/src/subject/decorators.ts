@@ -138,6 +138,57 @@ export interface PropertyOptions {
     local?: boolean;
 }
 
+
+/**
+ * Decorator for defining required and writable properties of a model class.
+ * 
+ * @category Decorators
+ * 
+ * @description
+ * This will define a required property that must have an initial value.
+ * All the same options as Property are available, but required is automatically set to true.
+ * If no initial value is provided, it defaults to "literal://string:uninitialized"
+ * 
+ * @example
+ * // Usage 
+ * Property({ through: "ad4m://name" }) // defines a required property with default initial value
+ * Property({ through: "ad4m://name", initial: "John" }) // defines a required property with custom initial value
+ *
+ * @param {PropertyOptions} [opts] - Property options.
+ */
+export function Property(opts: PropertyOptions) {
+    return Optional({
+        ...opts,
+        required: true,
+        initial: opts.initial || "literal://string:uninitialized"
+    });
+}
+
+/**
+ * Decorator for defining read-only properties of a subject class.
+ * 
+ * @category Decorators
+ * 
+ * @description
+ * This will define a read-only property that cannot be modified after initialization.
+ * All the same options as Property are available, but writable is automatically set to false.
+ * 
+ * @example
+ * // Usage
+ * ReadOnly({ through: "ad4m://id" }) // defines a read-only property
+ * 
+ *
+ * @param {PropertyOptions} [opts] - Property options.
+ */
+export function ReadOnly(opts: PropertyOptions) {
+    return Optional({
+        ...opts,
+        writable: false
+    });
+}
+
+
+
 /**
  * Decorator for defining properties of a subject class.
  * 
@@ -147,7 +198,7 @@ export interface PropertyOptions {
  * This will allow you to define properties with different conditions and how they would be defined in proflog engine.
  * 
  * - All properties must have a `through` option which is the predicate of the property.
- * -e If the property is required, it must have an `initial` option which is the initial value of the property.
+ * - If the property is required, it must have an `initial` option which is the initial value of the property.
  * - If the property is writable, it will have a setter in prolog engine. A custom setter can be defined with the `setter` option.
  * - If resolveLanguage is defined, you can use the default `Literal` Language or use your custom language address that can be used to store the property.
  * - If a custom getter is defined, it will be used to get the value of the property in prolog engine. If not, the default getter will be used.
@@ -155,11 +206,11 @@ export interface PropertyOptions {
  * 
  * @example
  * // Usage
- * SubjectProperty({ through: "ad4m://name", initial: "John", required: true }) // this will define a property with the name "ad4m://name" and the initial value "John"
+ * Optional({ through: "ad4m://name", initial: "John", required: true }) // this will define a property with the name "ad4m://name" and the initial value "John"
  * 
  * @param {PropertyOptions} [opts] - Property options.
  */
-export function SubjectProperty(opts: PropertyOptions) {
+export function Optional(opts: PropertyOptions) {
     return function <T>(target: T, key: keyof T) {
         if (opts.required && !opts.initial) {
             throw new Error("SubjectProperty requires an 'initial' option if 'required' is true");
@@ -195,7 +246,7 @@ export interface FlagOptions {
 }
 
 /**
- * Decorator for defining flags of a subject class
+ * Decorator for defining flags on model classes.
  * 
  * @category Decorators
  * 
@@ -209,11 +260,11 @@ export interface FlagOptions {
  * 
  * @example
  * // Usage
- * SubjectFlag({ through: "ad4m://name", value: "John" }) // this will define a flag with the name "ad4m://name" and the initial value "John"   
+ * Flag({ through: "ad4m://name", value: "John" }) // this will define a flag with the name "ad4m://name" and the initial value "John"   
  * 
  * @param {FlagOptions} [opts] Flag options.
  */
-export function SubjectFlag(opts: FlagOptions) {
+export function Flag(opts: FlagOptions) {
     return function <T>(target: T, key: keyof T) {
         if (!opts.through && !opts.value) {
             throw new Error("SubjectFlag requires a 'through' and 'value' option")
@@ -267,7 +318,7 @@ export interface CollectionOptions {
 }
 
 /**
- * Decorator for defining collections of a subject class.
+ * Decorator for defining collections on model classes.
  * 
  * @category Decorators
  * 
@@ -282,11 +333,11 @@ export interface CollectionOptions {
  * 
  * @example
  * // Usage
- * SubjectCollection({ through: "ad4m://friends" }) // this will define a collection with the name "ad4m://friends"
+ * Collection({ through: "ad4m://friends" }) // this will define a collection with the name "ad4m://friends"
  * 
  * @param opts Collection options.
  */
-export function SubjectCollection(opts: CollectionOptions) {
+export function Collection(opts: CollectionOptions) {
     return function <T>(target: T, key: keyof T) {
         target["__collections"] = target["__collections"] || {};
         target["__collections"][key] = opts;
@@ -310,7 +361,7 @@ export function makeRandomPrologAtom(length: number): string {
     return result;
  }
 
-export interface SDNAClassOptions {
+export interface ModelOptionsOptions {
     /**
      * The name of the entity.
      */
@@ -318,7 +369,8 @@ export interface SDNAClassOptions {
 }
 
 /**
- * Decorator for defining an SDNA class.
+ * Decorator for defining options on a model class to be stored as
+ * a Social DNA subject class in AD4M.
  * 
  * @category Decorators
  * 
@@ -329,11 +381,11 @@ export interface SDNAClassOptions {
  * 
  * @example
  * // Usage
- *  SDNAClass({ name: "Person" }) // this will create a new SDNA class with the name "Person"
+ *  ModelOptions({ name: "Person" }) // this will create a new SDNA class with the name "Person"
  * 
- * @param opts SDNA class options.
+ * @param opts Model options.
  */
-export function SDNAClass(opts: SDNAClassOptions) {
+export function ModelOptions(opts: ModelOptionsOptions) {
     return function (target: any) {
         target.prototype.className = opts.name;
         target.className = opts.name;
