@@ -368,15 +368,7 @@ export class SubjectEntity {
     return await this.instancesFromPrologResult(perspective, query, result);
   }
 
-  /**
-   * Gets a count of all instances of the subject entity in the perspective that match the query params.
-   * @param perspective - The perspective that the subject entities belongs to.
-   * @param query - The query object used to define search contraints.
-   *
-   * @returns The count of subject entities matching the query.
-   *
-   */
-  static async count(perspective: PerspectiveProxy, query: Query = {}) {
+  static async countQueryToProlog(perspective: PerspectiveProxy, query: Query = {}) {
     const { source, where, offset } = query;
     const instanceQueries = [buildAuthorAndTimestampQuery(), buildSourceQuery(source), buildWhereQuery(where)];
     const resultSetQueries = [buildOrderQuery(), buildOffsetQuery(offset), buildLimitQuery(0, true)];
@@ -390,7 +382,19 @@ export class SubjectEntity {
       ${resultSetQueries.filter((q) => q).join(", ")}
     `;
 
-    const result = await perspective.infer(fullQuery);
+    return fullQuery;
+  }
+
+  /**
+   * Gets a count of all instances of the subject entity in the perspective that match the query params.
+   * @param perspective - The perspective that the subject entities belongs to.
+   * @param query - The query object used to define search contraints.
+   *
+   * @returns The count of subject entities matching the query.
+   *
+   */
+  static async count(perspective: PerspectiveProxy, query: Query = {}) {
+    const result = await perspective.infer(await this.countQueryToProlog(perspective, query));
 
     return result?.[0]?.TotalCount || 0;
   }
@@ -658,5 +662,24 @@ export class SubjectQueryBuilder<T extends SubjectEntity> {
       subscription.result
     );
     return instances as T[];
+  }
+
+  async count(): Promise<number> {
+    const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams);
+    const result = await this.perspective.infer(query);
+    return result?.[0]?.TotalCount || 0;
+  }
+
+  async countSubscribe(callback: (count: number) => void): Promise<number> {
+    const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams);
+    const subscription = await this.perspective.subscribeInfer(query);
+
+    const processResults = async (result: any) => {
+      const newCount = result?.[0]?.TotalCount || 0;
+      callback(newCount);
+    };
+
+    subscription.onResult(processResults);
+    return  subscription.result?.[0]?.TotalCount || 0;
   }
 }
