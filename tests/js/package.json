@@ -11,7 +11,7 @@
     "test-integration": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/integration.test.ts",
     "test-app": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/app.test.ts",
     "test-auth": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/authentication.test.ts",
-    "test-prolog-and-literals": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/prolog-and-literals.test.ts",
+    "test-prolog-and-literals": "ts-mocha -p tsconfig.json --timeout 1200000 --serial --exit tests/prolog-and-literals.test.ts",
     "prepare-test": "run-script-os",
     "prepare-test:macos": "./scripts/build-test-language.sh && ./scripts/prepareTestDirectory.sh && deno run --allow-all scripts/get-builtin-test-langs.js && pnpm run inject-language-language && pnpm run publish-test-languages && pnpm run inject-publishing-agent",
     "prepare-test:linux": "./scripts/build-test-language.sh && ./scripts/prepareTestDirectory.sh && deno run --allow-all scripts/get-builtin-test-langs.js && pnpm run inject-language-language && pnpm run publish-test-languages && pnpm run inject-publishing-agent",

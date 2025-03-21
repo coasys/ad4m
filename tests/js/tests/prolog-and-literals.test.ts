@@ -1217,8 +1217,8 @@ describe("Prolog + Literals", () => {
                     expect(recipes4.length).to.equal(3);
 
                     // 2. Timestamps
-                    const recipe2timestamp = allRecipes[1].timestamp;
-
+                    const recipe2timestamp = parseInt(allRecipes[1].timestamp);
+                    
                     // Test less than (lt) operation on timestamp
                     const recipes5 = await Recipe.findAll(perspective!, { where: { timestamp: { lt: recipe2timestamp } } });
                     expect(recipes5.length).to.equal(1);
@@ -1231,7 +1231,7 @@ describe("Prolog + Literals", () => {
                     const recipes7 = await Recipe.findAll(perspective!, { where: { timestamp: { gt: recipe2timestamp } } });
                     expect(recipes7.length).to.equal(2);
 
-                    // Test greater than (gt) operation on timestamp
+                    // Test greater than or equal to (gte) operation on timestamp
                     const recipes8 = await Recipe.findAll(perspective!, { where: { timestamp: { gte: recipe2timestamp } } });
                     expect(recipes8.length).to.equal(3);
 
@@ -1389,30 +1389,12 @@ describe("Prolog + Literals", () => {
                     const oldRecipes = await Recipe.findAll(perspective!);
                     for (const recipe of oldRecipes) await recipe.delete();
                     
-                    // Create recipes
-                    const recipe1 = new Recipe(perspective!);
-                    recipe1.name = "Recipe 1";
-                    await recipe1.save();
-                    
-                    const recipe2 = new Recipe(perspective!);
-                    recipe2.name = "Recipe 2";
-                    await recipe2.save();
-                    
-                    const recipe3 = new Recipe(perspective!);
-                    recipe3.name = "Recipe 3";
-                    await recipe3.save();
-                    
-                    const recipe4 = new Recipe(perspective!);
-                    recipe4.name = "Recipe 4";
-                    await recipe4.save();
-
-                    const recipe5 = new Recipe(perspective!);
-                    recipe5.name = "Recipe 5";
-                    await recipe5.save();
-
-                    const recipe6 = new Recipe(perspective!);
-                    recipe6.name = "Recipe 6";
-                    await recipe6.save();
+                    // Create 6 recipe instances with sequential names
+                    for (let i = 1; i <= 6; i++) {
+                        const recipe = new Recipe(perspective!);
+                        recipe.name = `Recipe ${i}`;
+                        await recipe.save();
+                    }
                     
                     // Check all recipes are there
                     const allRecipes = await Recipe.findAll(perspective!);
@@ -1441,10 +1423,8 @@ describe("Prolog + Literals", () => {
                     expect(recipes6.length).to.equal(3);
                     expect(recipes6[0].name).to.equal("Recipe 3");
 
-                    
-                    await recipe1.delete();
-                    await recipe2.delete();
-                    await recipe3.delete();
+                    // Delete recipies
+                    for (const recipe of allRecipes) await recipe.delete();
                 })
 
                 it("findAll() works with a mix of query constraints", async () => {
@@ -1571,6 +1551,234 @@ describe("Prolog + Literals", () => {
                     await recipe3.delete();
                 })
 
+                it("findAllAndCount() returns both the retrived instances and the total count", async () => {
+                    // Clear any old recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+                    
+                    // Create 6 recipe instances with sequential names
+                    for (let i = 1; i <= 6; i++) {
+                        const recipe = new Recipe(perspective!);
+                        recipe.name = `Recipe ${i}`;
+                        recipe.number = 5;
+                        await recipe.save();
+                    }
+                    
+                    // Check all recipes are there
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    expect(allRecipes.length).to.equal(6);
+
+                    // Test count with limit
+                    const { results: recipes1, totalCount: count1 } = await Recipe.findAllAndCount(perspective!, { limit: 2, count: true });
+                    expect(recipes1.length).to.equal(2);
+                    expect(count1).to.equal(6);
+
+                    // Test count with offset & limit
+                    const { results: recipes3, totalCount: count3 } = await Recipe.findAllAndCount(perspective!, { offset: 3, limit: 3, count: true });
+                    expect(recipes3.length).to.equal(3);
+                    expect(count3).to.equal(6);
+
+                    // Test count with where constraints & limit
+                    const { results: recipes2, totalCount: count2 } = await Recipe.findAllAndCount(perspective!, { where: { name: ["Recipe 1", "Recipe 2", "Recipe 3"] }, limit: 2, count: true });
+                    expect(recipes2.length).to.equal(2);
+                    expect(count2).to.equal(3);
+
+                    // Test count with where equality constraint (exists), offset, & limit
+                    const { results: recipes4, totalCount: count4 } = await Recipe.findAllAndCount(perspective!, { where: { number: 5 }, offset: 3, limit: 3, count: true });
+                    console.log('recipes4: ', recipes4);
+                    expect(recipes4.length).to.equal(3);
+                    expect(count4).to.equal(6);
+
+                    // Test count with where equality constraint (does not exist), offset, & limit
+                    const { results: recipes5, totalCount: count5 } = await Recipe.findAllAndCount(perspective!, { where: { number: 3 }, offset: 3, limit: 3, count: true });
+                    expect(recipes5.length).to.equal(0);
+                    expect(count5).to.equal(0);
+
+                    // Test count with where not constraint & limit
+                    const { results: recipes6, totalCount: count6 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 1" } }, limit: 3, count: true });
+                    expect(recipes6.length).to.equal(3);
+                    expect(count6).to.equal(5);
+
+                    // Test count with where not constraint, offset, & limit
+                    const { results: recipes7, totalCount: count7 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 2" } }, offset: 1, limit: 3, count: true });
+                    expect(recipes7.length).to.equal(3);
+                    expect(count7).to.equal(5);
+
+                    // Test count with where not constraint, offset, limit, & result set less than limit
+                    const { results: recipes8, totalCount: count8 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 4" } }, offset: 3, limit: 3, count: true });
+                    expect(recipes8.length).to.equal(2);
+                    expect(count8).to.equal(5);
+
+                    // Delete recipies
+                    for (const recipe of allRecipes) await recipe.delete();
+                })
+
+                it("paginate() helper function works with pageNumber & pageSize props", async () => {
+                    // Clear any old recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+                    
+                    // Create 6 recipe instances with sequential names
+                    for (let i = 1; i <= 6; i++) {
+                        const recipe = new Recipe(perspective!);
+                        recipe.name = `Recipe ${i}`;
+                        await recipe.save();
+                    }
+                    
+                    // Check all recipes are there
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    expect(allRecipes.length).to.equal(6);
+
+                    // Test basic pagination (pageSize: 2, pageNumber: 1)
+                    const { results: recipes1, totalCount: count1 } = await Recipe.paginate(perspective!, 2, 1);
+                    expect(recipes1.length).to.equal(2);
+                    expect(count1).to.equal(6);
+                    expect(recipes1[0].name).to.equal("Recipe 1");
+                    expect(recipes1[1].name).to.equal("Recipe 2");
+
+                    // Test pagination with where constraints (pageSize: 3, pageNumber: 2)
+                    const { results: recipes2, totalCount: count2 } = await Recipe.paginate(perspective!, 3, 2, { where: { name: { not: "Recipe 4" } } });
+                    expect(recipes2.length).to.equal(2);
+                    expect(count2).to.equal(5);
+                    expect(recipes2[0].name).to.equal("Recipe 5");
+                    expect(recipes2[1].name).to.equal("Recipe 6");
+
+                    // Delete recipies
+                    for (const recipe of allRecipes) await recipe.delete();
+                });
+
+                it("count() returns only the count without retrieving instances", async () => {
+                    // Clear any old recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+                    
+                    // Create 6 recipe instances with sequential names
+                    for (let i = 1; i <= 6; i++) {
+                        const recipe = new Recipe(perspective!);
+                        recipe.name = `Recipe ${i}`;
+                        await recipe.save();
+                    }
+                    
+                    // Test count with no constraints
+                    const count1 = await Recipe.count(perspective!);
+                    expect(count1).to.equal(6);
+
+                    // Test count with where constraints
+                    const count2 = await Recipe.count(perspective!, { where: { name: ["Recipe 1", "Recipe 2", "Recipe 3"] } });
+                    expect(count2).to.equal(3);
+
+                    // Test count with more complex constraints
+                    const count3 = await Recipe.count(perspective!, { where: { name: { not: "Recipe 1" } } });
+                    expect(count3).to.equal(5);
+
+                    // Delete recipes
+                    for (const recipe of await Recipe.findAll(perspective!)) await recipe.delete();
+                });
+
+                it("count() and countSubscribe() work on the query builder", async () => {
+                    // Clear any old recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+                    
+                    // Create recipes
+                    const recipe1 = new Recipe(perspective!);
+                    recipe1.name = "Recipe 1";
+                    await recipe1.save();
+                    
+                    const recipe2 = new Recipe(perspective!);
+                    recipe2.name = "Recipe 2"; 
+                    await recipe2.save();
+                    
+                    const recipe3 = new Recipe(perspective!);
+                    recipe3.name = "Recipe 3";
+                    await recipe3.save();
+
+                    // Test count() on query builder
+                    const query = Recipe.query(perspective!);
+                    const count = await query.count();
+                    expect(count).to.equal(3);
+
+                    // Test count with where clause
+                    const filteredQuery = Recipe.query(perspective!)
+                        .where({ name: ["Recipe 1", "Recipe 2"] });
+                    const filteredCount = await filteredQuery.count();
+                    expect(filteredCount).to.equal(2);
+
+                    // Test countSubscribe
+                    let lastCount = 0;
+                    const subscription = await Recipe.query(perspective!)
+                        .countSubscribe((count) => {
+                            lastCount = count;
+                        });
+                    expect(subscription).to.equal(3);
+
+                    // Add another recipe and verify callback is called
+                    const recipe4 = new Recipe(perspective!);
+                    recipe4.name = "Recipe 4";
+                    await recipe4.save();
+
+                    // Give time for subscription to process
+                    await sleep(1000);
+                    expect(lastCount).to.equal(4);
+
+                    // Clean up
+                    for (const recipe of await Recipe.findAll(perspective!)) {
+                        await recipe.delete();
+                    }
+                })
+
+                it("paginate() and paginateSubscribe() work on the query builder", async () => {
+                    // Clear any existing recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+
+                    // Create test recipes
+                    for (let i = 1; i <= 10; i++) {
+                        const recipe = new Recipe(perspective!);
+                        recipe.name = `Recipe ${i}`;
+                        await recipe.save();
+                    }
+
+                    // Test paginate()
+                    const query = Recipe.query(perspective!);
+                    const page1 = await query.paginate(3, 1);
+                    expect(page1.results.length).to.equal(3);
+                    expect(page1.totalCount).to.equal(10);
+                    expect(page1.results[0].name).to.equal("Recipe 1");
+                    expect(page1.results[2].name).to.equal("Recipe 3");
+
+                    const page2 = await query.paginate(3, 2);
+                    expect(page2.results.length).to.equal(3);
+                    expect(page2.results[0].name).to.equal("Recipe 4");
+
+                    const lastPage = await query.paginate(3, 4);
+                    expect(lastPage.results.length).to.equal(1);
+                    expect(lastPage.results[0].name).to.equal("Recipe 10");
+
+                    // Test paginateSubscribe()
+                    let lastResult: any = null;
+                    const initialResult = await query.paginateSubscribe(3, 1, (result) => {
+                        lastResult = result;
+                    });
+
+                    expect(initialResult.results.length).to.equal(3);
+                    expect(initialResult.totalCount).to.equal(10);
+
+                    // Add a new recipe and verify subscription updates
+                    const newRecipe = new Recipe(perspective!);
+                    newRecipe.name = "Recipe 11";
+                    await newRecipe.save();
+
+                    await sleep(2000);
+                    expect(lastResult.totalCount).to.equal(11);
+
+                    // Clean up
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of allRecipes) {
+                        await recipe.delete();
+                    }
+                })
+
                 it("query builder works with subscriptions", async () => {
                     @SDNAClass({
                         name: "Notification"
@@ -1609,14 +1817,16 @@ describe("Prolog + Literals", () => {
 
                     // Set up subscription for high-priority unread notifications
                     let updateCount = 0;
-                    const query = Notification.query(perspective!).where({ 
-                        priority: { gt: 5 },
-                        read: false
-                    });
-                    const initialResults = await query.subscribeAndRun((newNotifications: SubjectEntity[]) => {
-                        notifications = newNotifications;
-                        updateCount++;
-                    });
+                    const initialResults = await Notification
+                        .query(perspective!)
+                        .where({ 
+                            priority: { gt: 5 },
+                            read: false
+                        })
+                        .subscribe((newNotifications) => {
+                            notifications = newNotifications;
+                            updateCount++;
+                        });
 
                     // Initially no results
                     expect(initialResults.length).to.equal(0);
@@ -1730,8 +1940,7 @@ describe("Prolog + Literals", () => {
                     await note2.save();
 
                     // Query for recipes - this should only return the recipe instance
-                    const note1Query = Note1.query(perspective!).where({ name: "Test Item" });
-                    const note1Results = await note1Query.run();
+                    const note1Results = await Note1.query(perspective!).where({ name: "Test Item" }).get()
                     
                     console.log("note1Results: ", note1Results)
                     // This assertion will fail because the query builder doesn't filter by class
@@ -1763,6 +1972,7 @@ describe("Prolog + Literals", () => {
                             resolveLanguage: "literal"
                         })
                         dueDate: number = 0;
+
 
                         @SubjectProperty({
                             through: "task://completed",
@@ -1802,7 +2012,7 @@ describe("Prolog + Literals", () => {
                             completed: false,
                             assignee: "alice"
                         }
-                    })).subscribeAndRun((newTasks: SubjectEntity[]) => {
+                    })).subscribe((newTasks) => {
                         tasks = newTasks;
                         updateCount++;
                     });

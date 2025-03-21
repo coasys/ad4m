@@ -20,14 +20,17 @@ type Order = { [propertyName: string]: "ASC" | "DESC" };
 export type Query = {
   source?: string;
   properties?: string[];
-  collections?: string[];
+  collections?: string[]; // replace with include: Query[]
   where?: Where;
   order?: Order;
   offset?: number;
   limit?: number;
+  count?: boolean;
 };
 
-export type AllInstancesResult = { AllInstances: SubjectEntity[] };
+export type AllInstancesResult = { AllInstances: SubjectEntity[]; TotalCount?: number };
+export type ResultsWithTotalCount<T> = { results: T[]; totalCount?: number };
+export type PaginationResult<T> = { results: T[]; totalCount?: number; pageSize: number; pageNumber: number };
 
 function capitalize(word: string): string {
   return word.charAt(0).toUpperCase() + word.slice(1);
@@ -117,7 +120,7 @@ function buildWhereQuery(where: Where = {}): string {
           } else {
             // NOT EQUAL
             if (isSpecial) return `${field} \\= ${formatValue(not)}`;
-            else return `\\+ (${getter}, Value${key} = ${formatValue(not)})`;
+            else return `${getter}, Value${key} \\= ${formatValue(not)}`;
           }
         }
 
@@ -148,6 +151,10 @@ function buildWhereQuery(where: Where = {}): string {
     .join(", ");
 }
 
+function buildCountQuery(count?: boolean): string {
+  return count ? "length(UnsortedInstances, TotalCount)" : "";
+}
+
 function buildOrderQuery(order?: Order): string {
   if (!order) return "SortedInstances = UnsortedInstances";
   const [propertyName, direction] = Object.entries(order)[0];
@@ -167,6 +174,19 @@ function buildLimitQuery(limit?: number): string {
 /**
  * Class representing a subject entity.
  * Can extend this class to create a new subject entity to add methods interact with SDNA and much better experience then using the bare bone methods.
+ *
+ * @example
+ * ```typescript
+ * @SDNAClass({ name: "Recipe" })
+ * class Recipe extends SubjectEntity {
+ *   @SubjectProperty({
+ *     through: "recipe://name",
+ *     writable: true,
+ *     resolveLanguage: "literal"
+ *   })
+ *   name: string = "";
+ * }
+ * ```
  */
 export class SubjectEntity {
   #baseExpression: string;
@@ -196,10 +216,20 @@ export class SubjectEntity {
   }
 
   /**
-   * Constructs a new subject.
-   * @param perspective - The perspective that the subject belongs to.
-   * @param baseExpression - The base expression of the subject.
-   * @param source - The source of the subject, the expression this instance is linked too.
+   * Constructs a new subject entity instance.
+   *
+   * @param perspective - The perspective that the subject belongs to
+   * @param baseExpression - Optional base expression for the subject
+   * @param source - Optional source expression this instance is linked to
+   *
+   * @example
+   * ```typescript
+   * const recipe = new Recipe(perspective);
+   * // or with base expression
+   * const recipe = new Recipe(perspective, "base123");
+   * // or with source
+   * const recipe = new Recipe(perspective, "base123", "source456");
+   * ```
    */
   constructor(perspective: PerspectiveProxy, baseExpression?: string, source?: string) {
     this.#baseExpression = baseExpression ? baseExpression : Literal.from(makeRandomPrologAtom(24)).toUrl();
@@ -268,7 +298,7 @@ export class SubjectEntity {
 
   // Todo: Only return AllInstances (InstancesWithOffset, SortedInstances, & UnsortedInstances not required)
   public static async queryToProlog(perspective: PerspectiveProxy, query: Query) {
-    const { source, properties, collections, where, order, offset, limit } = query;
+    const { source, properties, collections, where, order, offset, limit, count } = query;
 
     const instanceQueries = [
       buildAuthorAndTimestampQuery(),
@@ -278,7 +308,12 @@ export class SubjectEntity {
       buildWhereQuery(where),
     ];
 
-    const resultSetQueries = [buildOrderQuery(order), buildOffsetQuery(offset), buildLimitQuery(limit)];
+    const resultSetQueries = [
+      buildCountQuery(count),
+      buildOrderQuery(order),
+      buildOffsetQuery(offset),
+      buildLimitQuery(limit),
+    ];
 
     const fullQuery = `
       findall([Base, Properties, Collections, Timestamp, Author], (
@@ -292,12 +327,13 @@ export class SubjectEntity {
     return fullQuery;
   }
 
-  public static async instancesFromPrologResult(
+  public static async instancesFromPrologResult<T extends SubjectEntity>(
+    this: typeof SubjectEntity & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query: Query,
     result: AllInstancesResult
-  ) {
-    if (!result?.[0]?.AllInstances) return [];
+  ): Promise<ResultsWithTotalCount<T>> {
+    if (!result?.[0]?.AllInstances) return { results: [], totalCount: 0 };
     // Map results to instances
     const requestedAttribtes = [...(query?.properties || []), ...(query?.collections || [])];
     const allInstances = await Promise.all(
@@ -322,23 +358,136 @@ export class SubjectEntity {
         }
       })
     );
-    return allInstances.filter((instance) => instance !== null);
+    return { results: allInstances.filter((instance) => instance !== null), totalCount: result[0].TotalCount };
   }
 
   /**
-   * Gets all instances of the subject entity in the perspective that match the query params .
-   * @param perspective - The perspective that the subject entities belongs to.
-   * @param query - The query object used to define search contraints.
+   * Gets all instances of the subject entity in the perspective that match the query params.
    *
-   * @returns An array of all subject entity matches.
+   * @param perspective - The perspective to search in
+   * @param query - Optional query parameters to filter results
+   * @returns Array of matching subject entities
    *
+   * @example
+   * ```typescript
+   * // Get all recipes
+   * const allRecipes = await Recipe.findAll(perspective);
+   *
+   * // Get recipes with specific criteria
+   * const recipes = await Recipe.findAll(perspective, {
+   *   where: {
+   *     name: "Pasta",
+   *     rating: { gt: 4 }
+   *   },
+   *   order: { createdAt: "DESC" },
+   *   limit: 10
+   * });
+   * ```
    */
-  static async findAll(perspective: PerspectiveProxy, query: Query = {}) {
-    // todo: set up includes
+  static async findAll<T extends SubjectEntity>(
+    this: typeof SubjectEntity & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    query: Query = {}
+  ): Promise<T[]> {
     const prologQuery = await this.queryToProlog(perspective, query);
     const result = await perspective.infer(prologQuery);
-    const allInstances = await this.instancesFromPrologResult(perspective, query, result);
-    return allInstances;
+    const { results } = await this.instancesFromPrologResult(perspective, query, result);
+    return results;
+  }
+
+  /**
+   * Gets all instances with count of total matches without offset & limit applied.
+   *
+   * @param perspective - The perspective to search in
+   * @param query - Optional query parameters to filter results
+   * @returns Object containing results array and total count
+   *
+   * @example
+   * ```typescript
+   * const { results, totalCount } = await Recipe.findAllAndCount(perspective, {
+   *   where: { category: "Dessert" },
+   *   limit: 10
+   * });
+   * console.log(`Showing 10 of ${totalCount} dessert recipes`);
+   * ```
+   */
+  static async findAllAndCount<T extends SubjectEntity>(
+    this: typeof SubjectEntity & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    query: Query = {}
+  ): Promise<ResultsWithTotalCount<T>> {
+    const prologQuery = await this.queryToProlog(perspective, query);
+    const result = await perspective.infer(prologQuery);
+    return await this.instancesFromPrologResult(perspective, query, result);
+  }
+
+  /**
+   * Helper function for pagination with explicit page size and number.
+   *
+   * @param perspective - The perspective to search in
+   * @param pageSize - Number of items per page
+   * @param pageNumber - Which page to retrieve (1-based)
+   * @param query - Optional additional query parameters
+   * @returns Paginated results with metadata
+   *
+   * @example
+   * ```typescript
+   * const page = await Recipe.paginate(perspective, 10, 1, {
+   *   where: { category: "Main Course" }
+   * });
+   * console.log(`Page ${page.pageNumber} of recipes, ${page.results.length} items`);
+   * ```
+   */
+  static async paginate<T extends SubjectEntity>(
+    this: typeof SubjectEntity & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    pageSize: number,
+    pageNumber: number,
+    query?: Query
+  ): Promise<PaginationResult<T>> {
+    const paginationQuery = { ...(query || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
+    const prologQuery = await this.queryToProlog(perspective, paginationQuery);
+    const result = await perspective.infer(prologQuery);
+    const { results, totalCount } = await this.instancesFromPrologResult(perspective, paginationQuery, result);
+    return { results, totalCount, pageSize, pageNumber };
+  }
+
+  static async countQueryToProlog(perspective: PerspectiveProxy, query: Query = {}) {
+    const { source, where } = query;
+    const instanceQueries = [buildAuthorAndTimestampQuery(), buildSourceQuery(source), buildWhereQuery(where)];
+    const resultSetQueries = [buildCountQuery(true), buildOrderQuery(), buildOffsetQuery(), buildLimitQuery()];
+
+    const fullQuery = `
+      findall([Base, Properties, Collections, Timestamp, Author], (
+        subject_class("${await this.getClassName(perspective)}", SubjectClass),
+        instance(SubjectClass, Base),
+        ${instanceQueries.filter((q) => q).join(", ")}
+      ), UnsortedInstances),
+      ${resultSetQueries.filter((q) => q).join(", ")}
+    `;
+
+    return fullQuery;
+  }
+
+  /**
+   * Gets a count of all matching instances.
+   *
+   * @param perspective - The perspective to search in
+   * @param query - Optional query parameters to filter results
+   * @returns Total count of matching entities
+   *
+   * @example
+   * ```typescript
+   * const totalRecipes = await Recipe.count(perspective);
+   * const activeRecipes = await Recipe.count(perspective, {
+   *   where: { status: "active" }
+   * });
+   * ```
+   */
+  static async count(perspective: PerspectiveProxy, query: Query = {}) {
+    const result = await perspective.infer(await this.countQueryToProlog(perspective, query));
+
+    return result?.[0]?.TotalCount || 0;
   }
 
   private async setProperty(key: string, value: any) {
@@ -430,15 +579,18 @@ export class SubjectEntity {
   }
 
   /**
-   * Save the subject entity.
-   * This method will create a new subject with the base expression and add a new link from the source to the base expression with the predicate "ad4m://has_child".
+   * Saves the subject entity to the perspective.
+   * Creates a new subject with the base expression and links it to the source.
    *
-   * If a property has an action, it will perform the action (Only for collections).
-   * If a property is an array and is not empty, it will set the collection.
-   * If a property is not undefined, not null, and not an empty string, it will set the property.
+   * @throws Will throw if subject creation, linking, or updating fails
    *
-   *
-   * @throws Will throw an error if the subject entity cannot be converted to a subject class, or if the subject cannot be created, or if the link cannot be added, or if the subject entity cannot be updated.
+   * @example
+   * ```typescript
+   * const recipe = new Recipe(perspective);
+   * recipe.name = "Spaghetti";
+   * recipe.ingredients = ["pasta", "tomato sauce"];
+   * await recipe.save();
+   * ```
    */
   async save() {
     await this.#perspective.createSubject(this, this.#baseExpression);
@@ -451,15 +603,16 @@ export class SubjectEntity {
   }
 
   /**
-   * Update the subject entity.
+   * Updates the subject entity's properties and collections.
    *
-   * It will iterate over the properties of the subject entity.
+   * @throws Will throw if property setting or collection updates fail
    *
-   * If a property has an action, it will perform the action (Only for collections).
-   * If a property is an array and is not empty, it will set the collection.
-   * If a property is not undefined, not null, and not an empty string, it will set the property.
-   *
-   * @throws Will throw an error if the subject entity cannot be converted to a subject class, or if a property cannot be set, or if a collection cannot be set, or if the data of the subject entity cannot be gotten.
+   * @example
+   * ```typescript
+   * const recipe = await Recipe.findAll(perspective)[0];
+   * recipe.rating = 5;
+   * await recipe.update();
+   * ```
    */
   async update() {
     this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this);
@@ -493,11 +646,17 @@ export class SubjectEntity {
   }
 
   /**
-   * Get the subject entity with all the properties & collection populated.
+   * Gets the subject entity with all properties and collections populated.
    *
-   * @returns The subject entity.
+   * @returns The populated subject entity
+   * @throws Will throw if data retrieval fails
    *
-   * @throws Will throw an error if the subject entity cannot be converted to a subject class, or if the data of the subject entity cannot be gotten.
+   * @example
+   * ```typescript
+   * const recipe = new Recipe(perspective, existingId);
+   * await recipe.get();
+   * console.log(recipe.name, recipe.ingredients);
+   * ```
    */
   async get() {
     this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this);
@@ -506,20 +665,48 @@ export class SubjectEntity {
   }
 
   /**
-   * Delete the subject entity.
-   * This method will remove the subject from the perspective.
+   * Deletes the subject entity from the perspective.
    *
-   * @throws Will throw an error if the subject entity cannot be removed.
+   * @throws Will throw if removal fails
+   *
+   * @example
+   * ```typescript
+   * const recipe = await Recipe.findAll(perspective)[0];
+   * await recipe.delete();
+   * ```
    */
   async delete() {
     await this.#perspective.removeSubject(this, this.#baseExpression);
   }
 
-  /** Query builder for SubjectEntity queries.
-   * Allows building queries with a fluent interface and either running them once
-   * or subscribing to updates.
+  /**
+   * Creates a query builder for fluent query construction.
+   *
+   * @param perspective - The perspective to query
+   * @param query - Optional initial query parameters
+   * @returns A new query builder instance
+   *
+   * @example
+   * ```typescript
+   * const recipes = await Recipe.query(perspective)
+   *   .where({ category: "Dessert" })
+   *   .order({ rating: "DESC" })
+   *   .limit(5)
+   *   .run();
+   *
+   * // With real-time updates
+   * await Recipe.query(perspective)
+   *   .where({ status: "cooking" })
+   *   .subscribe(recipes => {
+   *     console.log("Currently cooking:", recipes);
+   *   });
+   * ```
    */
-  static query<T extends SubjectEntity>(perspective: PerspectiveProxy, query?: Query): SubjectQueryBuilder<T> {
+  static query<T extends SubjectEntity>(
+    this: typeof SubjectEntity & (new (...args: any[]) => T),
+    perspective: PerspectiveProxy,
+    query?: Query
+  ): SubjectQueryBuilder<T> {
     return new SubjectQueryBuilder<T>(perspective, this as any, query);
   }
 }
@@ -527,6 +714,22 @@ export class SubjectEntity {
 /** Query builder for SubjectEntity queries.
  * Allows building queries with a fluent interface and either running them once
  * or subscribing to updates.
+ *
+ * @example
+ * ```typescript
+ * const builder = Recipe.query(perspective)
+ *   .where({ category: "Dessert" })
+ *   .order({ rating: "DESC" })
+ *   .limit(10);
+ *
+ * // Run once
+ * const recipes = await builder.run();
+ *
+ * // Or subscribe to updates
+ * await builder.subscribe(recipes => {
+ *   console.log("Updated recipes:", recipes);
+ * });
+ * ```
  */
 export class SubjectQueryBuilder<T extends SubjectEntity> {
   private perspective: PerspectiveProxy;
@@ -539,61 +742,300 @@ export class SubjectQueryBuilder<T extends SubjectEntity> {
     if (query) this.queryParams = query;
   }
 
+  /**
+   * Adds where conditions to the query.
+   *
+   * @param conditions - The conditions to filter by
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * .where({
+   *   category: "Dessert",
+   *   rating: { gt: 4 },
+   *   tags: ["vegan", "quick"],
+   *   published: true
+   * })
+   * ```
+   */
   where(conditions: Where): SubjectQueryBuilder<T> {
     this.queryParams.where = conditions;
     return this;
   }
 
+  /**
+   * Sets the order for the query results.
+   *
+   * @param orderBy - The ordering criteria
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * .order({ createdAt: "DESC" })
+   * ```
+   */
   order(orderBy: Order): SubjectQueryBuilder<T> {
     this.queryParams.order = orderBy;
     return this;
   }
 
+  /**
+   * Sets the maximum number of results to return.
+   *
+   * @param limit - Maximum number of results
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * .limit(10)
+   * ```
+   */
   limit(limit: number): SubjectQueryBuilder<T> {
     this.queryParams.limit = limit;
     return this;
   }
 
+  /**
+   * Sets the number of results to skip.
+   *
+   * @param offset - Number of results to skip
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * .offset(20) // Skip first 20 results
+   * ```
+   */
   offset(offset: number): SubjectQueryBuilder<T> {
     this.queryParams.offset = offset;
     return this;
   }
 
+  /**
+   * Sets the source filter for the query.
+   *
+   * @param source - The source to filter by
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * .source("ad4m://self")
+   * ```
+   */
   source(source: string): SubjectQueryBuilder<T> {
     this.queryParams.source = source;
     return this;
   }
 
+  /**
+   * Specifies which properties to include in the results.
+   *
+   * @param properties - Array of property names to include
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * .properties(["name", "description", "rating"])
+   * ```
+   */
   properties(properties: string[]): SubjectQueryBuilder<T> {
     this.queryParams.properties = properties;
     return this;
   }
 
+  /**
+   * Specifies which collections to include in the results.
+   *
+   * @param collections - Array of collection names to include
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * .collections(["ingredients", "steps"])
+   * ```
+   */
   collections(collections: string[]): SubjectQueryBuilder<T> {
     this.queryParams.collections = collections;
     return this;
   }
 
-  /** Execute the query once and return the results */
-  async run(): Promise<T[]> {
+  /**
+   * Executes the query once and returns the results.
+   *
+   * @returns Array of matching entities
+   *
+   * @example
+   * ```typescript
+   * const recipes = await Recipe.query(perspective)
+   *   .where({ category: "Dessert" })
+   *   .get();
+   * ```
+   */
+  async get(): Promise<T[]> {
     const query = await this.ctor.queryToProlog(this.perspective, this.queryParams);
     const result = await this.perspective.infer(query);
-    const allInstances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
-    return allInstances as T[];
+    const { results } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
+    return results as T[];
   }
 
-  /** Subscribe to the query and receive updates when results change */
-  async subscribeAndRun(callback: (results: T[]) => void): Promise<T[]> {
+  /**
+   * Subscribes to the query and receives updates when results change.
+   * Also returns initial results immediately.
+   *
+   * @param callback - Function to call with updated results
+   * @returns Initial results array
+   *
+   * @example
+   * ```typescript
+   * await Recipe.query(perspective)
+   *   .where({ status: "cooking" })
+   *   .subscribe(recipes => {
+   *     console.log("Currently cooking:", recipes);
+   *   });
+   * ```
+   */
+  async subscribe(callback: (results: T[]) => void): Promise<T[]> {
     const query = await this.ctor.queryToProlog(this.perspective, this.queryParams);
     const subscription = await this.perspective.subscribeInfer(query);
 
     const processResults = async (result: AllInstancesResult) => {
-      let newInstances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
-      callback(newInstances as T[]);
+      const { results } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
+      callback(results as T[]);
     };
 
     subscription.onResult(processResults);
-    let instances = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, subscription.result);
-    return instances as T[];
+    const { results } = await this.ctor.instancesFromPrologResult(
+      this.perspective,
+      this.queryParams,
+      subscription.result
+    );
+    return results as T[];
+  }
+
+  /**
+   * Gets the total count of matching entities.
+   *
+   * @returns Total count
+   *
+   * @example
+   * ```typescript
+   * const totalDesserts = await Recipe.query(perspective)
+   *   .where({ category: "Dessert" })
+   *   .count();
+   * ```
+   */
+  async count(): Promise<number> {
+    const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams);
+    const result = await this.perspective.infer(query);
+    return result?.[0]?.TotalCount || 0;
+  }
+
+  /**
+   * Subscribes to count updates for matching entities.
+   *
+   * @param callback - Function to call with updated count
+   * @returns Initial count
+   *
+   * @example
+   * ```typescript
+   * await Recipe.query(perspective)
+   *   .where({ status: "active" })
+   *   .countSubscribe(count => {
+   *     console.log("Active items:", count);
+   *   });
+   * ```
+   */
+  async countSubscribe(callback: (count: number) => void): Promise<number> {
+    const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams);
+    const subscription = await this.perspective.subscribeInfer(query);
+
+    const processResults = async (result: any) => {
+      const newCount = result?.[0]?.TotalCount || 0;
+      callback(newCount);
+    };
+
+    subscription.onResult(processResults);
+    return subscription.result?.[0]?.TotalCount || 0;
+  }
+
+  /**
+   * Gets a page of results with pagination metadata.
+   *
+   * @param pageSize - Number of items per page
+   * @param pageNumber - Which page to retrieve (1-based)
+   * @returns Paginated results with metadata
+   *
+   * @example
+   * ```typescript
+   * const page = await Recipe.query(perspective)
+   *   .where({ category: "Main" })
+   *   .paginate(10, 1);
+   * console.log(`Page ${page.pageNumber}, ${page.results.length} of ${page.totalCount}`);
+   * ```
+   */
+  async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
+    const paginationQuery = {
+      ...(this.queryParams || {}),
+      limit: pageSize,
+      offset: pageSize * (pageNumber - 1),
+      count: true,
+    };
+    const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery);
+    const result = await this.perspective.infer(prologQuery);
+    const { results, totalCount } = (await this.ctor.instancesFromPrologResult(
+      this.perspective,
+      paginationQuery,
+      result
+    )) as ResultsWithTotalCount<T>;
+    return { results, totalCount, pageSize, pageNumber };
+  }
+
+  /**
+   * Subscribes to paginated results updates.
+   *
+   * @param pageSize - Number of items per page
+   * @param pageNumber - Which page to retrieve (1-based)
+   * @param callback - Function to call with updated pagination results
+   * @returns Initial pagination results
+   *
+   * @example
+   * ```typescript
+   * await Recipe.query(perspective)
+   *   .where({ category: "Main" })
+   *   .paginateSubscribe(10, 1, page => {
+   *     console.log("Updated page:", page.results);
+   *   });
+   * ```
+   */
+  async paginateSubscribe(
+    pageSize: number,
+    pageNumber: number,
+    callback: (results: PaginationResult<T>) => void
+  ): Promise<PaginationResult<T>> {
+    const paginationQuery = {
+      ...(this.queryParams || {}),
+      limit: pageSize,
+      offset: pageSize * (pageNumber - 1),
+      count: true,
+    };
+    const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery);
+    const subscription = await this.perspective.subscribeInfer(prologQuery);
+
+    const processResults = async (r: AllInstancesResult) => {
+      const { results, totalCount } = (await this.ctor.instancesFromPrologResult(
+        this.perspective,
+        this.queryParams,
+        r
+      )) as ResultsWithTotalCount<T>;
+      callback({ results, totalCount, pageSize, pageNumber });
+    };
+
+    subscription.onResult(processResults);
+    const { results, totalCount } = (await this.ctor.instancesFromPrologResult(
+      this.perspective,
+      paginationQuery,
+      subscription.result
+    )) as ResultsWithTotalCount<T>;
+    return { results, totalCount, pageSize, pageNumber };
   }
 }
