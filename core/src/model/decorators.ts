@@ -157,6 +157,13 @@ export interface PropertyOptions {
      * Indicates whether the property is stored locally in the perspective and not in the network. Useful for properties that are not meant to be shared with the network.
      */
     local?: boolean;
+
+    /**
+     * Optional transform function to modify the property value after it is retrieved.
+     * This is useful for transforming raw data into a more usable format.
+     * The function takes the raw value as input and returns the transformed value.
+     */
+    transform?: (value: any) => any;
 }
 
 
