@@ -10,6 +10,7 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     Collection,
     ModelOptions,
     Optional,
+    PropertyOptions,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
 import { startExecutor, apolloClient } from "../utils/utils";
@@ -2024,6 +2025,42 @@ describe("Prolog + Literals", () => {
                     await task1.delete();
                     await task2.delete();
                     await task3.delete();
+                });
+
+                it("transform option in property decorators works", async () => {
+                    @ModelOptions({ name: "ImagePost" })
+                    class ImagePost extends Ad4mModel {
+                        @Property({
+                            through: "image://data",
+                            resolveLanguage: "literal",
+                            transform: (data: any) => data ? `data:image/png;base64,${data.data_base64}` : undefined,
+                        } as PropertyOptions)
+                        image: string = "";
+
+                        @Property({
+                            through: "image://metadata",
+                            resolveLanguage: "literal",
+                            transform: (data: any) => data ? JSON.parse(data) : {},
+                        } as PropertyOptions)
+                        metadata: any = {};
+                    }
+
+                    // Register the ImagePost class
+                    await perspective!.ensureSDNASubjectClass(ImagePost);
+
+                    // Create a new image post
+                    const post = new ImagePost(perspective!);
+                    const imageData = JSON.stringify({ data_base64: "abc123" });
+                    const metadata = { width: 100, height: 100 };
+                    
+                    post.image = imageData;
+                    post.metadata = JSON.stringify(metadata);
+                    await post.save();
+
+                    // Retrieve the post and check transformed values
+                    const [retrieved] = await ImagePost.findAll(perspective!);
+                    expect(retrieved.image).to.equal("data:image/png;base64,abc123");
+                    expect(retrieved.metadata).to.deep.equal(metadata);
                 });
             })
         })
