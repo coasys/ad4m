@@ -9,6 +9,7 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     ReadOnly,
     Collection,
     ModelOptions,
+    Optional,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
 import { startExecutor, apolloClient } from "../utils/utils";
@@ -264,19 +265,16 @@ describe("Prolog + Literals", () => {
                 name: "Message"
             })
             class Message {
-                //@ts-ignore
                 @Flag({
                     through: "ad4m://type",
                     value: "ad4m://message"
                 })
                 type: string = ""
 
-                //@ts-ignore
                 @InstanceQuery()
                 static async all(perspective: PerspectiveProxy): Promise<Message[]> { return [] }
 
-                //@ts-ignore
-                @Property({
+                @Optional({
                     through: "todo://state",
                     initial: "todo://ready",
                 })
@@ -323,7 +321,7 @@ describe("Prolog + Literals", () => {
                 })
                 state: string = ""
 
-                @Property({
+                @Optional({
                     through: "todo://has_title",
                     writable: true,
                     resolveLanguage: "literal"
@@ -550,24 +548,24 @@ describe("Prolog + Literals", () => {
                     })
                     type: string = ""
 
-                    @Property({
+                    @Optional({
                         through: "recipe://plain",
                     })
                     plain: string = ""
 
-                    @Property({
+                    @Optional({
                         through: "recipe://name",
                         resolveLanguage: "literal"
                     })
                     name: string = ""
 
-                    @Property({
+                    @Optional({
                         through: "recipe://boolean",
                         resolveLanguage: "literal"
                     })
                     booleanTest: boolean = false
 
-                    @Property({
+                    @Optional({
                         through: "recipe://number",
                         resolveLanguage: "literal"
                     })
@@ -585,13 +583,13 @@ describe("Prolog + Literals", () => {
                     @Collection({ through: "recipe://comment" })
                     comments: string[] = []
 
-                    @Property({
+                    @Optional({
                         through: "recipe://local",
                         local: true
                     })
                     local: string = ""
 
-                    @Property({
+                    @Optional({
                         through: "recipe://resolve",
                         resolveLanguage: "literal"
                     })
