@@ -35,23 +35,44 @@ condition?: string;
 }
 
 /**
- * Decorator for querying instances of a subject class.
+ * Decorator for querying instances of a model class.
  * 
  * @category Decorators
  * 
  * @description
- * NOTE: Only works on methods that return a promise and will throw an error if not used on a method that returns a promise.
- * This will allow you to query for instances of a subject class with custom clauses within the instance clauses.
+ * Allows you to define static query methods on your model class to retrieve instances based on custom conditions.
+ * This decorator can only be applied to static async methods that return a Promise of an array of model instances.
+ * 
+ * The query can be constrained using either:
+ * - A `where` clause that matches property values
+ * - A custom Prolog `condition` for more complex queries
  * 
  * @example
- * // Usage with where clause
- * InstanceQuery({ where: { name: "John" }}) // this will return all the properties of the subject class with the name "John"
+ * ```typescript
+ * class Recipe extends Ad4mModel {
+ *   @Property({ through: "recipe://name" })
+ *   name: string = "";
  * 
- * @example
- * // Usage with condition clause
- * InstanceQuery({ condition: "triple(Instance, 'age', Age), Age > 18" }) // this will return all the properties of the subject class with the age greater than 18
+ *   @Property({ through: "recipe://rating" })
+ *   rating: number = 0;
  * 
- * @param {Object} [options] - Query options.
+ *   // Get all recipes
+ *   @InstanceQuery()
+ *   static async all(perspective: PerspectiveProxy): Promise<Recipe[]> { return [] }
+ * 
+ *   // Get recipes by name
+ *   @InstanceQuery({ where: { name: "Chocolate Cake" }})
+ *   static async findByName(perspective: PerspectiveProxy): Promise<Recipe[]> { return [] }
+ * 
+ *   // Get highly rated recipes using a custom condition
+ *   @InstanceQuery({ condition: "triple(Instance, 'recipe://rating', Rating), Rating > 4" })
+ *   static async topRated(perspective: PerspectiveProxy): Promise<Recipe[]> { return [] }
+ * }
+ * ```
+ * 
+ * @param {Object} [options] - Query options
+ * @param {object} [options.where] - Object with property-value pairs to match
+ * @param {string} [options.condition] - Custom Prolog condition for more complex queries
  */
 export function InstanceQuery(options?: InstanceQueryParams) {
     return function <T>(target: T, key: keyof T, descriptor: PropertyDescriptor) {
@@ -138,29 +159,92 @@ export interface PropertyOptions {
     local?: boolean;
 }
 
+
 /**
- * Decorator for defining properties of a subject class.
+ * Decorator for defining optional properties on model classes.
  * 
  * @category Decorators
  * 
  * @description
- * This will allow you to define properties with different conditions and how they would be defined in proflog engine.
+ * The most flexible property decorator that allows you to define properties with full control over:
+ * - Whether the property is required
+ * - Whether the property is writable
+ * - How values are stored and retrieved
+ * - Custom getter/setter logic
+ * - Local vs network storage
  * 
- * - All properties must have a `through` option which is the predicate of the property.
- * -e If the property is required, it must have an `initial` option which is the initial value of the property.
- * - If the property is writable, it will have a setter in prolog engine. A custom setter can be defined with the `setter` option.
- * - If resolveLanguage is defined, you can use the default `Literal` Language or use your custom language address that can be used to store the property.
- * - If a custom getter is defined, it will be used to get the value of the property in prolog engine. If not, the default getter will be used.
- * - If local is defined, the property will be stored locally in the perspective and not in the network. This is useful for properties that are not meant to be shared with the network
+ * Both @Property and @ReadOnly are specialized versions of @Optional with preset configurations.
  * 
  * @example
- * // Usage
- * SubjectProperty({ through: "ad4m://name", initial: "John", required: true }) // this will define a property with the name "ad4m://name" and the initial value "John"
+ * ```typescript
+ * class Recipe extends Ad4mModel {
+ *   // Basic optional property
+ *   @Optional({
+ *     through: "recipe://description"
+ *   })
+ *   description?: string;
  * 
- * @param {PropertyOptions} [opts] - Property options.
+ *   // Optional property with custom initial value
+ *   @Optional({
+ *     through: "recipe://status",
+ *     initial: "recipe://draft",
+ *     required: true
+ *   })
+ *   status: string = "";
+ * 
+ *   // Read-only property with custom getter
+ *   @Optional({
+ *     through: "recipe://rating",
+ *     writable: false,
+ *     getter: `
+ *       findall(Rating, triple(Base, "recipe://user_rating", Rating), Ratings),
+ *       sum_list(Ratings, Sum),
+ *       length(Ratings, Count),
+ *       Value is Sum / Count
+ *     `
+ *   })
+ *   averageRating: number = 0;
+ * 
+ *   // Property that resolves to a Literal and is stored locally
+ *   @Optional({
+ *     through: "recipe://notes",
+ *     resolveLanguage: "literal",
+ *     local: true
+ *   })
+ *   notes?: string;
+ * 
+ *   // Property with custom getter and setter logic
+ *   @Optional({
+ *     through: "recipe://ingredients",
+ *     getter: `
+ *       triple(Base, "recipe://ingredients", RawValue),
+ *       atom_json_term(RawValue, Value)
+ *     `,
+ *     setter: `
+ *       atom_json_term(Value, JsonValue),
+ *       Actions = [{"action": "setSingleTarget", "source": "this", "predicate": "recipe://ingredients", "target": JsonValue}]
+ *     `
+ *   })
+ *   ingredients: string[] = [];
+ * }
+ * ```
+ * 
+ * @param {PropertyOptions} opts - Property configuration options
+ * @param {string} opts.through - The predicate URI for the property
+ * @param {string} [opts.initial] - Initial value (required if property is required)
+ * @param {boolean} [opts.required] - Whether the property must have a value
+ * @param {boolean} [opts.writable=true] - Whether the property can be modified
+ * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
+ * @param {string} [opts.getter] - Custom Prolog code for getting the property value
+ * @param {string} [opts.setter] - Custom Prolog code for setting the property value
+ * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
-export function SubjectProperty(opts: PropertyOptions) {
+export function Optional(opts: PropertyOptions) {
     return function <T>(target: T, key: keyof T) {
+        if(typeof opts.writable === "undefined") {
+            opts.writable = true
+        }
+        
         if (opts.required && !opts.initial) {
             throw new Error("SubjectProperty requires an 'initial' option if 'required' is true");
         }
@@ -195,25 +279,59 @@ export interface FlagOptions {
 }
 
 /**
- * Decorator for defining flags of a subject class
+ * Decorator for defining flags on model classes.
  * 
  * @category Decorators
  * 
  * @description
- * The idea behind flag decorator is to define a property that is required and has an initial value. 
- * This will allow you to define a strict instance query. This behaviour can also be achieved with the `SubjectProperty` decorator but the `SubjectFlag` decorator is a shorthand for that.
+ * A specialized property decorator for defining immutable type flags or markers on model instances.
+ * Flags are always required properties with a fixed value that cannot be changed after creation.
  * 
- * NOTE: Use of Flag is discouraged and should be used only when necessary.
+ * Common uses for flags:
+ * - Type discrimination between different kinds of models
+ * - Marking models with specific capabilities or features
+ * - Versioning or compatibility markers
  * 
- * - All properties must have a `through` & `initial` option which is the predicate of the property.
+ * Note: Use of Flag is discouraged unless you specifically need type-based filtering or 
+ * discrimination between different kinds of models. For most cases, regular properties
+ * with @Property or @Optional are more appropriate.
  * 
  * @example
- * // Usage
- * SubjectFlag({ through: "ad4m://name", value: "John" }) // this will define a flag with the name "ad4m://name" and the initial value "John"   
+ * ```typescript
+ * class Message extends Ad4mModel {
+ *   // Type flag to identify message models
+ *   @Flag({
+ *     through: "ad4m://type",
+ *     value: "ad4m://message"
+ *   })
+ *   type: string = "";
  * 
- * @param {FlagOptions} [opts] Flag options.
+ *   // Version flag for compatibility
+ *   @Flag({
+ *     through: "ad4m://version",
+ *     value: "1.0.0"
+ *   })
+ *   version: string = "";
+ * 
+ *   // Feature flag
+ *   @Flag({
+ *     through: "message://feature",
+ *     value: "message://encrypted"
+ *   })
+ *   feature: string = "";
+ * }
+ * 
+ * // Later you can query for specific types:
+ * const messages = await Message.query(perspective)
+ *   .where({ type: "ad4m://message" })
+ *   .run();
+ * ```
+ * 
+ * @param {FlagOptions} opts - Flag configuration
+ * @param {string} opts.through - The predicate URI for the flag
+ * @param {string} opts.value - The fixed value for the flag
  */
-export function SubjectFlag(opts: FlagOptions) {
+export function Flag(opts: FlagOptions) {
     return function <T>(target: T, key: keyof T) {
         if (!opts.through && !opts.value) {
             throw new Error("SubjectFlag requires a 'through' and 'value' option")
@@ -267,26 +385,71 @@ export interface CollectionOptions {
 }
 
 /**
- * Decorator for defining collections of a subject class.
+ * Decorator for defining collections on model classes.
  * 
  * @category Decorators
  * 
  * @description
- * This will allow you to define collections with different conditions and how they would be defined in proflog engine.
+ * Defines a property that represents a collection of values linked to the model instance.
+ * Collections are always arrays and support operations for adding, removing, and setting values.
  * 
- * NOTE: The property needs to be an array for it to picked up during the initialization phase.
+ * For each collection property, the following methods are automatically generated:
+ * - `addX(value)` - Add a value to the collection
+ * - `removeX(value)` - Remove a value from the collection
+ * - `setCollectionX(values)` - Replace all values in the collection
  * 
- * - All collections must have a `through` option which is the predicate of the collection.
- * - If the collection has a `where` option, it can be used to define a custom condition for the collection.
- * - If the collection has a `local` option, the collection will be stored locally in the perspective and not in the network. This is useful for collections that are not meant to be shared with the network.
+ * Where X is the capitalized property name.
+ * 
+ * Collections can be filtered using the `where` option to only include values that:
+ * - Are instances of a specific model class
+ * - Match a custom Prolog condition
  * 
  * @example
- * // Usage
- * SubjectCollection({ through: "ad4m://friends" }) // this will define a collection with the name "ad4m://friends"
+ * ```typescript
+ * class Recipe extends Ad4mModel {
+ *   // Basic collection of ingredients
+ *   @Collection({ 
+ *     through: "recipe://ingredient" 
+ *   })
+ *   ingredients: string[] = [];
  * 
- * @param opts Collection options.
+ *   // Collection that only includes instances of another model
+ *   @Collection({
+ *     through: "recipe://comment",
+ *     where: { isInstance: Comment }
+ *   })
+ *   comments: string[] = [];
+ * 
+ *   // Collection with custom filter condition
+ *   @Collection({
+ *     through: "recipe://step",
+ *     where: { condition: `triple(Target, "step://order", Order), Order < 3` }
+ *   })
+ *   firstSteps: string[] = [];
+ * 
+ *   // Local-only collection not shared with network
+ *   @Collection({
+ *     through: "recipe://note",
+ *     local: true
+ *   })
+ *   privateNotes: string[] = [];
+ * }
+ * 
+ * // Using the generated methods:
+ * const recipe = new Recipe(perspective);
+ * await recipe.addIngredients("ingredient://flour");
+ * await recipe.removeIngredients("ingredient://sugar");
+ * await recipe.setCollectionIngredients(["ingredient://butter", "ingredient://eggs"]);
+ * ```
+ * 
+ * @param {CollectionOptions} opts - Collection configuration
+ * @param {string} opts.through - The predicate URI for collection links
+ * @param {WhereOptions} [opts.where] - Filter conditions for collection values
+ * @param {any} [opts.where.isInstance] - Model class to filter instances by
+ * @param {string} [opts.where.condition] - Custom Prolog condition for filtering
+ * @param {boolean} [opts.local] - Whether collection links are stored locally only
  */
-export function SubjectCollection(opts: CollectionOptions) {
+export function Collection(opts: CollectionOptions) {
     return function <T>(target: T, key: keyof T) {
         target["__collections"] = target["__collections"] || {};
         target["__collections"][key] = opts;
@@ -310,7 +473,7 @@ export function makeRandomPrologAtom(length: number): string {
     return result;
  }
 
-export interface SDNAClassOptions {
+export interface ModelOptionsOptions {
     /**
      * The name of the entity.
      */
@@ -318,22 +481,60 @@ export interface SDNAClassOptions {
 }
 
 /**
- * Decorator for defining an SDNA class.
+ * Decorator for defining model classes in AD4M.
  * 
  * @category Decorators
  * 
  * @description
- * This will create a new SDNA class with the given name and add custom methods to generate the SDNA for the class, for this to work the class need to have the properties defined using the decorators like `SubjectProperty`.
+ * The root decorator that must be applied to any class that represents a model in AD4M.
+ * It registers the class as a Social DNA (SDNA) subject class and provides the infrastructure
+ * for storing and retrieving instances.
  * 
- * Note: This decorator is required for the class to be picked up during the initialization phase.
+ * This decorator:
+ * - Registers the class with a unique name in the AD4M system
+ * - Generates the necessary SDNA code for the model's properties and collections
+ * - Enables the use of other model decorators (@Property, @Collection, etc.)
+ * - Provides static query methods through the Ad4mModel base class
  * 
  * @example
- * // Usage
- *  SDNAClass({ name: "Person" }) // this will create a new SDNA class with the name "Person"
+ * ```typescript
+ * @ModelOptions({ name: "Recipe" })
+ * class Recipe extends Ad4mModel {
+ *   @Property({
+ *     through: "recipe://name",
+ *     resolveLanguage: "literal"
+ *   })
+ *   name: string = "";
  * 
- * @param opts SDNA class options.
+ *   @Collection({ through: "recipe://ingredient" })
+ *   ingredients: string[] = [];
+ * 
+ *   // Static query methods from Ad4mModel:
+ *   static async findByName(perspective: PerspectiveProxy, name: string) {
+ *     return Recipe.query(perspective)
+ *       .where({ name })
+ *       .run();
+ *   }
+ * }
+ * 
+ * // Using the model:
+ * const recipe = new Recipe(perspective);
+ * recipe.name = "Chocolate Cake";
+ * await recipe.save();
+ * 
+ * // Querying instances:
+ * const recipes = await Recipe.query(perspective)
+ *   .where({ name: "Chocolate Cake" })
+ *   .run();
+ * 
+ * // Using with PerspectiveProxy:
+ * await perspective.ensureSDNASubjectClass(Recipe);
+ * ```
+ * 
+ * @param {ModelOptionsOptions} opts - Model configuration
+ * @param {string} opts.name - Unique name for the model class in AD4M
  */
-export function SDNAClass(opts: SDNAClassOptions) {
+export function ModelOptions(opts: ModelOptionsOptions) {
     return function (target: any) {
         target.prototype.className = opts.name;
         target.className = opts.name;
@@ -508,4 +709,130 @@ export function SDNAClass(opts: SDNAClassOptions) {
 
         Object.defineProperty(target, 'type', {configurable: true});
     }
+}
+
+/**
+ * Decorator for defining required and writable properties on model classes.
+ * 
+ * @category Decorators
+ * 
+ * @description
+ * A convenience decorator that defines a required property that must have an initial value and is writable by default.
+ * This is equivalent to using @Optional with `required: true` and `writable: true`.
+ * 
+ * Properties defined with this decorator:
+ * - Must have a value (required)
+ * - Can be modified after creation (writable)
+ * - Default to "literal://string:uninitialized" if no initial value is provided
+ * 
+ * @example
+ * ```typescript
+ * class User extends Ad4mModel {
+ *   // Basic required property with default initial value
+ *   @Property({
+ *     through: "user://name"
+ *   })
+ *   name: string = "";
+ * 
+ *   // Required property with custom initial value
+ *   @Property({
+ *     through: "user://status",
+ *     initial: "user://active"
+ *   })
+ *   status: string = "";
+ * 
+ *   // Required property with literal resolution
+ *   @Property({
+ *     through: "user://bio",
+ *     resolveLanguage: "literal"
+ *   })
+ *   bio: string = "";
+ * 
+ *   // Required property with custom getter/setter
+ *   @Property({
+ *     through: "user://age",
+ *     getter: `triple(Base, "user://birthYear", Year), Value is 2024 - Year`,
+ *     setter: `Year is 2024 - Value, Actions = [{"action": "setSingleTarget", "source": "this", "predicate": "user://birthYear", "target": Year}]`
+ *   })
+ *   age: number = 0;
+ * }
+ * ```
+ * 
+ * @param {PropertyOptions} opts - Property configuration
+ * @param {string} opts.through - The predicate URI for the property
+ * @param {string} [opts.initial] - Initial value (defaults to "literal://string:uninitialized")
+ * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
+ * @param {string} [opts.getter] - Custom Prolog code for getting the property value
+ * @param {string} [opts.setter] - Custom Prolog code for setting the property value
+ * @param {boolean} [opts.local] - Whether the property should only be stored locally
+ */
+export function Property(opts: PropertyOptions) {
+    return Optional({
+        ...opts,
+        required: true,
+        writable: true,
+        initial: opts.initial || "literal://string:uninitialized"
+    });
+}
+
+/**
+ * Decorator for defining read-only properties on model classes.
+ * 
+ * @category Decorators
+ * 
+ * @description
+ * A convenience decorator that defines a property that can only be read and cannot be modified after initialization.
+ * This is equivalent to using @Optional with `writable: false`.
+ * 
+ * Read-only properties are ideal for:
+ * - Computed or derived values
+ * - Properties that should never change after creation
+ * - Properties that are set by the system
+ * - Properties that represent immutable data
+ * 
+ * @example
+ * ```typescript
+ * class Post extends Ad4mModel {
+ *   // Read-only property with custom getter for computed value
+ *   @ReadOnly({
+ *     through: "post://likes",
+ *     getter: `findall(User, triple(Base, "post://liked_by", User), Users), length(Users, Value)`
+ *   })
+ *   likeCount: number = 0;
+ * 
+ *   // Read-only property for creation timestamp
+ *   @ReadOnly({
+ *     through: "post://created_at",
+ *     initial: new Date().toISOString()
+ *   })
+ *   createdAt: string = "";
+ * 
+ *   // Read-only property that resolves to a Literal
+ *   @ReadOnly({
+ *     through: "post://author",
+ *     resolveLanguage: "literal"
+ *   })
+ *   author: string = "";
+ * 
+ *   // Read-only property for system-managed data
+ *   @ReadOnly({
+ *     through: "post://version",
+ *     initial: "1.0.0"
+ *   })
+ *   version: string = "";
+ * }
+ * ```
+ * 
+ * @param {PropertyOptions} opts - Property configuration
+ * @param {string} opts.through - The predicate URI for the property
+ * @param {string} [opts.initial] - Initial value (if property should have one)
+ * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
+ * @param {string} [opts.getter] - Custom Prolog code for getting the property value
+ * @param {boolean} [opts.local] - Whether the property should only be stored locally
+ */
+export function ReadOnly(opts: PropertyOptions) {
+    return Optional({
+        ...opts,
+        writable: false
+    });
 }

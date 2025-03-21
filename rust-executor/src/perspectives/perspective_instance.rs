@@ -1619,18 +1619,18 @@ impl PerspectiveInstance {
                 Ok(QueryResolution::True) => instance_check_passed = true,
                 Ok(QueryResolution::Matches(_)) => instance_check_passed = true,
                 Err(e) => log::warn!("Error trying to check instance after create_subject: {}", e),
-                Ok(r) => log::info!("create_subject instance query returned: {:?}", r),
+                Ok(_) => {} //log::info!("create_subject instance query returned: {:?}", r),
             }
             sleep(Duration::from_millis(10)).await;
             tries += 1;
         }
 
         if instance_check_passed {
-            log::info!(
-                "Subject class \"{}\" successfully instantiated around \"{}\".",
-                class_name,
-                expression_address
-            );
+            // log::info!(
+            //     "Subject class \"{}\" successfully instantiated around \"{}\".",
+            //     class_name,
+            //     expression_address
+            // );
         } else {
             log::warn!("create_subject: instance check still false after running constructor and waiting 5s. Something seems off with subject class: {}", class_name);
         }
