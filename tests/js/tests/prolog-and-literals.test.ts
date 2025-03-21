@@ -2033,13 +2033,16 @@ describe("Prolog + Literals", () => {
                         @Property({
                             through: "image://data",
                             resolveLanguage: "literal",
-                            transform: (data: any) => data ? `data:image/png;base64,${data}` : undefined,
+                            transform: (data: any) => data ? `data:image/png;base64,${data.data_base64}` : undefined,
                         } as PropertyOptions)
                         image: string = "";
-                        //TODO: having json objects as properties in our new queries breaks the JSON
-                        // construction of Prolog query results.
-                        // Need to find a way to make this work:
-                        //image: { data_base64: string } = { data_base64: "" };
+
+                        @Property({
+                            through: "image://metadata",
+                            resolveLanguage: "literal",
+                            transform: (data: any) => data ? JSON.parse(data) : {},
+                        } as PropertyOptions)
+                        metadata: any = {};
                     }
 
                     // Register the ImagePost class
@@ -2047,15 +2050,17 @@ describe("Prolog + Literals", () => {
 
                     // Create a new image post
                     const post = new ImagePost(perspective!);
-                    const imageData = "abc123";
-                    //const imageData = { data_base64: "abc123" };
+                    const imageData = JSON.stringify({ data_base64: "abc123" });
+                    const metadata = { width: 100, height: 100 };
                     
                     post.image = imageData;
+                    post.metadata = JSON.stringify(metadata);
                     await post.save();
 
                     // Retrieve the post and check transformed values
                     const [retrieved] = await ImagePost.findAll(perspective!);
                     expect(retrieved.image).to.equal("data:image/png;base64,abc123");
+                    expect(retrieved.metadata).to.deep.equal(metadata);
                 });
             })
         })
