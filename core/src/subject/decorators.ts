@@ -160,6 +160,7 @@ export function Property(opts: PropertyOptions) {
     return Optional({
         ...opts,
         required: true,
+        writable: true,
         initial: opts.initial || "literal://string:uninitialized"
     });
 }
