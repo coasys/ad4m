@@ -1278,7 +1278,7 @@ dependencies = [
  "bitflags 2.6.0",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.10.5",
  "lazy_static",
  "lazycell",
  "log",
@@ -3003,7 +3003,7 @@ dependencies = [
  "cssparser-macros",
  "dtoa-short",
  "itoa 1.0.11",
- "phf 0.11.2",
+ "phf 0.8.0",
  "smallvec",
 ]
 
@@ -3614,8 +3614,8 @@ source = "git+https://github.com/coasys/deno_core.git?branch=v8-dylib#4c825881bc
 dependencies = [
  "anyhow",
  "bincode",
- "bit-set 0.8.0",
- "bit-vec 0.8.0",
+ "bit-set 0.5.3",
+ "bit-vec 0.6.3",
  "bytes",
  "cooked-waker",
  "deno_core_icudata",
@@ -7980,7 +7980,7 @@ dependencies = [
  "httpdate",
  "itoa 1.0.11",
  "pin-project-lite",
- "socket2 0.5.7",
+ "socket2 0.4.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -12290,7 +12290,7 @@ dependencies = [
  "font",
  "itertools 0.13.0",
  "log",
- "ordered-float 4.2.2",
+ "ordered-float 2.10.1",
  "pathfinder_color",
  "pathfinder_content",
  "pathfinder_geometry",
@@ -14878,7 +14878,7 @@ dependencies = [
 [[package]]
 name = "scryer-prolog"
 version = "0.9.4"
-source = "git+https://github.com/coasys/scryer-prolog#ea02b54e7fc164f026e4f52702088d5b0146c2a3"
+source = "git+https://github.com/coasys/scryer-prolog#badef57ebfc95acc85681309d0cd9e5bfde82f4f"
 dependencies = [
  "arcu",
  "base64 0.22.1",
@@ -15719,7 +15719,7 @@ version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38d1e02fca405f6280643174a50c942219f0bbf4dbf7d480f1dd864d6f211ae5"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "proc-macro2",
  "quote",
  "syn 2.0.87",
@@ -18294,7 +18294,7 @@ version = "1.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
- "cfg-if 1.0.0",
+ "cfg-if 0.1.10",
  "rand 0.6.5",
  "static_assertions",
 ]
