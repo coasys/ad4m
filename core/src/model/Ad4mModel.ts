@@ -476,7 +476,7 @@ export class Ad4mModel {
   }
 
   /**
-   * Gets all instances with count of total matches without limit applied.
+   * Gets all instances with count of total matches without offset & limit applied.
    * 
    * @param perspective - The perspective to search in
    * @param query - Optional query parameters to filter results
@@ -778,7 +778,7 @@ export class Ad4mModel {
    * // With real-time updates
    * await Recipe.query(perspective)
    *   .where({ status: "cooking" })
-   *   .subscribeAndRun(recipes => {
+   *   .subscribe(recipes => {
    *     console.log("Currently cooking:", recipes);
    *   });
    * ```
@@ -807,7 +807,7 @@ export class Ad4mModel {
  * const recipes = await builder.run();
  * 
  * // Or subscribe to updates
- * await builder.subscribeAndRun(recipes => {
+ * await builder.subscribe(recipes => {
  *   console.log("Updated recipes:", recipes);
  * });
  * ```
