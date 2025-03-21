@@ -4,15 +4,15 @@ import { LinkQuery } from "./LinkQuery";
 import { PerspectiveHandle, PerspectiveState } from './PerspectiveHandle'
 import { Perspective } from "./Perspective";
 import { Literal } from "../Literal";
-import { Subject } from "../subject/Subject";
+import { Subject } from "../model/Subject";
 import { ExpressionRendered } from "../expression/Expression";
-import { collectionAdderToName, collectionRemoverToName, collectionSetterToName } from "../subject/util";
+import { collectionAdderToName, collectionRemoverToName, collectionSetterToName } from "../model/util";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 import { AIClient } from "../ai/AIClient";
 import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
 import { gql } from "@apollo/client/core";
-import { AllInstancesResult } from "../subject/Ad4mModel";
+import { AllInstancesResult } from "../model/Ad4mModel";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 

@@ -19,8 +19,8 @@ export * from "./perspectives/PerspectiveProxy";
 export * from "./perspectives/PerspectiveDiff";
 export * from "./perspectives/LinkQuery";
 export * from "./SmartLiteral";
-export * from "./subject/decorators";
-export * from "./subject/Subject";
+export * from "./model/decorators";
+export * from "./model/Subject";
 export * from "./neighbourhood/Neighbourhood";
 export * from "./neighbourhood/NeighbourhoodProxy";
 export * from "./typeDefs";
@@ -30,4 +30,4 @@ export * from "./agent/AgentClient";
 export * from "./ai/AIClient"
 export * from "./ai/Tasks"
 export * from "./runtime/RuntimeResolver"
-export * from './subject/Ad4mModel'
+export * from './model/Ad4mModel'
