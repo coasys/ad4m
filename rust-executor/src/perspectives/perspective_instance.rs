@@ -1619,7 +1619,7 @@ impl PerspectiveInstance {
                 Ok(QueryResolution::True) => instance_check_passed = true,
                 Ok(QueryResolution::Matches(_)) => instance_check_passed = true,
                 Err(e) => log::warn!("Error trying to check instance after create_subject: {}", e),
-                Ok(r) => {}//log::info!("create_subject instance query returned: {:?}", r),
+                Ok(_) => {} //log::info!("create_subject instance query returned: {:?}", r),
             }
             sleep(Duration::from_millis(10)).await;
             tries += 1;
