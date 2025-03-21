@@ -172,20 +172,102 @@ function buildLimitQuery(limit?: number): string {
 }
 
 /**
- * Class representing a subject entity.
- * Can extend this class to create a new subject entity to add methods interact with SDNA and much better experience then using the bare bone methods.
+ * Base class for defining data models in AD4M.
+ * 
+ * @description
+ * Ad4mModel provides the foundation for creating data models that are stored in AD4M perspectives.
+ * Each model instance is represented as a subgraph in the perspective, with properties and collections
+ * mapped to links in that graph. The class uses Prolog-based queries to efficiently search and filter
+ * instances based on their properties and relationships.
+ * 
+ * Key concepts:
+ * - Each model instance has a unique base expression that serves as its identifier
+ * - Properties are stored as links with predicates defined by the `through` option
+ * - Collections represent one-to-many relationships as sets of links
+ * - Queries are translated to Prolog for efficient graph pattern matching
+ * - Changes are tracked through the perspective's subscription system
  * 
  * @example
  * ```typescript
- * @SDNAClass({ name: "Recipe" })
+ * // Define a recipe model
+ * @ModelOptions({ name: "Recipe" })
  * class Recipe extends Ad4mModel {
- *   @SubjectProperty({
+ *   // Required property with literal value
+ *   @Property({
  *     through: "recipe://name",
- *     writable: true,
  *     resolveLanguage: "literal"
  *   })
  *   name: string = "";
+ * 
+ *   // Optional property with custom initial value
+ *   @Optional({
+ *     through: "recipe://status",
+ *     initial: "recipe://draft"
+ *   })
+ *   status: string = "";
+ * 
+ *   // Read-only computed property
+ *   @ReadOnly({
+ *     through: "recipe://rating",
+ *     getter: `
+ *       findall(Rating, triple(Base, "recipe://user_rating", Rating), Ratings),
+ *       sum_list(Ratings, Sum),
+ *       length(Ratings, Count),
+ *       Value is Sum / Count
+ *     `
+ *   })
+ *   averageRating: number = 0;
+ * 
+ *   // Collection of ingredients
+ *   @Collection({ through: "recipe://ingredient" })
+ *   ingredients: string[] = [];
+ * 
+ *   // Collection of comments that are instances of another model
+ *   @Collection({
+ *     through: "recipe://comment",
+ *     where: { isInstance: Comment }
+ *   })
+ *   comments: Comment[] = [];
  * }
+ * 
+ * // Create and save a new recipe
+ * const recipe = new Recipe(perspective);
+ * recipe.name = "Chocolate Cake";
+ * recipe.ingredients = ["flour", "sugar", "cocoa"];
+ * await recipe.save();
+ * 
+ * // Query recipes in different ways
+ * // Get all recipes
+ * const allRecipes = await Recipe.findAll(perspective);
+ * 
+ * // Find recipes with specific criteria
+ * const desserts = await Recipe.findAll(perspective, {
+ *   where: { 
+ *     status: "recipe://published",
+ *     averageRating: { gt: 4 }
+ *   },
+ *   order: { name: "ASC" },
+ *   limit: 10
+ * });
+ * 
+ * // Use the fluent query builder
+ * const popularRecipes = await Recipe.query(perspective)
+ *   .where({ averageRating: { gt: 4.5 } })
+ *   .order({ averageRating: "DESC" })
+ *   .limit(5)
+ *   .get();
+ * 
+ * // Subscribe to real-time updates
+ * await Recipe.query(perspective)
+ *   .where({ status: "recipe://cooking" })
+ *   .subscribe(recipes => {
+ *     console.log("Currently being cooked:", recipes);
+ *   });
+ * 
+ * // Paginate results
+ * const { results, totalCount, pageNumber } = await Recipe.query(perspective)
+ *   .where({ status: "recipe://published" })
+ *   .paginate(10, 1);
  * ```
  */
 export class Ad4mModel {
@@ -216,19 +298,22 @@ export class Ad4mModel {
   }
 
   /**
-   * Constructs a new subject entity instance.
+   * Constructs a new model instance.
    * 
-   * @param perspective - The perspective that the subject belongs to
-   * @param baseExpression - Optional base expression for the subject
+   * @param perspective - The perspective where this model will be stored
+   * @param baseExpression - Optional unique identifier for this instance
    * @param source - Optional source expression this instance is linked to
    * 
    * @example
    * ```typescript
+   * // Create a new recipe with auto-generated base expression
    * const recipe = new Recipe(perspective);
-   * // or with base expression
-   * const recipe = new Recipe(perspective, "base123");
-   * // or with source
-   * const recipe = new Recipe(perspective, "base123", "source456");
+   * 
+   * // Create with specific base expression
+   * const recipe = new Recipe(perspective, "recipe://chocolate-cake");
+   * 
+   * // Create with source link
+   * const recipe = new Recipe(perspective, undefined, "cookbook://desserts");
    * ```
    */
   constructor(perspective: PerspectiveProxy, baseExpression?: string, source?: string) {
@@ -574,10 +659,10 @@ export class Ad4mModel {
   }
 
   /**
-   * Saves the subject entity to the perspective.
-   * Creates a new subject with the base expression and links it to the source.
+   * Saves the model instance to the perspective.
+   * Creates a new instance with the base expression and links it to the source.
    * 
-   * @throws Will throw if subject creation, linking, or updating fails
+   * @throws Will throw if instance creation, linking, or updating fails
    * 
    * @example
    * ```typescript
@@ -598,7 +683,7 @@ export class Ad4mModel {
   }
 
   /**
-   * Updates the subject entity's properties and collections.
+   * Updates the model instance's properties and collections.
    * 
    * @throws Will throw if property setting or collection updates fail
    * 
@@ -606,6 +691,7 @@ export class Ad4mModel {
    * ```typescript
    * const recipe = await Recipe.findAll(perspective)[0];
    * recipe.rating = 5;
+   * recipe.ingredients.push("garlic");
    * await recipe.update();
    * ```
    */
@@ -641,9 +727,9 @@ export class Ad4mModel {
   }
 
   /**
-   * Gets the subject entity with all properties and collections populated.
+   * Gets the model instance with all properties and collections populated.
    * 
-   * @returns The populated subject entity
+   * @returns The populated model instance
    * @throws Will throw if data retrieval fails
    * 
    * @example
@@ -660,7 +746,7 @@ export class Ad4mModel {
   }
 
   /**
-   * Deletes the subject entity from the perspective.
+   * Deletes the model instance from the perspective.
    * 
    * @throws Will throw if removal fails
    * 
