@@ -67,7 +67,7 @@ describe("Prolog + Literals", () => {
         before(async () => {
             perspective = await ad4m!.perspective.add("test")
             // for test debugging:
-            console.log("UUID: " + perspective.uuid)
+            //console.log("UUID: " + perspective.uuid)
 
             let classes = await perspective.subjectClasses();
             expect(classes.length).to.equal(0)
@@ -1554,7 +1554,7 @@ describe("Prolog + Literals", () => {
 
                     // Test count with offset, limit, & where equality constraint (exists)
                     const { results: recipes4, totalCount: count4 } = await Recipe.findAllAndCount(perspective!, { where: { number: 3 }, offset: 3, limit: 3, count: true });
-                    console.log('recipes4: ', recipes4);
+                    //console.log('recipes4: ', recipes4);
                     expect(recipes4.length).to.equal(0);
                     expect(count4).to.equal(0);
 
@@ -1738,7 +1738,14 @@ describe("Prolog + Literals", () => {
                     newRecipe.name = "Recipe 11";
                     await newRecipe.save();
 
-                    await sleep(2000);
+                    let tries = 0;
+                    while (!lastResult) {
+                        await sleep(500);
+                        tries++;
+                        if (tries > 20) {
+                            throw new Error("Timeout waiting for subscription to update");
+                        }
+                    }
                     expect(lastResult.totalCount).to.equal(11);
 
                     // Clean up
@@ -1894,7 +1901,7 @@ describe("Prolog + Literals", () => {
                     // Query for recipes - this should only return the recipe instance
                     const note1Results = await Note1.query(perspective!).where({ name: "Test Item" }).get()
                     
-                    console.log("note1Results: ", note1Results)
+                    //console.log("note1Results: ", note1Results)
                     // This assertion will fail because the query builder doesn't filter by class
                     expect(note1Results.length).to.equal(1);
                     expect(note1Results[0]).to.be.instanceOf(Note1);
@@ -2030,7 +2037,7 @@ describe("Prolog + Literals", () => {
         before(async () => {
             perspective = await ad4m!.perspective.add("smart literal test")
             // for test debugging:
-            console.log("UUID: " + perspective.uuid)
+            //console.log("UUID: " + perspective.uuid)
         })
 
         it("can create and use a new smart literal", async () => {
