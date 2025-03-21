@@ -1551,7 +1551,7 @@ describe("Prolog + Literals", () => {
                     await recipe3.delete();
                 })
 
-                it("findAllAndCount() returns both the retrived instances and a count without limit applied", async () => {
+                it("findAllAndCount() returns both the retrived instances and the total count", async () => {
                     // Clear any old recipes
                     const oldRecipes = await Recipe.findAll(perspective!);
                     for (const recipe of oldRecipes) await recipe.delete();
@@ -1578,33 +1578,33 @@ describe("Prolog + Literals", () => {
                     expect(recipes3.length).to.equal(3);
                     expect(count3).to.equal(6);
 
-                    // Test count with limit & where constraints
+                    // Test count with where constraints & limit
                     const { results: recipes2, totalCount: count2 } = await Recipe.findAllAndCount(perspective!, { where: { name: ["Recipe 1", "Recipe 2", "Recipe 3"] }, limit: 2, count: true });
                     expect(recipes2.length).to.equal(2);
                     expect(count2).to.equal(3);
 
-                    // Test count with offset, limit, & where equality constraint (exists)
-                    const { results: recipes4, totalCount: count4 } = await Recipe.findAllAndCount(perspective!, { where: { number: 3 }, offset: 3, limit: 3, count: true });
+                    // Test count with where equality constraint (exists), offset, & limit
+                    const { results: recipes4, totalCount: count4 } = await Recipe.findAllAndCount(perspective!, { where: { number: 5 }, offset: 3, limit: 3, count: true });
                     console.log('recipes4: ', recipes4);
-                    expect(recipes4.length).to.equal(0);
-                    expect(count4).to.equal(0);
+                    expect(recipes4.length).to.equal(3);
+                    expect(count4).to.equal(6);
 
-                    // Test count with offset, limit, & where equality constraint (does not exist)
-                    const { results: recipes5, totalCount: count5 } = await Recipe.findAllAndCount(perspective!, { where: { number: 5 }, offset: 3, limit: 3, count: true });
-                    expect(recipes5.length).to.equal(3);
-                    expect(count5).to.equal(6);
+                    // Test count with where equality constraint (does not exist), offset, & limit
+                    const { results: recipes5, totalCount: count5 } = await Recipe.findAllAndCount(perspective!, { where: { number: 3 }, offset: 3, limit: 3, count: true });
+                    expect(recipes5.length).to.equal(0);
+                    expect(count5).to.equal(0);
 
-                    // Test count with limit & where not constraint
+                    // Test count with where not constraint & limit
                     const { results: recipes6, totalCount: count6 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 1" } }, limit: 3, count: true });
                     expect(recipes6.length).to.equal(3);
                     expect(count6).to.equal(5);
 
-                    // Test count with offset, limit, & where not constraint
+                    // Test count with where not constraint, offset, & limit
                     const { results: recipes7, totalCount: count7 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 2" } }, offset: 1, limit: 3, count: true });
                     expect(recipes7.length).to.equal(3);
                     expect(count7).to.equal(5);
 
-                    // Test count with offset, limit, & where constraint
+                    // Test count with where not constraint, offset, limit, & result set less than limit
                     const { results: recipes8, totalCount: count8 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 4" } }, offset: 3, limit: 3, count: true });
                     expect(recipes8.length).to.equal(2);
                     expect(count8).to.equal(5);
