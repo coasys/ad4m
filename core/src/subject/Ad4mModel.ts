@@ -787,8 +787,8 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy, 
     query?: Query
-  ): SubjectQueryBuilder<T> {
-    return new SubjectQueryBuilder<T>(perspective, this as any, query);
+  ): ModelQueryBuilder<T> {
+    return new ModelQueryBuilder<T>(perspective, this as any, query);
   }
 }
 
@@ -812,7 +812,7 @@ export class Ad4mModel {
  * });
  * ```
  */
-export class SubjectQueryBuilder<T extends Ad4mModel> {
+export class ModelQueryBuilder<T extends Ad4mModel> {
   private perspective: PerspectiveProxy;
   private queryParams: Query = {};
   private ctor: typeof Ad4mModel;
@@ -839,7 +839,7 @@ export class SubjectQueryBuilder<T extends Ad4mModel> {
    * })
    * ```
    */
-  where(conditions: Where): SubjectQueryBuilder<T> {
+  where(conditions: Where): ModelQueryBuilder<T> {
     this.queryParams.where = conditions;
     return this;
   }
@@ -855,7 +855,7 @@ export class SubjectQueryBuilder<T extends Ad4mModel> {
    * .order({ createdAt: "DESC" })
    * ```
    */
-  order(orderBy: Order): SubjectQueryBuilder<T> {
+  order(orderBy: Order): ModelQueryBuilder<T> {
     this.queryParams.order = orderBy;
     return this;
   }
@@ -871,7 +871,7 @@ export class SubjectQueryBuilder<T extends Ad4mModel> {
    * .limit(10)
    * ```
    */
-  limit(limit: number): SubjectQueryBuilder<T> {
+  limit(limit: number): ModelQueryBuilder<T> {
     this.queryParams.limit = limit;
     return this;
   }
@@ -887,7 +887,7 @@ export class SubjectQueryBuilder<T extends Ad4mModel> {
    * .offset(20) // Skip first 20 results
    * ```
    */
-  offset(offset: number): SubjectQueryBuilder<T> {
+  offset(offset: number): ModelQueryBuilder<T> {
     this.queryParams.offset = offset;
     return this;
   }
@@ -903,7 +903,7 @@ export class SubjectQueryBuilder<T extends Ad4mModel> {
    * .source("ad4m://self")
    * ```
    */
-  source(source: string): SubjectQueryBuilder<T> {
+  source(source: string): ModelQueryBuilder<T> {
     this.queryParams.source = source;
     return this;
   }
@@ -919,7 +919,7 @@ export class SubjectQueryBuilder<T extends Ad4mModel> {
    * .properties(["name", "description", "rating"])
    * ```
    */
-  properties(properties: string[]): SubjectQueryBuilder<T> {
+  properties(properties: string[]): ModelQueryBuilder<T> {
     this.queryParams.properties = properties;
     return this;
   }
@@ -935,7 +935,7 @@ export class SubjectQueryBuilder<T extends Ad4mModel> {
    * .collections(["ingredients", "steps"])
    * ```
    */
-  collections(collections: string[]): SubjectQueryBuilder<T> {
+  collections(collections: string[]): ModelQueryBuilder<T> {
     this.queryParams.collections = collections;
     return this;
   }
