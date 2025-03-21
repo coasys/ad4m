@@ -213,6 +213,10 @@ export function ReadOnly(opts: PropertyOptions) {
  */
 export function Optional(opts: PropertyOptions) {
     return function <T>(target: T, key: keyof T) {
+        if(typeof opts.writable === "undefined") {
+            opts.writable = true
+        }
+        
         if (opts.required && !opts.initial) {
             throw new Error("SubjectProperty requires an 'initial' option if 'required' is true");
         }
