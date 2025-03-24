@@ -10,6 +10,7 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     Collection,
     ModelOptions,
     Optional,
+    PropertyOptions,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
 import { startExecutor, apolloClient } from "../utils/utils";
@@ -2024,6 +2025,37 @@ describe("Prolog + Literals", () => {
                     await task1.delete();
                     await task2.delete();
                     await task3.delete();
+                });
+
+                it("transform option in property decorators works", async () => {
+                    @ModelOptions({ name: "ImagePost" })
+                    class ImagePost extends Ad4mModel {
+                        @Property({
+                            through: "image://data",
+                            resolveLanguage: "literal",
+                            transform: (data: any) => data ? `data:image/png;base64,${data}` : undefined,
+                        } as PropertyOptions)
+                        image: string = "";
+                        //TODO: having json objects as properties in our new queries breaks the JSON
+                        // construction of Prolog query results.
+                        // Need to find a way to make this work:
+                        //image: { data_base64: string } = { data_base64: "" };
+                    }
+
+                    // Register the ImagePost class
+                    await perspective!.ensureSDNASubjectClass(ImagePost);
+
+                    // Create a new image post
+                    const post = new ImagePost(perspective!);
+                    const imageData = "abc123";
+                    //const imageData = { data_base64: "abc123" };
+                    
+                    post.image = imageData;
+                    await post.save();
+
+                    // Retrieve the post and check transformed values
+                    const [retrieved] = await ImagePost.findAll(perspective!);
+                    expect(retrieved.image).to.equal("data:image/png;base64,abc123");
                 });
             })
         })

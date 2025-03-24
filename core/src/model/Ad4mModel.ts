@@ -354,6 +354,11 @@ export class Ad4mModel {
               finalValue = resolvedExpression.data;
             }
           }
+          // Apply transform function if it exists
+          const transform = instance["__properties"]?.[name]?.transform;
+          if (transform && typeof transform === "function") {
+            finalValue = transform(finalValue);
+          }
           return [name, finalValue];
         })
       )
