@@ -1,300 +1,533 @@
 import { Tab, Tabs } from "nextra-theme-docs";
 
-# Defining and using Model Classes
+# Model Classes in AD4M
 
-One of the first use cases of Social DNA is for Neigbourhoods to be able to agree that a certain
-collection of links represent one thing.
+Model classes in AD4M provide a powerful way to define, store, and query data in your application. They allow you to work with structured data in a type-safe manner while leveraging AD4M's underlying graph-based storage system.
 
-Consider the following example for Todo definition:
+## Overview
 
-<Tabs items={['SDNA Class', 'Prolog output']}>
+Model classes are TypeScript/JavaScript classes that represent entities in your application. Under the hood, each model instance is stored as a subgraph in an AD4M perspective, where properties and relationships are represented as links between nodes. Every node in this graph must be a URL pointing to an Expression in some language.
+
+### Base Expressions and Graph Structure
+
+Each model instance has a unique identifier called a "base expression". This serves as the root node of the subgraph representing that instance. For example, a Recipe instance might have a base expression like `recipe://chocolate-cake-123`, and all its properties and relationships would be stored as links connected to this base expression:
+
+```
+recipe://chocolate-cake-123 -[recipe://name]-> literal://string:"Chocolate Cake"
+recipe://chocolate-cake-123 -[recipe://cookingTime]-> literal://number:45
+recipe://chocolate-cake-123 -[recipe://ingredient]-> ingredient://flour
+recipe://chocolate-cake-123 -[recipe://ingredient]-> ingredient://sugar
+```
+
+### Literals for Simple Values
+
+While every node in an AD4M graph must be an Expression URL, AD4M provides a convenient way to store simple values through Literals. Instead of creating a full language just to store strings or numbers, you can use the built-in Literal language:
+
+```typescript
+// Without Literals (complex):
+"expression://languageAddress/expressionHash" // Points to an Expression storing "Chocolate Cake"
+
+// With Literals (simple):
+"literal://string:Chocolate Cake"  // Direct string storage
+"literal://number:42"             // Direct number storage
+"literal://boolean:true"          // Direct boolean storage
+```
+
+### Social DNA and Prolog
+
+When you define a model class, AD4M generates a Social DNA (SDNA) representation in Prolog. This SDNA defines the structure and rules for your model, similar to how SHACL shapes define constraints for RDF graphs. Let's look at a complete example:
+
+<Tabs items={['TypeScript Class', 'Generated Prolog SDNA']}>
   <Tab>
+    ```typescript
+    @ModelOptions({ name: "Recipe" })
+    class Recipe extends Ad4mModel {
+      @Property({
+        through: "recipe://name",
+        resolveLanguage: "literal",
+        required: true
+      })
+      name: string = "";
 
-    ```js
-    @SDNAClass({
-        name: "Todo",
-    })
-    export default class Todo {
-        @SubjectProperty({
-            through: "rdf://title",
-            writable: true,
-            required: true,
-            resolveLanguage: "literal",
-            value: ""
-        })
-        title: string;
-
-        @SubjectProperty({
-            through: "rdf://done",
-            writable: true,
-            required: true,
-            resolveLanguage: "literal",
-            value: false,
-        })
-        isDone: boolean;
+      @Collection({ through: "recipe://ingredient" })
+      ingredients: string[] = [];
     }
     ```
-
   </Tab>
   <Tab>
     ```prolog
-    subject_class("Todo", c).
+    subject_class("Recipe", c).
+    
+    % Constructor defines how new instances are initialized
     constructor(c, '[
-      {action: "addLink", source: "this", predicate: "rdf://title", target: "literal://string:''"},
-      {action: "addLink", source: "this", predicate: "rdf://state", target: "literal://boolean:true"}
+      {action: "addLink", source: "this", predicate: "recipe://name", target: "literal://string:''"}
     ]').
-    instance(c, Base) :- triple(Base, "rdf://state", *), triple(Base, "rdf://title", *).
 
-    property(c, "title").
-    property_resolve(c, "title").
-    property_resolve_language(c, "title", "literal").
-    property_getter(c, Base, "title", Value) :- triple(Base, "rdf://has_title", Value).
-    property_setter(c, "title", '[{action: "setSingleTarget", source: "this", predicate: "rdf://has_title", target: "value"}]').
+    % Instance rule defines what makes a valid Recipe
+    instance(c, Base) :- triple(Base, "recipe://name", _).
 
-    property(c, "isDone").
-    property_resolve(c, "isDone").
-    property_resolve_language(c, "isDone", "literal").
-    property_getter(c, Base, "isDone", Value) :- triple(Base, "rdf://done", Value).
-    property_setter(c, "isDone", '[{action: "setSingleTarget", source: "this", predicate: "rdf://done", target: "value"}]').
+    % Property definitions
+    property(c, "name").
+    property_resolve(c, "name").
+    property_resolve_language(c, "name", "literal").
+    property_getter(c, Base, "name", Value) :- triple(Base, "recipe://name", Value).
+    property_setter(c, "name", '[{action: "setSingleTarget", source: "this", predicate: "recipe://name", "target": "value"}]').
+
+    % Collection definitions
+    collection(c, "ingredients").
+    collection_getter(c, Base, "ingredients", List) :- findall(Target, triple(Base, "recipe://ingredient", Target), List).
+    collection_adder(c, "ingredients", '[{action: "addLink", source: "this", predicate: "recipe://ingredient", target: "value"}]').
+    collection_remover(c, "ingredients", '[{action: "removeLink", source: "this", predicate: "recipe://ingredient", target: "value"}]').
     ```
-
   </Tab>
 </Tabs>
 
-It defines a Subject Class called "Todo" with two properties: "state" and "title". The used predicates "subject_class", "property" and "property_getter" etc. enable a generic way for ADAM and UIs to interface with these classes and reflect on their properties. We've developed tooling around Subject Classes that is designed to make it seamless for app developers to leverage this power. With these tools, developers can define and interact with their app-specific ontology based on ADAM's meta-ontology easily, thus ensuring interoperability.
+### The resolveLanguage Feature
 
-The concept of Subject Classes shares a close relationship with SHACL shapes, a standard for validating RDF graphs against a set of conditions. Just like SHACL shapes, Subject Classes allow for the definition of triple-based associations which get grouped to form higher-level virtual objects, or "subjects". Tooling for compatibility with SHACL is not implemented yet, but planned.
+The `resolveLanguage` option tells AD4M how to handle property values:
 
-This approach provides an ergonomic way for developers to define complex and meaningful relationships within their data.
+```typescript
+@Property({
+  through: "recipe://description",
+  resolveLanguage: "literal"  // Store as literal://string:value
+})
+description: string = "";
 
-Learning prolog to define structure and rules to create SDNA's can be diffcult thats why a4dm comes with decorators that helps convert a class to a SDNA class, there are two ways they can be used Repository & Record implementation.
+@Property({
+  through: "recipe://content",
+  resolveLanguage: "markdown"  // Store as markdown://hash
+})
+content: string = "";
 
-## Decorators
+@Property({
+  through: "recipe://image",
+  // No resolveLanguage = store raw Expression URLs
+})
+imageUrl: string = "";
+```
 
-Decorators are needed to create sdna class but not if the snda is already created (NOTE: class signature should match for it to fetch the snda).
+When `resolveLanguage` is set to "literal", AD4M automatically converts values to and from Literal URLs. For other languages, it creates and resolves Expressions in that language.
 
-There are 4 Decorators that are needed to create Subject classes.
+## Defining Models
 
-## SDNAClass
+To define a model, create a class that extends `Ad4mModel` and use the `@ModelOptions` decorator:
 
-Every class must be Decorated using the decorator inorder for it to have the correct subject name.
+```typescript
+import { Ad4mModel, ModelOptions, Property, Collection } from '@coasys/ad4m';
 
-Properties:
-
-Name: Name of the Subject class (When the js class goes through a minfiner it can change the class name so needed this)
-
-### SubjectProperty
-All the properties on the subject class that are not collections should use this decorator to define the property. Atleast one property should be an instance property for the class to function meaning it should define through, initial & required.
-
-Properties:
-
-- through: Indicates the predicate for the property
-- initial: Initial value for the property (needed to declare the property as a instance/ flag property)
-- required: Is the property required (needed to declare the property as a instance/ flag property)
-- writable: Is this property writable, also should a setter be generated for this property.
-- resolveLanguage: What language should this property use to store itself, defaults to literal language.
-- getter: Overrides the default getter, a prolog query.
-- setter: Overrides the default setter, a prolog query.
-
-### SubjectFlag
-
-This decorator simplifies the creation of an instance property. Unlike SubjectProperty this is not writable mean once define can't be changed so if you are planning to add an instance property that can be overridden use SubjectProperty.
-
-through: Indicates the predicate for the property
-value: Initial value for the property
-
-### SubjectCollection
-This decorator can be used to define collections/ arrays and comes with some additional functions unlike SubjectProperty. With this decorator you can set, push & remove items from the collections.
-
-through: Indicates the predicate for the property
-where:
-isInstance: You can pass in the subject class directly instead of using a prolog query.
-condition: prolog query to add a condition
-
-### Vanilla JS way
-The above implementation can be writen below as js class using the decorator.
-
-```js
-@SDNAClass({ name: "Todo" })
-class Todo {
-  @SubjectFlag({
-    through: "todo://state",
-    initial: "todo://ready",
+@ModelOptions({ name: "Recipe" })
+class Recipe extends Ad4mModel {
+  @Property({
+    through: "recipe://name",
+    resolveLanguage: "literal"
   })
-  state: string = "";
+  name: string = "";
 
-  @SubjectProperty({
-    through: "todo://has_title",
-    writable: true,
-    resolveLanguage: "literal",
+  @Property({
+    through: "recipe://cookingTime",
+    resolveLanguage: "literal"
   })
-  title: string = "";
+  cookingTime: number = 0;
 
-  @SubjectCollections({
-    through: "flux://entry_type",
-    where: { condition: `triple(Target, "flux://has_reaction", "flux://thumbsup")` }
-  })
-  likedMessages: string = "";
+  @Collection({ through: "recipe://ingredient" })
+  ingredients: string[] = [];
 }
 ```
 
-Generate subject class ():
+## Property Types
 
-```js
-// this will write the sdna to the perspective
-Todo.generateSDNA();
+AD4M provides several decorators for defining different types of properties:
+
+### @Property
+For required, writable properties:
+
+```typescript
+@Property({
+  through: "recipe://name",     // Required: The predicate URI
+  resolveLanguage: "literal",   // Optional: How to store the value
+  initial: "Untitled"          // Optional: Default value
+})
+name: string = "";
 ```
 
-To create a new subject instance:
+### @Optional
+For optional properties that may or may not have a value:
 
-```js
-// this checks if the sdna was written to the perspective or not and throws an error
-// Takes two parameter the SubjectClass & a baseExpression this can be any string
-await perspective!.createSubject(new Todo(), root)
-
+```typescript
+@Optional({
+  through: "recipe://description",
+  writable: true,              // Can be modified after creation
+  resolveLanguage: "literal"
+})
+description?: string;
 ```
 
-Get the subject proxy:
+### @ReadOnly
+For computed or immutable properties:
 
-```js
-// this checks if the subject instance was created or not and throws an error
-// Takes two parameter the a baseExpression this can be any string & SubjectClass
-await perspective!.getSubjectProxy(root, new Todo())
+```typescript
+@ReadOnly({
+  through: "recipe://rating",
+  getter: `
+    findall(Rating, triple(Base, "recipe://user_rating", Rating), Ratings),
+    sum_list(Ratings, Sum),
+    length(Ratings, Count),
+    Value is Sum / Count
+  `
+})
+averageRating: number = 0;
 ```
 
-Check if the instance was created for this subject class
+### @Flag
+For immutable type markers or discriminators:
 
-```js
-// this checks if the subject instance was created or not and throws an error
-// Takes two parameter the a baseExpression this can be any string & SubjectClass
-await perspective!.isSubjectInstance(root, new Todo()))
+```typescript
+@Flag({
+  through: "ad4m://type",
+  value: "recipe://main-course"
+})
+type: string = "";
 ```
 
-To remove a subject instance:
+### @Collection
+For one-to-many relationships:
 
-```js
-// this checks if the sdna was written to the perspective or not and throws an error
-// Takes two parameter the SubjectClass & a baseExpression this can be any string
-await perspective!.removeSubject(new Todo(), root)
+```typescript
+// Simple collection
+@Collection({ through: "recipe://ingredient" })
+ingredients: string[] = [];
+
+// Collection of other model instances
+@Collection({
+  through: "recipe://comment",
+  where: { isInstance: Comment }  // Only include Comment instances
+})
+comments: Comment[] = [];
+
+// Collection with custom filter
+@Collection({
+  through: "recipe://review",
+  where: { condition: `triple(Target, "review://rating", Rating), Rating > 4` }
+})
+topReviews: string[] = [];
 ```
 
-Get all subject proxies for this class:
+## Working with Model Instances
 
-```js
-await perspective!.getAllSubjectProxies(new Todo())
+### Creating & Saving
+
+```typescript
+// Create new instance
+const recipe = new Recipe(perspective);
+recipe.name = "Chocolate Cake";
+recipe.ingredients = ["flour", "sugar", "cocoa"];
+await recipe.save();
+
+// Create with specific ID
+const recipe = new Recipe(perspective, "recipe://chocolate-cake");
+await recipe.save();
+
+// Create with source link
+const recipe = new Recipe(perspective, undefined, "cookbook://desserts");
+await recipe.save();
 ```
 
-Update properties/ collections:
+### Reading & Updating
 
-Decorating the class will add new functions for each property & collection that can be used to update them. For property it will create new method with set prefix to the property name. ex. title will add setTitle function & for collection it will add 3 functions ex. ingredient will add setIngredient, addIngredient & removeIngredient..
+```typescript
+// Get by ID
+const recipe = new Recipe(perspective, existingId);
+await recipe.get();
 
-```js
-const todod = await perspective!.getSubjectProxy(root, new Todo())
-await todo.setTitle("New title");
+// Update properties
+recipe.name = "Dark Chocolate Cake";
+await recipe.update();
+
+// Update collections
+recipe.ingredients.push("dark chocolate");
+await recipe.update();
 ```
 
-## Repository implementation (move the subjectRepo flux implementation to ad4m)
+### Deleting
 
-### Record implementation
+```typescript
+const recipe = await Recipe.findAll(perspective)[0];
+await recipe.delete();
+```
 
-If the above way of doing thing seems cumbersome, ad4m also implements an Active record implementation for SubjectClasses, which simplfies the whole process.
+## Querying
 
-All you need is to extend the above class with SubjectEntity.
+AD4M provides multiple ways to query model instances:
 
-```js
-@SDNAClass({ name: "Todo" })
-class Todo extends SubjectEntity {
-  @SubjectProperty({
-    through: "todo://state",
-    initial: "todo://ready",
-    writable: true,
-    required: true,
+### Basic Queries
+
+```typescript
+// Get all instances
+const allRecipes = await Recipe.findAll(perspective);
+
+// Get with conditions
+const recipes = await Recipe.findAll(perspective, {
+  where: { 
+    category: "Dessert",
+    cookingTime: { lt: 30 }
+  },
+  order: { name: "ASC" },
+  limit: 10
+});
+```
+
+### Query Builder
+
+```typescript
+// Fluent interface for complex queries
+const recipes = await Recipe.query(perspective)
+  .where({ 
+    category: "MainCourse",
+    rating: { gt: 4 }
   })
-  state: string = "";
+  .order({ createdAt: "DESC" })
+  .limit(5)
+  .get();
 
-  @SubjectProperty({
-    through: "todo://has_title",
-    writable: true,
-    resolveLanguage: "literal",
+// With pagination
+const { results, totalCount, pageNumber } = await Recipe.query(perspective)
+  .where({ category: "Dessert" })
+  .paginate(10, 1);
+```
+
+### Custom Query Methods
+
+You can define custom query methods using the `@InstanceQuery` decorator:
+
+```typescript
+@ModelOptions({ name: "Recipe" })
+class Recipe extends Ad4mModel {
+  // ... properties ...
+
+  // Get all recipes
+  @InstanceQuery()
+  static async all(perspective: PerspectiveProxy): Promise<Recipe[]> { return [] }
+
+  // Get by category
+  @InstanceQuery({ where: { category: "Dessert" }})
+  static async desserts(perspective: PerspectiveProxy): Promise<Recipe[]> { return [] }
+
+  // Custom Prolog condition
+  @InstanceQuery({ 
+    condition: `triple(Instance, "recipe://rating", Rating), Rating > 4` 
   })
-  title: string = "";
+  static async topRated(perspective: PerspectiveProxy): Promise<Recipe[]> { return [] }
+}
+
+// Usage:
+const desserts = await Recipe.desserts(perspective);
+const topRated = await Recipe.topRated(perspective);
+```
+
+## Real-time Updates
+
+You can subscribe to query results to get real-time updates:
+
+```typescript
+// Subscribe to all cooking recipes
+await Recipe.query(perspective)
+  .where({ status: "cooking" })
+  .subscribe(recipes => {
+    console.log("Currently being cooked:", recipes);
+  });
+
+// Subscribe to paginated results
+await Recipe.query(perspective)
+  .where({ category: "Dessert" })
+  .paginateSubscribe(10, 1, page => {
+    console.log(`Page ${page.pageNumber}: ${page.results.length} items`);
+  });
+```
+
+## Best Practices
+
+1. **Use Meaningful Predicates**: Structure your predicate URIs logically:
+   ```typescript
+   through: "recipe://name"      // Good
+   through: "myapp://x"          // Bad
+   ```
+
+2. **Type Safety**: Always define proper TypeScript types:
+   ```typescript
+   @Property({ through: "recipe://servings" })
+   servings: number = 0;         // Good
+   
+   @Property({ through: "recipe://servings" })
+   servings: any;               // Bad
+   ```
+
+3. **Collection Filtering**: Use `where` conditions to filter collections:
+   ```typescript
+   @Collection({
+     through: "recipe://review",
+     where: { isInstance: Review }  // Only include Review instances
+   })
+   reviews: Review[] = [];
+   ```
+
+4. **Query Optimization**: Use specific queries instead of filtering in memory:
+   ```typescript
+   // Good
+   const topRated = await Recipe.query(perspective)
+     .where({ rating: { gt: 4 } })
+     .get();
+   
+   // Bad
+   const all = await Recipe.findAll(perspective);
+   const topRated = all.filter(r => r.rating > 4);
+   ```
+
+5. **Subscriptions**: Clean up subscriptions when they're no longer needed:
+   ```typescript
+   const subscription = await Recipe.query(perspective)
+     .where({ status: "active" })
+     .subscribe(recipes => {
+       // Handle updates
+     });
+   
+   // Later...
+   subscription.unsubscribe();
+   ```
+
+6. **Use Literals Appropriately**: 
+   ```typescript
+   // Good - Using literals for simple values
+   @Property({
+     through: "recipe://name",
+     resolveLanguage: "literal"
+   })
+   name: string = "";
+   
+   // Good - Using specific language for rich content
+   @Property({
+     through: "recipe://instructions",
+     resolveLanguage: "markdown"
+   })
+   instructions: string = "";
+   ```
+
+7. **Meaningful Base Expressions**:
+   ```typescript
+   // Good - Descriptive base expression
+   const recipe = new Recipe(perspective, "recipe://chocolate-cake-2024-03");
+   
+   // Bad - Random or meaningless base expression
+   const recipe = new Recipe(perspective, "x://123");
+   ```
+
+## Advanced Features
+
+### Custom Getters & Setters
+
+You can define custom Prolog logic for getting and setting properties:
+
+```typescript
+@Property({
+  through: "recipe://ingredients",
+  getter: `
+    findall(Ingredient, (
+      triple(Base, "recipe://ingredient", IngredientId),
+      triple(IngredientId, "ingredient://name", Ingredient)
+    ), Value)
+  `,
+  setter: `
+    % Custom setter logic in Prolog
+    Actions = [
+      {"action": "addLink", "source": "this", "predicate": "recipe://ingredient", "target": "value"}
+    ]
+  `
+})
+ingredients: string[] = [];
+```
+
+### Local Storage
+
+You can mark properties or collections to be stored only locally:
+
+```typescript
+@Property({
+  through: "recipe://notes",
+  local: true,              // Won't be shared with network
+  resolveLanguage: "literal"
+})
+privateNotes: string = "";
+```
+
+### Custom Instance Conditions
+
+You can define custom conditions for what constitutes a valid instance:
+
+```typescript
+@ModelOptions({ name: "Recipe" })
+class Recipe extends Ad4mModel {
+  // Custom instance check
+  static isSubjectInstance = [
+    `triple(Base, "recipe://name", _)`,
+    `triple(Base, "recipe://ingredients", _)`
+  ];
+  
+  // ... properties ...
 }
 ```
 
-Generate subject class ():
-This will generate the subject class when you create a new instance of the class automatically so need to call generateSdna anymore.
+## Relationship with SHACL and Linked Data
 
-```js
-const todo = new Todo(perspective, baseExpression);
+AD4M's model classes share many concepts with SHACL (Shapes Constraint Language) and other linked data shape systems:
+
+1. **Shape Definition**: Like SHACL shapes, model classes define:
+   - Required properties (`@Property`)
+   - Optional properties (`@Optional`)
+   - Property constraints (through Prolog rules)
+   - Property types (through `resolveLanguage`)
+
+2. **Validation**: The generated Prolog SDNA ensures:
+   - Required properties are present
+   - Values are of the correct type
+   - Custom validation rules are enforced
+
+3. **Graph Structure**: Both systems:
+   - Define how data should be structured in a graph
+   - Use predicates (links) to connect nodes
+   - Support validation of graph patterns
+
+While SHACL is focused on RDF validation, AD4M model classes provide a more complete solution that includes:
+- TypeScript/JavaScript integration
+- Built-in CRUD operations
+- Real-time subscriptions
+- Custom query methods
+- Local vs. network storage options
+
+## Error Handling
+
+Always handle potential errors when working with models:
+
+```typescript
+try {
+  const recipe = new Recipe(perspective);
+  recipe.name = "Failed Recipe";
+  await recipe.save();
+} catch (error) {
+  console.error("Failed to save recipe:", error);
+  // Handle error appropriately
+}
 ```
 
-To create a new subject instance:
+## Integration with AD4M Perspectives
 
-```js
-// this checks if the sdna was written to the perspective or not and throws an error
-// Takes two parameter the perspective & a baseExpression this can be any string
-const todo = new Todo(perspective, baseExpression);
+Before using a model class, register it with the perspective:
 
-// Just call save on the todo object to create a new instance
-todo.save();
+```typescript
+// Register the model class
+await perspective.ensureSDNASubjectClass(Recipe);
+
+// Now you can use it
+const recipe = new Recipe(perspective);
+await recipe.save();
 ```
 
-```js
-Get the subject proxy:
-// this checks if the subject instance was created or not and throws an error
-// Takes two parameter the perspective & a baseExpression this can be any string
-const todo = new Todo(perspective, baseExpression);
-
-// Just call get on the todo object to get the instance, this will throw an error if an instance is not found.
-await todo.get()
-```
-
-To remove a subject instance:
-
-```js
-// this checks if the sdna was written to the perspective or not and throws an error
-// Takes two parameter the perspective & a baseExpression this can be any string
-const todo = new Todo(perspective, baseExpression);
-
-// Just call delete on the todo object to remove it
-await todo.delete();
-```
-
-Get all subject proxies for this class:
-
-```js
-// This will get all the instances of the subject class
-await Todo.all(perspective);
-```
-
-Query subject proxies for this class:
-
-```js
-/** This will get all the instances of the subject class
-  *
-  * SubjectEntityQueryParam:
-  * - `size: number`: The number of items/ subject proxies to return per page.
-  * - `page: number`: Page number starts from 1.
-  * - `source: string`: The baseExpression that all the instances are linked to, defaults to `ad4m://self`
-  */
-await Todo.query(perspective, { page: 1, size: 10 });
-```
-
-Update properties/ collections:
-
-```js
-const todo = new Todo(perspective, baseExpression);
-todo.title = "New Title";
-
-// Just update the properties that you want to change and than call update
-await todo.update();
-
-// To update collection you can directly set the property like so
-todo.ingredients = ["test1", "test2"];
-
-// or you can use pass in an object
-todo.ingredients = {
-  action: "add", // can also be remove
-  value: "test3",
-};
-```
+This ensures the perspective knows how to handle instances of your model class.
