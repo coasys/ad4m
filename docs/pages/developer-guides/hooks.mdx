@@ -1,380 +1,262 @@
-# Hooks
+# AD4M React Hooks
 
-The following are a set of React hooks designed to easily work with ADAM principles like Perspectives, Expressions and Subject Classes within React applications:
-
-## useAgent
-
-The `useAgent` hook is allows designed to manage state related to fetching and caching data about ADAM agents, i.e. users, based on their DID.
-
-### Props
-
-The `useAgent` hook accepts the following props:
-
-- `client`: An instance of `AgentClient` which represents a client to interact with the AD4M network.
-- `did`: A string or a function that returns a string representing the decentralized identifier (DID) of the agent.
-- `formatter(links: LinkExpression[])`: A function that takes a links and formatted data structure.
-
-### Return Values
-
-The `useAgent` hook returns an object with the following properties:
-
-- `agent`: The cached `Agent` object fetched from the AD4M network.
-- `profile`: The profile data formatted using the provided formatter function.
-- `error`: Any error encountered during data fetching.
-- `mutate`: A function to mutate the shared/cached data for all subscribers.
-- `reload`: A function to trigger a re-fetch of data from the AD4M network.
-
-### Example Usage
-
-```javascript
-import { useAgent } from '@coasys/ad4m/hooks/react';
-
-const MyComponent = () => {
-  const client = new AgentClient();
-  const did = "some-did";
-  const formatter = (links) => ({ id: links[0].data.target, name: links[1].data.target });
-
-  const { agent, profile, error, mutate, reload } = useAgent({ client, did, formatter });
-
-  useEffect(() => {
-    console.log("Agent:", agent);
-    console.log("Profile:", profile);
-    console.log("Error:", error);
-  }, [agent, profile, error]);
-
-  return (
-    <div>
-      {/* Render your component using the fetched data */}
-    </div>
-  );
-};
-```
+AD4M provides a set of React hooks to easily work with core AD4M concepts like Agents, Perspectives, and Subjects. These hooks handle state management, caching, and real-time updates automatically.
 
 ## useClient
 
-The `useClient` hook is a hook provides access to the underlying `Ad4mClient.
+The most fundamental hook that provides access to the AD4M client instance.
 
-### Props
-This hook does not accept any props.
+```typescript
+import { useClient } from '@coasys/ad4m-react-hooks';
 
-### Return Value
-The `useClient` hook returns an object with the following properties:
-- `client`: The cached `Ad4mClient` object fetched from the AD4M network.
-- `error`: Any error encountered during data fetching.
-- `mutate`: A function to mutate the shared/cached data for all subscribers.
-- `reload`: A function to trigger a re-fetch of the AD4M client data.
-
-### Example Usage
-```javascript
-import { useEffect } from "react";
-import { useClient } from '@coasys/ad4m/hooks/react';
-
-const MyComponent = () => {
+function MyComponent() {
   const { client, error, reload } = useClient();
 
-  useEffect(() => {
-    if (error) {
-      console.error("Error fetching AD4M client:", error);
-    }
-  }, [error]);
+  if (error) {
+    return <div>Error connecting to AD4M: {error}</div>;
+  }
+
+  if (!client) {
+    return <div>Connecting to AD4M...</div>;
+  }
+
+  return <div>Connected to AD4M</div>;
+}
+```
+
+The hook returns:
+- `client`: The AD4M client instance
+- `error`: Any connection errors
+- `reload`: Function to retry the connection
+- `mutate`: Function to update the cached client instance
+
+## useAgent
+
+Fetches and caches agent data by DID, with support for profile formatting.
+
+```typescript
+import { useAgent } from '@coasys/ad4m-react-hooks';
+
+function AgentProfile({ agentClient, did }) {
+  const { agent, profile, error } = useAgent({
+    client: agentClient,
+    did,
+    formatter: (links) => ({
+      name: links.find(l => l.data.predicate === 'name')?.data.target,
+      bio: links.find(l => l.data.predicate === 'bio')?.data.target
+    })
+  });
+
+  if (error) return <div>Error: {error}</div>;
+  if (!agent) return <div>Loading...</div>;
 
   return (
     <div>
-      <h1>My AD4M Application</h1>
-      <p>Client: {client ? "Connected" : "Disconnected"}</p>
-      <button onClick={reload}>Reload Client</button>
+      <h2>{profile?.name}</h2>
+      <p>{profile?.bio}</p>
+      <p>DID: {agent.did}</p>
     </div>
   );
-};
-
-export default MyComponent;
+}
 ```
 
 ## useMe
 
-The `useMe` hook is a custom React hook designed to manage state related to fetching and caching user data, including agent information and profile data.
+Provides access to the current agent's data and status.
 
-### Props
-- `agent`: An instance of `AgentClient` representing the user's agent in the AD4M network.
-- `formatter(links: LinkExpression[])`: A function that takes a links and formatted data structure.
+```typescript
+import { useMe } from '@coasys/ad4m-react-hooks';
 
-### Return Value
-The `useMe` hook returns an object with the following properties:
-- `me`: The user's agent object.
-- `status`: The status of the user's agent.
-- `profile`: The user's profile data formatted using the provided formatter function.
-- `error`: Any error encountered during data fetching.
-- `mutate`: A function to mutate the shared/cached data for all subscribers.
-- `reload`: A function to trigger a re-fetch of the user's data.
+function MyProfile({ agentClient }) {
+  const { me, status, profile, error } = useMe(agentClient, (links) => ({
+    name: links.find(l => l.data.predicate === 'name')?.data.target,
+    bio: links.find(l => l.data.predicate === 'bio')?.data.target
+  }));
 
-### Example Usage
-```javascript
-import { useEffect } from "react";
-import { useMe } from from '@coasys/ad4m/hooks/react';
-
-const MyComponent = () => {
-  const { me, status, profile, error, reload } = useMe(agentClient, formatProfile);
-
-  useEffect(() => {
-    if (error) {
-      console.error("Error fetching user data:", error);
-    }
-  }, [error]);
+  if (error) return <div>Error: {error}</div>;
+  if (!me) return <div>Loading...</div>;
 
   return (
     <div>
-      <h1>User Profile</h1>
-      {me && (
-        <div>
-          <p>Name: {me.name}</p>
-          <p>Email: {me.email}</p>
-          <p>Status: {status}</p>
-        </div>
-      )}
-      {profile && (
-        <div>
-          {/* Render profile data here */}
-        </div>
-      )}
-      <button onClick={reload}>Reload Data</button>
+      <h2>{profile?.name}</h2>
+      <p>{profile?.bio}</p>
+      <p>Status: {status.isUnlocked ? 'Unlocked' : 'Locked'}</p>
     </div>
   );
-};
-
-export default MyComponent;
+}
 ```
 
 ## usePerspective
 
-The `usePerspective` hook is a hook that allows to fetching and caching a specific perspective from the AD4M.
+Fetches and subscribes to a single perspective by UUID.
 
-### Props
-- `client`: An instance of `Ad4mClient` representing the client to interact with the AD4M network.
-- `uuid`: A string or a function that returns a string representing the UUID of the perspective.
+```typescript
+import { usePerspective } from '@coasys/ad4m-react-hooks';
 
-### Return Value
-The `usePerspective` hook returns an object with the following properties:
-- `data`: An object containing the fetched perspective and its synchronization status.
+function Perspective({ client, uuid }) {
+  const { data } = usePerspective(client, uuid);
+  const { perspective, synced } = data;
 
-### Example Usage
-```javascript
-import React, { useState, useEffect } from 'react';
-import { usePerspectives } from './usePerspectives';
-import { Ad4mClient, PerspectiveProxy } from '../../index';
-import { usePerspective } from from '@coasys/ad4m/hooks/react';
-
-const MyComponent = () => {
-  const client = new Ad4mClient(); // Initialize your Ad4m client
-  const perspectiveUuid = "some-uuid"; // Provide the UUID of the perspective you want to fetch
-
-  const { data } = usePerspective(client, perspectiveUuid);
-
-  useEffect(() => {
-    if (data.perspective) {
-      console.log("Fetched perspective:", data.perspective);
-      console.log("Synced:", data.synced);
-    }
-  }, [data]);
+  if (!perspective) return <div>Loading...</div>;
 
   return (
     <div>
-      {/* Render your component using the fetched perspective data */}
+      <h2>{perspective.name}</h2>
+      <p>Synced: {synced ? 'Yes' : 'No'}</p>
+      <p>UUID: {perspective.uuid}</p>
     </div>
   );
-};
-
-export default MyComponent;
+}
 ```
 
 ## usePerspectives
 
-The `usePerspectives` hook is a hook that allows to fetching and caching all the perspectives from the AD4M.
+Provides access to all perspectives and handles real-time updates.
 
-### Props
-- `client`: An instance of `Ad4mClient` representing the client to interact with the AD4M network.
+```typescript
+import { usePerspectives } from '@coasys/ad4m-react-hooks';
 
-### Return Value
-The `usePerspectives` hook returns an object with the following properties:
-- `perspectives`: An object containing all fetched perspectives, indexed by their UUIDs.
-- `neighbourhoods`: An object containing only the fetched perspectives that have a shared URL, indexed by their UUIDs.
-- `onLinkAdded`: A function to register a callback to be called when a link is added to any perspective.
-- `onLinkRemoved`: A function to register a callback to be called when a link is removed from any perspective.
-
-### Example Usage
-```javascript
-import React, { useEffect } from "react";
-import { Ad4mClient } from "../../index";
-import { usePerspectives } from from '@coasys/ad4m/hooks/react';
-
-const MyComponent = () => {
-  const client = new Ad4mClient(); // Initialize your Ad4m client
+function PerspectivesList({ client }) {
   const { perspectives, neighbourhoods, onLinkAdded, onLinkRemoved } = usePerspectives(client);
 
   useEffect(() => {
-    // Example of registering a callback for link added event
-    const linkAddedCallback = (perspective, link) => {
-      console.log("Link added to perspective:", perspective.uuid);
-      console.log("Link details:", link);
+    const handleNewLink = (perspective, link) => {
+      console.log(`New link in ${perspective.name}:`, link);
     };
-    onLinkAdded(linkAddedCallback);
-
-    // Example of registering a callback for link removed event
-    const linkRemovedCallback = (perspective, link) => {
-      console.log("Link removed from perspective:", perspective.uuid);
-      console.log("Link details:", link);
-    };
-    onLinkRemoved(linkRemovedCallback);
-
-    return () => {
-      // Clean up by removing the registered callbacks
-      onLinkAdded(linkAddedCallback);
-      onLinkRemoved(linkRemovedCallback);
-    };
-  }, [onLinkAdded, onLinkRemoved]);
+    onLinkAdded(handleNewLink);
+    return () => onLinkRemoved(handleNewLink);
+  }, []);
 
   return (
     <div>
-      <h1>Perspectives</h1>
       <h2>All Perspectives</h2>
       <ul>
-        {Object.values(perspectives).map((perspective) => (
-          <li key={perspective.uuid}>{perspective.uuid}</li>
+        {Object.values(perspectives).map(p => (
+          <li key={p.uuid}>{p.name}</li>
         ))}
       </ul>
+      
       <h2>Neighbourhoods</h2>
       <ul>
-        {Object.values(neighbourhoods).map((neighbourhood) => (
-          <li key={neighbourhood.uuid}>{neighbourhood.uuid}</li>
+        {Object.values(neighbourhoods).map(p => (
+          <li key={p.uuid}>{p.name}</li>
         ))}
       </ul>
     </div>
   );
-};
-
-export default MyComponent;
+}
 ```
 
 ## useSubject
 
-The `useSubject` hook is a hook that allows you to interact with a single subject instance and listen to any changes on that instance.
+Manages state for a single subject instance within a perspective.
 
-### Props
-- `id`: A string representing the unique identifier of the subject.
-- `perspective`: An instance of `PerspectiveProxy` representing the perspective containing the subject.
-- `subject`: A string or a class representing the type of subject.
+```typescript
+import { useSubject } from '@coasys/ad4m-react-hooks';
 
-### Return Value
-The `useSubject` hook returns an object with the following properties:
-- `entry`: The fetched subject data.
-- `error`: Any error encountered during data fetching.
-- `mutate`: A function to mutate the shared/cached data for all subscribers.
-- `repo`: An instance of `SubjectRepository` for interacting with the subject data.
-- `reload`: A function to trigger a re-fetch of the subject data.
-
-### Example Usage
-```javascript
-import { useState, useEffect } from "react";
-import { PerspectiveProxy, LinkExpression } from "../../index";
-import { useSubject } from from '@coasys/ad4m/hooks/react'; // SDNA class
-
-const MyComponent = () => {
-  const perspective = new PerspectiveProxy(); // Initialize your perspective
-  const subjectId = "some-unique-id"; // Provide the ID of the subject you want to fetch
-  const subjectType = "SomeSubject"; // Provide the type of the subject
-  const { entry, error, reload } = useSubject({
-    id: subjectId,
-    perspective: perspective,
-    subject: subjectType, // SDNA Class
+function TodoItem({ perspective, id }) {
+  const { entry, error, repo, reload } = useSubject({
+    id,
+    perspective,
+    subject: 'Todo'
   });
 
-  useEffect(() => {
-    if (error) {
-      console.error("Error fetching subject data:", error);
-    }
-  }, [error]);
+  if (error) return <div>Error: {error}</div>;
+  if (!entry) return <div>Loading...</div>;
 
   return (
     <div>
-      <h1>Subject Data</h1>
-      {entry && (
-        <div>
-          <p>ID: {entry.id}</p>
-          <p>Timestamp: {entry.timestamp}</p>
-          <p>Author: {entry.author}</p>
-          {/* Render additional subject data here */}
-        </div>
-      )}
-      <button onClick={reload}>Reload Data</button>
+      <h3>{entry.title}</h3>
+      <p>{entry.description}</p>
+      <button onClick={() => repo.remove(id)}>Delete</button>
+      <button onClick={reload}>Refresh</button>
     </div>
   );
-};
-
-export default MyComponent;
+}
 ```
 
 ## useSubjects
 
-The `useSubjects` hook that allows to listen to all the subject instances of a subject class.
+Manages state for multiple subject instances with filtering and pagination.
 
-### Props
-- `source`: A string representing the source of the subjects.
-- `perspective`: An instance of `PerspectiveProxy` representing the perspective containing the subjects.
-- `subject`: A class or a string representing the type of the subjects.
-- `query` (optional): An object representing query options for fetching subjects.
+```typescript
+import { useSubjects } from '@coasys/ad4m-react-hooks';
 
-### Return Value
-The `useSubjects` hook returns an object with the following properties:
-- `entries`: An array of fetched subject data.
-- `error`: Any error encountered during data fetching.
-- `mutate`: A function to mutate the shared/cached data for all subscribers.
-- `setQuery`: A function to update the query options for fetching subjects.
-- `repo`: An instance of `SubjectRepository` for interacting with the subject data.
-- `isLoading`: A boolean indicating whether data is currently being fetched.
-- `reload`: A function to trigger a re-fetch of the subject data.
-- `isMore`: A boolean indicating whether there are more subjects available to fetch based on query options.
-
-### Example Usage
-```javascript
-import { useState, useEffect } from "react";
-import { PerspectiveProxy, LinkExpression } from "../../index";
-import { useSubjects } from from '@coasys/ad4m/hooks/react'; 
-
-const MyComponent = () => {
-  const perspective = new PerspectiveProxy(); // Initialize your perspective
-  const source = "some-source"; // Provide the source of the subjects
-
-  const { entries, error, isLoading, reload, isMore, setQuery } = useSubjects({
-    source: source,
-    perspective: perspective,
-    subject: subjectType, // SDNA Class
-    query: { page: 1, size: 10, infinite: false, uniqueKey: "uniqueKey" }
+function TodoList({ perspective }) {
+  const { entries, error, repo, isLoading, isMore, setQuery } = useSubjects({
+    perspective,
+    subject: 'Todo',
+    source: 'ad4m://self',
+    query: {
+      page: 1,
+      size: 10,
+      infinite: false
+    }
   });
 
-  useEffect(() => {
-    if (error) {
-      console.error("Error fetching subjects data:", error);
-    }
-  }, [error]);
+  if (error) return <div>Error: {error}</div>;
+  if (isLoading) return <div>Loading...</div>;
 
   return (
     <div>
-      <h1>Subjects Data</h1>
-      {isLoading ? (
-        <p>Loading...</p>
-      ) : (
-        <ul>
-          {entries.map(entry => (
-            <li key={entry.id}>
-              {/* Render subject data here */}
-            </li>
-          ))}
-        </ul>
+      {entries.map(todo => (
+        <div key={todo.id}>
+          <h3>{todo.title}</h3>
+          <p>{todo.description}</p>
+        </div>
+      ))}
+      {isMore && (
+        <button onClick={() => setQuery(prev => ({ ...prev, page: prev.page + 1 }))}>
+          Load More
+        </button>
       )}
-      <button onClick={reload}>Reload Data</button>
-      {isMore && <button onClick={() => setQuery({ ...query, page: query.page + 1 })}>Load More</button>}
     </div>
   );
-};
-
-export default MyComponent;
+}
 ```
+
+## Best Practices
+
+1. **Always handle loading and error states**
+   ```typescript
+   if (error) return <ErrorComponent error={error} />;
+   if (!data) return <LoadingComponent />;
+   ```
+
+2. **Clean up subscriptions**
+   ```typescript
+   useEffect(() => {
+     const callback = (perspective, link) => { /* ... */ };
+     onLinkAdded(callback);
+     return () => onLinkRemoved(callback);
+   }, []);
+   ```
+
+3. **Use formatters for consistent data structure**
+   ```typescript
+   const formatter = (links) => ({
+     name: links.find(l => l.data.predicate === 'name')?.data.target,
+     bio: links.find(l => l.data.predicate === 'bio')?.data.target
+   });
+   ```
+
+4. **Leverage caching**
+   ```typescript
+   // The hooks handle caching automatically
+   const { data: perspective1 } = usePerspective(client, uuid1);
+   const { data: perspective2 } = usePerspective(client, uuid2);
+   ```
+
+5. **Use TypeScript for better type safety**
+   ```typescript
+   interface TodoSubject {
+     id: string;
+     title: string;
+     description: string;
+   }
+
+   const { entries } = useSubjects<TodoSubject>({
+     perspective,
+     subject: 'Todo'
+   });
+   ```

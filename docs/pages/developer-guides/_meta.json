@@ -1,5 +1,6 @@
 {
     "model-classes": "Defining and using Model Classes",
-    "cli": "Using the AD4M CLI",
-    "hooks": "AD4M React hooks"
+    "hooks": "Hooking up models to the UI",
+    "ai": "Local AI inference with AD4M",
+    "cli": "Using the AD4M CLI"
 }
