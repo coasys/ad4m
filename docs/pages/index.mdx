@@ -47,9 +47,24 @@ Using Holochain for it's core backbone, each instance doesn’t just store data�
 
 Practically, this means every developer’s user runs their own AD4M node. Install it, configure it (e.g., via a RuntimeConfig JSON), and it spins up a process holding their private keys, syncing their Perspectives, and running Language code—like a lightweight, personal cloud. A UI might then query:
 ```javascript
-const ad4mClient = await getAd4mClient("ws://localhost:4000");
-const perspective = await ad4mClient.perspective.byUUID("2f168edc-...");
-console.log(perspective.links); // RDF triples: [{source: "me", predicate: "posted", target: "QmXyz123://post456"}]
+// Initialize the client
+const ad4mClient = new Ad4mClient("ws://localhost:4000", false);
+
+// Get the current agent
+const agent = await ad4mClient.agent.me();
+console.log(agent.did); // did:key:z6Mk...
+
+// Create and work with a perspective
+const perspective = await ad4mClient.perspective.add("MyPerspective");
+const link = await perspective.add(new Link({
+  source: "test://source",
+  predicate: "test://predicate", 
+  target: "test://target"
+}));
+
+// Query links
+const links = await perspective.get({} as LinkQuery);
+console.log(links); // [{source: "test://source", predicate: "test://predicate", target: "test://target"}]
 ```
 This spanning layer doesn’t replace the internet—it augments it, giving agents control over their data and connections while enabling apps to tap into a distributed, interoperable network. AD4M is the engine behind a user’s digital agency, the glue for ecosystem synergy, and the foundation for Collective Intelligence—all in one local instance.
 
@@ -97,9 +112,17 @@ The true genius of AD4M’s Language system lies in its evolvability, driven by 
 This bootstrap Language acts as a registry and distribution mechanism: developers create a custom Language (e.g., my-social-app), its code is hashed (e.g., QmCustom321), 
 and it’s published as an Expression at language://QmCustom321. Other agents can then fetch and install it:
 ```javascript
-const newLanguage = await ad4mClient.expression.get("language://QmCustom321");
-await ad4mClient.languages.install(newLanguage);
-console.log(await ad4mClient.languages.all()); // Includes "my-social-app" at QmCustom321
+// Publish a new language
+const languageMeta = {
+  name: "my-social-app",
+  description: "A custom social app language"
+};
+const published = await ad4mClient.languages.publish("./build/bundle.js", languageMeta);
+console.log(published.address); // QmCustom321
+
+// Get all installed languages
+const languages = await ad4mClient.languages.all();
+console.log(languages); // Includes the newly published language
 ```
 
 This Language installation process happens automatically when AD4M tries to resolve an Expression of a new Language.
@@ -137,11 +160,17 @@ collaboratively edited graphs. Built on the same linked data principles as the s
 ```javascript
 
 const perspective = await ad4mClient.perspective.add("MyCommunity");
-await perspective.addLink({
+
+// Add a link to the perspective
+await perspective.add(new Link({
   source: "agent123",
   predicate: "memberOf",
   target: "neighbourhood://QmAbc789"
-});
+}));
+
+// Query links
+const links = await perspective.get({} as LinkQuery);
+console.log(links); // [{source: "agent123", predicate: "memberOf", target: "neighbourhood://QmAbc789"}]
 ```
 
 This focus on agent-to-agent relationships, not app boundaries, drives AD4M’s interoperability, making social networks the foundation of its architecture.
@@ -189,52 +218,102 @@ For app developers, writing Prolog directly is optional—AD4M’s Ad4mModel cla
 This TypeScript base class lets you define model classes with properties and relationships, automatically generating the Prolog predicates for 
 Social DNA behind the scenes. Here’s how that same MemberPost concept becomes a model:
 ```typescript
+import { Ad4mModel, ModelOptions, Property, Collection, Flag, Optional, ReadOnly } from "@coasys/ad4m";
 
-import { Ad4mModel, Link, property, link } from "@coasys/ad4m";
+@ModelOptions({
+    name: "Todo"
+})
+class Todo extends Ad4mModel {
+    @Property({
+        through: "todo://state",
+        initial: "todo://ready"
+    })
+    state: string = "";
 
-// Define a Post model
-@Ad4mModel("Post")
-class Post {
-  @property("content")
-  content: string;
+    @Optional({
+        through: "todo://has_title",
+        writable: true,
+        resolveLanguage: "literal"
+    })
+    title: string = "";
 
-  @link("postedBy", "Agent")
-  postedBy: string; // Agent DID
+    @ReadOnly({
+        getter: `triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true`
+    })
+    isLiked: boolean = false;
 
-  @link("inNeighbourhood", "Neighbourhood")
-  neighbourhood: string; // Neighbourhood UUID or address
+    @Collection({ through: "todo://comment" })
+    comments: string[] = [];
 
-  // Optional: Custom method leveraging Social DNA
-  async isMemberPost(): Promise<boolean> {
-    const query = `memberPost("${this.id}", "${this.postedBy}", "${this.neighbourhood}")`;
-    const results = await this.queryProlog(query);
-    return results.length > 0;
-  }
+    @Collection({ 
+        through: "flux://entry_type",
+        where: { condition: `triple(Target, "flux://has_reaction", "flux://thumbsup")` }
+    })
+    likedMessages: string[] = [];
+
+    // Static query methods
+    static async all(perspective: PerspectiveProxy): Promise<Todo[]> {
+        return await Todo.findAll(perspective);
+    }
+
+    static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> {
+        return await Todo.findAll(perspective, { 
+            where: { state: "todo://done" }
+        });
+    }
 }
-
-// Usage in an app
-const post = new Post();
-post.content = "Hello, group!";
-post.postedBy = "did:key:z6Mk...";
-post.neighbourhood = "neighbourhood://QmGroup789";
-await post.save(); // Persists to Perspective, generates Prolog
-
-const isValid = await post.isMemberPost();
-console.log(isValid); // True if postedBy is a member
 ```
 
-Behind this, the @Ad4mModel, @property, and @link decorators translate the class into Prolog rules like:
+Behind this, the decorators generate Prolog rules like:
 ```prolog
+subject_class("Todo", c).
+constructor(c, '[{action: "addLink", source: "this", predicate: "todo://state", target: "todo://ready"}]').
+instance(c, Base) :- triple(Base, "todo://state", _).
 
-% Auto-generated by decorators
-post(Id, Content) :- link(Id, "content", Content).
-postedBy(Post, Agent) :- link(Post, "postedBy", Agent).
-inNeighbourhood(Post, Neighbourhood) :- link(Post, "inNeighbourhood", Neighbourhood).
-member(Agent, Neighbourhood) :- link(Agent, "memberOf", Neighbourhood).
-memberPost(Post, Agent, Neighbourhood) :-
-    postedBy(Post, Agent),
-    inNeighbourhood(Post, Neighbourhood),
-    member(Agent, Neighbourhood).
+property(c, "state").
+property_getter(c, Base, "state", Value) :- triple(Base, "todo://state", Value).
+property_setter(c, "state", '[{action: "setSingleTarget", source: "this", predicate: "todo://state", target: "value"}]').
+
+property(c, "title").
+property_resolve(c, "title").
+property_resolve_language(c, "title", "literal").
+property_getter(c, Base, "title", Value) :- triple(Base, "todo://has_title", Value).
+property_setter(c, "title", '[{action: "setSingleTarget", source: "this", predicate: "todo://has_title", target: "value"}]').
+
+property(c, "isLiked").
+property_getter(c, Base, "isLiked", Value) :- triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true.
+
+collection(c, "comments").
+collection_getter(c, Base, "comments", List) :- findall(C, triple(Base, "todo://comment", C), List).
+collection_adder(c, "commentss", '[{action: "addLink", source: "this", predicate: "todo://comment", target: "value"}]').
+collection_remover(c, "commentss", '[{action: "removeLink", source: "this", predicate: "todo://comment", target: "value"}]').
+collection_setter(c, "commentss", '[{action: "collectionSetter", source: "this", predicate: "todo://comment", target: "value"}]').
+
+collection(c, "likedMessages").
+collection_getter(c, Base, "likedMessages", List) :- setof(Target, (triple(Base, "flux://entry_type", Target), triple(Target, "flux://has_reaction", "flux://thumbsup")), List).
+collection_adder(c, "likedMessagess", '[{action: "addLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
+collection_remover(c, "likedMessagess", '[{action: "removeLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
+collection_setter(c, "likedMessagess", '[{action: "collectionSetter", source: "this", predicate: "flux://entry_type", target: "value"}]').
+```
+
+You can then use this model to work with Todo items in a type-safe way:
+```typescript
+// Create a new Todo
+const todo = new Todo(perspective);
+todo.title = "Complete documentation";
+todo.state = "todo://ready";
+await todo.save();
+
+// Query todos
+const allTodos = await Todo.all(perspective);
+const doneTodos = await Todo.allDone(perspective);
+
+// Update a todo
+todo.state = "todo://done";
+await todo.update();
+
+// Delete a todo
+await todo.delete();
 ```
 
 Developers define their app’s data model in familiar TypeScript, and AD4M handles the Social DNA—stored in a Perspective or Neighbourhood—making it both accessible and powerful. This abstraction lets you focus on app logic while Prolog ensures decentralized reasoning scales across the network.
