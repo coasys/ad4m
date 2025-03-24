@@ -1005,7 +1005,7 @@ impl Mutation {
         })
     }
 
-    async fn perspective_keepalive_query(
+    async fn perspective_keep_alive_query(
         &self,
         context: &RequestContext,
         uuid: String,
