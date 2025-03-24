@@ -2,118 +2,14 @@ import { Tab, Tabs } from "nextra-theme-docs";
 
 # Model Classes in AD4M
 
-Model classes in AD4M provide a powerful way to define, store, and query data in your application. They allow you to work with structured data in a type-safe manner while leveraging AD4M's underlying graph-based storage system.
+Model classes in AD4M provide a way to define, store, and query structured data in your application. Let's start with a simple example that we'll build upon:
 
-## Overview
+## Quick Start
 
-Model classes are TypeScript/JavaScript classes that represent entities in your application. Under the hood, each model instance is stored as a subgraph in an AD4M perspective, where properties and relationships are represented as links between nodes. Every node in this graph must be a URL pointing to an Expression in some language.
-
-### Base Expressions and Graph Structure
-
-Each model instance has a unique identifier called a "base expression". This serves as the root node of the subgraph representing that instance. For example, a Recipe instance might have a base expression like `recipe://chocolate-cake-123`, and all its properties and relationships would be stored as links connected to this base expression:
-
-```
-recipe://chocolate-cake-123 -[recipe://name]-> literal://string:"Chocolate Cake"
-recipe://chocolate-cake-123 -[recipe://cookingTime]-> literal://number:45
-recipe://chocolate-cake-123 -[recipe://ingredient]-> ingredient://flour
-recipe://chocolate-cake-123 -[recipe://ingredient]-> ingredient://sugar
-```
-
-### Literals for Simple Values
-
-While every node in an AD4M graph must be an Expression URL, AD4M provides a convenient way to store simple values through Literals. Instead of creating a full language just to store strings or numbers, you can use the built-in Literal language:
+Here's a basic recipe model:
 
 ```typescript
-// Without Literals (complex):
-"expression://languageAddress/expressionHash" // Points to an Expression storing "Chocolate Cake"
-
-// With Literals (simple):
-"literal://string:Chocolate Cake"  // Direct string storage
-"literal://number:42"             // Direct number storage
-"literal://boolean:true"          // Direct boolean storage
-```
-
-### Social DNA and Prolog
-
-When you define a model class, AD4M generates a Social DNA (SDNA) representation in Prolog. This SDNA defines the structure and rules for your model, similar to how SHACL shapes define constraints for RDF graphs. Let's look at a complete example:
-
-<Tabs items={['TypeScript Class', 'Generated Prolog SDNA']}>
-  <Tab>
-    ```typescript
-    @ModelOptions({ name: "Recipe" })
-    class Recipe extends Ad4mModel {
-      @Property({
-        through: "recipe://name",
-        resolveLanguage: "literal",
-        required: true
-      })
-      name: string = "";
-
-      @Collection({ through: "recipe://ingredient" })
-      ingredients: string[] = [];
-    }
-    ```
-  </Tab>
-  <Tab>
-    ```prolog
-    subject_class("Recipe", c).
-    
-    % Constructor defines how new instances are initialized
-    constructor(c, '[
-      {action: "addLink", source: "this", predicate: "recipe://name", target: "literal://string:''"}
-    ]').
-
-    % Instance rule defines what makes a valid Recipe
-    instance(c, Base) :- triple(Base, "recipe://name", _).
-
-    % Property definitions
-    property(c, "name").
-    property_resolve(c, "name").
-    property_resolve_language(c, "name", "literal").
-    property_getter(c, Base, "name", Value) :- triple(Base, "recipe://name", Value).
-    property_setter(c, "name", '[{action: "setSingleTarget", source: "this", predicate: "recipe://name", "target": "value"}]').
-
-    % Collection definitions
-    collection(c, "ingredients").
-    collection_getter(c, Base, "ingredients", List) :- findall(Target, triple(Base, "recipe://ingredient", Target), List).
-    collection_adder(c, "ingredients", '[{action: "addLink", source: "this", predicate: "recipe://ingredient", target: "value"}]').
-    collection_remover(c, "ingredients", '[{action: "removeLink", source: "this", predicate: "recipe://ingredient", target: "value"}]').
-    ```
-  </Tab>
-</Tabs>
-
-### The resolveLanguage Feature
-
-The `resolveLanguage` option tells AD4M how to handle property values:
-
-```typescript
-@Property({
-  through: "recipe://description",
-  resolveLanguage: "literal"  // Store as literal://string:value
-})
-description: string = "";
-
-@Property({
-  through: "recipe://content",
-  resolveLanguage: "markdown"  // Store as markdown://hash
-})
-content: string = "";
-
-@Property({
-  through: "recipe://image",
-  // No resolveLanguage = store raw Expression URLs
-})
-imageUrl: string = "";
-```
-
-When `resolveLanguage` is set to "literal", AD4M automatically converts values to and from Literal URLs. For other languages, it creates and resolves Expressions in that language.
-
-## Defining Models
-
-To define a model, create a class that extends `Ad4mModel` and use the `@ModelOptions` decorator:
-
-```typescript
-import { Ad4mModel, ModelOptions, Property, Collection } from '@coasys/ad4m';
+import { Ad4mModel, ModelOptions, Property } from '@coasys/ad4m';
 
 @ModelOptions({ name: "Recipe" })
 class Recipe extends Ad4mModel {
@@ -122,47 +18,160 @@ class Recipe extends Ad4mModel {
     resolveLanguage: "literal"
   })
   name: string = "";
+}
 
+// Using the model
+const recipe = new Recipe(perspective);
+recipe.name = "Chocolate Cake";
+await recipe.save();
+
+// Reading it back
+const recipes = await Recipe.findAll(perspective);
+console.log(recipes[0].name); // "Chocolate Cake"
+```
+
+Before using any model class, register it with your perspective:
+
+```typescript
+await perspective.ensureSDNASubjectClass(Recipe);
+```
+
+## Basic Concepts
+
+### Properties
+
+Properties are the basic building blocks of your models. They can be required or optional:
+
+```typescript
+@ModelOptions({ name: "Recipe" })
+class Recipe extends Ad4mModel {
+  // Required property
   @Property({
-    through: "recipe://cookingTime",
+    through: "recipe://name",
     resolveLanguage: "literal"
   })
-  cookingTime: number = 0;
+  name: string = "";
+
+  // Optional property
+  @Optional({
+    through: "recipe://description",
+    resolveLanguage: "literal"
+  })
+  description?: string;
+}
+```
+
+### Collections
+
+Collections represent one-to-many relationships:
+
+```typescript
+@ModelOptions({ name: "Recipe" })
+class Recipe extends Ad4mModel {
+  @Property({
+    through: "recipe://name",
+    resolveLanguage: "literal"
+  })
+  name: string = "";
 
   @Collection({ through: "recipe://ingredient" })
   ingredients: string[] = [];
 }
+
+// Using collections
+const recipe = new Recipe(perspective);
+recipe.name = "Chocolate Cake";
+recipe.ingredients = ["flour", "sugar", "cocoa"];
+await recipe.save();
 ```
 
-## Property Types
+## Working with Models
 
-AD4M provides several decorators for defining different types of properties:
-
-### @Property
-For required, writable properties:
+### Creating & Saving
 
 ```typescript
-@Property({
-  through: "recipe://name",     // Required: The predicate URI
-  resolveLanguage: "literal",   // Optional: How to store the value
-  initial: "Untitled"          // Optional: Default value
-})
-name: string = "";
+// Create new instance
+const recipe = new Recipe(perspective);
+recipe.name = "Chocolate Cake";
+await recipe.save();
+
+// Create with specific ID
+const recipe = new Recipe(perspective, "recipe://chocolate-cake");
+await recipe.save();
 ```
 
-### @Optional
-For optional properties that may or may not have a value:
+### Reading & Updating
 
 ```typescript
-@Optional({
-  through: "recipe://description",
-  writable: true,              // Can be modified after creation
-  resolveLanguage: "literal"
-})
-description?: string;
+// Get by ID
+const recipe = new Recipe(perspective, existingId);
+await recipe.get();
+
+// Update
+recipe.name = "Dark Chocolate Cake";
+await recipe.update();
 ```
 
-### @ReadOnly
+### Basic Querying
+
+```typescript
+// Get all recipes
+const allRecipes = await Recipe.findAll(perspective);
+
+// Get with simple conditions
+const recipes = await Recipe.findAll(perspective, {
+  where: { name: "Chocolate Cake" }
+});
+```
+
+## Understanding the Underlying System
+
+Now that you've seen the basics, let's understand how it works under the hood.
+
+### Graph-Based Storage
+
+Each model instance is stored as a subgraph in an AD4M perspective. For example, our recipe is stored as:
+
+```
+recipe://chocolate-cake-123 -[recipe://name]-> literal://string:"Chocolate Cake"
+recipe://chocolate-cake-123 -[recipe://ingredient]-> ingredient://flour
+recipe://chocolate-cake-123 -[recipe://ingredient]-> ingredient://sugar
+```
+
+Every node in this graph is a URL pointing to an Expression in some language.
+
+### Base Expressions
+
+Each model instance has a unique identifier called a "base expression" that serves as the root node of its subgraph. You can specify it or let AD4M generate one:
+
+```typescript
+// Auto-generated base expression
+const recipe = new Recipe(perspective);
+
+// Custom base expression
+const recipe = new Recipe(perspective, "recipe://chocolate-cake-2024-03");
+```
+
+### Literals for Simple Values
+
+AD4M provides Literals for storing simple values without needing a full language:
+
+```typescript
+// These are equivalent:
+recipe.name = "Chocolate Cake";
+// Stored as: literal://string:Chocolate Cake
+
+recipe.cookingTime = 45;
+// Stored as: literal://number:45
+```
+
+## Advanced Features
+
+### Property Types
+
+AD4M provides several specialized property decorators:
+
+#### @ReadOnly
 For computed or immutable properties:
 
 ```typescript
@@ -178,8 +187,8 @@ For computed or immutable properties:
 averageRating: number = 0;
 ```
 
-### @Flag
-For immutable type markers or discriminators:
+#### @Flag
+For immutable type markers:
 
 ```typescript
 @Flag({
@@ -189,18 +198,15 @@ For immutable type markers or discriminators:
 type: string = "";
 ```
 
-### @Collection
-For one-to-many relationships:
+### Advanced Collections
+
+Collections can be filtered and typed:
 
 ```typescript
-// Simple collection
-@Collection({ through: "recipe://ingredient" })
-ingredients: string[] = [];
-
 // Collection of other model instances
 @Collection({
   through: "recipe://comment",
-  where: { isInstance: Comment }  // Only include Comment instances
+  where: { isInstance: Comment }
 })
 comments: Comment[] = [];
 
@@ -212,74 +218,11 @@ comments: Comment[] = [];
 topReviews: string[] = [];
 ```
 
-## Working with Model Instances
+### Advanced Querying
 
-### Creating & Saving
-
-```typescript
-// Create new instance
-const recipe = new Recipe(perspective);
-recipe.name = "Chocolate Cake";
-recipe.ingredients = ["flour", "sugar", "cocoa"];
-await recipe.save();
-
-// Create with specific ID
-const recipe = new Recipe(perspective, "recipe://chocolate-cake");
-await recipe.save();
-
-// Create with source link
-const recipe = new Recipe(perspective, undefined, "cookbook://desserts");
-await recipe.save();
-```
-
-### Reading & Updating
+The query builder provides a fluent interface for complex queries:
 
 ```typescript
-// Get by ID
-const recipe = new Recipe(perspective, existingId);
-await recipe.get();
-
-// Update properties
-recipe.name = "Dark Chocolate Cake";
-await recipe.update();
-
-// Update collections
-recipe.ingredients.push("dark chocolate");
-await recipe.update();
-```
-
-### Deleting
-
-```typescript
-const recipe = await Recipe.findAll(perspective)[0];
-await recipe.delete();
-```
-
-## Querying
-
-AD4M provides multiple ways to query model instances:
-
-### Basic Queries
-
-```typescript
-// Get all instances
-const allRecipes = await Recipe.findAll(perspective);
-
-// Get with conditions
-const recipes = await Recipe.findAll(perspective, {
-  where: { 
-    category: "Dessert",
-    cookingTime: { lt: 30 }
-  },
-  order: { name: "ASC" },
-  limit: 10
-});
-```
-
-### Query Builder
-
-```typescript
-// Fluent interface for complex queries
 const recipes = await Recipe.query(perspective)
   .where({ 
     category: "MainCourse",
@@ -288,61 +231,65 @@ const recipes = await Recipe.query(perspective)
   .order({ createdAt: "DESC" })
   .limit(5)
   .get();
-
-// With pagination
-const { results, totalCount, pageNumber } = await Recipe.query(perspective)
-  .where({ category: "Dessert" })
-  .paginate(10, 1);
 ```
 
-### Custom Query Methods
+### Real-time Updates
 
-You can define custom query methods using the `@InstanceQuery` decorator:
-
-```typescript
-@ModelOptions({ name: "Recipe" })
-class Recipe extends Ad4mModel {
-  // ... properties ...
-
-  // Get all recipes
-  @InstanceQuery()
-  static async all(perspective: PerspectiveProxy): Promise<Recipe[]> { return [] }
-
-  // Get by category
-  @InstanceQuery({ where: { category: "Dessert" }})
-  static async desserts(perspective: PerspectiveProxy): Promise<Recipe[]> { return [] }
-
-  // Custom Prolog condition
-  @InstanceQuery({ 
-    condition: `triple(Instance, "recipe://rating", Rating), Rating > 4` 
-  })
-  static async topRated(perspective: PerspectiveProxy): Promise<Recipe[]> { return [] }
-}
-
-// Usage:
-const desserts = await Recipe.desserts(perspective);
-const topRated = await Recipe.topRated(perspective);
-```
-
-## Real-time Updates
-
-You can subscribe to query results to get real-time updates:
+Subscribe to changes in your data:
 
 ```typescript
-// Subscribe to all cooking recipes
 await Recipe.query(perspective)
   .where({ status: "cooking" })
   .subscribe(recipes => {
-    console.log("Currently being cooked:", recipes);
-  });
-
-// Subscribe to paginated results
-await Recipe.query(perspective)
-  .where({ category: "Dessert" })
-  .paginateSubscribe(10, 1, page => {
-    console.log(`Page ${page.pageNumber}: ${page.results.length} items`);
+    console.log("Currently cooking:", recipes);
   });
 ```
+
+## Under the Hood
+
+### Social DNA and Prolog
+
+When you define a model class, AD4M generates a Social DNA (SDNA) representation in Prolog:
+
+<Tabs items={['TypeScript Class', 'Generated Prolog SDNA']}>
+  <Tab>
+    ```typescript
+    @ModelOptions({ name: "Recipe" })
+    class Recipe extends Ad4mModel {
+      @Property({
+        through: "recipe://name",
+        resolveLanguage: "literal",
+        required: true
+      })
+      name: string = "";
+    }
+    ```
+  </Tab>
+  <Tab>
+    ```prolog
+    subject_class("Recipe", c).
+    
+    constructor(c, '[
+      {action: "addLink", source: "this", predicate: "recipe://name", target: "literal://string:''"}
+    ]').
+
+    instance(c, Base) :- triple(Base, "recipe://name", _).
+
+    property(c, "name").
+    property_resolve(c, "name").
+    property_resolve_language(c, "name", "literal").
+    property_getter(c, Base, "name", Value) :- triple(Base, "recipe://name", Value).
+    property_setter(c, "name", '[{action: "setSingleTarget", source: "this", predicate: "recipe://name", "target": "value"}]').
+    ```
+  </Tab>
+</Tabs>
+
+### Relationship with SHACL and Linked Data
+
+AD4M's model classes share concepts with SHACL (Shapes Constraint Language):
+- Both define property constraints and validation rules
+- Both work with graph-based data
+- AD4M adds TypeScript integration, CRUD operations, and real-time features
 
 ## Best Practices
 
@@ -419,88 +366,6 @@ await Recipe.query(perspective)
    // Bad - Random or meaningless base expression
    const recipe = new Recipe(perspective, "x://123");
    ```
-
-## Advanced Features
-
-### Custom Getters & Setters
-
-You can define custom Prolog logic for getting and setting properties:
-
-```typescript
-@Property({
-  through: "recipe://ingredients",
-  getter: `
-    findall(Ingredient, (
-      triple(Base, "recipe://ingredient", IngredientId),
-      triple(IngredientId, "ingredient://name", Ingredient)
-    ), Value)
-  `,
-  setter: `
-    % Custom setter logic in Prolog
-    Actions = [
-      {"action": "addLink", "source": "this", "predicate": "recipe://ingredient", "target": "value"}
-    ]
-  `
-})
-ingredients: string[] = [];
-```
-
-### Local Storage
-
-You can mark properties or collections to be stored only locally:
-
-```typescript
-@Property({
-  through: "recipe://notes",
-  local: true,              // Won't be shared with network
-  resolveLanguage: "literal"
-})
-privateNotes: string = "";
-```
-
-### Custom Instance Conditions
-
-You can define custom conditions for what constitutes a valid instance:
-
-```typescript
-@ModelOptions({ name: "Recipe" })
-class Recipe extends Ad4mModel {
-  // Custom instance check
-  static isSubjectInstance = [
-    `triple(Base, "recipe://name", _)`,
-    `triple(Base, "recipe://ingredients", _)`
-  ];
-  
-  // ... properties ...
-}
-```
-
-## Relationship with SHACL and Linked Data
-
-AD4M's model classes share many concepts with SHACL (Shapes Constraint Language) and other linked data shape systems:
-
-1. **Shape Definition**: Like SHACL shapes, model classes define:
-   - Required properties (`@Property`)
-   - Optional properties (`@Optional`)
-   - Property constraints (through Prolog rules)
-   - Property types (through `resolveLanguage`)
-
-2. **Validation**: The generated Prolog SDNA ensures:
-   - Required properties are present
-   - Values are of the correct type
-   - Custom validation rules are enforced
-
-3. **Graph Structure**: Both systems:
-   - Define how data should be structured in a graph
-   - Use predicates (links) to connect nodes
-   - Support validation of graph patterns
-
-While SHACL is focused on RDF validation, AD4M model classes provide a more complete solution that includes:
-- TypeScript/JavaScript integration
-- Built-in CRUD operations
-- Real-time subscriptions
-- Custom query methods
-- Local vs. network storage options
 
 ## Error Handling
 
