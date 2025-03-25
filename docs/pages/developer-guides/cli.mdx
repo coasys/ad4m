@@ -1,95 +1,284 @@
-# AD4M CLI
+# AD4M Command Line Tools
 
-This is a cmd-tool (`ad4m`) that uses the Rust implementation of the AD4M GraphQL interface wrapper (https://crates.io/crates/ad4m-client).
-As such, it's a command-line based generic UI intended for development and scripting use and remote-controlling
-of AD4M and all it's features.
+AD4M provides two command-line tools that enable developers to work with AD4M in headless and scripting scenarios:
 
-# Install
+- `ad4m-executor`: A full AD4M node implementation (similar to the Launcher but without UI)
+- `ad4m`: A client tool for interacting with any AD4M executor
 
-`cargo install ad4m`
+## Installation
 
-This command will install two binaries
-- `ad4m` - one for using the client to interact with execuror
-- `ad4m-executor` - one for running the executor
+For build and installation instructions, please refer to the [CLI README](https://github.com/coasys/ad4m/tree/main/cli).
 
-## Usage with executor
+## The AD4M Executor
 
-### `init`
+The `ad4m-executor` binary runs a complete AD4M node, making it ideal for:
+- Server deployments
+- Automated testing
+- CI/CD pipelines
+- Headless applications
+- System integration
 
-This will initialize the ad4m directory & add the default bootstrap seed (run `ad4m-executor help` for more details).
+Unlike the Launcher which provides a GUI, the executor is designed for command-line and programmatic interaction.
 
-Example:
+### Authentication & Security
 
+The executor uses a secure authentication handshake system. When a client attempts to connect, the executor generates a random number that must be used to complete the authentication. This number is printed in the executor's logs.
+
+For automated scenarios where manual authentication is impractical, you can provide an admin credential that bypasses the handshake:
+
+```bash
+ad4m-executor run --admin-credential your-secret-here
 ```
+
+This is particularly useful for:
+- Scripts managing the executor
+- CI/CD pipelines
+- Integration testing
+- Management UIs (the Launcher uses this internally)
+
+### Configuration Parameters
+
+The executor supports various configuration parameters to customize its behavior. Here are the key parameters:
+
+```bash
+# Basic configuration
+ad4m-executor run \
+  --gql-port 12000 \           # Main GraphQL API port (default: 4000)
+  --admin-credential secret \   # Bypass authentication handshake
+  --app-data-path ./data \     # Custom data directory (default: ~/.ad4m)
+  --run-dapp-server true       # Run the DApp server (default: false)
+
+# Holochain-related configuration
+  --hc-admin-port 1234 \       # Holochain admin interface port (default: 1234)
+  --hc-app-port 8888 \         # Holochain app interface port (default: 8888)
+  --hc-use-bootstrap true \    # Use bootstrap service (default: true)
+  --hc-use-proxy true \        # Use proxy for Holochain (default: true)
+  --hc-proxy-url url \         # Custom proxy URL
+  --hc-bootstrap-url url       # Custom bootstrap URL
+```
+
+### Running Multiple Executors
+
+For development and testing, you might want to run multiple AD4M executors on the same machine. Here's how to configure two executors to run simultaneously:
+
+```bash
+# First executor (default ports)
+ad4m-executor run
+
+# Second executor (custom ports)
+ad4m-executor run \
+  --gql-port 14000 \           # Different GraphQL port
+  --hc-admin-port 2234 \       # Different Holochain admin port
+  --hc-app-port 9888 \         # Different Holochain app port
+  --app-data-path ~/.ad4m2     # Separate data directory
+```
+
+When connecting to the second executor with the client, specify the custom GraphQL port:
+
+```bash
+ad4m --executor-url http://localhost:14000 agent me
+```
+
+### Basic Usage
+
+1. Initialize a new AD4M instance:
+```bash
 ad4m-executor init
 ```
+This creates the necessary directory structure and configuration in `~/.ad4m`.
 
-### Run
-
-This command will spawn the executor (run `ad4m-executor help` for more details).
-
-```
+2. Start the executor:
+```bash
 ad4m-executor run
 ```
 
-### Run Local HC Services
-
-This command will run local holochain services like bootstrap service & signaling service for holochain (run `ad4m-executor help` for more details).
-
-```
+3. (Optional) Run local Holochain services:
+```bash
 ad4m-executor run-local-hc-services
 ```
+This starts the bootstrap and signaling services required by Holochain-based languages.
 
-## Usage with client
+## The AD4M Client: A Tutorial
 
-### Agent
-Functions related to local agent can use to generate a new agent, get the current agent etc.
+The `ad4m` client tool provides a complete interface to interact with a running executor. Let's explore its features through practical examples.
 
+### Getting Started
+
+1. First, ensure you have an executor running (see above).
+
+2. For a fresh installation, generate a new agent:
+```bash
+ad4m agent generate
 ```
-ad4m-executor agent <command>
-```
+This will prompt you for a password to encrypt your agent's keys.
 
-### Languages
-See, create, and manage Languages.
-
-```
-ad4m-executor languages <command>
-```
-
-### Perspectives
-Can be used to add, remove and access Perspectives, links, SDNA & classes.
-
-```
-ad4m-executor perspectives <command>
+3. On subsequent starts, unlock your agent:
+```bash
+ad4m agent unlock
 ```
 
-### Neighbourhoods
-Publish perspectives as Neighbourhoods and join Neighbourhoods.
-
+4. View your agent's information:
+```bash
+ad4m agent me
 ```
-ad4m-executor neighbourhoods <command>
-```
+This shows your DID, public perspective, and messaging capabilities.
 
-### Runtime
-Access various states of the local AD4M executor.
+### Working with Perspectives
 
-```
-ad4m-executor runtime <command>
-```
+Perspectives are semantic spaces where you can store and query linked data.
 
-### Expression
-Create and get language expressions.
-
-```
-ad4m-executor expression <command>
+1. Create a new perspective:
+```bash
+ad4m perspectives create
 ```
 
-### Log
-Print the executor log.
-
-```
-ad4m-executor log <command>
+2. List all perspectives:
+```bash
+ad4m perspectives
 ```
 
-For more details on each command, run ad4m-executor \<domain\> help.
+3. Add links to a perspective:
+```bash
+ad4m perspectives add-link <perspective-UUID> "Alice" "knows" "Bob"
+```
+
+4. Query links:
+```bash
+ad4m perspectives query-links <perspective-UUID> --source "Alice"
+```
+
+5. Watch for real-time changes:
+```bash
+ad4m perspectives watch <perspective-UUID>
+```
+
+### Interactive Data Manipulation
+
+The REPL provides an interactive environment for working with perspective data:
+
+```bash
+ad4m perspectives repl <perspective-UUID>
+```
+
+In the REPL, you can:
+```
+# Add links
+add Alice knows Bob
+
+# Query with variables
+?Person knows Bob
+
+# Create subjects
+new Person(alice)
+subject(alice)[name] = "Alice Smith"
+subject(alice)[interests] <= "coding"
+
+# View subject data
+subject(alice)
+
+# Run Prolog queries
+friend(X, Y), hobby(Y, 'coding')
+```
+
+### Managing Languages
+
+Languages in AD4M are pluggable protocols that define how data is stored and shared.
+
+1. List installed languages:
+```bash
+ad4m languages all
+```
+
+2. Get language details:
+```bash
+ad4m languages by-address <language-address>
+```
+
+3. Publish a new language:
+```bash
+ad4m languages publish ./my-language --name "My Language" --description "A custom language"
+```
+
+### Building Communities with Neighborhoods
+
+Neighborhoods are shared spaces built on perspectives and languages.
+
+1. Create a neighborhood:
+```bash
+ad4m neighbourhoods create <perspective-UUID> <link-language>
+```
+This publishes your perspective as a shared space others can join.
+
+2. Join an existing neighborhood:
+```bash
+ad4m neighbourhoods join <neighbourhood-url>
+```
+
+### Runtime Management
+
+Monitor and manage your AD4M node:
+
+1. View runtime information:
+```bash
+ad4m runtime info
+```
+
+2. Manage trusted agents:
+```bash
+# Add trusted agents
+ad4m runtime add-trusted-agents did:key:123...
+
+# List trusted agents
+ad4m runtime trusted-agents
+```
+
+3. Manage friends:
+```bash
+# Add friends
+ad4m runtime add-friends did:key:123...
+
+# List friends
+ad4m runtime friends
+```
+
+4. View logs:
+```bash
+ad4m log
+```
+
+### Expression Management
+
+Work with language-specific expressions:
+
+1. Create an expression:
+```bash
+ad4m expression create <language-address> '{"key": "value"}'
+```
+
+2. Retrieve expressions:
+```bash
+# Get parsed expression
+ad4m expression get <url>
+
+# Get raw data
+ad4m expression get-raw <url>
+```
+
+## Advanced Features
+
+For development and testing:
+
+```bash
+# Generate bootstrap seed
+ad4m dev generate-bootstrap <agent-path> <passphrase> <seed-proto>
+
+# Test expression language
+ad4m dev publish-and-test-expression-language <language-path> <data>
+```
+
+For a complete list of commands and their options:
+```bash
+ad4m --help
+ad4m <command> --help
+```
 
