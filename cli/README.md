@@ -182,6 +182,66 @@ ad4m expression get <url>
 ad4m expression get-raw <url>
 ```
 
+## Interactive REPL
+
+AD4M provides an interactive REPL (Read-Eval-Print Loop) for working with perspectives. The REPL supports both Prolog-style queries and direct commands for managing subjects and links.
+
+To enter the REPL for a perspective:
+```bash
+ad4m perspectives repl <perspective-UUID>
+```
+
+### REPL Commands
+
+#### Link Management
+```
+# Add a new link
+add <source> <predicate> <target>
+
+# Query links
+?<source> <predicate> <target>
+```
+Any of the terms can be variables (starting with uppercase letters) or concrete values.
+
+#### Subject Management
+```
+# Create a new subject
+new <class>(<base>)
+
+# Set a property on a subject
+subject(<base>)[<property>] = <value>
+
+# Add a value to a collection property
+subject(<base>)[<collection>] <= <value>
+
+# View subject details
+subject(<base>)
+```
+
+#### Class Management
+```
+# List all subject classes
+classes
+
+# Show DNA/schema of a class
+sdna <class>
+```
+
+#### Prolog Queries
+The REPL also functions as a Prolog shell where you can run any valid Prolog query against the perspective's knowledge base.
+
+Example queries:
+```prolog
+# Find all subjects of a class
+subject(X, 'Person')
+
+# Find properties of subjects
+hasProperty(Subject, 'name', Name)
+
+# Complex relationship queries
+friend(X, Y), hobby(Y, 'coding')
+```
+
 ## Advanced Usage
 
 ### Development Commands
