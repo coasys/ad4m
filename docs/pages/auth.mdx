@@ -1,10 +1,43 @@
-# Authentication
+# Authentication & Capabilities
 
-Apps need to be granted capabilities to be able to access your agents data.
+## Overview
 
-To avoid the complexity of setting up this authentication flow [ad4m-connect](https://github.com/perspect3vism/ad4m/tree/main/connect)
-will do all of this for you and just deliver an initialized and usable
-[Ad4mClient](/jsdoc/classes/Ad4mClient) object.
+AD4M uses a capability-based security model to protect user data and control access to agent functionality. Every application that wants to interact with an AD4M executor needs to request specific capabilities, which are then granted (or denied) by the user.
+
+### What are Capabilities?
+
+Capabilities in AD4M are like permission tokens that:
+- Define what data an application can access (which perspectives)
+- Specify what operations an application can perform
+- Are scoped to specific domains and functions
+- Can be revoked by the user at any time
+
+A capability token might grant permissions like:
+- Read access to specific perspectives
+- Write access to create or modify links
+- Ability to create new perspectives
+- Permission to manage agent relationships
+- Access to specific language functions
+
+## Authentication Flow
+
+### Standard Flow
+
+When an application wants to connect to an AD4M executor, it goes through a secure authentication handshake:
+
+1. The application requests access with specific capabilities
+2. The AD4M executor generates a random verification code
+3. The user must confirm the request and enter the code
+4. Upon successful verification, a capability token is issued
+
+This flow ensures that:
+- The user explicitly approves application access
+- The application only gets the permissions it needs
+- The connection between UI and executor is secure
+
+### Using ad4m-connect
+
+The easiest way to implement this flow is using our `ad4m-connect` library:
 
 ```js
 import Ad4mConnect from "@coasys/ad4m-connect";
@@ -14,40 +47,115 @@ const ui = Ad4mConnect({
   appDesc: "This is my first app here.",
   appDomain: "ad4m.dev",
   appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
-  capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
+  capabilities: [{ 
+    with: { domain: "*", pointers: ["*"] }, 
+    can: ["*"] 
+  }],
 });
 
 // .connect() will show the authentication pop up
 ui.connect().then((client) => {
-  // Save the client after authentication is done
+  // Client is now authenticated with requested capabilities
 });
 ```
 
-This will create a popup that takes the agent through the authentication process:
+If ad4m-connect could not find a running AD4M-executor, it will show a screen prompting the user to either download and run
+the AD4M Launcher to provide other connection settings:
 
-![ad4m-connect-1](/images/connect.jpg)
+![ad4m-connect-1](/images/connect1.jpg)
 
-Since all the users's data is stored locally in AD4M Perspectives,
-using a new app/UI and granting it access to all or parts of these perspectives
-and AD4M functionality is potentially risky.
-`ad4m-connect` not only makes it easy for app developers to connect to the users AD4M-executor,
-it also provides a recognizable interface/wizard for the user.
+When ad4m-connect was able to find a running AD4M-executor, it will begin the authentication flow:
+![ad4m-connect-1](/images/connect2.jpg)
 
-The `capabilities` property must hold a string that defines what capability
-(access to which perspectives and interface functions) should be requested.
-This example requests all which might a good first step when starting to familiarize
-yourself with AD4M, but should be restricted to what you really need for a production release.
 
-If the user clicks authorize, `ad4m-connect` will connect to the AD4M-executor and request a capability token.
-This will make the AD4M launcher bring up its pop-up window:
+Clicking on "Authorize" will trigger the request against the AD4M-executor and Launcher will open a pop-up prompting the user
+with the nature of this request:
+- The application requesting access
+- The capabilities being requested
 
-![ad4m-connect-pop-up](/images/authorize.jpg)
+![ad4m-connect-pop-up](/images/authorize1.jpg)
 
-Here the user has to confirm the request to their AD4M instance.
-Next, AD4M will then show a six-digit random secret code that needs to be entered into the app UI.
+If the user approves the request, the Launcher will show a six-digit random secret code that needs to be entered into the app UI.
 That way we have safely established that the network agent initiating the capability request (as seen from
 the AD4M-executor) really is the UI the users wants to use.
+(It could run on an external device, like the user's phone connecting through a proxy server).
 
-Now you are ready to use the AD4MClient to communicate with the agent.
+![ad4m-connect-pop-up](/images/authorize2.jpg)
+### Capability Specification
 
-More info is found in the [docs](https://github.com/perspect3vism/ad4m/tree/main/connect)
+When requesting capabilities, you need to specify:
+
+```js
+{
+  with: {
+    domain: string | "*",     // Which perspective/domain
+    pointers: string[] | "*"  // Which parts of the domain
+  },
+  can: string[] | "*"         // Which operations are allowed
+}
+```
+
+Examples:
+```js
+// Request access to everything (development only)
+{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }
+
+// Request read-only access to a specific perspective
+{ with: { domain: "perspective-uuid", pointers: ["*"] }, can: ["read"] }
+
+// Request specific operations on a domain
+{ with: { domain: "friends", pointers: ["*"] }, can: ["read", "add", "remove"] }
+```
+
+### Admin Credential Override
+
+For automated scenarios or system integration, the authentication handshake can be bypassed using an admin credential:
+
+```js
+// In your application
+const client = new Ad4mClient({
+  adminCredential: "your-secret-here"
+});
+```
+
+This is particularly useful for:
+- CI/CD pipelines
+- Testing environments
+- System services
+- Management interfaces (the AD4M Launcher uses this internally)
+
+To enable this on the executor:
+
+```bash
+ad4m-executor run --admin-credential your-secret-here
+```
+
+⚠️ **Security Note**: The admin credential grants full access to the executor. Use it carefully and never expose it in client-side code or public repositories.
+
+## Best Practices
+
+1. **Request Minimal Capabilities**
+   - Only request permissions your app actually needs
+   - Use specific domains and operations instead of wildcards
+   - Consider read-only access when possible
+
+2. **Handle Authentication States**
+   - Check if capabilities are still valid
+   - Implement reconnection logic
+   - Handle capability revocation gracefully
+
+3. **Secure Storage**
+   - Store capability tokens securely
+   - Never expose admin credentials
+   - Implement token refresh mechanisms
+
+4. **User Experience**
+   - Clearly explain why your app needs certain capabilities
+   - Provide feedback during the authentication process
+   - Handle errors gracefully
+
+## More Information
+
+For more details about implementing authentication in your application:
+- Check the [ad4m-connect documentation](https://github.com/coasys/ad4m/tree/main/connect)
+- See the [Ad4mClient API reference](/jsdoc/classes/Ad4mClient)
