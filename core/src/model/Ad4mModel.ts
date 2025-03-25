@@ -94,7 +94,7 @@ function buildWhereQuery(where: Where = {}): string {
 
   return (Object.entries(where) as [string, WhereCondition][])
     .map(([key, value]) => {
-      const isSpecial = ["author", "timestamp"].includes(key);
+      const isSpecial = ["base", "author", "timestamp"].includes(key);
       const getter = `resolve_property(SubjectClass, Base, "${key}", Value${key}, _)`;
       // const getter = `property_getter(SubjectClass, Base, "${key}", URI), literal_from_url(URI, V, _)`;
       const field = capitalize(key);
