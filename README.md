@@ -1,7 +1,7 @@
-[![Project](https://img.shields.io/badge/Project-AD4M-brightgreen.svg)](http://ad4m.dev/)
+[![Project](https://img.shields.io/badge/Website-Coasys-brightgreen.svg)](http://coasys.org/)
 [![Docs](https://img.shields.io/badge/Docs-AD4M-blue.svg)](http://docs.ad4m.dev/)
 [![License: CAL 1.0](https://img.shields.io/badge/License-CAL%201.0-blue.svg)](https://github.com/holochain/cryptographic-autonomy-license)
-[![Discord](https://img.shields.io/discord/894280941516652564?label=Discord)](https://discord.com/invite/fYGVM66jEz)
+[![Discord](https://img.shields.io/discord/887669548969517056?label=Discord)](https://discord.com/invite/fYGVM66jEz)
 [![Twitter Follow](https://img.shields.io/twitter/follow/ad4m_layer?style=social)](https://x.com/ad4m_layer)
 
 # AD4M: Agent-Centric Distributed Application Meta-ontology
