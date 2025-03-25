@@ -29,6 +29,41 @@ AD4M solves these challenges by:
 
 Think of AD4M as the missing piece in the internet stack – one that transcends mere data exchange to enable meaningful collaboration between sovereign agents, regardless of the underlying protocols or platforms they use.
 
+## Architecture & Execution Strategy
+
+AD4M represents a sophisticated agent-centric node – a "second brain" that runs on the user's local machine. Unlike traditional web applications that rely on central servers, AD4M puts powerful server capabilities directly in the hands of users:
+
+### Local-First Sovereign Node
+
+Each AD4M instance is a full-featured data node that:
+- Runs entirely on the user's machine
+- Maintains the agent's digital identity and keys
+- Stores and manages their semantic data
+- Connects to other agents through various protocols
+- Acts as their sovereign compute environment
+
+### Technical Sophistication
+
+AD4M integrates several powerful technologies into a cohesive whole:
+- [Holochain](https://github.com/holochain/holochain): For distributed hash tables and p2p networking 
+- [Deno & V8](https://github.com/denoland/deno): For secure JavaScript/TypeScript execution
+- [Scryer-Prolog](https://github.com/mthom/scryer-prolog): For semantic reasoning and queries
+- [Juniper](https://github.com/graphql-rust/juniper): For GraphQL API capabilities
+- [Kalosm](https://github.com/floneum/floneum): For AI model inference with Candle
+- [rustql](https://github.com/rust-corpus/rustql): For local data persistence
+
+This complexity is necessary to provide a rich, sovereign computing environment – but it's all packaged to run smoothly on personal devices.
+
+### Self-Recursive Bootstrap
+
+AD4M achieves extensibility through a clever self-recursive design:
+1. The three core concepts (Agents, Languages, Perspectives) are themselves implemented as Languages
+2. This means the very foundations of AD4M can be extended and evolved
+3. New implementations of these core Languages can be created and adopted
+4. The system becomes an evolvable, living network
+
+This architectural pattern enables AD4M to grow into a true "global brain" – a distributed intelligence layer that can adapt and evolve without central coordination.
+
 ## Key Concepts
 
 ### 1. Languages: Universal Protocol Adapters
@@ -37,9 +72,9 @@ Languages in AD4M are pluggable protocols that define how information is stored 
 
 ```typescript
 // Languages can wrap any protocol or storage system
-const ipfsLanguage = "language://QmIPFSHash";  // Store on IPFS
-const solidLanguage = "language://QmSolidHash"; // Store on Solid pods
-const webLanguage = "language://web";           // Regular web URLs
+const ipfsLanguage = "QmIPFSHash";   // Store on IPFS
+const solidLanguage = "QmSolidHash"; // Store on Solid pods
+const webLanguage = "https";         // Regular web URLs
 
 // Create and share data through any Language
 const expression = await ad4m.expression.create(
@@ -202,7 +237,7 @@ ad4m/
 
 Key Components:
 - **core**: Core types, `Ad4mClient`, and GraphQL schema. Published as `@coasys/ad4m` npm package.
-- **rust-executor**: Main AD4M executor with GraphQL server, Deno runtime, Holochain integration, and Prolog engine.
+- **rust-executor**: Main AD4M executor with GraphQL server, Deno runtime, Holochain integration, AI model inference and Prolog engine.
 - **rust-client**: Rust implementation of `Ad4mClient`. Published as `ad4m-client` on crates.io.
 - **executor**: Core JavaScript code managing agent state, perspectives, languages, and expressions.
 - **bootstrap-languages**: Essential languages for AD4M functionality (like agent identity, language publishing).
