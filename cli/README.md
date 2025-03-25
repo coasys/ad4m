@@ -1,149 +1,200 @@
-# AD4M Executables
+# AD4M Command Line Tools
 
 ![](screenshots/banner.png)
 
-This package contains command line tools for the Agent-Centric Distributed Application Meta-ontology (ADAM, aka AD4M), a framework for building interoperable, decentralized applications. It provides developers with the tools to control and script the functionalities of AD4M, leveraging the power of the Rust implementation of the AD4M GraphQL interface wrapper.
+## Overview
 
-The purpose of these CLIs is development, scripting, and remote control of AD4M features,
-as well as programatic setup and running of ADAM agents.
+The AD4M (Agent-Centric Distributed Application Meta-ontology) Command Line Tools provide powerful interfaces for interacting with the AD4M ecosystem. These tools enable developers to:
+
+- Control and manage AD4M agents
+- Create and manage perspectives (semantic data spaces)
+- Work with languages (pluggable protocols)
+- Build and join neighborhoods (shared spaces)
+- Manage runtime configurations
+- Debug and develop AD4M applications
+
+The package includes two main executables:
+- `ad4m`: A client for interacting with the AD4M executor
+- `ad4m-executor`: The core executor that runs your AD4M agent
 
 ## Installation
 
-This crate is published to crates.io and can be installed via `cargo install ad4m`. 
-But several dependent crates have non-Rust dependencies which need to be installed.
+### Prerequisites
 
-### Build dependencies
-
-#### Rust version
+#### Rust Version
 Make sure you have `rustup` installed (follow instructions [here](https://www.rust-lang.org/tools/install)).
-Use rustup to install the latest stable Rust version.
-
-ADAM currently needs at least Rust version:
+AD4M requires Rust version 1.84.0 or later. Install it using:
+```bash
+rustup install 1.84.0
+rustup default 1.84.0
 ```
-1.81.0
-```
 
-#### Rust WASM target for Holochain based Languages
-For building Holochain DNAs, which are part of the ADAM bootstrap languages included here
-you need your Rust toolchain to be able to compile to WASM.
-
-Run the following command to install the WASM target:
-```
+#### Rust WASM Target
+For building Holochain DNAs (required for AD4M bootstrap languages), install the WASM target:
+```bash
 rustup target add wasm32-unknown-unknown
 ```
 
 #### Go
-Holochain currently depends on [Go](https://go.dev) being installed at version 1.21 or later.
-Follow the installation instructions on [https://go.dev/doc/install](https://go.dev/doc/install).
+AD4M depends on [Go](https://go.dev) version 1.22.0 or later.
+Follow the installation instructions at [https://go.dev/doc/install](https://go.dev/doc/install).
 
-Make sure `go` is in your `$PATH` before you continue. Output of `go version` should look like this:
-```
-go version go1.21.0 darwin/arm64
+Verify your Go installation:
+```bash
+go version  # Should show 1.22.0 or later
 ```
 
-#### Platform specific dependencies
-Run the following commands depending on your operating system to get all the system libraries installed that are needed by some of the Rust crates that Holochain and ADAM depend on.
+#### Platform-Specific Dependencies
 
 ##### macOS
-Ensure you have [Homebrew](https://brew.sh/) installed and then run:
-```
+Using [Homebrew](https://brew.sh/):
+```bash
 brew install protobuf cmake
 ```
 
 ##### Linux (Ubuntu / Debian)
-```
+```bash
 sudo apt-get update
-sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake
+sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake fuse libfuse2 mesa-utils mesa-vulkan-drivers libsoup-3.0-dev javascriptcoregtk-4.1-dev webkit2gtk-4.1-dev librust-alsa-sys-dev
 ```
 
 ##### Windows
-Ensure you have [Chocolatey](https://chocolatey.org/) installed and then run:
-```
+Using [Chocolatey](https://chocolatey.org/):
+```bash
 choco install strawberryperl protoc cmake curl cygwin gnuwin32-m4 msys2 make mingw
 ```
 
+### Installing AD4M
 
-### Install command
-Install AD4M using Cargo, Rust's package manager:
-```
+Install the AD4M tools using Cargo:
+```bash
 cargo install ad4m
 ```
 
-This command installs two binaries:
-- `ad4m`: The client for interacting with the executor.
-- `ad4m-executor`: The executor that runs the AD4M agent.
-
-
 ## Getting Started
 
-Initialize the AD4M executor with:
-```
+1. Initialize the AD4M executor:
+```bash
 ad4m-executor init
 ```
 
-This will create a new agent/config directory in ~/.ad4m.
-
-Run the executor (i.e. the ADAM agent/node) using:
-```
+2. Run the executor:
+```bash
 ad4m-executor run
 ```
 
-## Interacting with AD4M
+## Core Commands
 
-Use the `ad4m` client to interact with the executor. Here are some common commands:
-
-### Generate and unlock agent
-A fresh install will first need a new agent to be created, which requires a password
-which is used to encrypt the agent's keys:
-
-```
+### Agent Management
+```bash
+# Generate a new agent
 ad4m agent generate
-```
 
-This command will prompt for a new password.
-Future runs of the executor require the wallet to be unlocked with
-
-```
+# Unlock your agent
 ad4m agent unlock
-```
-providing the same password.
 
+# View agent status
+ad4m agent status
 
-Show all perspectives:
+# View your agent info
+ad4m agent me
+
+# Lock your agent
+ad4m agent lock
+
+# Watch agent status changes
+ad4m agent watch
 ```
+
+### Perspectives
+```bash
+# List all perspectives
 ad4m perspectives
-```
 
-### Query Perspectives
-![](screenshots/perspectives.png)
-
-Query links of a perspective by its UUID:
-```
+# Query links in a perspective
 ad4m perspectives query-links <perspective-UUID>
-```
 
-![](screenshots/query-links.png)
-
-Watch changes of a perspective in real-time:
-```
+# Watch perspective changes in real-time
 ad4m perspectives watch <perspective-UUID>
+
+# Create a new perspective
+ad4m perspectives create
+
+# Add links to a perspective
+ad4m perspectives add-link <perspective-UUID> <source> <predicate> <target>
 ```
 
-### Creating neighbourhoods
-![](screenshots/watch.png)
+### Languages
+```bash
+# List all installed languages
+ad4m languages all
 
-Clone and publish a language from a template:
-```
-ad4m languages apply-template-and-publish <language-template-hash>
+# Get info about a specific language
+ad4m languages by-address <language-address>
+
+# Publish a new language
+ad4m languages publish <path> --name <name> --description <desc>
+
+# Apply template and publish
+ad4m languages apply-template-and-publish <source> <template-data>
+
+# Remove a language
+ad4m languages remove <address>
 ```
 
-Publish a perspective as a Neighbourhood:
-```
-ad4m neighbourhoods create <perspective-UUID> <neighbourhood-template-hash>
+### Neighborhoods
+```bash
+# Create a new neighborhood
+ad4m neighbourhoods create <perspective-UUID> <link-language>
+
+# Join an existing neighborhood
+ad4m neighbourhoods join <url>
 ```
 
-For a full list of commands and their explanations, use:
+### Runtime Management
+```bash
+# View runtime info
+ad4m runtime info
+
+# Manage trusted agents
+ad4m runtime add-trusted-agents <agents...>
+ad4m runtime delete-trusted-agents <agents...>
+ad4m runtime trusted-agents
+
+# Manage friends
+ad4m runtime add-friends <agents...>
+ad4m runtime remove-friends <agents...>
+ad4m runtime friends
+
+# View executor logs
+ad4m log
 ```
+
+### Expression Management
+```bash
+# Create a new expression
+ad4m expression create <language-address> <content>
+
+# Get expression details
+ad4m expression get <url>
+
+# Get raw expression data
+ad4m expression get-raw <url>
+```
+
+## Advanced Usage
+
+### Development Commands
+```bash
+# Generate bootstrap seed
+ad4m dev generate-bootstrap <agent-path> <passphrase> <seed-proto>
+
+# Test expression language
+ad4m dev publish-and-test-expression-language <language-path> <data>
+```
+
+For a complete list of commands and their options:
+```bash
 ad4m --help
 ```
 
@@ -155,13 +206,16 @@ Contributions to AD4M are welcome! Please read our contributing guidelines and s
 
 AD4M is licensed under the [CAL-1.0](LICENSE).
 
+## More Information
+
+For more information about AD4M:
+- Visit our [official website](https://coasys.org/adam)
+- Read the [core documentation](https://docs.ad4m.dev)
+- Join our [community](https://discord.com/invite/fYGVM66jEz)
+
 ## Screenshots
 
 ![](screenshots/banner.png)
 
 ![](screenshots/query-links.png)
 ![](screenshots/watch.png)
-
-## More Information
-
-For more information on AD4M and ADAM, visit our [official website](https://ad4m.dev) or check out the [core documentation](https://docs.ad4m.dev).
