@@ -1184,13 +1184,15 @@ impl PerspectiveInstance {
                 log::error!("Error spawning Prolog engine: {:?}", e)
             };
 
-            let fact_rebuild_needed = !diff.removals.is_empty()
-                || diff.additions.iter().any(|link| is_sdna_link(&link.data));
+            let fact_rebuild_needed = diff.additions.iter().any(|link| is_sdna_link(&link.data));
 
             let did_update = if !fact_rebuild_needed {
                 let mut assertions: Vec<String> = Vec::new();
                 for addition in &diff.additions {
                     assertions.push(generic_link_fact("assert_link_and_triple", addition));
+                }
+                for removal in &diff.removals {
+                    assertions.push(generic_link_fact("retract_link_and_triple", removal));
                 }
 
                 let query = format!("{}.", assertions.join(","));

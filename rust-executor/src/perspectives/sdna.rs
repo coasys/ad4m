@@ -494,6 +494,18 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
     assert_link_and_triple(Source, Predicate, Target, Timestamp, Author) :-
         (assert_link(Source, Predicate, Target, Timestamp, Author) ; true),
         (assert_triple(Source, Predicate, Target) ; true).
+
+    retract_link(Source, Predicate, Target, Timestamp, Author) :-
+        link(Source, Predicate, Target, Timestamp, Author),
+        retract(link(Source, Predicate, Target, Timestamp, Author)).
+
+    retract_triple(Source, Predicate, Target) :-
+        triple(Source, Predicate, Target),
+        retract(triple(Source, Predicate, Target)).
+
+    retract_link_and_triple(Source, Predicate, Target, Timestamp, Author) :-
+        (retract_link(Source, Predicate, Target, Timestamp, Author) ; true),
+        (retract_triple(Source, Predicate, Target) ; true).
 "#;
     lines.extend(assert_link.split('\n').map(|s| s.to_string()));
 
