@@ -1,128 +1,501 @@
 import { Tab, Tabs } from "nextra-theme-docs";
 import { Callout } from "nextra/components";
 
-# Social DNA
+# Social DNA: Making Social Interaction Patterns Explicit
 
-ADAMs goal is to create a communication infrastructure that enables
-**group agency without imposing a bias on how a group manages itself**.
+## What is Social DNA?
 
-In a social group this could mean many different things like:
+Social DNA represents the core interaction patterns and social contracts within a digital space. Just as biological DNA encodes the rules for how cells interact and function, Social DNA encodes the rules for how agents (users) interact and collaborate in a digital space.
 
-- **Rating systems**: Deciding how a Post or a Comment's rating is calculated.
-- **Access rights**: Allowing certain Agents to do certain actions when certain conditions in the graph are met.
-- **Shared definitions**: Defining data structures in the graph that have a certain meaning.
+Think of it as the "business logic" of social applications, but with a crucial difference: instead of being buried in application code, these patterns are made explicit and separated from both:
+- The storage layer (Languages) - how data is actually stored and shared
+- The UI layer - how these interactions are presented to users
 
-Social DNA enable Neigbourhoods to add shared computer programs that run on the Agents device,
-based on the structure of the graph data. Using [Prolog](https://en.wikipedia.org/wiki/Prolog), a
-turing complete logical programming language, any kind of alorithm can be run based on the
-state of the graph.
+### Why "Social DNA"?
+
+In traditional applications, social interaction patterns are often:
+- Implicit in the application code
+- Tied to specific storage implementations
+- Mixed with UI concerns
+- Hard to modify or extend
+- Not portable between applications
+
+Social DNA makes these patterns:
+- Explicit and declarative
+- Independent of storage details
+- Separated from UI concerns
+- Easy to modify and extend
+- Portable between applications
+
+### Example: A Simple Social Space
+
+Let's look at a common social interaction pattern: posting and liking content. In a traditional app, this might be scattered across:
+- Database schemas
+- API endpoints
+- UI components
+- Business logic
+
+With Social DNA, we can express this as a clear social contract:
+
+```js
+// Define what a "post" means in this space
+const postClass = {
+  properties: {
+    content: "string",
+    author: "did",
+    timestamp: "datetime"
+  },
+  actions: {
+    like: "any agent can like a post once",
+    comment: "any agent can comment on a post",
+    edit: "only the author can edit their post"
+  }
+}
+
+// Define what "trending" means in this space
+const trendingRule = {
+  condition: "post has more than 5 likes in last 24 hours",
+  action: "mark post as trending"
+}
+```
+
+This is just pseudo-code, but it illustrates how Social DNA makes interaction patterns explicit and declarative.
+
+## How Social DNA Works
+
+AD4M implements Social DNA through two main mechanisms:
+
+1. **Subject Classes**: Define what things mean in a space
+   - Graph patterns that represent specific types of data
+   - Properties and relationships between data
+   - Validation rules for data integrity
+
+2. **Flows**: Define what agents can do in a space
+   - Preconditions for actions
+   - State transitions
+   - Effects of actions
+
+Both are implemented using Prolog, a logical programming language perfect for:
+- Pattern matching in graphs
+- Declarative rules
+- Complex reasoning
 
 <Callout type="info" emoji="ℹ️">
   Don't worry if you are unfamiliar with [Prolog](https://en.wikipedia.org/wiki/Prolog). You will normally either
   use AI to write it for you, or you will use some of our abstraction layers to
-  avoid writing Prolog code yourself. (Think of ORMs vs raw SQL, Ad4m comes with its own implementation [Subject Classes](/subject-classes) ).
+  avoid writing Prolog code yourself. (Think of ORMs vs raw SQL, AD4m comes with its own implementation [Model Classes](/developer-guides/model-classes)).
 </Callout>
 
-<details>
-<summary>
-Quick Intro to Prolog
-</summary>
+## Subject Classes: Defining Things
 
-Prolog is a declarative programming language commonly used for logic programming.
-It revolves around defining logical facts and rules to solve problems through logical inference.
-Here's a super quick introduction to the basics of Prolog with code examples:
+### Understanding Subject Classes
 
-**Facts**: Facts are statements that define relationships or properties.
+The term "Subject Class" was deliberately chosen to emphasize the subjective nature of pattern recognition in semantic graphs. Unlike traditional object-oriented programming where classes define objective structures, Subject Classes represent subjective interpretations of graph patterns – different ways of "seeing" meaning in the connections between expressions.
 
-```prolog
-likes(john, pizza).
+#### Subjective Pattern Recognition
+
+Think of a Subject Class as a lens through which an application views and interprets graph patterns:
+- Different apps can have different "opinions" about what constitutes a meaningful pattern
+- The same base expression can be interpreted through multiple Subject Classes
+- Each Subject Class defines what properties and relationships are important to its perspective
+
+For example, consider a base expression representing some content:
+```
+expression://xyz123
 ```
 
-**Rules**: Rules define logical implications or conditions using predicates and logical operators.
+Different applications might interpret this through different Subject Classes:
+- A chat app might see it as a "Message" with replies and reactions
+- A task app might see it as a "Todo" with state and assignments
+- A social app might see it as a "Post" with likes and shares
+- A wiki might see it as a "Document" with citations and revisions
 
-```prolog
-likes(john, X) :- pizza(X).
+Each of these interpretations is equally valid – they're just different subjective lenses on the same underlying graph structure.
+
+#### Subject-Oriented Programming
+
+This approach is inspired by subject-oriented programming, where:
+- Behavior and structure are separated from the base objects
+- Different subjects can have different views of the same object
+- Multiple interpretations can coexist without conflict
+- New interpretations can be added without modifying existing ones
+
+In AD4M, this means:
+- Subject Classes define patterns around base expressions
+- Multiple Subject Classes can match the same expression
+- New Subject Classes can be added without changing existing ones
+- Applications can choose which patterns matter to them
+
+#### Base Expressions and Graph Patterns
+
+Every Subject Class instance is anchored to a base expression, but its properties and relationships are defined by patterns in the surrounding graph:
+```
+Base Expression: expression://xyz123
+                       │
+    ┌───────────────┬──┴──┬───────────────┐
+    │               │     │               │
+  state          author  title         comments
+    │               │     │               │
+  "done"        did:123  "Hi"     [expr1, expr2]
 ```
 
-Variables are denoted with uppercase letters or by starting with an underscore (\_).
-
-**Queries**: You can ask Prolog queries to find solutions that satisfy a
-specific condition or to retrieve information.
-
-```prolog
-?- likes(john, pizza).
-```
-
-Will return `true`
-
-</details>
-
-## Creating Social DNA
-
-Let's say we want to define `top_posts` as any post in the Perspective with **more than 5 likes**.
-
-First let's create an Perspective, and add a post:
-
-```js
-const myPosts = await ad4m.perspective.add("My Posts");
-const expressionURL = await ad4m.expression.create("My first Post", "literal");
-
-myPosts.add({
-  source: "ad4m://self",
-  predicate: "sioc://has_post",
-  target: expressionURL,
-});
-```
-
-Then let's use our Agent's DID to say that we like our own post 10 times:
-
-```js
-const { did } = await ad4m.agent.me();
-
-for (let i = 0; i < 10; i++) {
-  myPosts.add({
-    source: did,
-    predicate: "sioc://likes",
-    target: expressionURL,
-  });
+Different Subject Classes might look for different patterns around this same base:
+```typescript
+// A Todo class looks for state and assignments
+class Todo {
+  state: string;    // Looks for todo://state links
+  assignee: string; // Looks for todo://assigned-to links
 }
+
+// A Post class looks for social interactions
+class Post {
+  likes: string[];     // Looks for social://like links
+  comments: string[];  // Looks for social://comment links
+}
+
+// Both can exist simultaneously on the same base expression
+const todo = await perspective.getSubjectProxy<Todo>(baseExpr, "Todo");
+const post = await perspective.getSubjectProxy<Post>(baseExpr, "Post");
 ```
 
-Great! Now we have one post with 10 likes in our Perspective. Now let's define what `top_comments` mean
-to use in this Perspective:
+Here's a complete example of a Todo class:
 
-```prolog filename="top_posts.pl"
-top_posts(Post) :-
-    triple(Source, "sioc://has_post", Post),
-    link(Source, "sioc://likes", Post, Author, Timestamp),
-    count_likes(Post, Count),
-    Count > 5.
+```prolog
+// Define a Todo class
+subject_class("Todo", c).
 
-count_likes(Post, Count) :-
-    findall(_, link(_, "sioc://likes", Post, _, _), Likes),
-    length(Likes, Count).
+// Constructor - called when creating new instances
+constructor(c, '[{
+    action: "addLink", 
+    source: "this", 
+    predicate: "todo://state", 
+    target: "todo://ready"
+}]').
+
+// Instance check - what makes something a Todo?
+instance(c, Base) :- triple(Base, "todo://state", _).
+
+// Properties
+property(c, "state").
+property_getter(c, Base, "state", Value) :- 
+    triple(Base, "todo://state", Value).
+property_setter(c, "state", '[{
+    action: "setSingleTarget", 
+    source: "this", 
+    predicate: "todo://state", 
+    target: "value"
+}]').
+
+// Resolvable properties (e.g., literal values)
+property(c, "title").
+property_resolve(c, "title").
+property_resolve_language(c, "title", "literal").
+property_getter(c, Base, "title", Value) :- 
+    triple(Base, "todo://has_title", Value).
+
+// Computed properties
+property(c, "isLiked").
+property_getter(c, Base, "isLiked", Value) :- 
+    triple(Base, "flux://has_reaction", "flux://thumbsup"), 
+    Value = true.
+
+// Collections
+collection(c, "comments").
+collection_getter(c, Base, "comments", List) :- 
+    findall(C, triple(Base, "todo://comment", C), List).
+collection_adder(c, "comments", '[{
+    action: "addLink", 
+    source: "this", 
+    predicate: "todo://comment", 
+    target: "value"
+}]').
 ```
 
-After writing the Prolog definition, you can add the definition as Social DNA to any Perspective:
+This defines:
+- What makes something a Todo
+- What properties it has
+- How to get and set those properties
+- What collections it contains
+
+### Using Subject Classes in Code
+
+While the [PerspectiveProxy](/jsdoc/classes/PerspectiveProxy.html) provides low-level methods for working with Subject Classes, 
+we strongly recommend using our high-level [Ad4mModel](/jsdoc/classes/Ad4mModel.html) system
+(described in detail in the [Model Classes](/developer-guides/model-classes) guide). 
+This TypeScript-based approach provides:
+- Automatic Prolog code generation from decorated classes
+- Type safety and IDE support
+- Rich ActiveRecord-style semantics
+- Clean, declarative syntax
+
+Here's how to define and use Subject Classes the recommended way:
+
+```typescript
+import { Ad4mModel, ModelOptions, Property, Optional, Collection } from '@coasys/ad4m';
+
+@ModelOptions({ name: "Todo" })
+class Todo extends Ad4mModel {
+  @Property({
+    through: "todo://state",
+    initial: "todo://ready"
+  })
+  state: string = "";
+
+  @Optional({
+    through: "todo://has_title",
+    writable: true,
+    resolveLanguage: "literal"
+  })
+  title?: string;
+
+  @ReadOnly({
+    through: "flux://has_reaction",
+    getter: `triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true`
+  })
+  isLiked: boolean = false;
+
+  @Collection({ 
+    through: "todo://comment"
+  })
+  comments: string[] = [];
+
+  // Static query methods
+  @InstanceQuery()
+  static async all(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
+
+  @InstanceQuery({ where: { state: "todo://done" }})
+  static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
+}
+
+// Use it with full type safety and ActiveRecord patterns
+const todo = new Todo(perspective);
+todo.state = "todo://doing";
+await todo.save();
+
+// Query with type safety
+const todos = await Todo.all(perspective);
+const doneTodos = await Todo.allDone(perspective);
+```
+
+This approach automatically generates the Prolog code we saw earlier and provides a much richer development experience.
+
+#### Understanding the Lower Level
+
+For a complete understanding, here are the basic PerspectiveProxy methods that power the above abstractions:
+
+```typescript
+// Add the subject class definition to a perspective
+await perspective.addSdna("Todo", classDefinition, "subject_class");
+
+// List all available subject classes
+const classes = await perspective.subjectClasses();
+// Returns: ["Todo"]
+
+// Create a new subject instance
+await perspective.createSubject("Todo", "expression://123");
+
+// Check if an expression is an instance of a class
+const isTodo = await perspective.isSubjectInstance("expression://123", "Todo");
+
+// Get subject data
+const todoData = await perspective.getSubjectData("Todo", "expression://123");
+
+// Remove a subject (runs destructor if defined)
+await perspective.removeSubject("Todo", "expression://123");
+
+// Get all instances of a class
+const allTodos = await perspective.getAllSubjectInstances("Todo");
+
+// Get a proxy object
+const todo = await perspective.getSubjectProxy("expression://123", "Todo");
+```
+
+While these methods are available, we recommend using the `Ad4mModel` system for most use cases. It provides a more maintainable and type-safe way to work with Subject Classes while handling all the low-level details automatically.
+
+## Flows: Defining Actions
+
+Flows define what agents can do in a space and under what conditions. Here's a complete example of a Todo flow that manages state transitions:
+
+```prolog
+// Register this flow with a name and reference (t)
+register_sdna_flow("TODO", t).
+
+// Define what expressions can enter this flow (all in this case)
+flowable(_, t).
+
+// Define the possible states (using numbers)
+flow_state(ExprAddr, 0, t) :- triple(ExprAddr, "todo://state", "todo://ready").
+flow_state(ExprAddr, 0.5, t) :- triple(ExprAddr, "todo://state", "todo://doing").
+flow_state(ExprAddr, 1, t) :- triple(ExprAddr, "todo://state", "todo://done").
+
+// Initial action when starting the flow
+start_action('[{
+    action: "addLink", 
+    source: "this", 
+    predicate: "todo://state", 
+    target: "todo://ready"
+}]', t).
+
+// Define state transitions with actions
+action(0, "Start", 0.5, '[{
+    action: "addLink", 
+    source: "this", 
+    predicate: "todo://state", 
+    target: "todo://doing"
+}, {
+    action: "removeLink", 
+    source: "this", 
+    predicate: "todo://state", 
+    target: "todo://ready"
+}]').
+
+action(0.5, "Finish", 1, '[{
+    action: "addLink", 
+    source: "this", 
+    predicate: "todo://state", 
+    target: "todo://done"
+}, {
+    action: "removeLink", 
+    source: "this", 
+    predicate: "todo://state", 
+    target: "todo://doing"
+}]').
+```
+
+This flow defines:
+1. A named flow ("TODO") with states (0 = ready, 0.5 = doing, 1 = done)
+2. What expressions can enter the flow (any expression)
+3. How states are determined (by checking todo://state links)
+4. Initial action when starting the flow
+5. Available actions for each state with their transitions
+
+### Using Flows in Code
+
+You can work with flows using these methods:
+
+```typescript
+// Get all flows defined in a perspective
+const flows = await perspective.sdnaFlows();
+// Returns: ["TODO"]
+
+// Check what flows are available for an expression
+const availableFlows = await perspective.availableFlows("expression://123");
+// Returns flows that can be started on this expression
+
+// Start a flow on an expression
+await perspective.startFlow("TODO", "expression://123");
+// This runs the start_action, putting the expression in initial state
+
+// Get expressions in a specific flow state
+const readyTodos = await perspective.expressionsInFlowState("TODO", 0);
+// Returns expressions in the "ready" state
+
+// Get current state of an expression in a flow
+const state = await perspective.flowState("TODO", "expression://123");
+// Returns: 0, 0.5, or 1
+
+// Get available actions for current state
+const actions = await perspective.flowActions("TODO", "expression://123");
+// Returns: ["Start"] if in ready state
+
+// Execute an action
+await perspective.runFlowAction("TODO", "expression://123", "Start");
+// Transitions from ready (0) to doing (0.5)
+```
+
+### Adding Flows to a Perspective
+
+To add a flow to your perspective:
+
+```typescript
+// Add the flow definition
+await perspective.addSdna("Todo", flowDefinition, "flow");
+
+// Check if it was added
+const flows = await perspective.sdnaFlows();
+console.log(flows); // Should include "TODO"
+```
+
+## The Prolog Engine
+
+Under the hood, AD4M's Prolog engine provides all the tools needed to implement these patterns. Here's what's available:
+
+### Core Predicates
+```prolog
+// Basic graph predicates
+triple(Subject, Predicate, Object).      // Access raw triples
+link(Subject, Predicate, Object, Timestamp, Author).  // Access links with metadata
+
+// Graph traversal
+reachable(A, B).  // True if B can be reached from A through any predicates
+
+// Expression metadata
+languageAddress(Expression, Address).  // Get language address for expression
+languageName(Expression, Name).        // Get language name for expression
+expressionAddress(Expression, Address). // Get expression address
+```
+
+### Built-in Utilities
+```prolog
+// Pagination and sorting
+paginate(Data, PageNumber, PageSize, PageData).
+sort_instances(Instances, SortKey, Direction, Sorted).
+
+// String and data handling
+remove_html_tags(Input, Output).
+string_includes(String, Substring).
+literal_from_url(Url, Decoded, Scheme).
+json_property(JsonString, Property, Value).
+```
+
+## Using Social DNA in Your Space
+
+To add Social DNA to a Perspective:
 
 ```js
-perspective.addSDNA(prologCode);
+// Add a subject class definition
+perspective.addSDNA(classDefinition, "subject_class");
+
+// Add a flow definition
+perspective.addSDNA(flowDefinition, "flow");
+
+// Add custom rules
+perspective.addSDNA(customRules, "custom");
 ```
 
-## Querying the Social DNA
-
-The Social DNA is now added to the Perspective, and we can easily ask the Perspective
-to give us the top comments:
+Then query it:
 
 ```js
-const res = await perspective.infer(
-  `top_comments(Source, Target, Author, Timestamp)`
-);
+// Find all active todos
+const todos = await perspective.infer(`
+    instance(Todo, "Todo"),
+    property_getter("Todo", Todo, "state", "active")
+`);
+
+// Check if an action is allowed
+const canVote = await perspective.infer(`
+    can_vote("${agentDid}", "${proposalId}")
+`);
 ```
 
-What is interesting here is that the `top_comments` definition could have a different
-algorithm in a different Perspective, but the developer wanting to display these comments, would not
-need to worry about the actually reasoning behind what `top_comments` actually mean for this
-specific Perspective.
+## Best Practices
 
-This gives us **complete group agency**!
+1. **Start with Patterns**
+   - Identify common interaction patterns
+   - Make implicit rules explicit
+   - Think about preconditions and effects
+
+2. **Use Subject Classes for**:
+   - Data validation
+   - Computed properties
+   - Relationship definitions
+
+3. **Use Flows for**:
+   - Action permissions
+   - State transitions
+   - Complex processes
+
+4. **Keep it Simple**
+   - Start with basic patterns
+   - Add complexity gradually
+   - Use the high-level Model Classes when possible
