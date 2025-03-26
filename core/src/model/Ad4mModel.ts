@@ -94,7 +94,7 @@ function buildWhereQuery(where: Where = {}): string {
 
   return (Object.entries(where) as [string, WhereCondition][])
     .map(([key, value]) => {
-      const isSpecial = ["author", "timestamp"].includes(key);
+      const isSpecial = ["base", "author", "timestamp"].includes(key);
       const getter = `resolve_property(SubjectClass, Base, "${key}", Value${key}, _)`;
       // const getter = `property_getter(SubjectClass, Base, "${key}", URI), literal_from_url(URI, V, _)`;
       const field = capitalize(key);
@@ -387,8 +387,9 @@ export class Ad4mModel {
   }
 
   // Todo: Only return AllInstances (InstancesWithOffset, SortedInstances, & UnsortedInstances not required)
-  public static async queryToProlog(perspective: PerspectiveProxy, query: Query) {
+  public static async queryToProlog(perspective: PerspectiveProxy, query: Query, modelClassName?: string | null) {
     const { source, properties, collections, where, order, offset, limit, count } = query;
+    const className = modelClassName || (await this.getClassName(perspective));
 
     const instanceQueries = [
       buildAuthorAndTimestampQuery(),
@@ -402,7 +403,7 @@ export class Ad4mModel {
 
     const fullQuery = `
       findall([Base, Properties, Collections, Timestamp, Author], (
-        subject_class("${await this.getClassName(perspective)}", SubjectClass),
+        subject_class("${className}", SubjectClass),
         instance(SubjectClass, Base),
         ${instanceQueries.filter((q) => q).join(", ")}
       ), UnsortedInstances),
@@ -537,14 +538,15 @@ export class Ad4mModel {
     return { results, totalCount, pageSize, pageNumber };
   }
 
-  static async countQueryToProlog(perspective: PerspectiveProxy, query: Query = {}) {
+  static async countQueryToProlog(perspective: PerspectiveProxy, query: Query = {}, modelClassName?: string | null) {
     const { source, where } = query;
+    const className = modelClassName || (await this.getClassName(perspective));
     const instanceQueries = [buildAuthorAndTimestampQuery(), buildSourceQuery(source), buildWhereQuery(where)];
     const resultSetQueries = [buildCountQuery(true), buildOrderQuery(), buildOffsetQuery(), buildLimitQuery()];
 
     const fullQuery = `
       findall([Base, Properties, Collections, Timestamp, Author], (
-        subject_class("${await this.getClassName(perspective)}", SubjectClass),
+        subject_class("${className}", SubjectClass),
         instance(SubjectClass, Base),
         ${instanceQueries.filter((q) => q).join(", ")}
       ), UnsortedInstances),
@@ -820,6 +822,7 @@ export class Ad4mModel {
 export class ModelQueryBuilder<T extends Ad4mModel> {
   private perspective: PerspectiveProxy;
   private queryParams: Query = {};
+  private modelClassName: string | null = null;
   private ctor: typeof Ad4mModel;
 
   constructor(perspective: PerspectiveProxy, ctor: typeof Ad4mModel, query?: Query) {
@@ -945,6 +948,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     return this;
   }
 
+  overrideModelClassName(className: string): ModelQueryBuilder<T> {
+    this.modelClassName = className;
+    return this;
+  }
+
   /**
    * Executes the query once and returns the results.
    * 
@@ -981,7 +989,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async subscribe(callback: (results: T[]) => void): Promise<T[]> {
-    const query = await this.ctor.queryToProlog(this.perspective, this.queryParams);
+    const query = await this.ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
     const subscription = await this.perspective.subscribeInfer(query);
 
     const processResults = async (result: AllInstancesResult) => {
@@ -1011,7 +1019,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async count(): Promise<number> {
-    const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams);
+    const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
     const result = await this.perspective.infer(query);
     return result?.[0]?.TotalCount || 0;
   }
@@ -1032,7 +1040,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async countSubscribe(callback: (count: number) => void): Promise<number> {
-    const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams);
+    const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
     const subscription = await this.perspective.subscribeInfer(query);
 
     const processResults = async (result: any) => {
@@ -1061,7 +1069,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery);
+    const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
     const result = await this.perspective.infer(prologQuery);
     const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, result)) as ResultsWithTotalCount<T>;
     return { results, totalCount, pageSize, pageNumber };
@@ -1090,7 +1098,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     callback: (results: PaginationResult<T>) => void
   ): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery);
+    const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
     const subscription = await this.perspective.subscribeInfer(prologQuery);
     
 
