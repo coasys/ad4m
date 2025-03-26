@@ -227,7 +227,8 @@ export default class PerspectiveResolver {
     perspectiveCreateSubject(
         @Arg('uuid') uuid: string,
         @Arg('subjectClass') SubjectClass: string,
-        @Arg('expressionAddress') expressionAddress: string
+        @Arg('expressionAddress') expressionAddress: string,
+        @Arg('initialValues', { nullable: true }) initialValues?: string
     ): Boolean {
         return true
     }

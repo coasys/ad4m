@@ -371,12 +371,12 @@ export class PerspectiveClient {
         })).perspectiveExecuteCommands
     }
 
-    async createSubject(uuid: string, subjectClass: string, expressionAddress: string): Promise<boolean> {
+    async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string): Promise<boolean> {
         return unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveCreateSubject($uuid: String!, $subjectClass: String!, $expressionAddress: String!) {
-                perspectiveCreateSubject(uuid: $uuid, subjectClass: $subjectClass, expressionAddress: $expressionAddress)
+            mutation: gql`mutation perspectiveCreateSubject($uuid: String!, $subjectClass: String!, $expressionAddress: String!, $initialValues: String) {
+                perspectiveCreateSubject(uuid: $uuid, subjectClass: $subjectClass, expressionAddress: $expressionAddress, initialValues: $initialValues)
             }`,
-            variables: { uuid, subjectClass, expressionAddress }
+            variables: { uuid, subjectClass, expressionAddress, initialValues }
         })).perspectiveCreateSubject
     }
 

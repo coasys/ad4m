@@ -1589,23 +1589,69 @@ impl PerspectiveInstance {
         &mut self,
         subject_class: SubjectClassOption,
         expression_address: String,
+        initial_values: Option<serde_json::Value>,
     ) -> Result<(), AnyError> {
         let class_name = self
             .subject_class_option_to_class_name(subject_class)
             .await?;
+
+        // Get constructor actions
         let result = self
             .prolog_query(format!(
                 "subject_class(\"{}\", C), constructor(C, Actions).",
                 class_name
             ))
             .await?;
-        let actions = prolog_get_first_string_binding(&result, "Actions")
+        let constructor_actions = prolog_get_first_string_binding(&result, "Actions")
             .ok_or(anyhow!("No constructor found for class: {}", class_name))?;
 
-        let commands: Vec<Command> = json5::from_str(&actions).unwrap();
+        // Get property setters for initial values if provided
+        let mut property_setters = Vec::new();
+        if let Some(values) = initial_values {
+            if let Some(obj) = values.as_object() {
+                for (prop, value) in obj.iter() {
+                    let result = self
+                        .prolog_query(format!(
+                            "subject_class(\"{}\", C), property_setter(C, \"{}\", Action).",
+                            class_name, prop
+                        ))
+                        .await?;
+                    if let Some(action) = prolog_get_first_string_binding(&result, "Action") {
+                        property_setters.push((prop.clone(), value.clone(), action));
+                    }
+                }
+            }
+        }
+
+        // Parse constructor actions
+        let mut commands: Vec<Command> = json5::from_str(&constructor_actions).unwrap();
+
+        // Merge property setters with constructor actions
+        // If a property setter exists for a property in initial values, use it instead of the constructor action
+        for (prop, value, action) in property_setters {
+            let setter_commands: Vec<Command> = json5::from_str(&action).unwrap();
+            // Remove any constructor actions for this property
+            commands.retain(|cmd| {
+                if let (Some(pred), Some(src)) = (&cmd.predicate, &cmd.source) {
+                    !(src == &expression_address && pred.contains(&prop))
+                } else {
+                    true
+                }
+            });
+            // Add the property setter commands with the initial value
+            for mut cmd in setter_commands {
+                if let Some(target) = cmd.target.as_mut() {
+                    *target = value.to_string();
+                }
+                commands.push(cmd);
+            }
+        }
+
+        // Execute the merged commands
         self.execute_commands(commands, expression_address.clone(), vec![])
             .await?;
 
+        // Verify instance was created successfully
         let mut tries = 0;
         let mut instance_check_passed = false;
         while !instance_check_passed && tries < 50 {

@@ -195,6 +195,21 @@ describe("Prolog + Literals", () => {
                 //@ts-ignore
                 expect(await todos[1].state).to.exist
             })
+
+            it("should create a subject with initial values", async () => {
+                let root = Literal.from("initial values test").toUrl()
+                const initialValues = {
+                    title: "Initial Title",
+                    state: "todo://done"
+                }
+                await perspective!.createSubject("Todo", root, initialValues)
+                let subject = await perspective!.getSubjectProxy(root, "Todo") as unknown as Subject
+
+                //@ts-ignore
+                expect(await subject.title).to.equal("Initial Title")
+                //@ts-ignore
+                expect(await subject.state).to.equal("todo://done")
+            })
         })
 
         describe("TypeScript compatibility", () => {

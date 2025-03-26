@@ -465,25 +465,45 @@ export class PerspectiveProxy {
         }
     }
 
-    /** Creates a new subject instance by running its (SDNA defined) constructor,
-     * which means adding links around the given expression address so that it
-     * conforms to the given subject class.
-     *
+    /**
+     * Creates a new subject instance in the perspective.
+     * 
      * @param subjectClass Either a string with the name of the subject class, or an object
-     * with the properties of the subject class. In the latter case, the first subject class
-     * that matches the given properties will be used.
+     * with the properties of the subject class.
      * @param exprAddr The address of the expression to be turned into a subject instance
+     * @param initialValues Optional initial values for properties. If provided, these will be
+     * merged with constructor actions for better performance.
+     * @returns A proxy object for the created subject
      */
-    async createSubject<T>(subjectClass: T, exprAddr: string): Promise<T> {
+    async createSubject<T>(
+        subjectClass: T, 
+        exprAddr: string,
+        initialValues?: Record<string, any>
+    ): Promise<T> {
         let className: string;
 
         if(typeof subjectClass === "string") {
-            className = subjectClass
-
-            await this.#client.createSubject(this.#handle.uuid, JSON.stringify({className}), exprAddr);
+            className = subjectClass;
+            await this.#client.createSubject(
+                this.#handle.uuid, 
+                JSON.stringify({
+                    className,
+                    initialValues
+                }), 
+                exprAddr,
+                initialValues ? JSON.stringify(initialValues) : undefined
+            );
         } else {
-            let query = this.buildQueryFromTemplate(subjectClass as object)
-            await this.#client.createSubject(this.#handle.uuid, JSON.stringify({query}), exprAddr);
+            let query = this.buildQueryFromTemplate(subjectClass as object);
+            await this.#client.createSubject(
+                this.#handle.uuid, 
+                JSON.stringify({
+                    query,
+                    initialValues
+                }), 
+                exprAddr,
+                initialValues ? JSON.stringify(initialValues) : undefined
+            );
         }
 
         return this.getSubjectProxy(exprAddr, subjectClass)
