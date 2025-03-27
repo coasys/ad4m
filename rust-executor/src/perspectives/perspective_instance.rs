@@ -1616,19 +1616,19 @@ impl PerspectiveInstance {
 
     async fn resolve_property_value(&self, class_name: &str, property: &str, value: &serde_json::Value) -> Result<String, AnyError> {
         let resolve_result = self.prolog_query(format!(
-            r#"subject_class("{}", C), property_resolve(C, "{}")"#,
-            class_name, property
+            r#"subject_class("{}", C), property_resolve(C, "{}"), property_resolve_language(C, "{}", Language)"#,
+            class_name, property, property
         )).await?;
         
-        if QueryResolution::False != resolve_result {
+        if let Some(resolve_language) = prolog_get_first_string_binding(&resolve_result, "Language") {
             // Create an expression for the value
             let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
             if let Some(ref mut js) = *lock {
                 let result = js.execute(format!(
                     r#"JSON.stringify(
-                        (await core.callResolver("Mutation", "expressionCreate", {{ languageAddress: "literal", content: JSON.stringify({}) }})).Ok
+                        (await core.callResolver("Mutation", "expressionCreate", {{ languageAddress: "{}", content: JSON.stringify({}) }})).Ok
                     )"#,
-                    serde_json::to_string(value)?
+                    resolve_language, serde_json::to_string(value)?
                 )).await?;
                 Ok(result.trim_matches('"').to_string())
             } else {
