@@ -1596,54 +1596,88 @@ impl PerspectiveInstance {
             .await?;
 
         // Get constructor actions
-        let result = self
-            .prolog_query(format!(
-                "subject_class(\"{}\", C), constructor(C, Actions).",
-                class_name
-            ))
-            .await?;
-        let constructor_actions = prolog_get_first_string_binding(&result, "Actions")
+        let constructor_actions = self.prolog_query(format!(
+            r#"subject_class("{}", C), constructor(C, Actions)"#,
+            class_name
+        )).await?;
+        let constructor_actions_str = prolog_get_first_string_binding(&constructor_actions, "Actions")
             .ok_or(anyhow!("No constructor found for class: {}", class_name))?;
+        //log::info!("Constructor actions: {}", constructor_actions_str);
+        let mut commands: Vec<Command> = json5::from_str(&constructor_actions_str)?;
+        //log::info!("Commands: {:?}", commands);
 
-        // Get property setters for initial values if provided
-        let mut property_setters = Vec::new();
-        if let Some(values) = initial_values {
-            if let Some(obj) = values.as_object() {
+        // Handle initial values if provided
+        if let Some(obj) = initial_values {
+            if let serde_json::Value::Object(obj) = obj {
                 for (prop, value) in obj.iter() {
-                    let result = self
-                        .prolog_query(format!(
-                            "subject_class(\"{}\", C), property_setter(C, \"{}\", Action).",
-                            class_name, prop
-                        ))
-                        .await?;
-                    if let Some(action) = prolog_get_first_string_binding(&result, "Action") {
-                        property_setters.push((prop.clone(), value.clone(), action));
-                    }
-                }
-            }
-        }
+                    // Get property setter actions
+                    let setter_actions = self.prolog_query(format!(
+                        r#"subject_class("{}", C), property_setter(C, "{}", Actions)"#,
+                        class_name, prop
+                    )).await?;
+                    let setter_actions_str = if let Some(actions) = prolog_get_first_string_binding(&setter_actions, "Actions") {
+                        actions
+                    } else {
+                        continue;
+                    };
+                    //log::info!("Setter actions: {}", setter_actions_str);
+                    let setter_commands: Vec<Command> = json5::from_str(&setter_actions_str)?;
+                    //log::info!("Setter commands: {:?}", setter_commands);
 
-        // Parse constructor actions
-        let mut commands: Vec<Command> = json5::from_str(&constructor_actions).unwrap();
+                    // Check if property needs resolution
+                    let resolve_result = self.prolog_query(format!(
+                        r#"subject_class("{}", C), property_resolve(C, "{}")"#,
+                        class_name, prop
+                    )).await?;
+                    let needs_resolution = QueryResolution::False != resolve_result;
 
-        // Merge property setters with constructor actions
-        // If a property setter exists for a property in initial values, use it instead of the constructor action
-        for (prop, value, action) in property_setters {
-            let setter_commands: Vec<Command> = json5::from_str(&action).unwrap();
-            // Remove any constructor actions for this property
-            commands.retain(|cmd| {
-                if let (Some(pred), Some(src)) = (&cmd.predicate, &cmd.source) {
-                    !(src == &expression_address && pred.contains(&prop))
-                } else {
-                    true
+                    // Get the final target value
+                    let target_value = if needs_resolution {
+                        // Create an expression for the value
+                        let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
+                        if let Some(ref mut js) = *lock {
+                            let result = js.execute(format!(
+                                r#"JSON.stringify(
+                                    (await core.callResolver("Mutation", "expressionCreate", {{ languageAddress: "literal", content: JSON.stringify({}) }})).Ok
+                                )"#,
+                                serde_json::to_string(value)?
+                            )).await?;
+                            let url = result.trim_matches('"').to_string();
+                            url
+                        } else {
+                            value.to_string()
+                        }
+                    } else {
+                        match value {
+                            serde_json::Value::String(s) => s.clone(),
+                            _ => value.to_string(),
+                        }
+                    };
+
+                    
+                    // Compare predicates between setter and constructor commands
+                    for setter_cmd in setter_commands.iter() {
+                        let mut overwritten = false;
+                        if let Some(setter_pred) = &setter_cmd.predicate {
+                            for cmd in commands.iter_mut() {
+                                if let Some(pred) = &cmd.predicate {
+                                    if pred == setter_pred {
+                                        cmd.target = Some(target_value.clone());
+                                        overwritten = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if !overwritten {
+                            commands.push(Command {
+                                target: Some(target_value.clone()),
+                                ..setter_cmd.clone()
+                            });
+                        }
+                    };
+                    //log::info!("constructor commands after: {:?}", commands);
                 }
-            });
-            // Add the property setter commands with the initial value
-            for mut cmd in setter_commands {
-                if let Some(target) = cmd.target.as_mut() {
-                    *target = value.to_string();
-                }
-                commands.push(cmd);
             }
         }
 
