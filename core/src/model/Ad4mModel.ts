@@ -680,29 +680,34 @@ export class Ad4mModel {
    * ```
    */
   async save() {
-    await this.#perspective.createSubject(this, this.#baseExpression);
+    // We use createSubject's initialValues to set properties (but not collections)
+    // We then later use innerUpdate to set collections
 
+    // First filter out the properties that are not collections (arrays)
+    const initialValues = {};
+    for (const [key, value] of Object.entries(this)) {
+      if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
+        initialValues[key] = value;
+      }
+    }
+
+    // Create the subject with the initial values
+    await this.perspective.createSubject(
+      this,
+      this.#baseExpression,
+      initialValues
+    );
+
+    // Link the subject to the source
     await this.#perspective.add(
       new Link({ source: this.#source, predicate: "ad4m://has_child", target: this.baseExpression })
     );
 
-    await this.update();
+    // Set collections
+    await this.innerUpdate(false)
   }
 
-  /**
-   * Updates the model instance's properties and collections.
-   * 
-   * @throws Will throw if property setting or collection updates fail
-   * 
-   * @example
-   * ```typescript
-   * const recipe = await Recipe.findAll(perspective)[0];
-   * recipe.rating = 5;
-   * recipe.ingredients.push("garlic");
-   * await recipe.update();
-   * ```
-   */
-  async update() {
+  private async innerUpdate(setProperties: boolean = true) {
     this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this);
 
     const entries = Object.entries(this);
@@ -725,11 +730,29 @@ export class Ad4mModel {
         } else if (Array.isArray(value) && value.length > 0) {
           await this.setCollectionSetter(key, value);
         } else if (value !== undefined && value !== null && value !== "") {
-          await this.setProperty(key, value);
+          if (setProperties) {
+            await this.setProperty(key, value);
+          }
         }
       }
     }
+  }
 
+  /**
+   * Updates the model instance's properties and collections.
+   * 
+   * @throws Will throw if property setting or collection updates fail
+   * 
+   * @example
+   * ```typescript
+   * const recipe = await Recipe.findAll(perspective)[0];
+   * recipe.rating = 5;
+   * recipe.ingredients.push("garlic");
+   * await recipe.update();
+   * ```
+   */
+  async update() {
+    await this.innerUpdate(true);
     await this.getData();
   }
 
