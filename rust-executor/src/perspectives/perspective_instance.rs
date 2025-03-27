@@ -1585,9 +1585,12 @@ impl PerspectiveInstance {
         })
     }
 
-    async fn get_actions_from_prolog(&self, query: String) -> Result<Option<Vec<Command>>, AnyError> {
+    async fn get_actions_from_prolog(
+        &self,
+        query: String,
+    ) -> Result<Option<Vec<Command>>, AnyError> {
         let result = self.prolog_query(query).await?;
-        
+
         if let Some(actions_str) = prolog_get_first_string_binding(&result, "Actions") {
             json5::from_str(&actions_str)
                 .map(Some)
@@ -1602,11 +1605,16 @@ impl PerspectiveInstance {
             r#"subject_class("{}", C), constructor(C, Actions)"#,
             class_name
         );
-        self.get_actions_from_prolog(query).await?
+        self.get_actions_from_prolog(query)
+            .await?
             .ok_or(anyhow!("No constructor found for class: {}", class_name))
     }
 
-    async fn get_property_setter_actions(&self, class_name: &str, property: &str) -> Result<Option<Vec<Command>>, AnyError> {
+    async fn get_property_setter_actions(
+        &self,
+        class_name: &str,
+        property: &str,
+    ) -> Result<Option<Vec<Command>>, AnyError> {
         let query = format!(
             r#"subject_class("{}", C), property_setter(C, "{}", Actions)"#,
             class_name, property
@@ -1614,13 +1622,19 @@ impl PerspectiveInstance {
         self.get_actions_from_prolog(query).await
     }
 
-    async fn resolve_property_value(&self, class_name: &str, property: &str, value: &serde_json::Value) -> Result<String, AnyError> {
+    async fn resolve_property_value(
+        &self,
+        class_name: &str,
+        property: &str,
+        value: &serde_json::Value,
+    ) -> Result<String, AnyError> {
         let resolve_result = self.prolog_query(format!(
             r#"subject_class("{}", C), property_resolve(C, "{}"), property_resolve_language(C, "{}", Language)"#,
             class_name, property, property
         )).await?;
-        
-        if let Some(resolve_language) = prolog_get_first_string_binding(&resolve_result, "Language") {
+
+        if let Some(resolve_language) = prolog_get_first_string_binding(&resolve_result, "Language")
+        {
             // Create an expression for the value
             let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
             if let Some(ref mut js) = *lock {
@@ -1658,9 +1672,13 @@ impl PerspectiveInstance {
         if let Some(obj) = initial_values {
             if let serde_json::Value::Object(obj) = obj {
                 for (prop, value) in obj.iter() {
-                    if let Some(setter_commands) = self.get_property_setter_actions(&class_name, prop).await? {
-                        let target_value = self.resolve_property_value(&class_name, prop, value).await?;
-                        
+                    if let Some(setter_commands) =
+                        self.get_property_setter_actions(&class_name, prop).await?
+                    {
+                        let target_value = self
+                            .resolve_property_value(&class_name, prop, value)
+                            .await?;
+
                         // Compare predicates between setter and constructor commands
                         for setter_cmd in setter_commands.iter() {
                             let mut overwritten = false;

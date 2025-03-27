@@ -952,10 +952,7 @@ impl Mutation {
 
         let initial_values = if let Some(values) = initial_values {
             serde_json::from_str(&values).map_err(|e| {
-                FieldError::new(
-                    e,
-                    graphql_value!({ "invalid_initial_values": values }),
-                )
+                FieldError::new(e, graphql_value!({ "invalid_initial_values": values }))
             })?
         } else {
             None
