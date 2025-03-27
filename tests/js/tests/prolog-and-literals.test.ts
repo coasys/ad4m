@@ -270,7 +270,7 @@ describe("Prolog + Literals", () => {
 
                 // todos is an array of Todo objects
                 // note how we don't need @ts-ignore here:
-                expect(todos.length).to.equal(2)
+                expect(todos.length).to.equal(3)
                 expect(await todos[1].state).to.exist
             })
 
@@ -406,7 +406,7 @@ describe("Prolog + Literals", () => {
 
             it("can retrieve all instances through instaceQuery decoratored all()", async () => {
                 let todos = await Todo.all(perspective!)
-                expect(todos.length).to.equal(3)
+                expect(todos.length).to.equal(4)
             })
 
             it("can retrieve all mathching instance through InstanceQuery(where: ..)", async () => {
@@ -415,7 +415,7 @@ describe("Prolog + Literals", () => {
                 expect(await todos[0].state).to.equal("todo://ready")
 
                 todos = await Todo.allDone(perspective!)
-                expect(todos.length).to.equal(1)
+                expect(todos.length).to.equal(2)
                 expect(await todos[0].state).to.equal("todo://done")
             })
 
