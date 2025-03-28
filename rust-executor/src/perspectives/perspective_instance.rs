@@ -1158,7 +1158,6 @@ impl PerspectiveInstance {
 
     /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
     pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
-        log::info!("prolog_query query: {}", query);
         self.ensure_prolog_engine().await?;
 
         let _read_lock = self.prolog_update_mutex.read().await;
@@ -1175,7 +1174,6 @@ impl PerspectiveInstance {
         };
 
         let result = prolog_engine.run_query(query).await?;
-        log::info!("prolog_query result: {:?}", result);
 
         match result {
             Err(e) => {
@@ -1191,13 +1189,6 @@ impl PerspectiveInstance {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
-            log::info!("Spawning Prolog facts update");
-            log::info!("Additions: {}, Removals: {}", diff.additions.len(), diff.removals.len());
-            if diff.removals.len() > 0 {
-                for removal in &diff.removals {
-                    log::info!("Removal: {} --{}--> {}", removal.data.source, removal.data.predicate.clone().unwrap_or("".to_string()), removal.data.target);
-                }
-            }
             if let Err(e) = self_clone.ensure_prolog_engine().await {
                 log::error!("Error spawning Prolog engine: {:?}", e)
             };
@@ -1228,7 +1219,6 @@ impl PerspectiveInstance {
                     }
                 }
             } else {
-                log::info!("!!!!! PROLOG FACTS UPDATE !!!!!!");
                 match self_clone.update_prolog_engine_facts().await {
                     Ok(()) => true,
                     Err(e) => {
@@ -1462,7 +1452,6 @@ impl PerspectiveInstance {
         expression: String,
         parameters: Vec<Parameter>,
     ) -> Result<(), AnyError> {
-        log::info!("Executing commands: {:?}", commands);
         let jsvalue_to_string = |value: &Value| -> String {
             match value {
                 serde_json::Value::String(s) => s.clone(),
@@ -1489,7 +1478,7 @@ impl PerspectiveInstance {
             }
         };
 
-        for command in commands.clone() {
+        for command in commands {
             let source = replace_this(replace_parameters(command.source))
                 .ok_or_else(|| anyhow!("Source cannot be None"))?;
             let predicate = replace_this(replace_parameters(command.predicate));
@@ -1526,16 +1515,10 @@ impl PerspectiveInstance {
                         })
                         .await?;
                     for link_expression in link_expressions {
-                        log::info!("ACTION REMOVE LINK Removing link: {} --{}--> {}", link_expression.data.source, link_expression.data.predicate.clone().unwrap_or("".to_string()), link_expression.data.target);
-                        log::info!("commands: {:?}", commands);
                         self.remove_link(link_expression.into()).await?;
                     }
                 }
                 Action::SetSingleTarget => {
-                    if predicate.is_none()  {
-                        log::error!("SetSingleTarget actions with no predicate are not allowed. Skipping.");
-                        continue;
-                    }
                     let link_expressions = self
                         .get_links(&LinkQuery {
                             source: Some(source.clone()),
@@ -1547,8 +1530,6 @@ impl PerspectiveInstance {
                         })
                         .await?;
                     for link_expression in link_expressions {
-                        log::info!("ACTION SET SINGLE TARGET Removing link: {} --{}--> {}", link_expression.data.source, link_expression.data.predicate.clone().unwrap_or("".to_string()), link_expression.data.target);
-                        log::info!("commands: {:?}", commands);
                         self.remove_link(link_expression.into()).await?;
                     }
                     self.add_link(
@@ -1700,26 +1681,19 @@ impl PerspectiveInstance {
             .subject_class_option_to_class_name(subject_class)
             .await?;
 
-        log::info!("Creating subject: {}", class_name);
-        log::info!("initial_values: {:?}", initial_values);
-
         let mut commands = self.get_constructor_actions(&class_name).await?;
 
-        log::info!("constructor commands: {:?}", commands);
         // Handle initial values if provided
         if let Some(obj) = initial_values {
             if let serde_json::Value::Object(obj) = obj {
                 for (prop, value) in obj.iter() {
-                    log::info!("initial prop {}: {:?}", prop, value);
-                    let maybe_setter_commands = self.get_property_setter_actions(&class_name, prop).await;
-                    if let Some(setter_commands) = dbg!(maybe_setter_commands)?
+                    if let Some(setter_commands) =
+                        self.get_property_setter_actions(&class_name, prop).await?
                     {
-                        log::info!("setter commands: {:?}", setter_commands);
                         let target_value = self
                             .resolve_property_value(&class_name, prop, value)
                             .await?;
 
-                        log::info!("target value: {}", target_value);
                         // Compare predicates between setter and constructor commands
                         for setter_cmd in setter_commands.iter() {
                             let mut overwritten = false;
@@ -1746,8 +1720,6 @@ impl PerspectiveInstance {
             }
         }
 
-        log::info!("final commands: {:?}", commands);
-
         // Execute the merged commands
         self.execute_commands(commands, expression_address.clone(), vec![])
             .await?;
@@ -1756,7 +1728,6 @@ impl PerspectiveInstance {
         let mut tries = 0;
         let mut instance_check_passed = false;
         while !instance_check_passed && tries < 50 {
-            log::info!("Checking instance after create_subject");
             match self
                 .prolog_query(format!(
                     "subject_class(\"{}\", C), instance(C, \"{}\").",
