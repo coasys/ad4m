@@ -162,6 +162,7 @@ pub struct PerspectiveInstance {
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<Mutex<Option<Language>>>,
     trigger_notification_check: Arc<Mutex<bool>>,
+    trigger_prolog_subscription_check: Arc<Mutex<bool>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
@@ -182,6 +183,7 @@ impl PerspectiveInstance {
             prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(Mutex::new(None)),
             trigger_notification_check: Arc::new(Mutex::new(false)),
+            trigger_prolog_subscription_check: Arc::new(Mutex::new(false)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)), // Default to 3 immediate commits
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
@@ -599,6 +601,7 @@ impl PerspectiveInstance {
         self.spawn_prolog_facts_update(decorated_diff.clone());
         self.pubsub_publish_diff(decorated_diff).await;
         *(self.trigger_notification_check.lock().await) = true;
+        *(self.trigger_prolog_subscription_check.lock().await) = true;
     }
 
     pub async fn telepresence_signal_from_link_language(&self, mut signal: PerspectiveExpression) {
@@ -682,6 +685,7 @@ impl PerspectiveInstance {
 
         self.pubsub_publish_diff(decorated_perspective_diff).await;
         *(self.trigger_notification_check.lock().await) = true;
+        *(self.trigger_prolog_subscription_check.lock().await) = true;
         Ok(decorated_link_expression)
     }
 
@@ -718,6 +722,7 @@ impl PerspectiveInstance {
             self.spawn_commit_and_handle_error(&perspective_diff);
         }
         *(self.trigger_notification_check.lock().await) = true;
+        *(self.trigger_prolog_subscription_check.lock().await) = true;
         Ok(decorated_link_expressions)
     }
 
@@ -768,6 +773,7 @@ impl PerspectiveInstance {
             self.spawn_commit_and_handle_error(&diff);
         }
         *(self.trigger_notification_check.lock().await) = true;
+        *(self.trigger_prolog_subscription_check.lock().await) = true;
         Ok(decorated_diff)
     }
 
@@ -830,6 +836,7 @@ impl PerspectiveInstance {
             self.spawn_commit_and_handle_error(&diff);
         }
         *(self.trigger_notification_check.lock().await) = true;
+        *(self.trigger_prolog_subscription_check.lock().await) = true;
         Ok(decorated_new_link_expression)
     }
 
@@ -855,6 +862,7 @@ impl PerspectiveInstance {
             }
 
             *(self.trigger_notification_check.lock().await) = true;
+            *(self.trigger_prolog_subscription_check.lock().await) = true;
             Ok(decorated_link)
         } else {
             Err(anyhow!("Link not found"))
@@ -921,6 +929,7 @@ impl PerspectiveInstance {
         }
 
         *(self.trigger_notification_check.lock().await) = true;
+        *(self.trigger_prolog_subscription_check.lock().await) = true;
         Ok(decorated_links)
     }
 
@@ -1976,7 +1985,10 @@ impl PerspectiveInstance {
 
     async fn subscribed_queries_loop(&self) {
         while !*self.is_teardown.lock().await {
-            self.check_subscribed_queries().await;
+            if *self.trigger_prolog_subscription_check.lock().await {
+                self.check_subscribed_queries().await;
+                *self.trigger_prolog_subscription_check.lock().await = false;
+            }
             sleep(Duration::from_millis(QUERY_SUBSCRIPTION_CHECK_INTERVAL)).await;
         }
     }
