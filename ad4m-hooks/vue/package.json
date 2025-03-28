@@ -19,5 +19,5 @@
   "peerDependencies": {
     "vue": "^3.2.47"
   },
-  "version": "0.10.1-release-candidate-1"
+  "version": "0.10.1-release-candidate-2"
 }
