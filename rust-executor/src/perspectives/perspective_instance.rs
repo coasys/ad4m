@@ -1601,7 +1601,9 @@ impl PerspectiveInstance {
         let result = self.prolog_query(query).await?;
 
         if let Some(actions_str) = prolog_get_first_string_binding(&result, "Actions") {
-            json5::from_str(&actions_str)
+            // json5 seems to have a bug, blocking when a property is set to undefined
+            let sanitized_str = actions_str.replace("undefined", "null");
+            json5::from_str(&sanitized_str)
                 .map(Some)
                 .map_err(|e| anyhow!("Failed to parse actions: {}", e))
         } else {
