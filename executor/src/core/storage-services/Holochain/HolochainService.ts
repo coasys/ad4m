@@ -262,7 +262,7 @@ export default class HolochainService {
         //4. Call the zome function
         try {
             if (fnName != "sync" && fnName != "current_revision") {
-                console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, JSON.stringify(payload).substring(0, 50), "\nFor language with address", lang, "\x1b[0m");
+                //console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, JSON.stringify(payload).substring(0, 50), "\nFor language with address", lang, "\x1b[0m");
             }
 
             let result = await HOLOCHAIN_SERVICE.callZomeFunction(installed_app_id, dnaNick, zomeName, fnName, encode(payload));
@@ -274,13 +274,13 @@ export default class HolochainService {
 
             if (fnName != "sync" && fnName != "current_revision") {
                 if (typeof result === "string") {
-                    console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (string):", result.substring(0, 50), "... \x1b[0m")
+                    //console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (string):", result.substring(0, 50), "... \x1b[0m")
                 } else if (typeof result === "object") {
                     let resultString = JSON.stringify(result);
                     let endingLog = resultString.length > 50 ? "... \x1b[0m" : "\x1b[0m";
-                    console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (object):", resultString.substring(0, 50), endingLog)
+                    //console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (object):", resultString.substring(0, 50), endingLog)
                 } else {
-                    console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (other):", result, "\x1b[0m")
+                    //console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (other):", result, "\x1b[0m")
                 }
             }
             return result

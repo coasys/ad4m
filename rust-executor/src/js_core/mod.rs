@@ -364,9 +364,9 @@ impl JsCore {
                                                 );
                                                 match js_core_cloned.execute_async_smart(script).await {
                                                     Ok(_res) => {
-                                                        info!(
-                                                            "Holochain Handle Callback Completed Succesfully",
-                                                        );
+                                                        // info!(
+                                                        //     "Holochain Handle Callback Completed Succesfully",
+                                                        // );
                                                     }
                                                     Err(err) => {
                                                         error!("Error executing callback: {:?}", err);

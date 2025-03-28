@@ -477,10 +477,10 @@ impl HolochainService {
         fn_name: String,
         payload: Option<ExternIO>,
     ) -> Result<ZomeCallResponse, AnyError> {
-        info!(
-            "Calling zome function: {:?} {:?} {:?} {:?}",
-            app_id, cell_name, zome_name, fn_name
-        );
+        // info!(
+        //     "Calling zome function: {:?} {:?} {:?} {:?}",
+        //     app_id, cell_name, zome_name, fn_name
+        // );
         let app_info = self.conductor.get_app_info(&app_id).await?;
 
         if app_info.is_none() {
