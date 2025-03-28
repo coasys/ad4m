@@ -1,24 +1,98 @@
 # Installation
+To kick off with AD4M and tap into its agent-centric network, you’ll need to install the core runtime and, for JavaScript UI projects, 
+the client libraries to connect your apps. AD4M provides the AD4M Launcher for ease of use, the AD4M CLI for developer flexibility, 
+and two npm packages—`@coasys/ad4m` and `@coasys/ad4m-connect`—for front-end integration. 
+This guide aligns with the v0.10.1 release candidate (as of March 24, 2025), featuring AI integration and enhanced Social DNA querying.
 
-System Requirements:
+## AD4M Launcher
+The AD4M Launcher is a Tauri-based, system-tray app that bundles the AD4M executor, a background UI and a setup wizard—ideal for users and developers seeking a quick start. 
+It runs your agent’s instance locally, managing keys and data as the back-end for AD4M apps. Install it like this:
+- Download: Visit the [GitHub release page](https://github.com/coasys/ad4m/releases) and download the binary for your OS—e.g., 
+  `ADAM_Launcher_<version>-release-candidate-1_aarch64.dmg`, or `ADAM.Launcher_<version>-release-candidate-1_amd64-CUDA.AppImage` 
+  (**We are working on a Windows build!.**)
+- Run/Install: Execute the file. Windows may prompt a security warning (allow it; signed builds are coming); macOS/Linux follow standard app install steps.
+- Initialize: Launch it to generate or unlock an agent (DID and keys). It runs on localhost:12000, offering WebSocket and GraphQL endpoints.
 
-- Node.js 16.8 or later.
-- macOS, Windows (including WSL), and Linux are supported.
+The Launcher delivers a plug-and-play AD4M experience, ready for UI connections.
 
-### Install AD4M Launcher
+## AD4M CLI (For Developers)
+The AD4M CLI, written in Rust, gives developers command-line control over the AD4M ecosystem. 
+Available on Crates.io (**currently not updated due to unpublished dependencies** ) and sourced at https://github.com/coasys/ad4m/tree/dev/cli, 
+it includes two binaries: ad4m (CLI client) and ad4m-executor (full runtime without UI). It’s perfect for debugging, scripting, or Language development. 
 
-Download the latest version of the AD4M launcher from
-its [GitHub release page](https://github.com/coasys/ad4m/releases) and run/install it.
+### Set it up:
+Follow the CLI [README](https://github.com/coasys/ad4m/tree/dev/cli) to install all necessary dependencies.
+Clone or Install: Clone the repo and build:
+```bash
+git clone --branch dev https://github.com/coasys/ad4m.git
+cd ad4m/cli
+cargo install --path .
+```
+(Or install from Crates.io once we have published all dependencies: `cargo install ad4m`.)
 
-After creating an agent, you should see an AD4M system-tray icon which will
-bring up an AD4M pop-up window when you click it:
+Run the Executor: Start the full runtime with:
+```bash
+ad4m-executor run
+```
+Use ad4m init first to generate an agent if needed. It runs on localhost:12000.
 
-![ad4min-screenshots](/images/launcher.jpg)
+CLI Usage Example: With the executor running, use the ad4m CLI to interact:
+```bash
+ad4m languages meta QmXyz123
+```
+This fetches metadata for a Language (e.g., social-context) at QmXyz123, outputting details like name and description. See the CLI README for commands like ad4m expression create.
 
-### Install dependencies in your app
+The ad4m-executor provides the runtime (like the Launcher sans UI), while ad4m offers client commands—together, they’re a developer’s toolkit for AD4M.
 
-Install npm dependencies in your project:
+## AD4M Client Libraries for JS UI Projects
+For JavaScript UI projects (React, Vue, etc.), the client libraries `@coasys/ad4m` and `@coasys/ad4m-connect` connect your front-end to an AD4M instance (Launcher or CLI executor).
+`@coasys/ad4m`: The core client, offering direct API access. Install it:
+```bash
+npm install @coasys/ad4m
+```
+Use it for raw interactions:
+```javascript
+import { Ad4mClient } from "@coasys/ad4m";
+const client = new Ad4mClient("ws://localhost:12000");
+const agent = await client.agent.me();
+console.log(agent.did); // e.g., "did:key:z6Mk..."
+```
+It’s suited for custom logic needing full API control.
+
+@coasys/ad4m-connect: A higher-level library with WebSocket connectivity and authentication handling, ideal for streamlined UI integration. Install it:
+```bash
+npm install @coasys/ad4m-connect
+```
+Use it to connect and authenticate:
+```javascript
+
+import Ad4mConnect from "@coasys/ad4m-connect";
+ 
+const ui = Ad4mConnect({
+  appName: "My First ADAM App",
+  appDesc: "This is my first app here.",
+  appDomain: "ad4m.dev",
+  appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
+  capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
+});
+ 
+// .connect() will show the authentication pop up
+ui.connect().then((client) => {
+  // Save the client after authentication is done
+  const perspectives = await client.perspective.all();
+  console.log(perspectives[0].name); // e.g., "MyCommunity"
+});
 
 ```
-npm install -s @coasys/ad4m @coasys/ad4m-connect
-```
+Authentication Handling: Per [auth docs](/auth), `@coasys/ad4m-connect` manages capability-based auth. On first connect, it requests a capability token from the executor, prompting the user (via Launcher UI or CLI) to approve. Specify required capabilities (e.g., perspective:write) in the config. Once approved, it stores a JWT locally, auto-authenticating future connections. If the executor isn’t running or capabilities mismatch, it retries or prompts again—simplifying secure app setup.
+
+Start with `@coasys/ad4m-connect` for quick UI integration with auth, then use `@coasys/ad4m` for deeper API calls. Ensure the executor (Launcher or ad4m-executor) is active first.
+## System Requirements
+- OS: macOS 10.15+, or modern Linux (e.g., Ubuntu 22.04+, glibc 2.35+). 
+  **We are working on a Windows build!.**
+- Memory: 4GB RAM minimum (8GB recommended).
+- Node.js: 18+
+- Dependencies: Launcher bundles all (Holochain, Deno, Rust); CLI needs Rust; client libs need Node.js (18+) and an executor instance.
+- Optional: CUDA for GPU acceleration AI inference.
+With these tools installed, you’re ready to harness AD4M’s distributed power.
+

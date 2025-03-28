@@ -1,61 +1,44 @@
-# Expressions
+# Expressions: Agent-Authored Data Objects
 
-In any social network, people need to be able to communicate.
-In ADAM, Agents communicate by creating Expressions using [Languages](concepts/#languages):
+## Understanding Expressions
 
-```js
-const url = await ad4m.expression.create(content, language);
-```
+In AD4M's agent-centric paradigm, all data is treated as a claim or statement made by an agent. These claims are called "Expressions" – following the metaphor of Languages, they are what agents "express" through different protocols (Languages). While they could be seen as simple data objects, Expressions are fundamentally different because they:
 
-The resulting URL are identified like this: `<language>://<expression>`.
+1. Always include cryptographic proof of who created them
+2. Are always created through a specific Language
+3. Have globally unique addresses in AD4M's universal addressing scheme
 
-To ensure authenticity Expressions will be signed by the Agent that created it. Any Agent can then retrieve
-the expression, get the data and validate the signature:
+### Anatomy of an Expression
 
-```js
-const expression = await ad4m.expression.get(url);
-```
+Every Expression consists of:
 
-The content of the `expression` result will look something like this:
-
-```js
-{
-    author: "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
-    timestamp: "2023-06-21T14:47:48.935Z",
-    data: "Hello World!",
-    language: {
-        "address": "literal"
-    },
+```typescript
+interface Expression {
+    // The DID of the agent who created this Expression
+    author: string;
+    
+    // When the Expression was created
+    timestamp: string;
+    
+    // The actual data/content
+    data: any;
+    
+    // Which Language this Expression belongs to
+    language: LanguageRef;
+    
+    // Cryptographic proof of authorship
     proof: {
-        "valid": true,
-        "invalid": false
-    }
+        // These flags are added by AD4M during retrieval
+        valid?: boolean;    // True if signature verification succeeded
+        invalid?: boolean;  // True if signature verification failed
+        // The actual stored proof data
+        signature: string;  // The cryptographic signature
+        key: string;       // Key path in the author's DID Document used for signing
+    };
 }
 ```
 
-## Creating an Expression
-
-We will go into depth on how to use other languages or how to create your own, but for now let's
-use the simplest language that is included in ADAM – the `Literal` language. The `Literal` Language is an AD4M Language without back-end.
-It stores JavaScript literals (i.e. strings, numbers and objects) by encoding them into the Expression URLs.
-
-```ts
-const url = await ad4m.expression.create("Hello World!", "literal");
-```
-
-When running `create` the data will be created using the language, and automatically signed
-by your agent. The result when creating an expression will be a URL formatted like this `<language>://<expression>`.
-
-## Retrieving an Expression
-
-By using the URL of the expression, you can retrieve it's data:
-
-```ts
-const expression = await ad4m.expression.get(expressionUrl);
-```
-
-The result will look something like this:
-
+For example:
 ```json
 {
   "author": "did:key:zQ3shv5VUAbtY5P1jGsPzy7L27FTxeDv2hnhVp9QT3ALNCnQ2",
@@ -65,15 +48,144 @@ The result will look something like this:
     "address": "literal"
   },
   "proof": {
-    "valid": true,
-    "invalid": false
+    "valid": true,     // Added by AD4M during retrieval
+    "invalid": false,  // Added by AD4M during retrieval
+    "signature": "...", // The stored signature
+    "key": "..." // Key path in the author's DID Document used for signing
   }
 }
 ```
 
-For now we have only created something we could call **objective** data. What we mean with this is that
-any agent with the URL of the Expression will be able to resolve it.
+### Global Addressing
 
-In the next chapter we will learn how to organize these expression in something
-called [Perspectives](/concepts/#perspectives). These are essentially local graph databases that in
-turn can be turned into [Neighbourhoods](/neighbourhoods) (Shared social spaces).
+Every Expression in AD4M has a unique address in the format:
+```
+<language_hash>://<expression_address>
+```
+
+This means:
+- The Language's hash identifies how to interpret/resolve the address
+- The expression_address is Language-specific (could be a CID, URL, hash, etc.)
+- The full address is globally unique and resolvable by any AD4M instance
+
+## Working with Expressions
+
+### Creating Expressions
+
+When an agent wants to share data, they create an Expression through a Language:
+
+```typescript
+// Create an Expression using the literal Language
+const url = await ad4m.expression.create(
+    "Hello World!", 
+    "literal"
+);
+// Returns: literal://base64encoded-content
+
+// Create an Expression using a custom Language
+const socialPost = await ad4m.expression.create(
+    { text: "My first post!" },
+    "QmSocialApp123" // Language hash
+);
+// Returns: QmSocialApp123://post789
+```
+
+Behind the scenes, AD4M:
+1. Passes the data to the specified Language
+2. The Language stores/processes the data and returns an address
+3. AD4M signs the Expression with the agent's keys
+4. Returns the full Expression URL
+
+### Retrieving Expressions
+
+Any agent can retrieve an Expression using its address:
+
+```typescript
+const expression = await ad4m.expression.get("QmSocialApp123://post789");
+```
+
+The retrieved Expression includes:
+- The original data
+- Who created it (author DID)
+- When it was created
+- Cryptographic proof of authenticity
+
+### Signature Verification
+
+When you retrieve an Expression through `ad4m.expression.get()`, AD4M automatically:
+
+1. Resolves the author's DID to get their public keys
+2. Verifies that the signature matches:
+   - The author's DID
+   - The Expression's data
+   - The timestamp
+   - Using the specified key from the author's DID Document
+3. Enriches the Expression object with verification flags:
+   - `proof.valid`: Set to `true` if verification succeeded
+   - `proof.invalid`: Set to `true` if verification failed
+
+These verification flags are not stored with the Expression – they are computed on-the-fly during retrieval to ensure fresh verification against the current state of the author's DID Document.
+
+```typescript
+// When you retrieve an Expression
+const expression = await ad4m.expression.get("QmSocialApp123://post789");
+
+// AD4M has already verified the signature
+if (expression.proof.valid) {
+    // The Expression is authentic and unmodified
+    console.log("Verified expression from:", expression.author);
+} else {
+    // The signature verification failed
+    console.warn("Could not verify expression authenticity");
+}
+```
+
+
+### Expression Types
+
+While Expressions can contain any type of data, there are several common patterns:
+
+1. **Literal Expressions**
+   - Simple data types (strings, numbers, objects)
+   - Encoded directly in the address
+   - Example: `literal://base64encoded-content`
+
+2. **Content Expressions**
+   - Larger data objects (posts, documents, media)
+   - Stored in a distributed system (IPFS, Holochain, etc.)
+   - Example: `QmSocialApp123://post789`
+
+3. **Reference Expressions**
+   - Point to data in other systems
+   - Act as bridges to existing protocols
+   - Example: `http://example.com/resource`
+
+## Expressions and Trust
+
+The agent-centric nature of Expressions enables a web of trust:
+
+1. **Authenticity**: Every Expression is cryptographically signed, so you can verify who created it
+2. **Provenance**: The timestamp and author create an audit trail
+3. **Context**: Expressions can be referenced and linked in Perspectives, creating semantic meaning
+4. **Interoperability**: Any AD4M instance can verify and interpret Expressions
+
+## Best Practices
+
+When working with Expressions:
+
+1. **Choose the Right Language**
+   - Use literal Language for simple, small data
+   - Use specialized Languages for specific data types
+   - Consider storage requirements and accessibility
+
+2. **Handle Verification**
+   - Always check the `proof.valid` field
+   - Consider the Expression's author in your trust model
+   - Use timestamps for temporal context
+
+3. **Think Agent-Centric**
+   - Remember Expressions are claims made by agents
+   - Consider how Expressions fit into social contexts
+   - Use Perspectives to organize and give meaning to Expressions
+
+For more details on implementing Languages that create and resolve Expressions, see the [Language Development Guide](/developer-guides/languages).
