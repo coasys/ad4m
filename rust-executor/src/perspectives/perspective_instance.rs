@@ -36,6 +36,12 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 use tokio::{join, time};
 use uuid;
+use lazy_static::lazy_static;
+use uuid::Uuid;
+
+lazy_static! {
+    static ref BATCH_STORE: RwLock<HashMap<String, PerspectiveDiff>> = RwLock::new(HashMap::new());
+}
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
@@ -624,11 +630,66 @@ impl PerspectiveInstance {
         &mut self,
         link: Link,
         status: LinkStatus,
+        batch_id: Option<String>
     ) -> Result<DecoratedLinkExpression, AnyError> {
-        let link_expression = create_signed_expression(link)?;
+        let link_expr: LinkExpression = create_signed_expression(link)?.into();
+        
+        if let Some(batch_id) = batch_id {
+            let mut batches = BATCH_STORE.write().await;
+            let diff = batches.get_mut(&batch_id)
+                .ok_or(anyhow!("Batch not found"))?;
+            
+            let mut link_expr = link_expr.clone();
+            link_expr.status = Some(status.clone());
+            diff.additions.push(link_expr.clone());
+            
+            Ok(DecoratedLinkExpression::from((link_expr, status)))
+        } else {
+            self.add_link_expression(link_expr.into(), status).await
+        }
+    }
 
-        self.add_link_expression(link_expression.into(), status)
-            .await
+    pub async fn remove_link(
+        &mut self,
+        link_expression: LinkExpression,
+        batch_id: Option<String>
+    ) -> Result<DecoratedLinkExpression, AnyError> {
+        if let Some(batch_id) = batch_id {
+            let mut batches = BATCH_STORE.write().await;
+            let diff = batches.get_mut(&batch_id)
+                .ok_or(anyhow!("Batch not found"))?;
+            
+            let handle = self.persisted.lock().await.clone();
+            let (link_from_db, status) = Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &link_expression))?
+                .ok_or(anyhow!("Link not found"))?;
+
+            diff.removals.push(link_from_db.clone());
+            Ok(DecoratedLinkExpression::from((link_from_db, status)))
+        } else {
+            let handle = self.persisted.lock().await.clone();
+            if let Some((link_from_db, status)) =
+                Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &link_expression))?
+            {
+                Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, &link_expression))?;
+                let diff = PerspectiveDiff::from_removals(vec![link_expression.clone()]);
+                let decorated_link = DecoratedLinkExpression::from((link_from_db, status.clone()));
+                let decorated_diff =
+                    DecoratedPerspectiveDiff::from_removals(vec![decorated_link.clone()]);
+
+                self.spawn_prolog_facts_update(decorated_diff.clone());
+                self.pubsub_publish_diff(decorated_diff.clone()).await;
+
+                if status == LinkStatus::Shared {
+                    self.spawn_commit_and_handle_error(&diff);
+                }
+
+                *(self.trigger_notification_check.lock().await) = true;
+                *(self.trigger_prolog_subscription_check.lock().await) = true;
+                Ok(decorated_link)
+            } else {
+                Err(anyhow!("Link not found"))
+            }
+        }
     }
 
     async fn pubsub_publish_diff(&self, decorated_diff: DecoratedPerspectiveDiff) {
@@ -693,37 +754,52 @@ impl PerspectiveInstance {
         &mut self,
         links: Vec<Link>,
         status: LinkStatus,
+        batch_id: Option<String>
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        let handle = self.persisted.lock().await.clone();
-        let uuid = handle.uuid.clone();
-        let link_expressions = links
+        let link_expressions: Result<Vec<_>, _> = links
             .into_iter()
             .map(|l| create_signed_expression(l).map(LinkExpression::from))
-            .collect::<Result<Vec<LinkExpression>, AnyError>>();
-
+            .collect();
         let link_expressions = link_expressions?;
-        let decorated_link_expressions = link_expressions
-            .clone()
-            .into_iter()
-            .map(|l| DecoratedLinkExpression::from((l, status.clone())))
-            .collect::<Vec<DecoratedLinkExpression>>();
 
-        let perspective_diff = PerspectiveDiff::from_additions(link_expressions.clone());
-        let decorated_perspective_diff =
-            DecoratedPerspectiveDiff::from_additions(decorated_link_expressions.clone());
+        if let Some(batch_id) = batch_id {
+            let mut batches = BATCH_STORE.write().await;
+            let diff = batches.get_mut(&batch_id)
+                .ok_or(anyhow!("Batch not found"))?;
+            
+            let mut decorated_expressions = Vec::new();
+            for mut link_expr in link_expressions {
+                link_expr.status = Some(status.clone());
+                diff.additions.push(link_expr.clone());
+                decorated_expressions.push(DecoratedLinkExpression::from((link_expr, status.clone())));
+            }
+            
+            Ok(decorated_expressions)
+        } else {
+            let decorated_link_expressions = link_expressions
+                .clone()
+                .into_iter()
+                .map(|l| DecoratedLinkExpression::from((l, status.clone())))
+                .collect::<Vec<DecoratedLinkExpression>>();
 
-        Ad4mDb::with_global_instance(|db| {
-            db.add_many_links(&uuid, link_expressions.clone(), &status)
-        })?;
+            let perspective_diff = PerspectiveDiff::from_additions(link_expressions.clone());
+            let decorated_perspective_diff =
+                DecoratedPerspectiveDiff::from_additions(decorated_link_expressions.clone());
 
-        self.spawn_prolog_facts_update(decorated_perspective_diff.clone());
-        self.pubsub_publish_diff(decorated_perspective_diff).await;
-        if status == LinkStatus::Shared {
-            self.spawn_commit_and_handle_error(&perspective_diff);
+            let handle = self.persisted.lock().await.clone();
+            Ad4mDb::with_global_instance(|db| {
+                db.add_many_links(&handle.uuid, link_expressions.clone(), &status)
+            })?;
+
+            self.spawn_prolog_facts_update(decorated_perspective_diff.clone());
+            self.pubsub_publish_diff(decorated_perspective_diff).await;
+            if status == LinkStatus::Shared {
+                self.spawn_commit_and_handle_error(&perspective_diff);
+            }
+            *(self.trigger_notification_check.lock().await) = true;
+            *(self.trigger_prolog_subscription_check.lock().await) = true;
+            Ok(decorated_link_expressions)
         }
-        *(self.trigger_notification_check.lock().await) = true;
-        *(self.trigger_prolog_subscription_check.lock().await) = true;
-        Ok(decorated_link_expressions)
     }
 
     pub async fn link_mutations(
@@ -781,6 +857,7 @@ impl PerspectiveInstance {
         &mut self,
         old_link: LinkExpression,
         new_link: Link,
+        batch_id: Option<String>
     ) -> Result<DecoratedLinkExpression, AnyError> {
         let handle = self.persisted.lock().await.clone();
         let link_option = Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &old_link))?;
@@ -803,75 +880,60 @@ impl PerspectiveInstance {
 
         let new_link_expression = LinkExpression::from(create_signed_expression(new_link)?);
 
-        Ad4mDb::with_global_instance(|db| {
-            db.update_link(&handle.uuid, &link, &new_link_expression)
-        })?;
+        if let Some(batch_id) = batch_id {
+            let mut batches = BATCH_STORE.write().await;
+            let diff = batches.get_mut(&batch_id)
+                .ok_or(anyhow!("Batch not found"))?;
+            
+            diff.removals.push(old_link.clone());
+            let mut new_link_expr = new_link_expression.clone();
+            new_link_expr.status = Some(link_status.clone());
+            diff.additions.push(new_link_expr.clone());
+            
+            Ok(DecoratedLinkExpression::from((new_link_expr, link_status)))
+        } else {
+            Ad4mDb::with_global_instance(|db| {
+                db.update_link(&handle.uuid, &link, &new_link_expression)
+            })?;
 
-        let diff = PerspectiveDiff::from(vec![new_link_expression.clone()], vec![old_link.clone()]);
-        let decorated_new_link_expression =
-            DecoratedLinkExpression::from((new_link_expression.clone(), link_status.clone()));
-        let decorated_old_link =
-            DecoratedLinkExpression::from((old_link.clone(), link_status.clone()));
-        let decorated_diff = DecoratedPerspectiveDiff::from(
-            vec![decorated_new_link_expression.clone()],
-            vec![decorated_old_link.clone()],
-        );
+            let diff = PerspectiveDiff::from(vec![new_link_expression.clone()], vec![old_link.clone()]);
+            let decorated_new_link_expression =
+                DecoratedLinkExpression::from((new_link_expression.clone(), link_status.clone()));
+            let decorated_old_link =
+                DecoratedLinkExpression::from((old_link.clone(), link_status.clone()));
+            let decorated_diff = DecoratedPerspectiveDiff::from(
+                vec![decorated_new_link_expression.clone()],
+                vec![decorated_old_link.clone()],
+            );
 
-        self.spawn_prolog_facts_update(decorated_diff);
+            self.spawn_prolog_facts_update(decorated_diff);
 
-        get_global_pubsub()
-            .await
-            .publish(
-                &PERSPECTIVE_LINK_UPDATED_TOPIC,
-                &serde_json::to_string(&PerspectiveLinkUpdatedFilter {
-                    perspective: handle.clone(),
-                    old_link: decorated_old_link,
-                    new_link: decorated_new_link_expression.clone(),
-                })
-                .unwrap(),
-            )
-            .await;
+            get_global_pubsub()
+                .await
+                .publish(
+                    &PERSPECTIVE_LINK_UPDATED_TOPIC,
+                    &serde_json::to_string(&PerspectiveLinkUpdatedFilter {
+                        perspective: handle.clone(),
+                        old_link: decorated_old_link,
+                        new_link: decorated_new_link_expression.clone(),
+                    })
+                    .unwrap(),
+                )
+                .await;
 
-        if link_status == LinkStatus::Shared {
-            self.spawn_commit_and_handle_error(&diff);
-        }
-        *(self.trigger_notification_check.lock().await) = true;
-        *(self.trigger_prolog_subscription_check.lock().await) = true;
-        Ok(decorated_new_link_expression)
-    }
-
-    pub async fn remove_link(
-        &mut self,
-        link_expression: LinkExpression,
-    ) -> Result<DecoratedLinkExpression, AnyError> {
-        let handle = self.persisted.lock().await.clone();
-        if let Some((link_from_db, status)) =
-            Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &link_expression))?
-        {
-            Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, &link_expression))?;
-            let diff = PerspectiveDiff::from_removals(vec![link_expression.clone()]);
-            let decorated_link = DecoratedLinkExpression::from((link_from_db, status.clone()));
-            let decorated_diff =
-                DecoratedPerspectiveDiff::from_removals(vec![decorated_link.clone()]);
-
-            self.spawn_prolog_facts_update(decorated_diff.clone());
-            self.pubsub_publish_diff(decorated_diff.clone()).await;
-
-            if status == LinkStatus::Shared {
+            if link_status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&diff);
             }
-
             *(self.trigger_notification_check.lock().await) = true;
             *(self.trigger_prolog_subscription_check.lock().await) = true;
-            Ok(decorated_link)
-        } else {
-            Err(anyhow!("Link not found"))
+            Ok(decorated_new_link_expression)
         }
     }
 
     pub async fn remove_links(
         &mut self,
         link_expressions: Vec<LinkExpression>,
+        batch_id: Option<String>
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let handle = self.persisted.lock().await.clone();
 
@@ -890,47 +952,62 @@ impl PerspectiveInstance {
             return Ok(Vec::new());
         }
 
-        // Split into links and statuses
-        let (links, statuses): (Vec<_>, Vec<_>) = existing_links.into_iter().unzip();
+        if let Some(batch_id) = batch_id {
+            let mut batches = BATCH_STORE.write().await;
+            let diff = batches.get_mut(&batch_id)
+                .ok_or(anyhow!("Batch not found"))?;
+            
+            let decorated_links: Vec<_> = existing_links.iter()
+                .map(|(link, status)| {
+                    diff.removals.push(link.clone());
+                    DecoratedLinkExpression::from((link.clone(), status.clone()))
+                })
+                .collect();
+            
+            Ok(decorated_links)
+        } else {
+            // Split into links and statuses
+            let (links, statuses): (Vec<_>, Vec<_>) = existing_links.into_iter().unzip();
 
-        // Create diff from links that exist
-        let diff = PerspectiveDiff::from_removals(links.clone());
+            // Create diff from links that exist
+            let diff = PerspectiveDiff::from_removals(links.clone());
 
-        // Create decorated versions
-        let decorated_links: Vec<DecoratedLinkExpression> = links
-            .into_iter()
-            .zip(statuses.iter())
-            .map(|(link, status)| DecoratedLinkExpression::from((link, status.clone())))
-            .collect();
+            // Create decorated versions
+            let decorated_links: Vec<DecoratedLinkExpression> = links
+                .into_iter()
+                .zip(statuses.iter())
+                .map(|(link, status)| DecoratedLinkExpression::from((link, status.clone())))
+                .collect();
 
-        let decorated_diff = DecoratedPerspectiveDiff::from_removals(decorated_links.clone());
+            let decorated_diff = DecoratedPerspectiveDiff::from_removals(decorated_links.clone());
 
-        // Remove from DB
-        for link in diff.removals.iter() {
-            Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, link))?;
+            // Remove from DB
+            for link in diff.removals.iter() {
+                Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, link))?;
+            }
+
+            self.spawn_prolog_facts_update(decorated_diff.clone());
+            self.pubsub_publish_diff(decorated_diff).await;
+
+            // Only commit shared links by filtering decorated_links
+            let shared_links: Vec<LinkExpression> = decorated_links
+                .iter()
+                .filter(|link| link.status == Some(LinkStatus::Shared))
+                .map(|link| link.clone().into())
+                .collect();
+
+            if !shared_links.is_empty() {
+                let shared_diff = PerspectiveDiff {
+                    additions: vec![],
+                    removals: shared_links,
+                };
+                self.spawn_commit_and_handle_error(&shared_diff);
+            }
+
+            *(self.trigger_notification_check.lock().await) = true;
+            *(self.trigger_prolog_subscription_check.lock().await) = true;
+            Ok(decorated_links)
         }
-
-        self.spawn_prolog_facts_update(decorated_diff.clone());
-        self.pubsub_publish_diff(decorated_diff).await;
-
-        // Only commit shared links by filtering decorated_links
-        let shared_links: Vec<LinkExpression> = decorated_links
-            .iter()
-            .filter(|link| link.status == Some(LinkStatus::Shared))
-            .map(|link| link.clone().into())
-            .collect();
-
-        if !shared_links.is_empty() {
-            let shared_diff = PerspectiveDiff {
-                additions: vec![],
-                removals: shared_links,
-            };
-            self.spawn_commit_and_handle_error(&shared_diff);
-        }
-
-        *(self.trigger_notification_check.lock().await) = true;
-        *(self.trigger_prolog_subscription_check.lock().await) = true;
-        Ok(decorated_links)
     }
 
     async fn get_links_local(
@@ -1110,7 +1187,7 @@ impl PerspectiveInstance {
                 target: sdna_code,
             });
 
-            self.add_links(sdna_links, LinkStatus::Shared).await?;
+            self.add_links(sdna_links, LinkStatus::Shared, None).await?;
             added = true;
         }
         // Mutex guard is automatically dropped here
@@ -1500,6 +1577,7 @@ impl PerspectiveInstance {
                             target,
                         },
                         status,
+                        None
                     )
                     .await?;
                 }
@@ -1515,7 +1593,7 @@ impl PerspectiveInstance {
                         })
                         .await?;
                     for link_expression in link_expressions {
-                        self.remove_link(link_expression.into()).await?;
+                        self.remove_link(link_expression.into(), None).await?;
                     }
                 }
                 Action::SetSingleTarget => {
@@ -1536,7 +1614,7 @@ impl PerspectiveInstance {
                         })
                         .await?;
                     for link_expression in link_expressions {
-                        self.remove_link(link_expression.into()).await?;
+                        self.remove_link(link_expression.into(), None).await?;
                     }
                     self.add_link(
                         Link {
@@ -1545,6 +1623,7 @@ impl PerspectiveInstance {
                             target,
                         },
                         status,
+                        None
                     )
                     .await?;
                 }
@@ -1560,7 +1639,7 @@ impl PerspectiveInstance {
                         })
                         .await?;
                     for link_expression in link_expressions {
-                        self.remove_link(link_expression.into()).await?;
+                        self.remove_link(link_expression.into(), None).await?;
                     }
                     self.add_links(
                         parameters
@@ -1572,6 +1651,7 @@ impl PerspectiveInstance {
                             })
                             .collect(),
                         status,
+                        None
                     )
                     .await?;
                 }
@@ -2000,6 +2080,113 @@ impl PerspectiveInstance {
             sleep(Duration::from_millis(QUERY_SUBSCRIPTION_CHECK_INTERVAL)).await;
         }
     }
+
+    pub async fn create_batch(&self) -> String {
+        let batch_uuid = Uuid::new_v4().to_string();
+        BATCH_STORE.write().await.insert(batch_uuid.clone(), PerspectiveDiff {
+            additions: Vec::new(),
+            removals: Vec::new(),
+        });
+        batch_uuid
+    }
+
+    pub async fn commit_batch(&mut self, batch_uuid: String) -> Result<DecoratedPerspectiveDiff, AnyError> {
+        let mut batch_store = BATCH_STORE.write().await;
+        let diff = match batch_store.remove(&batch_uuid) {
+            Some(diff) => diff,
+            None => return Err(anyhow!("No batch found with given UUID")),
+        };
+
+        let mut shared_diff = DecoratedPerspectiveDiff {
+            additions: Vec::new(),
+            removals: Vec::new(),
+        };
+        let mut local_diff = DecoratedPerspectiveDiff {
+            additions: Vec::new(),
+            removals: Vec::new(),
+        };
+
+        // Process additions
+        for link in diff.additions {
+            let status = link.status.unwrap_or(LinkStatus::Shared);
+            let signed_expr = create_signed_expression(link.data)?;
+            let decorated = DecoratedLinkExpression::from((LinkExpression::from(signed_expr), status.clone()));
+
+            match status {
+                LinkStatus::Shared => shared_diff.additions.push(decorated),
+                LinkStatus::Local => local_diff.additions.push(decorated),
+            }
+        }
+
+        // Process removals
+        for link in diff.removals {
+            let status = link.status.clone().unwrap_or(LinkStatus::Shared);
+            let decorated = DecoratedLinkExpression::from((link, status.clone()));
+            match status {
+                LinkStatus::Shared => shared_diff.removals.push(decorated),
+                LinkStatus::Local => local_diff.removals.push(decorated),
+            }
+        }
+
+        let handle = self.persisted.lock().await;
+        let uuid = handle.uuid.clone();
+        drop(handle);
+
+        // Apply shared changes
+        if !shared_diff.additions.is_empty() || !shared_diff.removals.is_empty() {
+            // Add shared links to storage
+            for link in &shared_diff.additions {
+                Ad4mDb::with_global_instance(|db| {
+                    db.add_link(&uuid, &link.clone().into(), &LinkStatus::Shared)
+                })?;
+            }
+            
+            // Remove shared links from storage
+            for link in &shared_diff.removals {
+                Ad4mDb::with_global_instance(|db| {
+                    db.remove_link(&uuid, &link.clone().into())
+                })?;
+            }
+
+            // Commit to link language
+            if self.has_link_language().await {
+                let perspective_diff = PerspectiveDiff {
+                    additions: shared_diff.additions.iter().map(|l| l.clone().into()).collect(),
+                    removals: shared_diff.removals.iter().map(|l| l.clone().into()).collect(),
+                };
+                self.spawn_commit_and_handle_error(&perspective_diff);
+            }
+        }
+
+        // Apply local changes
+        if !local_diff.additions.is_empty() || !local_diff.removals.is_empty() {
+            // Add local links to storage
+            for link in &local_diff.additions {
+                Ad4mDb::with_global_instance(|db| {
+                    db.add_link(&uuid, &link.clone().into(), &LinkStatus::Local)
+                })?;
+            }
+            
+            // Remove local links from storage
+            for link in &local_diff.removals {
+                Ad4mDb::with_global_instance(|db| {
+                    db.remove_link(&uuid, &link.clone().into())
+                })?;
+            }
+        }
+
+        // Create combined diff for prolog update and return value
+        let combined_diff = DecoratedPerspectiveDiff {
+            additions: [shared_diff.additions.clone(), local_diff.additions.clone()].concat(),
+            removals: [shared_diff.removals.clone(), local_diff.removals.clone()].concat(),
+        };
+
+        // Update prolog facts once for all changes
+        self.spawn_prolog_facts_update(combined_diff.clone());
+
+        // Return combined diff
+        Ok(combined_diff)
+    }
 }
 
 pub fn prolog_result(result: String) -> Value {
@@ -2060,7 +2247,7 @@ mod tests {
         for _ in 0..5 {
             let link = create_link();
             let expression = perspective
-                .add_link(link.clone(), LinkStatus::Local)
+                .add_link(link.clone(), LinkStatus::Local, None)
                 .await
                 .unwrap();
             all_links.push(expression);
@@ -2085,7 +2272,7 @@ mod tests {
             }
 
             let expression = perspective
-                .add_link(link.clone(), LinkStatus::Shared)
+                .add_link(link.clone(), LinkStatus::Shared, None)
                 .await
                 .unwrap();
             all_links.push(expression);
@@ -2111,7 +2298,7 @@ mod tests {
         let status = LinkStatus::Local;
 
         // Add a link to the perspective
-        let expression = perspective.add_link(link.clone(), status).await.unwrap();
+        let expression = perspective.add_link(link.clone(), status, None).await.unwrap();
 
         // Ensure the link is present
         let query = LinkQuery::default();
@@ -2120,7 +2307,7 @@ mod tests {
 
         // Remove the link from the perspective
         perspective
-            .remove_link(expression.clone().into())
+            .remove_link(expression.clone().into(), None)
             .await
             .unwrap();
 
@@ -2244,4 +2431,118 @@ mod tests {
 
     // Additional tests for updateLink, removeLink, syncWithSharingAdapter, etc. would go here
     // following the same pattern as above.
+
+    #[tokio::test]
+    async fn test_batch_operations() {
+        let mut perspective = setup();
+        let link = create_link();
+        let batch_id = perspective.create_batch().await;
+
+        perspective.add_link(link.clone(), LinkStatus::Shared, Some(batch_id.clone())).await.unwrap();
+
+        let query = LinkQuery::default();
+        let links = perspective.get_links(&query).await.unwrap();
+        assert_eq!(links.len(), 0);
+        
+        // Commit the batch
+        let diff = perspective.commit_batch(batch_id).await.unwrap();
+        assert_eq!(diff.additions.len(), 1);
+        
+        // Verify links are now in DB
+        let links = perspective.get_links(&query).await.unwrap();
+        assert_eq!(links.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_batch_update_and_remove() {
+        let mut perspective = setup();
+        let link = create_link();
+        let batch_id = perspective.create_batch().await;
+
+        // Add initial link
+        perspective.add_link(link.clone(), LinkStatus::Shared, None).await.unwrap();
+
+        let query = LinkQuery::default();
+        let links = perspective.get_links(&query).await.unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].data.target, link.target);
+        
+        // Update link in batch
+        let mut new_link = link.clone();
+        new_link.target = "new_target".to_string();
+        perspective.update_link(links[0].clone().into(), new_link.clone(), Some(batch_id.clone())).await.unwrap();
+        
+        // Commit the batch
+        perspective.commit_batch(batch_id).await.unwrap();
+        
+        // Verify final state in DB
+        let links = perspective.get_links(&query).await.unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].data.target, new_link.target);
+    }
+
+    #[tokio::test]
+    async fn test_batch_multiple_operations() {
+        let mut perspective = setup();
+
+        // one link outside the batch, for removal
+        let link0 = create_link();
+        let link0_expression = perspective.add_link(link0.clone(), LinkStatus::Shared, None).await.unwrap();
+
+        // two links in the batch
+        let link1 = create_link();
+        let mut link2 = link1.clone();
+        link2.target = "target2".to_string();
+
+        let batch_id = perspective.create_batch().await;
+
+        // Add two links in batch
+        perspective.add_link(link1.clone(), LinkStatus::Shared, Some(batch_id.clone())).await.unwrap();
+        perspective.add_link(link2.clone(), LinkStatus::Shared, Some(batch_id.clone())).await.unwrap();
+        perspective.remove_link(link0_expression.clone().into(), Some(batch_id.clone())).await.unwrap();
+
+        let query = LinkQuery::default();
+
+        let links_before = perspective.get_links(&query).await.unwrap();
+        assert_eq!(links_before.len(), 1);
+        
+        // Commit the batch
+        let diff = perspective.commit_batch(batch_id).await.unwrap();
+        assert_eq!(diff.additions.len(), 2); // link1 and link2
+        assert_eq!(diff.removals.len(), 1); // link1
+        
+        let links_after = perspective.get_links(&query).await.unwrap();
+        assert_eq!(links_after.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_batch_error_handling() {
+        let mut perspective = setup();
+        
+        // Try to commit non-existent batch
+        let result = perspective.commit_batch("non-existent".to_string()).await;
+        assert!(result.is_err());
+        
+        // Create a batch
+        let batch_id = perspective.create_batch().await;
+        
+        // Try to remove non-existent link in batch
+        let non_existent_link = LinkExpression {
+            author: "test".to_string(),
+            timestamp: "0".to_string(),
+            data: Link {
+                source: "test://non-existent".to_string(),
+                predicate: Some("test://predicate".to_string()),
+                target: "test://target".to_string(),
+            },
+            proof: Default::default(),
+            status: None,
+        };
+        let result = perspective.remove_link(non_existent_link.clone(), Some(batch_id.clone())).await;
+        assert!(result.is_err());
+        
+        // Try to use invalid batch ID
+        let result = perspective.add_link(create_link(), LinkStatus::Shared, Some("invalid".to_string())).await;
+        assert!(result.is_err());
+    }
 }

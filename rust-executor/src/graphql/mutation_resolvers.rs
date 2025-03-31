@@ -726,7 +726,7 @@ impl Mutation {
 
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         Ok(perspective
-            .add_link(link.into(), link_status_from_input(status)?)
+            .add_link(link.into(), link_status_from_input(status)?, None)
             .await?)
     }
 
@@ -764,6 +764,7 @@ impl Mutation {
             .add_links(
                 links.into_iter().map(|l| l.into()).collect(),
                 link_status_from_input(status)?,
+                None,
             )
             .await?)
     }
@@ -821,7 +822,7 @@ impl Mutation {
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         let link = crate::types::LinkExpression::try_from(link)?;
-        perspective.remove_link(link).await?;
+        perspective.remove_link(link, None).await?;
         Ok(true)
     }
 
@@ -840,7 +841,7 @@ impl Mutation {
             .into_iter()
             .map(LinkExpression::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        let removed_links = perspective.remove_links(links).await?;
+        let removed_links = perspective.remove_links(links, None).await?;
         Ok(removed_links)
     }
 
@@ -877,6 +878,7 @@ impl Mutation {
             .update_link(
                 LinkExpression::from_input_without_proof(old_link),
                 new_link.into(),
+                None,
             )
             .await?)
     }
