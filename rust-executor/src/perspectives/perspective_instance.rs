@@ -36,12 +36,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 use tokio::{join, time};
 use uuid;
-use lazy_static::lazy_static;
 use uuid::Uuid;
-
-lazy_static! {
-    static ref BATCH_STORE: RwLock<HashMap<String, PerspectiveDiff>> = RwLock::new(HashMap::new());
-}
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
@@ -172,6 +167,7 @@ pub struct PerspectiveInstance {
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
+    batch_store: Arc<RwLock<HashMap<String, PerspectiveDiff>>>,
 }
 
 impl PerspectiveInstance {
@@ -193,6 +189,7 @@ impl PerspectiveInstance {
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)), // Default to 3 immediate commits
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
+            batch_store: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -635,7 +632,7 @@ impl PerspectiveInstance {
         let link_expr: LinkExpression = create_signed_expression(link)?.into();
         
         if let Some(batch_id) = batch_id {
-            let mut batches = BATCH_STORE.write().await;
+            let mut batches = self.batch_store.write().await;
             let diff = batches.get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
             
@@ -655,7 +652,7 @@ impl PerspectiveInstance {
         batch_id: Option<String>
     ) -> Result<DecoratedLinkExpression, AnyError> {
         if let Some(batch_id) = batch_id {
-            let mut batches = BATCH_STORE.write().await;
+            let mut batches = self.batch_store.write().await;
             let diff = batches.get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
             
@@ -763,7 +760,7 @@ impl PerspectiveInstance {
         let link_expressions = link_expressions?;
 
         if let Some(batch_id) = batch_id {
-            let mut batches = BATCH_STORE.write().await;
+            let mut batches = self.batch_store.write().await;
             let diff = batches.get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
             
@@ -881,7 +878,7 @@ impl PerspectiveInstance {
         let new_link_expression = LinkExpression::from(create_signed_expression(new_link)?);
 
         if let Some(batch_id) = batch_id {
-            let mut batches = BATCH_STORE.write().await;
+            let mut batches = self.batch_store.write().await;
             let diff = batches.get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
             
@@ -953,7 +950,7 @@ impl PerspectiveInstance {
         }
 
         if let Some(batch_id) = batch_id {
-            let mut batches = BATCH_STORE.write().await;
+            let mut batches = self.batch_store.write().await;
             let diff = batches.get_mut(&batch_id)
                 .ok_or(anyhow!("Batch not found"))?;
             
@@ -2083,7 +2080,7 @@ impl PerspectiveInstance {
 
     pub async fn create_batch(&self) -> String {
         let batch_uuid = Uuid::new_v4().to_string();
-        BATCH_STORE.write().await.insert(batch_uuid.clone(), PerspectiveDiff {
+        self.batch_store.write().await.insert(batch_uuid.clone(), PerspectiveDiff {
             additions: Vec::new(),
             removals: Vec::new(),
         });
@@ -2091,7 +2088,7 @@ impl PerspectiveInstance {
     }
 
     pub async fn commit_batch(&mut self, batch_uuid: String) -> Result<DecoratedPerspectiveDiff, AnyError> {
-        let mut batch_store = BATCH_STORE.write().await;
+        let mut batch_store = self.batch_store.write().await;
         let diff = match batch_store.remove(&batch_uuid) {
             Some(diff) => diff,
             None => return Err(anyhow!("No batch found with given UUID")),
