@@ -1519,8 +1519,10 @@ impl PerspectiveInstance {
                     }
                 }
                 Action::SetSingleTarget => {
-                    if predicate.is_none()  {
-                        log::error!("SetSingleTarget actions with no predicate are not allowed. Skipping.");
+                    if predicate.is_none() {
+                        log::error!(
+                            "SetSingleTarget actions with no predicate are not allowed. Skipping."
+                        );
                         continue;
                     }
                     let link_expressions = self
