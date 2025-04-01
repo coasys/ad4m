@@ -630,20 +630,7 @@ impl PerspectiveInstance {
         batch_id: Option<String>
     ) -> Result<DecoratedLinkExpression, AnyError> {
         let link_expr: LinkExpression = create_signed_expression(link)?.into();
-        
-        if let Some(batch_id) = batch_id {
-            let mut batches = self.batch_store.write().await;
-            let diff = batches.get_mut(&batch_id)
-                .ok_or(anyhow!("Batch not found"))?;
-            
-            let mut link_expr = link_expr.clone();
-            link_expr.status = Some(status.clone());
-            diff.additions.push(link_expr.clone());
-            
-            Ok(DecoratedLinkExpression::from((link_expr, status)))
-        } else {
-            self.add_link_expression(link_expr.into(), status).await
-        }
+        self.add_link_expression(link_expr.into(), status, batch_id).await
     }
 
     pub async fn remove_link(
@@ -725,8 +712,20 @@ impl PerspectiveInstance {
         &mut self,
         link_expression: LinkExpression,
         status: LinkStatus,
+        batch_id: Option<String>
     ) -> Result<DecoratedLinkExpression, AnyError> {
         let handle = self.persisted.lock().await.clone();
+        if let Some(batch_id) = batch_id {
+            let mut batches = self.batch_store.write().await;
+            let diff = batches.get_mut(&batch_id)
+                .ok_or(anyhow!("Batch not found"))?;
+
+            let mut link_expr = link_expression.clone();
+            link_expr.status = Some(status.clone());
+            diff.additions.push(link_expr.clone());
+            
+            return Ok(DecoratedLinkExpression::from((link_expr.clone(), status.clone())));
+        }
         Ad4mDb::with_global_instance(|db| db.add_link(&handle.uuid, &link_expression, &status))?;
 
         let diff = PerspectiveDiff::from_additions(vec![link_expression.clone()]);
@@ -2328,7 +2327,7 @@ mod tests {
                 + chrono::Duration::minutes(i as i64))
             .to_rfc3339();
             let expression = perspective
-                .add_link_expression(LinkExpression::from(link.clone()), LinkStatus::Shared)
+                .add_link_expression(LinkExpression::from(link.clone()), LinkStatus::Shared, None)
                 .await
                 .unwrap();
             all_links.push(expression);

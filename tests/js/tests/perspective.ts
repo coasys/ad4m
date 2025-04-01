@@ -252,7 +252,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(queryLinksUpdated.length).to.equal(1);
 
                 const deleteLink = await ad4mClient!.perspective.removeLink(create.uuid, updateLink);
-                expect(deleteLink.perspectiveRemoveLink).to.equal(true);
+                expect(deleteLink).to.equal(true);
 
                 let queryLinksDeleted = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test2"}));
                 expect(queryLinksDeleted.length).to.equal(0);
@@ -335,6 +335,269 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(linkResult[0].X).to.equal('note-ipfs://Qm123');
                 expect(linkResult[0].Timestamp).not.to.be.null;
                 expect(linkResult[0].Author).not.to.be.null;
+            })
+        })
+
+        describe('Batch Operations', () => {
+            let proxy: PerspectiveProxy
+            let ad4mClient: Ad4mClient
+            
+            beforeEach(async () => {
+                ad4mClient = testContext.ad4mClient!
+                proxy = await ad4mClient.perspective.add("batch test");
+            })
+
+            it('can create and commit empty batch', async () => {
+                const batchId = await proxy.createBatch()
+                expect(batchId).to.be.a('string')
+                
+                const result = await proxy.commitBatch(batchId)
+                expect(result.additions).to.be.an('array')
+                expect(result.additions.length).to.equal(0)
+                expect(result.removals).to.be.an('array')
+                expect(result.removals.length).to.equal(0)
+            })
+
+            it('can add links in batch', async () => {
+                const batchId = await proxy.createBatch()
+                
+                const link1 = new Link({
+                    source: 'test://source1',
+                    predicate: 'test://predicate1',
+                    target: 'test://target1'
+                })
+                const link2 = new Link({
+                    source: 'test://source2',
+                    predicate: 'test://predicate2',
+                    target: 'test://target2'
+                })
+
+                // Add links to batch
+                await proxy.add(link1, 'shared', batchId)
+                await proxy.add(link2, 'shared', batchId)
+
+                // Links should not be visible before commit
+                let links = await proxy.get({} as LinkQuery)
+                expect(links.length).to.equal(0)
+
+                // Commit batch
+                const result = await proxy.commitBatch(batchId)
+                expect(result.additions.length).to.equal(2)
+                expect(result.removals.length).to.equal(0)
+
+                // Verify links are now visible
+                links = await proxy.get({} as LinkQuery)
+                expect(links.length).to.equal(2)
+                expect(links.map(l => l.data.target)).to.include('test://target1')
+                expect(links.map(l => l.data.target)).to.include('test://target2')
+            })
+
+            it('can remove links in batch', async () => {
+                // Add some initial links
+                const link1 = new Link({
+                    source: 'test://source1',
+                    predicate: 'test://predicate1',
+                    target: 'test://target1'
+                })
+                const link2 = new Link({
+                    source: 'test://source2',
+                    predicate: 'test://predicate2',
+                    target: 'test://target2'
+                })
+
+                const expr1 = await proxy.add(link1)
+                const expr2 = await proxy.add(link2)
+
+                // Create batch for removals
+                const batchId = await proxy.createBatch()
+                
+                // Remove links in batch
+                await proxy.remove(expr1, batchId)
+                await proxy.remove(expr2, batchId)
+
+                // Links should still be visible before commit
+                let links = await proxy.get({} as LinkQuery)
+                expect(links.length).to.equal(2)
+
+                // Commit batch
+                const result = await proxy.commitBatch(batchId)
+                expect(result.additions.length).to.equal(0)
+                expect(result.removals.length).to.equal(2)
+
+                // Verify links are now removed
+                links = await proxy.get({} as LinkQuery)
+                expect(links.length).to.equal(0)
+            })
+
+            it('can mix additions and removals in batch', async () => {
+                // Add an initial link
+                const link1 = new Link({
+                    source: 'test://source1',
+                    predicate: 'test://predicate1',
+                    target: 'test://target1'
+                })
+                const expr1 = await proxy.add(link1)
+
+                // Create batch
+                const batchId = await proxy.createBatch()
+
+                // Remove existing link and add new one in batch
+                await proxy.remove(expr1, batchId)
+                const link2 = new Link({
+                    source: 'test://source2',
+                    predicate: 'test://predicate2',
+                    target: 'test://target2'
+                })
+                await proxy.add(link2, 'shared', batchId)
+
+                // Original state should be unchanged before commit
+                let links = await proxy.get({} as LinkQuery)
+                expect(links.length).to.equal(1)
+                expect(links[0].data.target).to.equal('test://target1')
+
+                // Commit batch
+                const result = await proxy.commitBatch(batchId)
+                expect(result.additions.length).to.equal(1)
+                expect(result.removals.length).to.equal(1)
+
+                // Verify final state
+                links = await proxy.get({} as LinkQuery)
+                expect(links.length).to.equal(1)
+                expect(links[0].data.target).to.equal('test://target2')
+            })
+
+            it('can update links in batch', async () => {
+                // Add an initial link
+                const link1 = new Link({
+                    source: 'test://source1',
+                    predicate: 'test://predicate1',
+                    target: 'test://target1'
+                })
+                const expr1 = await proxy.add(link1)
+
+                // Create batch
+                const batchId = await proxy.createBatch()
+
+                // Update link in batch
+                const newLink = new Link({
+                    source: 'test://source1',
+                    predicate: 'test://predicate1',
+                    target: 'test://updated-target'
+                })
+                await proxy.update(expr1, newLink, batchId)
+
+                // Original state should be unchanged before commit
+                let links = await proxy.get({} as LinkQuery)
+                expect(links.length).to.equal(1)
+                expect(links[0].data.target).to.equal('test://target1')
+
+                // Commit batch
+                const result = await proxy.commitBatch(batchId)
+                expect(result.additions.length).to.equal(1)
+                expect(result.removals.length).to.equal(1)
+
+                // Verify final state
+                links = await proxy.get({} as LinkQuery)
+                expect(links.length).to.equal(1)
+                expect(links[0].data.target).to.equal('test://updated-target')
+            })
+
+            it('can handle multiple batches concurrently', async () => {
+                // Create two batches
+                const batchId1 = await proxy.createBatch()
+                const batchId2 = await proxy.createBatch()
+
+                // Add different links to each batch
+                const link1 = new Link({
+                    source: 'test://source1',
+                    predicate: 'test://predicate1',
+                    target: 'test://target1'
+                })
+                const link2 = new Link({
+                    source: 'test://source2',
+                    predicate: 'test://predicate2',
+                    target: 'test://target2'
+                })
+
+                await proxy.add(link1, 'shared', batchId1)
+                await proxy.add(link2, 'shared', batchId2)
+
+                // Verify no links are visible yet
+                let links = await proxy.get({} as LinkQuery)
+                expect(links.length).to.equal(0)
+
+                // Commit first batch
+                const result1 = await proxy.commitBatch(batchId1)
+                expect(result1.additions.length).to.equal(1)
+                expect(result1.removals.length).to.equal(0)
+
+                // Verify only first link is visible
+                links = await proxy.get({} as LinkQuery)
+                expect(links.length).to.equal(1)
+                expect(links[0].data.target).to.equal('test://target1')
+
+                // Commit second batch
+                const result2 = await proxy.commitBatch(batchId2)
+                expect(result2.additions.length).to.equal(1)
+                expect(result2.removals.length).to.equal(0)
+
+                // Verify both links are now visible
+                links = await proxy.get({} as LinkQuery)
+                expect(links.length).to.equal(2)
+                expect(links.map(l => l.data.target)).to.include('test://target1')
+                expect(links.map(l => l.data.target)).to.include('test://target2')
+            })
+
+            it('handles batch operations with addLinks and removeLinks', async () => {
+                const batchId = await proxy.createBatch()
+
+                // Add multiple links in one call
+                const links = [
+                    new Link({
+                        source: 'test://source1',
+                        predicate: 'test://predicate1',
+                        target: 'test://target1'
+                    }),
+                    new Link({
+                        source: 'test://source2',
+                        predicate: 'test://predicate2',
+                        target: 'test://target2'
+                    })
+                ]
+
+                await proxy.addLinks(links, 'shared', batchId)
+
+                // Verify links are not visible yet
+                let currentLinks = await proxy.get({} as LinkQuery)
+                expect(currentLinks.length).to.equal(0)
+
+                // Commit batch
+                const result = await proxy.commitBatch(batchId)
+                expect(result.additions.length).to.equal(2)
+                expect(result.removals.length).to.equal(0)
+
+                // Verify links are now visible
+                currentLinks = await proxy.get({} as LinkQuery)
+                expect(currentLinks.length).to.equal(2)
+
+                // Create new batch for removal
+                const removeBatchId = await proxy.createBatch()
+
+                // Remove multiple links in one call
+                await proxy.removeLinks(currentLinks, removeBatchId)
+
+                // Verify links are still visible before commit
+                currentLinks = await proxy.get({} as LinkQuery)
+                expect(currentLinks.length).to.equal(2)
+
+                // Commit removal batch
+                const removeResult = await proxy.commitBatch(removeBatchId)
+                expect(removeResult.additions.length).to.equal(0)
+                expect(removeResult.removals.length).to.equal(2)
+
+                // Verify all links are removed
+                currentLinks = await proxy.get({} as LinkQuery)
+                expect(currentLinks.length).to.equal(0)
             })
         })
 

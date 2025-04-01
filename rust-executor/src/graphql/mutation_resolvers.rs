@@ -718,6 +718,7 @@ impl Mutation {
         link: LinkInput,
         uuid: String,
         status: Option<String>,
+        batch_id: Option<String>,
     ) -> FieldResult<DecoratedLinkExpression> {
         check_capability(
             &context.capabilities,
@@ -726,7 +727,7 @@ impl Mutation {
 
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         Ok(perspective
-            .add_link(link.into(), link_status_from_input(status)?, None)
+            .add_link(link.into(), link_status_from_input(status)?, batch_id)
             .await?)
     }
 
@@ -736,6 +737,7 @@ impl Mutation {
         link: LinkExpressionInput,
         uuid: String,
         status: Option<String>,
+        batch_id: Option<String>,
     ) -> FieldResult<DecoratedLinkExpression> {
         check_capability(
             &context.capabilities,
@@ -744,7 +746,7 @@ impl Mutation {
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         let link = crate::types::LinkExpression::try_from(link)?;
         Ok(perspective
-            .add_link_expression(link, link_status_from_input(status)?)
+            .add_link_expression(link, link_status_from_input(status)?, batch_id)
             .await?)
     }
 
@@ -754,6 +756,7 @@ impl Mutation {
         links: Vec<LinkInput>,
         uuid: String,
         status: Option<String>,
+        batch_id: Option<String>,
     ) -> FieldResult<Vec<DecoratedLinkExpression>> {
         check_capability(
             &context.capabilities,
@@ -764,7 +767,7 @@ impl Mutation {
             .add_links(
                 links.into_iter().map(|l| l.into()).collect(),
                 link_status_from_input(status)?,
-                None,
+                batch_id,
             )
             .await?)
     }
@@ -815,6 +818,7 @@ impl Mutation {
         context: &RequestContext,
         link: LinkExpressionInput,
         uuid: String,
+        batch_id: Option<String>,
     ) -> FieldResult<bool> {
         check_capability(
             &context.capabilities,
@@ -822,7 +826,7 @@ impl Mutation {
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         let link = crate::types::LinkExpression::try_from(link)?;
-        perspective.remove_link(link, None).await?;
+        perspective.remove_link(link, batch_id).await?;
         Ok(true)
     }
 
@@ -831,6 +835,7 @@ impl Mutation {
         context: &RequestContext,
         links: Vec<LinkExpressionInput>,
         uuid: String,
+        batch_id: Option<String>,
     ) -> FieldResult<Vec<DecoratedLinkExpression>> {
         check_capability(
             &context.capabilities,
@@ -841,7 +846,7 @@ impl Mutation {
             .into_iter()
             .map(LinkExpression::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        let removed_links = perspective.remove_links(links, None).await?;
+        let removed_links = perspective.remove_links(links, batch_id).await?;
         Ok(removed_links)
     }
 
@@ -868,6 +873,7 @@ impl Mutation {
         new_link: LinkInput,
         old_link: LinkExpressionInput,
         uuid: String,
+        batch_id: Option<String>,
     ) -> FieldResult<DecoratedLinkExpression> {
         check_capability(
             &context.capabilities,
@@ -878,7 +884,7 @@ impl Mutation {
             .update_link(
                 LinkExpression::from_input_without_proof(old_link),
                 new_link.into(),
-                None,
+                batch_id,
             )
             .await?)
     }
@@ -1588,5 +1594,32 @@ impl Mutation {
         })?;
 
         Ok(true)
+    }
+
+    async fn perspective_create_batch(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+    ) -> FieldResult<String> {
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
+        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        Ok(perspective.create_batch().await)
+    }
+
+    async fn perspective_commit_batch(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        batch_id: String,
+    ) -> FieldResult<DecoratedPerspectiveDiff> {
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        Ok(perspective.commit_batch(batch_id).await?)
     }
 }

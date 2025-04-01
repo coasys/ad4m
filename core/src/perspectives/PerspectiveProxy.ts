@@ -224,6 +224,7 @@ export class PerspectiveProxy {
         this.#client.addPerspectiveSyncStateChangeListener(this.#handle.uuid, this.#perspectiveSyncStateChangeCallbacks)
     }
 
+    /** Execute a list of commands on this perspective */
     async executeAction(actions, expression, parameters: Parameter[]) {
         return await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters))
     }
@@ -239,18 +240,18 @@ export class PerspectiveProxy {
     }
 
     /** Adds a link to this perspective */
-    async add(link: Link, status: LinkStatus = 'shared'): Promise<LinkExpression> {
-        return await this.#client.addLink(this.#handle.uuid, link, status)
+    async add(link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
+        return await this.#client.addLink(this.#handle.uuid, link, status, batchId)
     }
 
     /** Adds multiple links to this perspective **/
-    async addLinks(links: Link[], status: LinkStatus = 'shared'): Promise<LinkExpression[]> {
-        return await this.#client.addLinks(this.#handle.uuid, links, status)
+    async addLinks(links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
+        return await this.#client.addLinks(this.#handle.uuid, links, status, batchId)
     }
 
     /** Removes multiple links from this perspective **/
-    async removeLinks(links: LinkExpressionInput[]): Promise<LinkExpression[]> {
-        return await this.#client.removeLinks(this.#handle.uuid, links)
+    async removeLinks(links: LinkExpressionInput[], batchId?: string): Promise<LinkExpression[]> {
+        return await this.#client.removeLinks(this.#handle.uuid, links, batchId)
     }
 
     /** Adds and removes multiple links from this perspective **/
@@ -259,16 +260,28 @@ export class PerspectiveProxy {
     }
 
     /** Adds a linkExpression to this perspective */
-    async addLinkExpression(link: LinkExpression, status: LinkStatus = 'shared'): Promise<LinkExpression> {
-        return await this.#client.addLinkExpression(this.#handle.uuid, link, status)
+    async addLinkExpression(link: LinkExpression, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
+        return await this.#client.addLinkExpression(this.#handle.uuid, link, status, batchId)
     }
 
-    async update(oldLink: LinkExpressionInput, newLink: Link) {
-        return await this.#client.updateLink(this.#handle.uuid, oldLink, newLink)
+    /** Updates a link in this perspective */
+    async update(oldLink: LinkExpressionInput, newLink: Link, batchId?: string): Promise<LinkExpression> {
+        return await this.#client.updateLink(this.#handle.uuid, oldLink, newLink, batchId)
     }
 
-    async remove(link: LinkExpressionInput) {
-        return await this.#client.removeLink(this.#handle.uuid, link)
+    /** Removes a link from this perspective */
+    async remove(link: LinkExpressionInput, batchId?: string): Promise<boolean> {
+        return await this.#client.removeLink(this.#handle.uuid, link, batchId)
+    }
+
+    /** Creates a new batch for grouping operations */
+    async createBatch(): Promise<string> {
+        return await this.#client.createBatch(this.#handle.uuid)
+    }
+
+    /** Commits a batch of operations */
+    async commitBatch(batchId: string): Promise<LinkExpressionMutations> {
+        return await this.#client.commitBatch(this.#handle.uuid, batchId)
     }
 
     async getExpression(expressionURI: string): Promise<ExpressionRendered> {
