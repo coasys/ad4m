@@ -599,6 +599,128 @@ export default function perspectiveTests(testContext: TestContext) {
                 currentLinks = await proxy.get({} as LinkQuery)
                 expect(currentLinks.length).to.equal(0)
             })
+
+            it("should support batch operations with executeCommands", async () => {
+                const perspective = await ad4mClient.perspective.add("test-batch-execute-commands");
+                const batchId = await perspective.createBatch();
+
+                // Execute commands in batch
+                await perspective.executeAction(
+                    [
+                        {
+                            action: "addLink",
+                            source: "test://source1",
+                            predicate: "test://predicate1",
+                            target: "test://target1"
+                        },
+                        {
+                            action: "addLink",
+                            source: "test://source2",
+                            predicate: "test://predicate2",
+                            target: "test://target2"
+                        }
+                    ],
+                    "test://expression",
+                    [],
+                    batchId
+                );
+
+                // Verify links are not visible before commit
+                let links = await perspective.get(new LinkQuery({}));
+                expect(links.length).to.equal(0);
+
+                // Commit batch and verify links are now visible
+                const diff = await perspective.commitBatch(batchId);
+                expect(diff.additions.length).to.equal(2);
+                expect(diff.removals.length).to.equal(0);
+
+                links = await perspective.get({ isMatch: () => true });
+                expect(links.length).to.equal(2);
+
+                // Verify link contents
+                const link1 = links.find(l => l.data.source === "test://source1");
+                if (!link1) throw new Error("Expected to find link1");
+                expect(link1.data.predicate).to.equal("test://predicate1");
+                expect(link1.data.target).to.equal("test://target1");
+
+                const link2 = links.find(l => l.data.source === "test://source2");
+                if (!link2) throw new Error("Expected to find link2");
+                expect(link2.data.predicate).to.equal("test://predicate2");
+                expect(link2.data.target).to.equal("test://target2");
+            });
+
+            it("should support batch operations with multiple commands", async () => {
+                const perspective = await ad4mClient.perspective.add("test-batch-multiple-commands");
+                
+                // Add a link outside the batch first
+                await perspective.executeAction(
+                    [{
+                        action: "addLink",
+                        source: "test://source0",
+                        predicate: "test://predicate0",
+                        target: "test://target0"
+                    }],
+                    "test://expression",
+                    []
+                );
+
+                const batchId = await perspective.createBatch();
+
+                // Execute multiple commands in batch including a remove
+                await perspective.executeAction(
+                    [
+                        {
+                            action: "removeLink",
+                            source: "test://source0",
+                            predicate: "test://predicate0",
+                            target: "test://target0"
+                        },
+                        {
+                            action: "addLink",
+                            source: "test://source1",
+                            predicate: "test://predicate1",
+                            target: "test://target1"
+                        },
+                        {
+                            action: "setSingleTarget",
+                            source: "test://source2",
+                            predicate: "test://predicate2",
+                            target: "test://target2"
+                        }
+                    ],
+                    "test://expression",
+                    [],
+                    batchId
+                );
+
+                // Verify state before commit
+                let links = await perspective.get(new LinkQuery({}));
+                expect(links.length).to.equal(1); // Only the initial link
+                expect(links[0].data.source).to.equal("test://source0");
+
+                // Commit batch and verify final state
+                const diff = await perspective.commitBatch(batchId);
+                expect(diff.additions.length).to.equal(2); // New links
+                expect(diff.removals.length).to.equal(1); // Removed initial link
+
+                links = await perspective.get(new LinkQuery({}));
+                expect(links.length).to.equal(2); // Two new links
+
+                // Verify final link contents
+                const link1 = links.find(l => l.data.source === "test://source1");
+                if (!link1) throw new Error("Expected to find link1");
+                expect(link1.data.predicate).to.equal("test://predicate1");
+                expect(link1.data.target).to.equal("test://target1");
+
+                const link2 = links.find(l => l.data.source === "test://source2");
+                if (!link2) throw new Error("Expected to find link2");
+                expect(link2.data.predicate).to.equal("test://predicate2");
+                expect(link2.data.target).to.equal("test://target2");
+
+                // Verify removed link is gone
+                const removedLink = links.find(l => l.data.source === "test://source0");
+                expect(removedLink).to.be.undefined;
+            });
         })
 
         describe('PerspectiveProxy', () => {

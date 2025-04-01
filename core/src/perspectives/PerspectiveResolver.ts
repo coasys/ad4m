@@ -272,7 +272,8 @@ export default class PerspectiveResolver {
         @Arg('uuid') uuid: string,
         @Arg('commands') commands: string,
         @Arg('expression') expression: string,
-        @Arg('parameters', type => String, {nullable: true}) parameters: string
+        @Arg('parameters', type => String, {nullable: true}) parameters: string,
+        @Arg('batchId', { nullable: true }) batchId?: string,
     ): Boolean {
         return true
     }
@@ -282,7 +283,8 @@ export default class PerspectiveResolver {
         @Arg('uuid') uuid: string,
         @Arg('subjectClass') SubjectClass: string,
         @Arg('expressionAddress') expressionAddress: string,
-        @Arg('initialValues', { nullable: true }) initialValues?: string
+        @Arg('initialValues', { nullable: true }) initialValues?: string,
+        @Arg('batchId', { nullable: true }) batchId?: string,
     ): Boolean {
         return true
     }

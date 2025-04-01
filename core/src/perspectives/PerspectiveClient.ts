@@ -346,21 +346,21 @@ export class PerspectiveClient {
         })).perspectiveAddSdna
     }
 
-    async executeCommands(uuid: string, commands: string, expression: string, parameters: string): Promise<boolean> {
+    async executeCommands(uuid: string, commands: string, expression: string, parameters: string, batchId?: string): Promise<boolean> {
         return unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveExecuteCommands($uuid: String!, $commands: String!, $expression: String!, $parameters: String) {
-                perspectiveExecuteCommands(uuid: $uuid, commands: $commands, expression: $expression, parameters: $parameters)
+            mutation: gql`mutation perspectiveExecuteCommands($uuid: String!, $commands: String!, $expression: String!, $parameters: String, $batchId: String) {
+                perspectiveExecuteCommands(uuid: $uuid, commands: $commands, expression: $expression, parameters: $parameters, batchId: $batchId)
             }`,
-            variables: { uuid, commands, expression, parameters }
+            variables: { uuid, commands, expression, parameters, batchId }
         })).perspectiveExecuteCommands
     }
 
-    async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string): Promise<boolean> {
+    async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string, batchId?: string): Promise<boolean> {
         return unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveCreateSubject($uuid: String!, $subjectClass: String!, $expressionAddress: String!, $initialValues: String) {
-                perspectiveCreateSubject(uuid: $uuid, subjectClass: $subjectClass, expressionAddress: $expressionAddress, initialValues: $initialValues)
+            mutation: gql`mutation perspectiveCreateSubject($uuid: String!, $subjectClass: String!, $expressionAddress: String!, $initialValues: String, $batchId: String) {
+                perspectiveCreateSubject(uuid: $uuid, subjectClass: $subjectClass, expressionAddress: $expressionAddress, initialValues: $initialValues, batchId: $batchId)
             }`,
-            variables: { uuid, subjectClass, expressionAddress, initialValues }
+            variables: { uuid, subjectClass, expressionAddress, initialValues, batchId }
         })).perspectiveCreateSubject
     }
 

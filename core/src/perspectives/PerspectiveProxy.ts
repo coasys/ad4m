@@ -225,8 +225,8 @@ export class PerspectiveProxy {
     }
 
     /** Execute a list of commands on this perspective */
-    async executeAction(actions, expression, parameters: Parameter[]) {
-        return await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters))
+    async executeAction(actions, expression, parameters: Parameter[], batchId?: string) {
+        return await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId)
     }
 
     /** Returns all the links of this perspective that matches the LinkQuery */
@@ -486,12 +486,14 @@ export class PerspectiveProxy {
      * @param exprAddr The address of the expression to be turned into a subject instance
      * @param initialValues Optional initial values for properties. If provided, these will be
      * merged with constructor actions for better performance.
+     * @param batchId Optional batch ID for the operation
      * @returns A proxy object for the created subject
      */
     async createSubject<T>(
         subjectClass: T, 
         exprAddr: string,
-        initialValues?: Record<string, any>
+        initialValues?: Record<string, any>,
+        batchId?: string
     ): Promise<T> {
         let className: string;
 
@@ -504,7 +506,8 @@ export class PerspectiveProxy {
                     initialValues
                 }), 
                 exprAddr,
-                initialValues ? JSON.stringify(initialValues) : undefined
+                initialValues ? JSON.stringify(initialValues) : undefined,
+                batchId
             );
         } else {
             let query = this.buildQueryFromTemplate(subjectClass as object);
@@ -515,7 +518,8 @@ export class PerspectiveProxy {
                     initialValues
                 }), 
                 exprAddr,
-                initialValues ? JSON.stringify(initialValues) : undefined
+                initialValues ? JSON.stringify(initialValues) : undefined,
+                batchId
             );
         }
 

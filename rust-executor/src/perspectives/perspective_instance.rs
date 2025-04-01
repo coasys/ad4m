@@ -1524,6 +1524,7 @@ impl PerspectiveInstance {
         commands: Vec<Command>,
         expression: String,
         parameters: Vec<Parameter>,
+        batch_id: Option<String>,
     ) -> Result<(), AnyError> {
         let jsvalue_to_string = |value: &Value| -> String {
             match value {
@@ -1573,7 +1574,7 @@ impl PerspectiveInstance {
                             target,
                         },
                         status,
-                        None
+                        batch_id.clone()
                     )
                     .await?;
                 }
@@ -1589,7 +1590,7 @@ impl PerspectiveInstance {
                         })
                         .await?;
                     for link_expression in link_expressions {
-                        self.remove_link(link_expression.into(), None).await?;
+                        self.remove_link(link_expression.into(), batch_id.clone()).await?;
                     }
                 }
                 Action::SetSingleTarget => {
@@ -1610,7 +1611,7 @@ impl PerspectiveInstance {
                         })
                         .await?;
                     for link_expression in link_expressions {
-                        self.remove_link(link_expression.into(), None).await?;
+                        self.remove_link(link_expression.into(), batch_id.clone()).await?;
                     }
                     self.add_link(
                         Link {
@@ -1619,7 +1620,7 @@ impl PerspectiveInstance {
                             target,
                         },
                         status,
-                        None
+                        batch_id.clone()
                     )
                     .await?;
                 }
@@ -1635,7 +1636,7 @@ impl PerspectiveInstance {
                         })
                         .await?;
                     for link_expression in link_expressions {
-                        self.remove_link(link_expression.into(), None).await?;
+                        self.remove_link(link_expression.into(), batch_id.clone()).await?;
                     }
                     self.add_links(
                         parameters
@@ -1647,7 +1648,7 @@ impl PerspectiveInstance {
                             })
                             .collect(),
                         status,
-                        None
+                        batch_id.clone()
                     )
                     .await?;
                 }
@@ -1758,6 +1759,7 @@ impl PerspectiveInstance {
         subject_class: SubjectClassOption,
         expression_address: String,
         initial_values: Option<serde_json::Value>,
+        batch_id: Option<String>
     ) -> Result<(), AnyError> {
         let class_name = self
             .subject_class_option_to_class_name(subject_class)
@@ -1803,7 +1805,7 @@ impl PerspectiveInstance {
         }
 
         // Execute the merged commands
-        self.execute_commands(commands, expression_address.clone(), vec![])
+        self.execute_commands(commands, expression_address.clone(), vec![], batch_id)
             .await?;
 
         // Verify instance was created successfully
@@ -2541,4 +2543,96 @@ mod tests {
         let result = perspective.add_link(create_link(), LinkStatus::Shared, Some("invalid".to_string())).await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn test_batch_with_execute_commands() {
+        let mut perspective = setup();
+        let batch_id = perspective.create_batch().await;
+
+        // Create commands to add links
+        let commands = vec![
+            Command {
+                source: Some("test://source1".to_string()),
+                predicate: Some("test://predicate1".to_string()),
+                target: Some("test://target1".to_string()),
+                local: None,
+                action: Action::AddLink,
+            },
+            Command {
+                source: Some("test://source2".to_string()),
+                predicate: Some("test://predicate2".to_string()),
+                target: Some("test://target2".to_string()),
+                local: None,
+                action: Action::AddLink,
+            },
+        ];
+
+        // Execute commands in batch
+        perspective.execute_commands(
+            commands,
+            "test://expression".to_string(),
+            vec![],
+            Some(batch_id.clone())
+        ).await.unwrap();
+
+        // Verify links are not visible before commit
+        let query = LinkQuery {
+            source: None,
+            predicate: None,
+            target: None,
+            from_date: None,
+            until_date: None,
+            limit: None,
+        };
+        let links = perspective.get_links(&query).await.unwrap();
+        assert_eq!(links.len(), 0);
+
+        // Commit batch and verify links are now visible
+        let diff = perspective.commit_batch(batch_id).await.unwrap();
+        assert_eq!(diff.additions.len(), 2);
+        assert_eq!(diff.removals.len(), 0);
+
+        let links_after = perspective.get_links(&query).await.unwrap();
+        assert_eq!(links_after.len(), 2);
+    }
+
+    // #[tokio::test]
+    // async fn test_batch_with_create_subject() {
+    //     let mut perspective = setup();
+    //     let batch_id = perspective.create_batch().await;
+
+    //     // Create a subject class option
+    //     let subject_class = SubjectClassOption {
+    //         class_name: Some("TestSubject".to_string()),
+    //         query: None,
+    //     };
+
+    //     // Create subject in batch
+    //     perspective.create_subject(
+    //         subject_class,
+    //         "test://expression1".to_string(),
+    //         None,
+    //         Some(batch_id.clone())
+    //     ).await.unwrap();
+
+    //     // Verify subject links are not visible before commit
+    //     let query = LinkQuery {
+    //         source: Some("test://expression1".to_string()),
+    //         predicate: None,
+    //         target: None,
+    //         from_date: None,
+    //         until_date: None,
+    //         limit: None,
+    //     };
+    //     let links = perspective.get_links(&query).await.unwrap();
+    //     assert_eq!(links.len(), 0);
+
+    //     // Commit batch and verify subject links are now visible
+    //     let diff = perspective.commit_batch(batch_id).await.unwrap();
+    //     assert!(diff.additions.len() > 0);
+    //     assert_eq!(diff.removals.len(), 0);
+
+    //     let links_after = perspective.get_links(&query).await.unwrap();
+    //     assert!(links_after.len() > 0);
+    // }
 }
