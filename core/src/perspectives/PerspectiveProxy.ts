@@ -177,26 +177,59 @@ interface Parameter {
     value: string
 }
 
-/** Perspective UI proxy object
- *
- * Convenience object for UIs to interact with a perspective.
- * It is created by some of the methods in the PerspectiveClient class and includes
- * a reference to the PerspectiveClient object that created it.
+/**
+ * PerspectiveProxy provides a high-level interface for working with AD4M Perspectives - agent-centric semantic graphs
+ * that store and organize links between expressions.
+ * 
+ * A Perspective is fundamentally a collection of links (subject-predicate-object triples) that represent an agent's view
+ * of their digital world. Through PerspectiveProxy, you can:
+ * - Add, remove, and query links
+ * - Work with Social DNA (subject classes and flows)
+ * - Subscribe to real-time updates
+ * - Share perspectives as Neighbourhoods
+ * - Execute Prolog queries for complex graph patterns
+ * 
+ * 
+ * @example
+ * ```typescript
+ * // Create and work with links
+ * const perspective = await ad4m.perspective.add("My Space");
+ * await perspective.add({
+ *   source: "did:key:alice",
+ *   predicate: "knows",
+ *   target: "did:key:bob"
+ * });
+ * 
+ * // Query links
+ * const friends = await perspective.get({
+ *   source: "did:key:alice",
+ *   predicate: "knows"
+ * });
+ * 
+ * // Use Social DNA
+ * await perspective.addSdna(todoClass, "subject_class");
+ * const todo = await perspective.createSubject("Todo", "expression://123");
+ * 
+ * // Subscribe to changes
+ * perspective.addListener("link-added", (link) => {
+ *   console.log("New link added:", link);
+ * });
+ * ```
  */
 export class PerspectiveProxy {
-    /** Unique ID of the perspective */
+    /** Unique identifier of this perspective */
     uuid: string;
 
-    /** Given name of the perspective */
+    /** Human-readable name of this perspective */
     name: string;
 
-    /** If the perspective is shared as a Neighbourhood, this is the Neighbourhood URL */
+    /** If this perspective is shared as a Neighbourhood, this is its URL */
     sharedUrl: string|null;
 
-    /** If the perspective is shared as a Neighbourhood, this is the Neighbourhood Expression */
+    /** If this perspective is shared, this contains the Neighbourhood metadata */
     neighbourhood: NeighbourhoodExpression|null;
 
-    /** Returns the state of the perspective **/
+    /** Current sync state if this perspective is shared */
     state: PerspectiveState|null;
 
     #handle: PerspectiveHandle
@@ -206,6 +239,10 @@ export class PerspectiveProxy {
     #perspectiveLinkUpdatedCallbacks: LinkCallback[]
     #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
 
+    /**
+     * Creates a new PerspectiveProxy instance.
+     * Note: Don't create this directly, use ad4m.perspective.add() instead.
+     */
     constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
         this.#perspectiveLinkAddedCallbacks = []
         this.#perspectiveLinkRemovedCallbacks = []
@@ -224,64 +261,252 @@ export class PerspectiveProxy {
         this.#client.addPerspectiveSyncStateChangeListener(this.#handle.uuid, this.#perspectiveSyncStateChangeCallbacks)
     }
 
+    /**
+     * Executes a set of actions on an expression with optional parameters.
+     * Used internally by Social DNA flows and subject class operations.
+     * 
+     * Actions are specified as an array of commands that modify links in the perspective.
+     * Each action is an object with the following format:
+     * ```typescript
+     * {
+     *   action: "addLink" | "removeLink" | "setSingleTarget" | "collectionSetter",
+     *   source: string,    // Usually "this" to reference the current expression
+     *   predicate: string, // The predicate URI
+     *   target: string     // The target value or "value" for parameters
+     * }
+     * ```
+     * 
+     * Available commands:
+     * - `addLink`: Creates a new link
+     * - `removeLink`: Removes an existing link
+     * - `setSingleTarget`: Removes all existing links with the same source/predicate and adds a new one
+     * - `collectionSetter`: Special command for setting collection properties
+     * 
+     * When used with parameters, the special value "value" in the target field will be 
+     * replaced with the actual parameter value.
+     * 
+     * @example
+     * ```typescript
+     * // Add a state link and remove an old one
+     * await perspective.executeAction([
+     *   {
+     *     action: "addLink",
+     *     source: "this",
+     *     predicate: "todo://state", 
+     *     target: "todo://doing"
+     *   },
+     *   {
+     *     action: "removeLink",
+     *     source: "this",
+     *     predicate: "todo://state",
+     *     target: "todo://ready"
+     *   }
+     * ], "expression://123");
+     * 
+     * // Set a property using a parameter
+     * await perspective.executeAction([
+     *   {
+     *     action: "setSingleTarget",
+     *     source: "this",
+     *     predicate: "todo://title",
+     *     target: "value"
+     *   }
+     * ], "expression://123", [
+     *   { name: "title", value: "New Title" }
+     * ]);
+     * ```
+     * 
+     * @param actions - Array of action objects to execute
+     * @param expression - Target expression address (replaces "this" in actions)
+     * @param parameters - Optional parameters that replace "value" in actions
+     */
     async executeAction(actions, expression, parameters: Parameter[]) {
         return await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters))
     }
 
-    /** Returns all the links of this perspective that matches the LinkQuery */
+    /**
+     * Retrieves links from the perspective that match the given query.
+     * 
+     * @param query - Query parameters to filter links
+     * @returns Array of matching LinkExpressions
+     * 
+     * @example
+     * ```typescript
+     * // Get all links where Alice knows someone
+     * const links = await perspective.get({
+     *   source: "did:key:alice",
+     *   predicate: "knows"
+     * });
+     * 
+     * // Get all comments on a post
+     * const comments = await perspective.get({
+     *   source: "post://123",
+     *   predicate: "comment"
+     * });
+     * ```
+     */
     async get(query: LinkQuery): Promise<LinkExpression[]> {
         return await this.#client.queryLinks(this.#handle.uuid, query)
     }
 
-    /** Runs a Prolog query on the perspective's Prolog engine */
+    /**
+     * Executes a Prolog query against the perspective's knowledge base.
+     * This is a powerful way to find complex patterns in the graph.
+     * 
+     * @param query - Prolog query string
+     * @returns Query results or false if no results
+     * 
+     * @example
+     * ```typescript
+     * // Find friends of friends
+     * const results = await perspective.infer(`
+     *   triple(A, "knows", B),
+     *   triple(B, "knows", C),
+     *   A \= C
+     * `);
+     * 
+     * // Find all active todos
+     * const todos = await perspective.infer(`
+     *   instance(Todo, "Todo"),
+     *   property_getter("Todo", Todo, "state", "active")
+     * `);
+     * ```
+     */
     async infer(query: string): Promise<any> {
         return await this.#client.queryProlog(this.#handle.uuid, query)
     }
 
-    /** Adds a link to this perspective */
+    /**
+     * Adds a new link to the perspective.
+     * 
+     * @param link - The link to add
+     * @param status - Whether the link should be shared in a Neighbourhood
+     * @returns The created LinkExpression
+     * 
+     * @example
+     * ```typescript
+     * // Add a simple relationship
+     * await perspective.add({
+     *   source: "did:key:alice",
+     *   predicate: "follows",
+     *   target: "did:key:bob"
+     * });
+     * 
+     * // Add a local-only link
+     * await perspective.add({
+     *   source: "note://123",
+     *   predicate: "tag",
+     *   target: "private"
+     * }, "local");
+     * ```
+     */
     async add(link: Link, status: LinkStatus = 'shared'): Promise<LinkExpression> {
         return await this.#client.addLink(this.#handle.uuid, link, status)
     }
 
-    /** Adds multiple links to this perspective **/
+    /**
+     * Adds multiple links to the perspective in a single operation.
+     * More efficient than adding links one by one.
+     * 
+     * @param links - Array of links to add
+     * @param status - Whether the links should be shared
+     * @returns Array of created LinkExpressions
+     */
     async addLinks(links: Link[], status: LinkStatus = 'shared'): Promise<LinkExpression[]> {
         return await this.#client.addLinks(this.#handle.uuid, links, status)
     }
 
-    /** Removes multiple links from this perspective **/
+    /**
+     * Removes multiple links from the perspective.
+     * 
+     * @param links - Array of links to remove
+     * @returns Array of removed LinkExpressions
+     */
     async removeLinks(links: LinkExpressionInput[]): Promise<LinkExpression[]> {
         return await this.#client.removeLinks(this.#handle.uuid, links)
     }
 
-    /** Adds and removes multiple links from this perspective **/
+    /**
+     * Applies a set of link mutations (adds and removes) in a single operation.
+     * Useful for atomic updates to the perspective.
+     * 
+     * @param mutations - Object containing links to add and remove
+     * @param status - Whether new links should be shared
+     * @returns Object containing results of the mutations
+     */
     async linkMutations(mutations: LinkMutations, status: LinkStatus = 'shared'): Promise<LinkExpressionMutations> {
         return await this.#client.linkMutations(this.#handle.uuid, mutations, status)
     }
 
-    /** Adds a linkExpression to this perspective */
+    /**
+     * Adds a pre-signed LinkExpression to the perspective.
+     * 
+     * @param link - The signed LinkExpression to add
+     * @param status - Whether the link should be shared
+     * @returns The added LinkExpression
+     */
     async addLinkExpression(link: LinkExpression, status: LinkStatus = 'shared'): Promise<LinkExpression> {
         return await this.#client.addLinkExpression(this.#handle.uuid, link, status)
     }
 
+    /**
+     * Updates an existing link with new data.
+     * 
+     * @param oldLink - The existing link to update
+     * @param newLink - The new link data
+     */
     async update(oldLink: LinkExpressionInput, newLink: Link) {
         return await this.#client.updateLink(this.#handle.uuid, oldLink, newLink)
     }
 
+    /**
+     * Removes a link from the perspective.
+     * 
+     * @param link - The link to remove
+     */
     async remove(link: LinkExpressionInput) {
         return await this.#client.removeLink(this.#handle.uuid, link)
     }
 
+    /**
+     * Retrieves and renders an Expression referenced in this perspective.
+     * 
+     * @param expressionURI - URI of the Expression to retrieve
+     * @returns The rendered Expression
+     */
     async getExpression(expressionURI: string): Promise<ExpressionRendered> {
         return await this.#client.getExpression(expressionURI)
     }
 
+    /**
+     * Creates a new Expression in the specified Language.
+     * 
+     * @param content - Content for the new Expression
+     * @param languageAddress - Address of the Language to use
+     * @returns URI of the created Expression
+     */
     async createExpression(content: any, languageAddress: string): Promise<string> {
         return await this.#client.createExpression(content, languageAddress)
     }
 
-    /** Adds a link listener
-     * @param type Can be 'link-added' or 'link-removed'
-     * @param cb Callback function that is called when a link is added to the perspective
+    /**
+     * Subscribes to link changes in the perspective.
+     * 
+     * @param type - Type of change to listen for
+     * @param cb - Callback function
+     * 
+     * @example
+     * ```typescript
+     * // Listen for new links
+     * perspective.addListener("link-added", (link) => {
+     *   console.log("New link:", link);
+     * });
+     * 
+     * // Listen for removed links
+     * perspective.addListener("link-removed", (link) => {
+     *   console.log("Link removed:", link);
+     * });
+     * ```
      */
     async addListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
         if (type === 'link-added') {
@@ -293,17 +518,27 @@ export class PerspectiveProxy {
         }
     }
 
-    /** Adds a sync state listener
-     * @param cb Callback function that is called when the sync state of the perspective changes
-     * @returns A function that can be called to remove the listener
+    /**
+     * Subscribes to sync state changes if this perspective is shared.
+     * 
+     * @param cb - Callback function
+     * 
+     * @example
+     * ```typescript
+     * perspective.addSyncStateChangeListener((state) => {
+     *   console.log("Sync state:", state);
+     * });
+     * ```
      */
     async addSyncStateChangeListener(cb: SyncStateChangeCallback) {
         this.#perspectiveSyncStateChangeCallbacks.push(cb)
     }
 
-    /** Removes a previously added link listener
-     * @param type Can be 'link-added' or 'link-removed'
-     * @param cb Callback function that is called when a link is added to the perspective
+    /**
+     * Unsubscribes from link changes.
+     * 
+     * @param type - Type of change to stop listening for
+     * @param cb - The callback function to remove
      */
     async removeListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
         if (type === 'link-added') {
@@ -321,15 +556,21 @@ export class PerspectiveProxy {
         }
     }
 
-
-    /** Create and return a snapshot of this perspective
-     * A snapshot is a rendered Perspectie object that contains all the links of the perspective.
+    /**
+     * Creates a snapshot of the current perspective state.
+     * Useful for backup or sharing.
+     * 
+     * @returns Perspective object containing all links
      */
     async snapshot(): Promise<Perspective> {
         return this.#client.snapshotByUUID(this.#handle.uuid)
     }
 
-    /** Take and load all the links from the given snapshot */
+    /**
+     * Loads a perspective snapshot, replacing current content.
+     * 
+     * @param snapshot - Perspective snapshot to load
+     */
     async loadSnapshot(snapshot: Perspective) {
         //Clean the input data from __typename
         const cleanedSnapshot = JSON.parse(JSON.stringify(snapshot));
@@ -343,11 +584,21 @@ export class PerspectiveProxy {
         }
     }
 
-    /** Convenience function to get the target of the first link that matches the given query
-     * This makes sense when the query is expected to return only one link
-     * and the target of that link is what you are looking for.
-     *
-     * Works best together with @member setSingelTarget()
+    /**
+     * Gets a single target value matching a query.
+     * Useful when you expect only one result.
+     * 
+     * @param query - Query to find the target
+     * @returns Target value or void if not found
+     * 
+     * @example
+     * ```typescript
+     * // Get a user's name
+     * const name = await perspective.getSingleTarget({
+     *   source: "did:key:alice",
+     *   predicate: "name"
+     * });
+     * ```
      */
     async getSingleTarget(query: LinkQuery): Promise<string|void> {
         delete query.target
@@ -358,12 +609,21 @@ export class PerspectiveProxy {
             return null
     }
 
-    /** Convenience function to ensure there is only one link with given source and predicate
-     * This function will remove all links with the same source and predicate as the given link,
-     * and then add the given link.
-     * This ensures there is only one target for the given source and predicate.
-     *
-     * Works best together with @member getSingleTarget()
+    /**
+     * Sets a single target value, removing any existing targets.
+     * 
+     * @param link - Link defining the new target
+     * @param status - Whether the link should be shared
+     * 
+     * @example
+     * ```typescript
+     * // Set a user's status
+     * await perspective.setSingleTarget({
+     *   source: "did:key:alice",
+     *   predicate: "status",
+     *   target: "online"
+     * });
+     * ```
      */
     async setSingleTarget(link: Link, status: LinkStatus = 'shared') {
         const query = new LinkQuery({source: link.source, predicate: link.predicate})
@@ -750,15 +1010,42 @@ export class PerspectiveProxy {
         return this.#client.getNeighbourhoodProxy(this.#handle.uuid)
     }
 
+    /**
+     * Returns a proxy object for working with AI capabilities.
+     * 
+     * @returns AIClient instance
+     * 
+     * @example
+     * ```typescript
+     * // Use AI to analyze perspective content
+     * const summary = await perspective.ai.summarize();
+     * 
+     * // Generate new content
+     * const suggestion = await perspective.ai.suggest("next action");
+     * ```
+     */
     get ai(): AIClient {
         return this.#client.aiClient
     }
 
-    /** Subscribe to a Prolog query and get updates when the results change.
-     * Returns a QuerySubscriptionProxy that handles keepalive and allows registering callbacks.
-     * The initial and subsequent results can be accessed via the result property.
+    /**
+     * Creates a subscription for a Prolog query that updates in real-time.
      * 
-     * Make sure to call dispose() on the subscription when you're done with it
+     * @param query - Prolog query string
+     * @returns QuerySubscriptionProxy instance
+     * 
+     * @example
+     * ```typescript
+     * // Subscribe to active todos
+     * const subscription = await perspective.subscribeInfer(`
+     *   instance(Todo, "Todo"),
+     *   property_getter("Todo", Todo, "state", "active")
+     * `);
+     * 
+     * subscription.onResult((todos) => {
+     *   console.log("Active todos:", todos);
+     * });
+     * ```
      */
     async subscribeInfer(query: string): Promise<QuerySubscriptionProxy> {
         const result = await this.#client.subscribeQuery(this.uuid, query);
