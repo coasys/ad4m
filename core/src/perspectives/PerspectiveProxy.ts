@@ -479,22 +479,23 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Creates a new subject instance in the perspective.
+     * Creates a new subject instance of the given subject class
      * 
      * @param subjectClass Either a string with the name of the subject class, or an object
      * with the properties of the subject class.
      * @param exprAddr The address of the expression to be turned into a subject instance
      * @param initialValues Optional initial values for properties. If provided, these will be
      * merged with constructor actions for better performance.
-     * @param batchId Optional batch ID for the operation
-     * @returns A proxy object for the created subject
+     * @param batchId Optional batch ID for grouping operations. If provided, returns the expression address
+     * instead of the subject proxy since the subject won't exist until the batch is committed.
+     * @returns A proxy object for the created subject, or just the expression address if in batch mode
      */
-    async createSubject<T>(
+    async createSubject<T, B extends string | undefined = undefined>(
         subjectClass: T, 
         exprAddr: string,
         initialValues?: Record<string, any>,
-        batchId?: string
-    ): Promise<T> {
+        batchId?: B
+    ): Promise<B extends undefined ? T : string> {
         let className: string;
 
         if(typeof subjectClass === "string") {
@@ -523,7 +524,12 @@ export class PerspectiveProxy {
             );
         }
 
-        return this.getSubjectProxy(exprAddr, subjectClass)
+        // Skip subject proxy creation when in batch mode since the subject won't exist until batch is committed
+        if (batchId) {
+            return exprAddr as B extends undefined ? T : string;
+        }
+
+        return this.getSubjectProxy(exprAddr, subjectClass) as Promise<B extends undefined ? T : string>;
     }
 
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
