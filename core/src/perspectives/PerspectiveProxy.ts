@@ -541,8 +541,10 @@ export class PerspectiveProxy {
      * with the properties of the subject class. In the latter case, the first subject class
      * that matches the given properties will be used.
      * @param exprAddr The address of the expression to be turned into a subject instance
+     * @param batchId Optional batch ID for grouping operations. If provided, the removal will be part of the batch
+     * and won't be executed until the batch is committed.
      */
-    async removeSubject<T>(subjectClass: T, exprAddr: string) {
+    async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
         let result = await this.infer(`subject_class("${className}", C), destructor(C, Actions)`)
         if(!result.length) {
@@ -550,7 +552,7 @@ export class PerspectiveProxy {
         }
 
         let actions = result.map(x => eval(x.Actions))
-        await this.executeAction(actions[0], exprAddr, undefined)
+        await this.executeAction(actions[0], exprAddr, undefined, batchId)
     }
 
     /** Checks if the given expression is a subject instance of the given subject class
