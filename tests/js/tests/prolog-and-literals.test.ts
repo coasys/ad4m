@@ -2183,28 +2183,28 @@ describe("Prolog + Literals", () => {
                     expect(notesAfterUpdate[0].content).to.equal("Updated: Use fresh ingredients and add garlic");
 
                     // Test deleting models in batch
-                    // const deleteBatchId = await perspective!.createBatch();
+                    const deleteBatchId = await perspective!.createBatch();
 
-                    // await recipesAfterUpdate[0].delete(deleteBatchId);
-                    // await notesAfterUpdate[0].delete(deleteBatchId);
+                    await recipesAfterUpdate[0].delete(deleteBatchId);
+                    await notesAfterUpdate[0].delete(deleteBatchId);
 
-                    // // Verify models still exist before commit
-                    // const recipesBeforeDelete = await BatchRecipe.findAll(perspective!);
-                    // expect(recipesBeforeDelete.length).to.equal(1);
+                    // Verify models still exist before commit
+                    const recipesBeforeDelete = await BatchRecipe.findAll(perspective!);
+                    expect(recipesBeforeDelete.length).to.equal(1);
 
-                    // const notesBeforeDelete = await BatchNote.findAll(perspective!);
-                    // expect(notesBeforeDelete.length).to.equal(1);
+                    const notesBeforeDelete = await BatchNote.findAll(perspective!);
+                    expect(notesBeforeDelete.length).to.equal(1);
 
-                    // // Commit delete batch
-                    // const deleteResult = await perspective!.commitBatch(deleteBatchId);
-                    // expect(deleteResult.removals.length).to.be.greaterThan(0);
+                    // Commit delete batch
+                    const deleteResult = await perspective!.commitBatch(deleteBatchId);
+                    expect(deleteResult.removals.length).to.be.greaterThan(0);
 
-                    // // Verify models are deleted
-                    // const recipesAfterDelete = await BatchRecipe.findAll(perspective!);
-                    // expect(recipesAfterDelete.length).to.equal(0);
+                    // Verify models are deleted
+                    const recipesAfterDelete = await BatchRecipe.findAll(perspective!);
+                    expect(recipesAfterDelete.length).to.equal(0);
 
-                    // const notesAfterDelete = await BatchNote.findAll(perspective!);
-                    // expect(notesAfterDelete.length).to.equal(0);
+                    const notesAfterDelete = await BatchNote.findAll(perspective!);
+                    expect(notesAfterDelete.length).to.equal(0);
                 });
             })
         })

@@ -624,7 +624,7 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                         action: "removeLink",
                         source: "this",
                         predicate: through,
-                        target: initial,
+                        target: "*",
                     })
                 }
             }

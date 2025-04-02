@@ -1588,7 +1588,7 @@ impl PerspectiveInstance {
                         .get_links(&LinkQuery {
                             source: Some(source),
                             predicate,
-                            target: Some(target),
+                            target: if target == "*" { None } else { Some(target) },
                             from_date: None,
                             until_date: None,
                             limit: None,
