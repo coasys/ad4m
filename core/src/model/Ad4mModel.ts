@@ -741,6 +741,7 @@ export class Ad4mModel {
               break;
             case "remover":
               await this.setCollectionRemover(key, value.value, batchId);
+              break;
             default:
               await this.setCollectionSetter(key, value.value, batchId);
               break;
