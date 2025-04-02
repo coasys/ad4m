@@ -123,8 +123,28 @@ export default class PerspectiveResolver {
         return true
     }
 
+    @Mutation(returns => String)
+    async perspectiveCreateBatch(@Arg('uuid') uuid: string): Promise<string> {
+        const perspective = new PerspectiveHandle(uuid)
+        return uuid + '-batch-' + Date.now()
+    }
+
+    @Mutation(returns => LinkExpressionMutations)
+    async perspectiveCommitBatch(
+        @Arg('uuid') uuid: string,
+        @Arg('batchId') batchId: string
+    ): Promise<LinkExpressionMutations> {
+        return new LinkExpressionMutations([], [])
+    }
+
     @Mutation(returns => LinkExpression)
-    perspectiveAddLink(@Arg('uuid') uuid: string, @Arg('link') link: LinkInput, @Arg('status', { nullable: true, defaultValue: 'shared'}) status: LinkStatus, @PubSub() pubSub: any): LinkExpression {
+    perspectiveAddLink(
+        @Arg('uuid') uuid: string, 
+        @Arg('link') link: LinkInput, 
+        @Arg('status', { nullable: true, defaultValue: 'shared' }) status: LinkStatus,
+        @Arg('batchId', { nullable: true }) batchId: string,
+        @PubSub() pubSub: any
+    ): LinkExpression {
         const l = new LinkExpression()
         l.author = 'did:ad4m:test'
         l.timestamp = Date.now()
@@ -138,26 +158,55 @@ export default class PerspectiveResolver {
     }
 
     @Mutation(returns => [LinkExpression])
-    perspectiveAddLinks(@Arg('uuid') uuid: string, @Arg('links', type => [LinkInput]) links: LinkInput[], @Arg('status', { nullable: true}) status: string, @PubSub() pubSub: any): LinkExpression[] {
+    perspectiveAddLinks(
+        @Arg('uuid') uuid: string, 
+        @Arg('links', type => [LinkInput]) links: LinkInput[], 
+        @Arg('status', { nullable: true, defaultValue: 'shared' }) status: LinkStatus,
+        @Arg('batchId', { nullable: true }) batchId: string,
+        @PubSub() pubSub: any
+    ): LinkExpression[] {
         const l = new LinkExpression()
         l.author = 'did:ad4m:test'
         l.timestamp = Date.now()
         l.proof = testLink.proof
         l.data = links[0]
+        l.status = status
 
         const l2 = new LinkExpression()
         l2.author = 'did:ad4m:test'
         l2.timestamp = Date.now()
         l2.proof = testLink.proof
         l2.data = links[0]
+        l2.status = status
 
         pubSub.publish(LINK_ADDED_TOPIC, { link: l })
         pubSub.publish(LINK_ADDED_TOPIC, { link: l2 })
         return [l, l2]
     }
 
+    @Mutation(returns => Boolean)
+    perspectiveRemoveLink(
+        @Arg('uuid') uuid: string, 
+        @Arg('link') link: LinkExpressionInput,
+        @Arg('batchId', { nullable: true }) batchId: string,
+        @PubSub() pubSub: any
+    ): Boolean {
+        const l = new LinkExpression()
+        l.author = 'did:ad4m:test'
+        l.timestamp = Date.now()
+        l.proof = testLink.proof
+        l.data = link.data
+        pubSub.publish(LINK_REMOVED_TOPIC, { link: l })
+        return true
+    }
+
     @Mutation(returns => [LinkExpression])
-    perspectiveRemoveLinks(@Arg('uuid') uuid: string, @Arg('links', type => [LinkExpressionInput]) links: LinkExpressionInput[], @PubSub() pubSub: any): LinkExpression[] {
+    perspectiveRemoveLinks(
+        @Arg('uuid') uuid: string, 
+        @Arg('links', type => [LinkExpressionInput]) links: LinkExpressionInput[],
+        @Arg('batchId', { nullable: true }) batchId: string,
+        @PubSub() pubSub: any
+    ): LinkExpression[] {
         const l = new LinkExpression()
         l.author = 'did:ad4m:test'
         l.timestamp = Date.now()
@@ -177,35 +226,40 @@ export default class PerspectiveResolver {
 
     @Mutation(returns => LinkExpressionMutations)
     perspectiveLinkMutations(@Arg('uuid') uuid: string, @Arg('mutations') mutations: LinkMutations, @Arg('status', { nullable: true}) status: LinkStatus, @PubSub() pubSub: any): LinkExpressionMutations {
-        const perspectiveAddLinks = this.perspectiveAddLinks(uuid, mutations.additions, status, pubSub);
-        const perspectiveRemoveLinks = this.perspectiveRemoveLinks(uuid, mutations.removals, pubSub);
+        const perspectiveAddLinks = this.perspectiveAddLinks(uuid, mutations.additions, status, null, pubSub);
+        const perspectiveRemoveLinks = this.perspectiveRemoveLinks(uuid, mutations.removals, null, pubSub);
         return new LinkExpressionMutations(perspectiveAddLinks, perspectiveRemoveLinks)
     }
 
     @Mutation(returns => LinkExpression)
-    perspectiveAddLinkExpression(@Arg('uuid') uuid: string, @Arg('link') link: LinkExpressionInput, @Arg('status', { nullable: true}) status: LinkStatus, @PubSub() pubSub: any): LinkExpression {
-        pubSub.publish(LINK_ADDED_TOPIC, { link })
-        link.status = status;
-        return link as LinkExpression
-    }
-
-    @Mutation(returns => LinkExpression)
-    perspectiveUpdateLink(@Arg('uuid') uuid: string, @Arg('oldLink') oldlink: LinkExpressionInput, @Arg('newLink') newlink: LinkInput, @PubSub() pubSub: any): LinkExpression {
+    perspectiveUpdateLink(
+        @Arg('uuid') uuid: string,
+        @Arg('oldLink') oldLink: LinkExpressionInput,
+        @Arg('newLink') newLink: LinkInput,
+        @Arg('batchId', { nullable: true }) batchId: string,
+        @PubSub() pubSub: any
+    ): LinkExpression {
         const l = new LinkExpression()
         l.author = 'did:ad4m:test'
         l.timestamp = Date.now()
         l.proof = testLink.proof
-        l.data = newlink
+        l.data = newLink
 
         pubSub.publish(LINK_REMOVED_TOPIC, { link: l })
-
         return l
     }
 
-    @Mutation(returns => Boolean)
-    perspectiveRemoveLink(@Arg('uuid') uuid: string, @Arg('link') link: LinkExpressionInput, @PubSub() pubSub: any): Boolean {
-        pubSub.publish(LINK_REMOVED_TOPIC)
-        return true
+    @Mutation(returns => LinkExpression)
+    perspectiveAddLinkExpression(
+        @Arg('uuid') uuid: string,
+        @Arg('link') link: LinkExpressionInput,
+        @Arg('status', { nullable: true, defaultValue: 'shared' }) status: LinkStatus,
+        @Arg('batchId', { nullable: true }) batchId: string,
+        @PubSub() pubSub: any
+    ): LinkExpression {
+        pubSub.publish(LINK_ADDED_TOPIC, { link })
+        link.status = status;
+        return link as LinkExpression
     }
 
     @Mutation(returns => Boolean)
@@ -218,7 +272,8 @@ export default class PerspectiveResolver {
         @Arg('uuid') uuid: string,
         @Arg('commands') commands: string,
         @Arg('expression') expression: string,
-        @Arg('parameters', type => String, {nullable: true}) parameters: string
+        @Arg('parameters', type => String, {nullable: true}) parameters: string,
+        @Arg('batchId', { nullable: true }) batchId?: string,
     ): Boolean {
         return true
     }
@@ -228,7 +283,8 @@ export default class PerspectiveResolver {
         @Arg('uuid') uuid: string,
         @Arg('subjectClass') SubjectClass: string,
         @Arg('expressionAddress') expressionAddress: string,
-        @Arg('initialValues', { nullable: true }) initialValues?: string
+        @Arg('initialValues', { nullable: true }) initialValues?: string,
+        @Arg('batchId', { nullable: true }) batchId?: string,
     ): Boolean {
         return true
     }

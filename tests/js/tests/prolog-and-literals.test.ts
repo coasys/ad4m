@@ -2072,6 +2072,140 @@ describe("Prolog + Literals", () => {
                     const [retrieved] = await ImagePost.findAll(perspective!);
                     expect(retrieved.image).to.equal("data:image/png;base64,abc123");
                 });
+
+                it("should support batch operations with multiple models", async () => {
+                    let perspective = await ad4m!.perspective.add("batch test")
+                    @ModelOptions({
+                        name: "BatchRecipe"
+                    })
+                    class BatchRecipe extends Ad4mModel {
+                        @Property({
+                            through: "recipe://name",
+                            resolveLanguage: "literal"
+                        })
+                        name: string = "";
+
+                        @Collection({ through: "recipe://ingredients" })
+                        ingredients: string[] = [];
+                    }
+
+                    @ModelOptions({
+                        name: "BatchNote"
+                    })
+                    class BatchNote extends Ad4mModel {
+                        @Property({
+                            through: "note://title",
+                            resolveLanguage: "literal"
+                        })
+                        title: string = "";
+
+                        @Property({
+                            through: "note://content",
+                            resolveLanguage: "literal"
+                        })
+                        content: string = "";
+                    }
+
+                    // Register the classes
+                    await perspective!.ensureSDNASubjectClass(BatchRecipe);
+                    await perspective!.ensureSDNASubjectClass(BatchNote);
+
+                    // Create batch
+                    const batchId = await perspective!.createBatch();
+
+                    // Create and save multiple models in batch
+                    const recipe = new BatchRecipe(perspective!);
+                    recipe.name = "Pasta";
+                    recipe.ingredients = ["pasta", "sauce", "cheese"];
+                    console.log("recipe: ", recipe)
+                    console.log("first save")
+                    await recipe.save(batchId);
+                    console.log("saved")
+
+                    const note = new BatchNote(perspective!);
+                    note.title = "Recipe Notes";
+                    note.content = "Make sure to use fresh ingredients";
+                    await note.save(batchId);
+
+                    // Verify models are not visible before commit
+                    const recipesBeforeCommit = await BatchRecipe.findAll(perspective!);
+                    expect(recipesBeforeCommit.length).to.equal(0);
+
+                    const notesBeforeCommit = await BatchNote.findAll(perspective!);
+                    expect(notesBeforeCommit.length).to.equal(0);
+
+                    // Commit batch
+                    console.log("committing batch")
+                    const result = await perspective!.commitBatch(batchId);
+                    console.log("done committed batch")
+                    expect(result.additions.length).to.be.greaterThan(0);
+                    expect(result.removals.length).to.equal(0);
+                    
+                    // Verify models are now visible
+                    const recipesAfterCommit = await BatchRecipe.findAll(perspective!);
+                    expect(recipesAfterCommit.length).to.equal(1);
+                    expect(recipesAfterCommit[0].name).to.equal("Pasta");
+                    expect(recipesAfterCommit[0].ingredients).to.deep.equal(["pasta", "sauce", "cheese"]);
+
+                    const notesAfterCommit = await BatchNote.findAll(perspective!);
+                    expect(notesAfterCommit.length).to.equal(1);
+                    expect(notesAfterCommit[0].title).to.equal("Recipe Notes");
+                    expect(notesAfterCommit[0].content).to.equal("Make sure to use fresh ingredients");
+
+                    console.log("creation batch done")
+
+                    // Test updating models in batch
+                    const updateBatchId = await perspective!.createBatch();
+                    console.log("update batch created")
+                    recipe.ingredients.push("garlic");
+                    await recipe.update(updateBatchId);
+
+                    note.content = "Updated: Use fresh ingredients and add garlic";
+                    await note.update(updateBatchId);
+
+                    // Verify models haven't changed before commit
+                    const recipesBeforeUpdate = await BatchRecipe.findAll(perspective!);
+                    expect(recipesBeforeUpdate[0].ingredients).to.deep.equal(["pasta", "sauce", "cheese"]);
+
+                    const notesBeforeUpdate = await BatchNote.findAll(perspective!);
+                    expect(notesBeforeUpdate[0].content).to.equal("Make sure to use fresh ingredients");
+
+                    // Commit update batch
+                    const updateResult = await perspective!.commitBatch(updateBatchId);
+                    console.log("update batch done")
+                    expect(updateResult.additions.length).to.be.greaterThan(0);
+
+                    // Verify models are updated
+                    const recipesAfterUpdate = await BatchRecipe.findAll(perspective!);
+                    expect(recipesAfterUpdate[0].ingredients).to.deep.equal(["pasta", "sauce", "cheese", "garlic"]);
+
+                    const notesAfterUpdate = await BatchNote.findAll(perspective!);
+                    expect(notesAfterUpdate[0].content).to.equal("Updated: Use fresh ingredients and add garlic");
+
+                    // Test deleting models in batch
+                    const deleteBatchId = await perspective!.createBatch();
+
+                    await recipesAfterUpdate[0].delete(deleteBatchId);
+                    await notesAfterUpdate[0].delete(deleteBatchId);
+
+                    // Verify models still exist before commit
+                    const recipesBeforeDelete = await BatchRecipe.findAll(perspective!);
+                    expect(recipesBeforeDelete.length).to.equal(1);
+
+                    const notesBeforeDelete = await BatchNote.findAll(perspective!);
+                    expect(notesBeforeDelete.length).to.equal(1);
+
+                    // Commit delete batch
+                    const deleteResult = await perspective!.commitBatch(deleteBatchId);
+                    expect(deleteResult.removals.length).to.be.greaterThan(0);
+
+                    // Verify models are deleted
+                    const recipesAfterDelete = await BatchRecipe.findAll(perspective!);
+                    expect(recipesAfterDelete.length).to.equal(0);
+
+                    const notesAfterDelete = await BatchNote.findAll(perspective!);
+                    expect(notesAfterDelete.length).to.equal(0);
+                });
             })
         })
     })

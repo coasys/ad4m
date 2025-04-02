@@ -319,9 +319,10 @@ export class PerspectiveProxy {
      * @param actions - Array of action objects to execute
      * @param expression - Target expression address (replaces "this" in actions)
      * @param parameters - Optional parameters that replace "value" in actions
+     * @param batchId - Optional batch ID to group this operation with others
      */
-    async executeAction(actions, expression, parameters: Parameter[]) {
-        return await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters))
+    async executeAction(actions, expression, parameters: Parameter[], batchId?: string) {
+        return await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId)
     }
 
     /**
@@ -381,6 +382,7 @@ export class PerspectiveProxy {
      * 
      * @param link - The link to add
      * @param status - Whether the link should be shared in a Neighbourhood
+     * @param batchId - Optional batch ID to group this operation with others
      * @returns The created LinkExpression
      * 
      * @example
@@ -400,8 +402,8 @@ export class PerspectiveProxy {
      * }, "local");
      * ```
      */
-    async add(link: Link, status: LinkStatus = 'shared'): Promise<LinkExpression> {
-        return await this.#client.addLink(this.#handle.uuid, link, status)
+    async add(link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
+        return await this.#client.addLink(this.#handle.uuid, link, status, batchId)
     }
 
     /**
@@ -410,20 +412,22 @@ export class PerspectiveProxy {
      * 
      * @param links - Array of links to add
      * @param status - Whether the links should be shared
+     * @param batchId - Optional batch ID to group this operation with others
      * @returns Array of created LinkExpressions
      */
-    async addLinks(links: Link[], status: LinkStatus = 'shared'): Promise<LinkExpression[]> {
-        return await this.#client.addLinks(this.#handle.uuid, links, status)
+    async addLinks(links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
+        return await this.#client.addLinks(this.#handle.uuid, links, status, batchId)
     }
 
     /**
      * Removes multiple links from the perspective.
      * 
      * @param links - Array of links to remove
+     * @param batchId - Optional batch ID to group this operation with others
      * @returns Array of removed LinkExpressions
      */
-    async removeLinks(links: LinkExpressionInput[]): Promise<LinkExpression[]> {
-        return await this.#client.removeLinks(this.#handle.uuid, links)
+    async removeLinks(links: LinkExpressionInput[], batchId?: string): Promise<LinkExpression[]> {
+        return await this.#client.removeLinks(this.#handle.uuid, links, batchId)
     }
 
     /**
@@ -438,36 +442,50 @@ export class PerspectiveProxy {
         return await this.#client.linkMutations(this.#handle.uuid, mutations, status)
     }
 
-    /**
+        /**
      * Adds a pre-signed LinkExpression to the perspective.
      * 
      * @param link - The signed LinkExpression to add
      * @param status - Whether the link should be shared
+     * @param batchId - Optional batch ID to group this operation with others
      * @returns The added LinkExpression
      */
-    async addLinkExpression(link: LinkExpression, status: LinkStatus = 'shared'): Promise<LinkExpression> {
-        return await this.#client.addLinkExpression(this.#handle.uuid, link, status)
+    async addLinkExpression(link: LinkExpression, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
+        return await this.#client.addLinkExpression(this.#handle.uuid, link, status, batchId)
     }
 
-    /**
+        /**
      * Updates an existing link with new data.
      * 
      * @param oldLink - The existing link to update
      * @param newLink - The new link data
+     * @param batchId - Optional batch ID to group this operation with others
      */
-    async update(oldLink: LinkExpressionInput, newLink: Link) {
-        return await this.#client.updateLink(this.#handle.uuid, oldLink, newLink)
+    async update(oldLink: LinkExpressionInput, newLink: Link, batchId?: string): Promise<LinkExpression> {
+        return await this.#client.updateLink(this.#handle.uuid, oldLink, newLink, batchId)
     }
 
     /**
      * Removes a link from the perspective.
      * 
      * @param link - The link to remove
+     * @param batchId - Optional batch ID to group this operation with others
      */
-    async remove(link: LinkExpressionInput) {
-        return await this.#client.removeLink(this.#handle.uuid, link)
+    async remove(link: LinkExpressionInput, batchId?: string): Promise<boolean> {
+        return await this.#client.removeLink(this.#handle.uuid, link, batchId)
     }
 
+    /** Creates a new batch for grouping operations */
+    async createBatch(): Promise<string> {
+        return await this.#client.createBatch(this.#handle.uuid)
+    }
+
+    /** Commits a batch of operations */
+    async commitBatch(batchId: string): Promise<LinkExpressionMutations> {
+        return await this.#client.commitBatch(this.#handle.uuid, batchId)
+
+        
+    }
     /**
      * Retrieves and renders an Expression referenced in this perspective.
      * 
@@ -726,20 +744,23 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Creates a new subject instance in the perspective.
+     * Creates a new subject instance of the given subject class
      * 
      * @param subjectClass Either a string with the name of the subject class, or an object
      * with the properties of the subject class.
      * @param exprAddr The address of the expression to be turned into a subject instance
      * @param initialValues Optional initial values for properties. If provided, these will be
      * merged with constructor actions for better performance.
-     * @returns A proxy object for the created subject
+     * @param batchId Optional batch ID for grouping operations. If provided, returns the expression address
+     * instead of the subject proxy since the subject won't exist until the batch is committed.
+     * @returns A proxy object for the created subject, or just the expression address if in batch mode
      */
-    async createSubject<T>(
+    async createSubject<T, B extends string | undefined = undefined>(
         subjectClass: T, 
         exprAddr: string,
-        initialValues?: Record<string, any>
-    ): Promise<T> {
+        initialValues?: Record<string, any>,
+        batchId?: B
+    ): Promise<B extends undefined ? T : string> {
         let className: string;
 
         if(typeof subjectClass === "string") {
@@ -751,7 +772,8 @@ export class PerspectiveProxy {
                     initialValues
                 }), 
                 exprAddr,
-                initialValues ? JSON.stringify(initialValues) : undefined
+                initialValues ? JSON.stringify(initialValues) : undefined,
+                batchId
             );
         } else {
             let query = this.buildQueryFromTemplate(subjectClass as object);
@@ -762,11 +784,17 @@ export class PerspectiveProxy {
                     initialValues
                 }), 
                 exprAddr,
-                initialValues ? JSON.stringify(initialValues) : undefined
+                initialValues ? JSON.stringify(initialValues) : undefined,
+                batchId
             );
         }
 
-        return this.getSubjectProxy(exprAddr, subjectClass)
+        // Skip subject proxy creation when in batch mode since the subject won't exist until batch is committed
+        if (batchId) {
+            return exprAddr as B extends undefined ? T : string;
+        }
+
+        return this.getSubjectProxy(exprAddr, subjectClass) as Promise<B extends undefined ? T : string>;
     }
 
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
@@ -784,16 +812,18 @@ export class PerspectiveProxy {
      * with the properties of the subject class. In the latter case, the first subject class
      * that matches the given properties will be used.
      * @param exprAddr The address of the expression to be turned into a subject instance
+     * @param batchId Optional batch ID for grouping operations. If provided, the removal will be part of the batch
+     * and won't be executed until the batch is committed.
      */
-    async removeSubject<T>(subjectClass: T, exprAddr: string) {
+    async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
         let result = await this.infer(`subject_class("${className}", C), destructor(C, Actions)`)
         if(!result.length) {
-            throw "No constructor found for given subject class: " + className
+            throw "No destructor found for given subject class: " + className
         }
 
         let actions = result.map(x => eval(x.Actions))
-        await this.executeAction(actions[0], exprAddr, undefined)
+        await this.executeAction(actions[0], exprAddr, undefined, batchId)
     }
 
     /** Checks if the given expression is a subject instance of the given subject class

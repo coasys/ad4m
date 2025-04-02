@@ -577,7 +577,7 @@ export class Ad4mModel {
     return result?.[0]?.TotalCount || 0;
   }
 
-  private async setProperty(key: string, value: any) {
+  private async setProperty(key: string, value: any, batchId?: string) {
     const setters = await this.#perspective.infer(
       `subject_class("${this.#subjectClassName}", C), property_setter(C, "${key}", Setter)`
     );
@@ -594,11 +594,11 @@ export class Ad4mModel {
       if (resolveLanguage) {
         value = await this.#perspective.createExpression(value, resolveLanguage);
       }
-      await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }]);
+      await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
     }
   }
 
-  private async setCollectionSetter(key: string, value: any) {
+  private async setCollectionSetter(key: string, value: any, batchId?: string) {
     let collectionSetters = await this.#perspective.infer(
       `subject_class("${this.#subjectClassName}", C), collection_setter(C, "${singularToPlural(key)}", Setter)`
     );
@@ -612,16 +612,17 @@ export class Ad4mModel {
           await this.#perspective.executeAction(
             actions,
             this.#baseExpression,
-            value.map((v) => ({ name: "value", value: v }))
+            value.map((v) => ({ name: "value", value: v })),
+            batchId
           );
         } else {
-          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }]);
+          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
         }
       }
     }
   }
 
-  private async setCollectionAdder(key: string, value: any) {
+  private async setCollectionAdder(key: string, value: any, batchId?: string) {
     let adders = await this.#perspective.infer(
       `subject_class("${this.#subjectClassName}", C), collection_adder(C, "${singularToPlural(key)}", Adder)`
     );
@@ -633,17 +634,17 @@ export class Ad4mModel {
         if (Array.isArray(value)) {
           await Promise.all(
             value.map((v) =>
-              this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }])
+              this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
             )
           );
         } else {
-          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }]);
+          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
         }
       }
     }
   }
 
-  private async setCollectionRemover(key: string, value: any) {
+  private async setCollectionRemover(key: string, value: any, batchId?: string) {
     let removers = await this.#perspective.infer(
       `subject_class("${this.#subjectClassName}", C), collection_remover(C, "${singularToPlural(key)}", Remover)`
     );
@@ -655,11 +656,11 @@ export class Ad4mModel {
         if (Array.isArray(value)) {
           await Promise.all(
             value.map((v) =>
-              this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }])
+              this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
             )
           );
         } else {
-          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }]);
+          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
         }
       }
     }
@@ -669,6 +670,7 @@ export class Ad4mModel {
    * Saves the model instance to the perspective.
    * Creates a new instance with the base expression and links it to the source.
    * 
+   * @param batchId - Optional batch ID for batch operations
    * @throws Will throw if instance creation, linking, or updating fails
    * 
    * @example
@@ -677,9 +679,14 @@ export class Ad4mModel {
    * recipe.name = "Spaghetti";
    * recipe.ingredients = ["pasta", "tomato sauce"];
    * await recipe.save();
+   * 
+   * // Or with batch operations:
+   * const batchId = await perspective.createBatch();
+   * await recipe.save(batchId);
+   * await perspective.commitBatch(batchId);
    * ```
    */
-  async save() {
+  async save(batchId?: string) {
     // We use createSubject's initialValues to set properties (but not collections)
     // We then later use innerUpdate to set collections
 
@@ -695,19 +702,30 @@ export class Ad4mModel {
     await this.perspective.createSubject(
       this,
       this.#baseExpression,
-      initialValues
+      initialValues,
+      batchId
     );
 
     // Link the subject to the source
     await this.#perspective.add(
-      new Link({ source: this.#source, predicate: "ad4m://has_child", target: this.baseExpression })
+      new Link({ source: this.#source, predicate: "ad4m://has_child", target: this.baseExpression }),
+      'shared',
+      batchId
     );
 
     // Set collections
-    await this.innerUpdate(false)
+    await this.innerUpdate(false, batchId)
+
+    // If we're in batch mode, we don't need to do anything else 
+    // since the instance won't exist until batch commit
+    if (batchId) {
+      return;
+    }
+
+    await this.getData();
   }
 
-  private async innerUpdate(setProperties: boolean = true) {
+  private async innerUpdate(setProperties: boolean = true, batchId?: string) {
     this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this);
 
     const entries = Object.entries(this);
@@ -716,22 +734,23 @@ export class Ad4mModel {
         if (value?.action) {
           switch (value.action) {
             case "setter":
-              await this.setCollectionSetter(key, value.value);
+              await this.setCollectionSetter(key, value.value, batchId);
               break;
             case "adder":
-              await this.setCollectionAdder(key, value.value);
+              await this.setCollectionAdder(key, value.value, batchId);
               break;
             case "remover":
-              await this.setCollectionRemover(key, value.value);
+              await this.setCollectionRemover(key, value.value, batchId);
+              break;
             default:
-              await this.setCollectionSetter(key, value.value);
+              await this.setCollectionSetter(key, value.value, batchId);
               break;
           }
         } else if (Array.isArray(value) && value.length > 0) {
-          await this.setCollectionSetter(key, value);
+          await this.setCollectionSetter(key, value, batchId);
         } else if (value !== undefined && value !== null && value !== "") {
           if (setProperties) {
-            await this.setProperty(key, value);
+            await this.setProperty(key, value, batchId);
           }
         }
       }
@@ -741,6 +760,7 @@ export class Ad4mModel {
   /**
    * Updates the model instance's properties and collections.
    * 
+   * @param batchId - Optional batch ID for batch operations
    * @throws Will throw if property setting or collection updates fail
    * 
    * @example
@@ -749,10 +769,15 @@ export class Ad4mModel {
    * recipe.rating = 5;
    * recipe.ingredients.push("garlic");
    * await recipe.update();
+   * 
+   * // Or with batch operations:
+   * const batchId = await perspective.createBatch();
+   * await recipe.update(batchId);
+   * await perspective.commitBatch(batchId);
    * ```
    */
-  async update() {
-    await this.innerUpdate(true);
+  async update(batchId?: string) {
+    await this.innerUpdate(true, batchId);
     await this.getData();
   }
 
@@ -778,16 +803,22 @@ export class Ad4mModel {
   /**
    * Deletes the model instance from the perspective.
    * 
+   * @param batchId - Optional batch ID for batch operations
    * @throws Will throw if removal fails
    * 
    * @example
    * ```typescript
    * const recipe = await Recipe.findAll(perspective)[0];
    * await recipe.delete();
+   * 
+   * // Or with batch operations:
+   * const batchId = await perspective.createBatch();
+   * await recipe.delete(batchId);
+   * await perspective.commitBatch(batchId);
    * ```
    */
-  async delete() {
-    await this.#perspective.removeSubject(this, this.#baseExpression);
+  async delete(batchId?: string) {
+    await this.#perspective.removeSubject(this, this.#baseExpression, batchId);
   }
 
   /**

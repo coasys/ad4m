@@ -718,6 +718,7 @@ impl Mutation {
         link: LinkInput,
         uuid: String,
         status: Option<String>,
+        batch_id: Option<String>,
     ) -> FieldResult<DecoratedLinkExpression> {
         check_capability(
             &context.capabilities,
@@ -726,7 +727,7 @@ impl Mutation {
 
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         Ok(perspective
-            .add_link(link.into(), link_status_from_input(status)?)
+            .add_link(link.into(), link_status_from_input(status)?, batch_id)
             .await?)
     }
 
@@ -736,6 +737,7 @@ impl Mutation {
         link: LinkExpressionInput,
         uuid: String,
         status: Option<String>,
+        batch_id: Option<String>,
     ) -> FieldResult<DecoratedLinkExpression> {
         check_capability(
             &context.capabilities,
@@ -744,7 +746,7 @@ impl Mutation {
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         let link = crate::types::LinkExpression::try_from(link)?;
         Ok(perspective
-            .add_link_expression(link, link_status_from_input(status)?)
+            .add_link_expression(link, link_status_from_input(status)?, batch_id)
             .await?)
     }
 
@@ -754,6 +756,7 @@ impl Mutation {
         links: Vec<LinkInput>,
         uuid: String,
         status: Option<String>,
+        batch_id: Option<String>,
     ) -> FieldResult<Vec<DecoratedLinkExpression>> {
         check_capability(
             &context.capabilities,
@@ -764,6 +767,7 @@ impl Mutation {
             .add_links(
                 links.into_iter().map(|l| l.into()).collect(),
                 link_status_from_input(status)?,
+                batch_id,
             )
             .await?)
     }
@@ -814,6 +818,7 @@ impl Mutation {
         context: &RequestContext,
         link: LinkExpressionInput,
         uuid: String,
+        batch_id: Option<String>,
     ) -> FieldResult<bool> {
         check_capability(
             &context.capabilities,
@@ -821,7 +826,7 @@ impl Mutation {
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         let link = crate::types::LinkExpression::try_from(link)?;
-        perspective.remove_link(link).await?;
+        perspective.remove_link(link, batch_id).await?;
         Ok(true)
     }
 
@@ -830,6 +835,7 @@ impl Mutation {
         context: &RequestContext,
         links: Vec<LinkExpressionInput>,
         uuid: String,
+        batch_id: Option<String>,
     ) -> FieldResult<Vec<DecoratedLinkExpression>> {
         check_capability(
             &context.capabilities,
@@ -840,7 +846,7 @@ impl Mutation {
             .into_iter()
             .map(LinkExpression::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        let removed_links = perspective.remove_links(links).await?;
+        let removed_links = perspective.remove_links(links, batch_id).await?;
         Ok(removed_links)
     }
 
@@ -867,6 +873,7 @@ impl Mutation {
         new_link: LinkInput,
         old_link: LinkExpressionInput,
         uuid: String,
+        batch_id: Option<String>,
     ) -> FieldResult<DecoratedLinkExpression> {
         check_capability(
             &context.capabilities,
@@ -877,6 +884,7 @@ impl Mutation {
             .update_link(
                 LinkExpression::from_input_without_proof(old_link),
                 new_link.into(),
+                batch_id,
             )
             .await?)
     }
@@ -907,25 +915,26 @@ impl Mutation {
         commands: String,
         expression: String,
         parameters: Option<String>,
+        batch_id: Option<String>,
     ) -> FieldResult<bool> {
         check_capability(
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let commands: Vec<Command> = serde_json::from_str(&commands)
-            .map_err(|e| FieldError::new(e, graphql_value!({ "invalid_commands": commands })))?;
-        let parameters: Vec<Parameter> = if let Some(p) = parameters {
-            serde_json::from_str(&p)
-                .map_err(|e| FieldError::new(e, graphql_value!({ "invalid_parameters": p })))?
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+
+        let commands: Vec<Command> = serde_json::from_str(&commands)?;
+        let parameters: Vec<Parameter> = if let Some(parameters) = parameters {
+            serde_json::from_str(&parameters)?
         } else {
-            Vec::new()
+            vec![]
         };
 
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         perspective
-            .execute_commands(commands, expression, parameters)
+            .execute_commands(commands, expression, parameters, batch_id)
             .await?;
+
         Ok(true)
     }
 
@@ -936,33 +945,26 @@ impl Mutation {
         subject_class: String,
         expression_address: String,
         initial_values: Option<String>,
+        batch_id: Option<String>,
     ) -> FieldResult<bool> {
         check_capability(
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let subject_class: SubjectClassOption =
-            serde_json::from_str(&subject_class).map_err(|e| {
-                FieldError::new(
-                    e,
-                    graphql_value!({ "invalid_subject_class": subject_class }),
-                )
-            })?;
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
 
-        let initial_values = if let Some(values) = initial_values {
-            serde_json::from_str(&values).map_err(|e| {
-                FieldError::new(e, graphql_value!({ "invalid_initial_values": values }))
-            })?
+        let subject_class: SubjectClassOption = serde_json::from_str(&subject_class)?;
+        let initial_values = if let Some(initial_values) = initial_values {
+            Some(serde_json::from_str(&initial_values)?)
         } else {
             None
         };
 
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
-
         perspective
-            .create_subject(subject_class, expression_address, initial_values)
+            .create_subject(subject_class, expression_address, initial_values, batch_id)
             .await?;
+
         Ok(true)
     }
 
@@ -1586,5 +1588,32 @@ impl Mutation {
         })?;
 
         Ok(true)
+    }
+
+    async fn perspective_create_batch(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+    ) -> FieldResult<String> {
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
+        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        Ok(perspective.create_batch().await)
+    }
+
+    async fn perspective_commit_batch(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        batch_id: String,
+    ) -> FieldResult<DecoratedPerspectiveDiff> {
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        Ok(perspective.commit_batch(batch_id).await?)
     }
 }
