@@ -1,0 +1,248 @@
+# Batch Operations
+
+## Overview
+Batch operations in AD4M allow you to group multiple perspective mutations into a single atomic transaction. This feature is particularly useful when you need to perform multiple related changes that should either all succeed or all fail together, or when you want to optimize performance by reducing the number of Prolog engine updates and network operations.
+
+## Key Benefits
+
+### 1. Atomicity
+- All operations in a batch are applied together or none are applied
+- Prevents partial updates that could leave your data in an inconsistent state
+- Ideal for complex operations that require multiple related changes
+
+### 2. Performance Optimization
+- Reduces the number of Prolog engine updates (which can be computationally expensive)
+- Minimizes the number of commits to the neighbourhood's link language
+- Batches network operations for shared perspectives
+- Improves overall system responsiveness when making multiple changes
+
+## Using Batch Operations
+
+### Basic Usage with PerspectiveProxy
+
+```typescript
+// Create a new batch
+const batchId = await perspective.createBatch();
+
+try {
+  // Add multiple links in the batch
+  await perspective.add(link1, 'shared', batchId);
+  await perspective.add(link2, 'shared', batchId);
+  
+  // Remove a link in the same batch
+  await perspective.remove(oldLink, batchId);
+  
+  // Update a link in the batch
+  await perspective.update(existingLink, newLink, batchId);
+  
+  // Commit all changes atomically
+  const result = await perspective.commitBatch(batchId);
+  console.log('Added:', result.additions.length);
+  console.log('Removed:', result.removals.length);
+} catch (error) {
+  // If any operation fails, none of the changes are applied
+  console.error('Batch operation failed:', error);
+}
+```
+
+### Using Batches with Ad4mModel
+
+```typescript
+// Create a batch for model operations
+const batchId = await perspective.createBatch();
+
+try {
+  // Create a new model instance
+  const recipe = new Recipe(perspective);
+  recipe.title = "Chocolate Cake";
+  recipe.ingredients = ["Sugar", "Flour", "Cocoa"];
+  await recipe.save(batchId);
+
+  // Update another model in the same batch
+  const existingRecipe = await Recipe.findAll(perspective)[0];
+  existingRecipe.title = "Updated Title";
+  await existingRecipe.update(batchId);
+
+  // Delete a model in the batch
+  await anotherRecipe.delete(batchId);
+
+  // Commit all model changes together
+  await perspective.commitBatch(batchId);
+} catch (error) {
+  console.error('Model batch operations failed:', error);
+}
+```
+
+## When to Use Batch Operations
+
+### 1. Complex Data Models
+When your application needs to maintain relationships between multiple entities:
+```typescript
+const batchId = await perspective.createBatch();
+
+// Create a user profile with related entities
+await userProfile.save(batchId);
+await userSettings.save(batchId);
+for (const preference of userPreferences) {
+  await preference.save(batchId);
+}
+
+await perspective.commitBatch(batchId);
+```
+
+### 2. Bulk Operations
+When performing operations on multiple items:
+```typescript
+const batchId = await perspective.createBatch();
+
+// Bulk status update
+for (const task of tasks) {
+  task.status = 'completed';
+  await task.update(batchId);
+}
+
+await perspective.commitBatch(batchId);
+```
+
+### 3. State Transitions
+When an operation requires multiple coordinated changes:
+```typescript
+const batchId = await perspective.createBatch();
+
+// Moving a task between lists
+await sourceList.removeTask(task, batchId);
+await targetList.addTask(task, batchId);
+await task.updateStatus('moved', batchId);
+
+await perspective.commitBatch(batchId);
+```
+
+## Technical Details
+
+### Batch Storage
+- Batches are stored in memory until committed
+- Each batch has a unique UUID
+- Changes are tracked separately for shared and local links
+
+### Prolog Engine Synchronization
+- Prolog facts are updated only once per batch commit
+- Updates are performed using a oneshot channel to ensure completion
+- The engine state remains consistent with all changes
+
+### Link Language Integration
+- For shared perspectives, commits to the link language happen only once per batch
+- Reduces network operations in distributed scenarios
+
+## Best Practices
+
+1. **Batch Size**
+   - Keep batches focused on related operations
+   - Avoid extremely large batches that could impact memory usage
+   - Consider splitting very large operations into multiple smaller batches
+
+2. **Error Handling**
+   ```typescript
+   const batchId = await perspective.createBatch();
+   try {
+     // Perform batch operations
+     await perspective.commitBatch(batchId);
+   } catch (error) {
+     // Handle errors appropriately
+     // No changes will be persisted
+   }
+   ```
+
+3. **Resource Management**
+   - Commit or abandon batches in a timely manner
+   - Don't keep batches open longer than necessary
+   - Consider using async/await patterns for better control flow
+
+4. **Testing**
+   - Test both successful and failed batch scenarios
+   - Verify data consistency after batch operations
+   - Include edge cases in your test suite
+
+## Limitations and Considerations
+
+1. **Memory Usage**
+   - Batches store changes in memory until committed
+   - Very large batches may impact system performance
+
+2. **Concurrency**
+   - Batch operations don't provide explicit locking
+   - Consider application-level synchronization for concurrent operations
+
+3. **Network Connectivity**
+   - For shared perspectives, ensure stable network connectivity before committing large batches
+   - Consider implementing retry logic for network-related failures
+
+## Examples
+
+### Complex Subject Creation
+```typescript
+const batchId = await perspective.createBatch();
+
+// Create main subject
+const post = new BlogPost(perspective);
+post.title = "My First Post";
+await post.save(batchId);
+
+// Create related subjects
+const comments = initialComments.map(comment => {
+  const c = new Comment(perspective);
+  c.content = comment;
+  c.postId = post.baseExpression;
+  return c;
+});
+
+// Save all related subjects in the same batch
+await Promise.all(comments.map(c => c.save(batchId)));
+
+// Commit everything together
+await perspective.commitBatch(batchId);
+```
+
+### Batch Processing with Validation
+```typescript
+async function updateRecipeWithIngredients(recipe, ingredients) {
+  const batchId = await perspective.createBatch();
+  
+  try {
+    // Validate all ingredients first
+    for (const ingredient of ingredients) {
+      if (!await validateIngredient(ingredient)) {
+        throw new Error(`Invalid ingredient: ${ingredient}`);
+      }
+    }
+    
+    // If all valid, proceed with updates
+    recipe.ingredients = ingredients;
+    await recipe.update(batchId);
+    
+    // Create ingredient references
+    for (const ingredient of ingredients) {
+      const ref = new IngredientReference(perspective);
+      ref.recipeId = recipe.baseExpression;
+      ref.ingredientId = ingredient.id;
+      await ref.save(batchId);
+    }
+    
+    await perspective.commitBatch(batchId);
+  } catch (error) {
+    // No changes are persisted if any operation fails
+    throw new Error(`Failed to update recipe: ${error.message}`);
+  }
+}
+```
+
+## Migration Guide
+
+Existing code will continue to work without modification. To adopt batch operations:
+
+1. Identify groups of related operations in your code
+2. Create a batch using `perspective.createBatch()`
+3. Add the `batchId` parameter to your operations
+4. Wrap operations in try/catch blocks
+5. Commit the batch when all operations are complete
+
+No schema changes or data migration is required to use this feature. 
