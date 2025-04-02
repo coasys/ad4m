@@ -601,7 +601,7 @@ impl PerspectiveInstance {
                 .collect(),
         };
 
-        self.spawn_prolog_facts_update(decorated_diff.clone());
+        self.spawn_prolog_facts_update(decorated_diff.clone(), None);
         self.pubsub_publish_diff(decorated_diff).await;
         *(self.trigger_notification_check.lock().await) = true;
         *(self.trigger_prolog_subscription_check.lock().await) = true;
@@ -660,7 +660,7 @@ impl PerspectiveInstance {
                 let decorated_diff =
                     DecoratedPerspectiveDiff::from_removals(vec![decorated_link.clone()]);
 
-                self.spawn_prolog_facts_update(decorated_diff.clone());
+                self.spawn_prolog_facts_update(decorated_diff.clone(), None);
                 self.pubsub_publish_diff(decorated_diff.clone()).await;
 
                 if status == LinkStatus::Shared {
@@ -734,7 +734,7 @@ impl PerspectiveInstance {
         let decorated_perspective_diff =
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
-        self.spawn_prolog_facts_update(decorated_perspective_diff.clone());
+        self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
 
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
@@ -787,7 +787,7 @@ impl PerspectiveInstance {
                 db.add_many_links(&handle.uuid, link_expressions.clone(), &status)
             })?;
 
-            self.spawn_prolog_facts_update(decorated_perspective_diff.clone());
+            self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
             self.pubsub_publish_diff(decorated_perspective_diff).await;
             if status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&perspective_diff);
@@ -838,7 +838,7 @@ impl PerspectiveInstance {
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
 
-        self.spawn_prolog_facts_update(decorated_diff.clone());
+        self.spawn_prolog_facts_update(decorated_diff.clone(), None);
         self.pubsub_publish_diff(decorated_diff.clone()).await;
 
         if status == LinkStatus::Shared {
@@ -902,7 +902,7 @@ impl PerspectiveInstance {
                 vec![decorated_old_link.clone()],
             );
 
-            self.spawn_prolog_facts_update(decorated_diff);
+            self.spawn_prolog_facts_update(decorated_diff.clone(), None);
 
             get_global_pubsub()
                 .await
@@ -982,7 +982,7 @@ impl PerspectiveInstance {
                 Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, link))?;
             }
 
-            self.spawn_prolog_facts_update(decorated_diff.clone());
+            self.spawn_prolog_facts_update(decorated_diff.clone(), None);
             self.pubsub_publish_diff(decorated_diff).await;
 
             // Only commit shared links by filtering decorated_links
@@ -1258,7 +1258,7 @@ impl PerspectiveInstance {
         }
     }
 
-    fn spawn_prolog_facts_update(&self, diff: DecoratedPerspectiveDiff) {
+    fn spawn_prolog_facts_update(&self, diff: DecoratedPerspectiveDiff, completion_sender: Option<tokio::sync::oneshot::Sender<()>>) {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
@@ -1303,6 +1303,11 @@ impl PerspectiveInstance {
 
             if did_update {
                 self_clone.pubsub_publish_diff(diff).await;
+            }
+
+            // Signal completion through the oneshot channel if provided
+            if let Some(sender) = completion_sender {
+                let _ = sender.send(());
             }
         });
     }
@@ -2183,9 +2188,17 @@ impl PerspectiveInstance {
             removals: [shared_diff.removals.clone(), local_diff.removals.clone()].concat(),
         };
 
-        // Update prolog facts once for all changes
-        self.spawn_prolog_facts_update(combined_diff.clone());
-
+        // Only spawn prolog facts update if there are changes to update
+        if !combined_diff.additions.is_empty() || !combined_diff.removals.is_empty() {
+            // Create oneshot channel for prolog facts update completion
+            let (completion_sender, completion_receiver) = tokio::sync::oneshot::channel();
+            //log::info!("spawning prolog facts update");
+            //log::info!("combined diff: {:?}", combined_diff);
+            // Update prolog facts once for all changes and wait for completion
+            self.spawn_prolog_facts_update(combined_diff.clone(), Some(completion_sender));
+            let _ = completion_receiver.await;
+            //log::info!("done spawning prolog facts update");
+        }
         // Return combined diff
         Ok(combined_diff)
     }
