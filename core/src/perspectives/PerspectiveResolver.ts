@@ -184,20 +184,20 @@ export default class PerspectiveResolver {
         return [l, l2]
     }
 
-    @Mutation(returns => LinkExpression)
+    @Mutation(returns => Boolean)
     perspectiveRemoveLink(
         @Arg('uuid') uuid: string, 
         @Arg('link') link: LinkExpressionInput,
         @Arg('batchId', { nullable: true }) batchId: string,
         @PubSub() pubSub: any
-    ): LinkExpression {
+    ): Boolean {
         const l = new LinkExpression()
         l.author = 'did:ad4m:test'
         l.timestamp = Date.now()
         l.proof = testLink.proof
         l.data = link.data
         pubSub.publish(LINK_REMOVED_TOPIC, { link: l })
-        return l
+        return true
     }
 
     @Mutation(returns => [LinkExpression])
