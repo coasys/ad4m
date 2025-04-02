@@ -554,7 +554,7 @@ export class PerspectiveProxy {
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
         let result = await this.infer(`subject_class("${className}", C), destructor(C, Actions)`)
         if(!result.length) {
-            throw "No constructor found for given subject class: " + className
+            throw "No destructor found for given subject class: " + className
         }
 
         let actions = result.map(x => eval(x.Actions))
