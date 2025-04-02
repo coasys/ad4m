@@ -268,13 +268,13 @@ export default class LanguageController {
 
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
-                console.log("LINKS CALLBACK", diff)
+                //console.log("LINKS CALLBACK", diff)
                 this.callLinkObservers(diff, {address: hash, name: language.name} as LanguageRef);
             })
 
             if (language.linksAdapter.addSyncStateChangeCallback) {
                 language.linksAdapter.addSyncStateChangeCallback((state: PerspectiveState) => {
-                    console.log("LanguageController.loadLanguage: sync state change", state);
+                    //console.log("LanguageController.loadLanguage: sync state change", state);
                     this.callSyncStateChangeObservers(state, {address: hash, name: language.name} as LanguageRef);
                 })
             }

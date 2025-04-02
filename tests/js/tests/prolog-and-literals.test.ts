@@ -195,6 +195,21 @@ describe("Prolog + Literals", () => {
                 //@ts-ignore
                 expect(await todos[1].state).to.exist
             })
+
+            it("should create a subject with initial values", async () => {
+                let root = Literal.from("initial values test").toUrl()
+                const initialValues = {
+                    title: "Initial Title",
+                    state: "todo://done"
+                }
+                await perspective!.createSubject("Todo", root, initialValues)
+                let subject = await perspective!.getSubjectProxy(root, "Todo") as unknown as Subject
+
+                //@ts-ignore
+                expect(await subject.title).to.equal("Initial Title")
+                //@ts-ignore
+                expect(await subject.state).to.equal("todo://done")
+            })
         })
 
         describe("TypeScript compatibility", () => {
@@ -255,7 +270,7 @@ describe("Prolog + Literals", () => {
 
                 // todos is an array of Todo objects
                 // note how we don't need @ts-ignore here:
-                expect(todos.length).to.equal(2)
+                expect(todos.length).to.equal(3)
                 expect(await todos[1].state).to.exist
             })
 
@@ -391,7 +406,7 @@ describe("Prolog + Literals", () => {
 
             it("can retrieve all instances through instaceQuery decoratored all()", async () => {
                 let todos = await Todo.all(perspective!)
-                expect(todos.length).to.equal(3)
+                expect(todos.length).to.equal(4)
             })
 
             it("can retrieve all mathching instance through InstanceQuery(where: ..)", async () => {
@@ -400,7 +415,7 @@ describe("Prolog + Literals", () => {
                 expect(await todos[0].state).to.equal("todo://ready")
 
                 todos = await Todo.allDone(perspective!)
-                expect(todos.length).to.equal(1)
+                expect(todos.length).to.equal(2)
                 expect(await todos[0].state).to.equal("todo://done")
             })
 

@@ -60,7 +60,7 @@ impl PrologEngine {
                         match message {
                             PrologServiceRequest::RunQuery(query, response) => {
                                 match std::panic::catch_unwind(AssertUnwindSafe(|| {
-                                    machine.run_query(query)
+                                    machine.run_query(query.clone())
                                 })) {
                                     Ok(result) => {
                                         let _ = response
@@ -69,11 +69,11 @@ impl PrologEngine {
                                     Err(e) => {
                                         let error_string =
                                             if let Some(string) = e.downcast_ref::<String>() {
-                                                format!("Scryer panicked with: {:?}", string)
+                                                format!("Scryer panicked with: {:?} - when running query: {}", string, query)
                                             } else if let Some(&str) = e.downcast_ref::<&str>() {
-                                                format!("Scryer panicked with: {:?}", str)
+                                                format!("Scryer panicked with: {:?} - when running query: {}", str, query)
                                             } else {
-                                                format!("Scryer panicked with: {:?}", e)
+                                                format!("Scryer panicked with: {:?} - when running query: {}", e, query)
                                             };
                                         log::error!("{}", error_string);
                                         let _ =

@@ -935,6 +935,7 @@ impl Mutation {
         uuid: String,
         subject_class: String,
         expression_address: String,
+        initial_values: Option<String>,
     ) -> FieldResult<bool> {
         check_capability(
             &context.capabilities,
@@ -949,10 +950,18 @@ impl Mutation {
                 )
             })?;
 
+        let initial_values = if let Some(values) = initial_values {
+            serde_json::from_str(&values).map_err(|e| {
+                FieldError::new(e, graphql_value!({ "invalid_initial_values": values }))
+            })?
+        } else {
+            None
+        };
+
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
 
         perspective
-            .create_subject(subject_class, expression_address)
+            .create_subject(subject_class, expression_address, initial_values)
             .await?;
         Ok(true)
     }

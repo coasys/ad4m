@@ -161,7 +161,8 @@ pub struct PerspectiveInstance {
     sdna_change_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<Mutex<Option<Language>>>,
-    links_have_changed: Arc<Mutex<bool>>,
+    trigger_notification_check: Arc<Mutex<bool>>,
+    trigger_prolog_subscription_check: Arc<Mutex<bool>>,
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
@@ -181,7 +182,8 @@ impl PerspectiveInstance {
             sdna_change_mutex: Arc::new(Mutex::new(())),
             prolog_update_mutex: Arc::new(RwLock::new(())),
             link_language: Arc::new(Mutex::new(None)),
-            links_have_changed: Arc::new(Mutex::new(false)),
+            trigger_notification_check: Arc::new(Mutex::new(false)),
+            trigger_prolog_subscription_check: Arc::new(Mutex::new(false)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)), // Default to 3 immediate commits
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
@@ -376,7 +378,7 @@ impl PerspectiveInstance {
         let mut before = self.notification_trigger_snapshot().await;
         while !*self.is_teardown.lock().await {
             interval.tick().await;
-            let mut changed = self.links_have_changed.lock().await;
+            let mut changed = self.trigger_notification_check.lock().await;
             if *changed {
                 let after = self.notification_trigger_snapshot().await;
                 let new_matches = Self::subtract_before_notification_matches(&before, &after);
@@ -598,7 +600,8 @@ impl PerspectiveInstance {
 
         self.spawn_prolog_facts_update(decorated_diff.clone());
         self.pubsub_publish_diff(decorated_diff).await;
-        *(self.links_have_changed.lock().await) = true;
+        *(self.trigger_notification_check.lock().await) = true;
+        *(self.trigger_prolog_subscription_check.lock().await) = true;
     }
 
     pub async fn telepresence_signal_from_link_language(&self, mut signal: PerspectiveExpression) {
@@ -681,7 +684,8 @@ impl PerspectiveInstance {
         }
 
         self.pubsub_publish_diff(decorated_perspective_diff).await;
-        *(self.links_have_changed.lock().await) = true;
+        *(self.trigger_notification_check.lock().await) = true;
+        *(self.trigger_prolog_subscription_check.lock().await) = true;
         Ok(decorated_link_expression)
     }
 
@@ -717,7 +721,8 @@ impl PerspectiveInstance {
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&perspective_diff);
         }
-        *(self.links_have_changed.lock().await) = true;
+        *(self.trigger_notification_check.lock().await) = true;
+        *(self.trigger_prolog_subscription_check.lock().await) = true;
         Ok(decorated_link_expressions)
     }
 
@@ -767,7 +772,8 @@ impl PerspectiveInstance {
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
         }
-        *(self.links_have_changed.lock().await) = true;
+        *(self.trigger_notification_check.lock().await) = true;
+        *(self.trigger_prolog_subscription_check.lock().await) = true;
         Ok(decorated_diff)
     }
 
@@ -829,7 +835,8 @@ impl PerspectiveInstance {
         if link_status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
         }
-        *(self.links_have_changed.lock().await) = true;
+        *(self.trigger_notification_check.lock().await) = true;
+        *(self.trigger_prolog_subscription_check.lock().await) = true;
         Ok(decorated_new_link_expression)
     }
 
@@ -854,7 +861,8 @@ impl PerspectiveInstance {
                 self.spawn_commit_and_handle_error(&diff);
             }
 
-            *(self.links_have_changed.lock().await) = true;
+            *(self.trigger_notification_check.lock().await) = true;
+            *(self.trigger_prolog_subscription_check.lock().await) = true;
             Ok(decorated_link)
         } else {
             Err(anyhow!("Link not found"))
@@ -920,7 +928,8 @@ impl PerspectiveInstance {
             self.spawn_commit_and_handle_error(&shared_diff);
         }
 
-        *(self.links_have_changed.lock().await) = true;
+        *(self.trigger_notification_check.lock().await) = true;
+        *(self.trigger_prolog_subscription_check.lock().await) = true;
         Ok(decorated_links)
     }
 
@@ -1510,6 +1519,12 @@ impl PerspectiveInstance {
                     }
                 }
                 Action::SetSingleTarget => {
+                    if predicate.is_none() {
+                        log::error!(
+                            "SetSingleTarget actions with no predicate are not allowed. Skipping."
+                        );
+                        continue;
+                    }
                     let link_expressions = self
                         .get_links(&LinkQuery {
                             source: Some(source.clone()),
@@ -1585,27 +1600,137 @@ impl PerspectiveInstance {
         })
     }
 
+    async fn get_actions_from_prolog(
+        &self,
+        query: String,
+    ) -> Result<Option<Vec<Command>>, AnyError> {
+        let result = self.prolog_query(query).await?;
+
+        if let Some(actions_str) = prolog_get_first_string_binding(&result, "Actions") {
+            // json5 seems to have a bug, blocking when a property is set to undefined
+            let sanitized_str = actions_str.replace("undefined", "null");
+            json5::from_str(&sanitized_str)
+                .map(Some)
+                .map_err(|e| anyhow!("Failed to parse actions: {}", e))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn get_constructor_actions(&self, class_name: &str) -> Result<Vec<Command>, AnyError> {
+        let query = format!(
+            r#"subject_class("{}", C), constructor(C, Actions)"#,
+            class_name
+        );
+        self.get_actions_from_prolog(query)
+            .await?
+            .ok_or(anyhow!("No constructor found for class: {}", class_name))
+    }
+
+    async fn get_property_setter_actions(
+        &self,
+        class_name: &str,
+        property: &str,
+    ) -> Result<Option<Vec<Command>>, AnyError> {
+        let query = format!(
+            r#"subject_class("{}", C), property_setter(C, "{}", Actions)"#,
+            class_name, property
+        );
+        self.get_actions_from_prolog(query).await
+    }
+
+    async fn resolve_property_value(
+        &self,
+        class_name: &str,
+        property: &str,
+        value: &serde_json::Value,
+    ) -> Result<String, AnyError> {
+        let resolve_result = self.prolog_query(format!(
+            r#"subject_class("{}", C), property_resolve(C, "{}"), property_resolve_language(C, "{}", Language)"#,
+            class_name, property, property
+        )).await?;
+
+        if let Some(resolve_language) = prolog_get_first_string_binding(&resolve_result, "Language")
+        {
+            // Create an expression for the value
+            let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
+            let content = match value {
+                serde_json::Value::String(s) => format!("\"{}\"", s.clone()),
+                _ => value.to_string(),
+            };
+            if let Some(ref mut js) = *lock {
+                let result = js.execute(format!(
+                    r#"JSON.stringify(
+                        (await core.callResolver("Mutation", "expressionCreate", {{ languageAddress: "{}", content: {} }})).Ok
+                    )"#,
+                    resolve_language, content
+                )).await?;
+                Ok(result.trim_matches('"').to_string())
+            } else {
+                Ok(value.to_string())
+            }
+        } else {
+            Ok(match value {
+                serde_json::Value::String(s) => s.clone(),
+                _ => value.to_string(),
+            })
+        }
+    }
+
     pub async fn create_subject(
         &mut self,
         subject_class: SubjectClassOption,
         expression_address: String,
+        initial_values: Option<serde_json::Value>,
     ) -> Result<(), AnyError> {
         let class_name = self
             .subject_class_option_to_class_name(subject_class)
             .await?;
-        let result = self
-            .prolog_query(format!(
-                "subject_class(\"{}\", C), constructor(C, Actions).",
-                class_name
-            ))
-            .await?;
-        let actions = prolog_get_first_string_binding(&result, "Actions")
-            .ok_or(anyhow!("No constructor found for class: {}", class_name))?;
 
-        let commands: Vec<Command> = json5::from_str(&actions).unwrap();
+        let mut commands = self.get_constructor_actions(&class_name).await?;
+
+        // Handle initial values if provided
+        if let Some(obj) = initial_values {
+            if let serde_json::Value::Object(obj) = obj {
+                for (prop, value) in obj.iter() {
+                    if let Some(setter_commands) =
+                        self.get_property_setter_actions(&class_name, prop).await?
+                    {
+                        let target_value = self
+                            .resolve_property_value(&class_name, prop, value)
+                            .await?;
+
+                        // Compare predicates between setter and constructor commands
+                        for setter_cmd in setter_commands.iter() {
+                            let mut overwritten = false;
+                            if let Some(setter_pred) = &setter_cmd.predicate {
+                                for cmd in commands.iter_mut() {
+                                    if let Some(pred) = &cmd.predicate {
+                                        if pred == setter_pred {
+                                            cmd.target = Some(target_value.clone());
+                                            overwritten = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if !overwritten {
+                                commands.push(Command {
+                                    target: Some(target_value.clone()),
+                                    ..setter_cmd.clone()
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Execute the merged commands
         self.execute_commands(commands, expression_address.clone(), vec![])
             .await?;
 
+        // Verify instance was created successfully
         let mut tries = 0;
         let mut instance_check_passed = false;
         while !instance_check_passed && tries < 50 {
@@ -1868,7 +1993,10 @@ impl PerspectiveInstance {
 
     async fn subscribed_queries_loop(&self) {
         while !*self.is_teardown.lock().await {
-            self.check_subscribed_queries().await;
+            if *self.trigger_prolog_subscription_check.lock().await {
+                self.check_subscribed_queries().await;
+                *self.trigger_prolog_subscription_check.lock().await = false;
+            }
             sleep(Duration::from_millis(QUERY_SUBSCRIPTION_CHECK_INTERVAL)).await;
         }
     }

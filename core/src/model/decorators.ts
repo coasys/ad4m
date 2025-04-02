@@ -248,7 +248,7 @@ export interface PropertyOptions {
  */
 export function Optional(opts: PropertyOptions) {
     return function <T>(target: T, key: keyof T) {
-        if(typeof opts.writable === "undefined") {
+        if(typeof opts.writable === "undefined" && opts.through) {
             opts.writable = true
         }
         
@@ -596,7 +596,7 @@ export function ModelOptions(opts: ModelOptionsOptions) {
 
                 if(setter) {
                     propertyCode += `property_setter(${uuid}, "${property}", Actions) :- ${setter}.\n`
-                } else if (writable) {
+                } else if (writable && through) {
                     let setter = obj[propertyNameToSetterName(property)]
                     if(typeof setter === "function") {
                         let action = [{
