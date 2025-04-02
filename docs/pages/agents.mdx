@@ -1,25 +1,131 @@
-# Agents
+# Agents: The Foundation of AD4M
 
-In ADAM, individuals are referred to as "Agents" instead of "Users" to
-highlight their active role and contribution. They are not simply users who use the
-network, but actively participate by operating as nodes, facilitating communication
-and enhancing network security.
+## Agent-Centric Architecture
 
-In the same way computers have their own unique IP address on the internet,
-each agent in ADAM has their own [Decentralized Identifier](https://en.wikipedia.org/wiki/Decentralized_identifier). Users can either use their
-existing identity or create a new one:
+In AD4M, we take a fundamentally different approach to building distributed systems. Instead of treating data as the primary building block, we place agents – humans and their computers – at the center of our architecture. This philosophical shift from "data-centric" to "agent-centric" has profound implications for how we build and interact with digital systems.
+
+### Why Agent-Centric?
+
+In traditional web architectures, data is treated as an objective, standalone entity that exists independently of its creators and consumers. This leads to centralized data silos, privacy concerns, and a disconnect between users and their digital footprint.
+
+AD4M's agent-centric approach recognizes that:
+- All data is fundamentally a claim or statement made by an agent
+- Trust and context come from understanding who made a claim
+- Agents should have sovereignty over their data and digital identity
+- Interactions should be peer-to-peer between agents
+
+## Technical Implementation
+
+### Decentralized Identifiers (DIDs)
+
+Every agent in AD4M is identified by a [Decentralized Identifier (DID)](https://en.wikipedia.org/wiki/Decentralized_identifier). DIDs are globally unique identifiers that:
+- Are fully controlled by the agent
+- Can be resolved to cryptographic keys
+- Enable verifiable, decentralized digital identity
 
 ```js
-await ad4m.agent.generate("Password123");
-```
+// Generate a new agent with associated DID
+await ad4m.agent.generate("YourSecurePassword");
 
-To retrieve your own Decentralized Identifier (DID) you can call `me()` on the AgentClient:
-
-```js
+// Get your agent's DID and information
 const { did, perspective } = await ad4m.agent.me();
 ```
 
-Each Agent also has their own [Perspective](/perspectives) that can
-contain public information about the Agent.
+### Agent Expressions
 
-[Agent class definition](/jsdoc/classes/Agent)
+AD4M comes with a built-in "agent bootstrap language" that resolves DIDs to `AgentExpression` objects. An `AgentExpression` contains:
+
+```typescript
+class Agent {
+  // The agent's DID - their unique identifier
+  did: string;
+
+  // The agent's public semantic profile
+  perspective?: Perspective;
+
+  // Address of the language used for direct messaging
+  directMessageLanguage?: string;
+}
+```
+
+The `perspective` field is particularly important as it serves as the agent's "homepage" in the semantic web – a public space where they can share information about themselves using semantic links.
+
+### Cryptographic Keys and Signatures
+
+AD4M manages cryptographic keys associated with an agent's DID. These keys are used to:
+- Sign expressions created by the agent
+- Verify the authenticity of expressions from other agents
+- Establish secure communication channels
+
+When an agent creates an expression, AD4M automatically signs it with their private key:
+
+```js
+// The expression will be signed with the agent's key
+const expression = await ad4m.expression.create(languageAddress, content);
+```
+
+### Communication Between Agents
+
+Agents can communicate directly with each other through AD4M's messaging system. The runtime client provides convenient functions that handle the underlying direct message language mechanics:
+
+```js
+// Send a message to another agent
+await ad4m.runtime.sendMessage(recipientDID, "Hello!");
+
+// Listen for incoming messages
+ad4m.runtime.addMessageCallback((message) => {
+  console.log("Message from:", message.from);
+  console.log("Content:", message.content);
+});
+```
+
+Under the hood, AD4M uses the recipient's preferred direct message language (specified in their `AgentExpression`) to deliver the message. This abstraction ensures that:
+- Messages are delivered using the recipient's chosen communication method
+- The underlying transport mechanism can be changed without affecting applications
+- Messages are properly encrypted and signed
+
+You can also check if an agent is available for messaging:
+
+```js
+// Get another agent's information
+const otherAgent = await ad4m.agent.byDID(someDID);
+
+// Check if they have messaging capability
+if (otherAgent.directMessageLanguage) {
+  // They can receive messages
+}
+```
+
+## Agent Perspectives
+
+Every agent has a public perspective that acts as their semantic profile. This perspective can contain:
+- Personal information
+- Social connections
+- Published content
+- Public keys
+- Contact methods
+
+The perspective uses semantic links to create a rich web of information:
+
+```js
+// Add information to your public perspective
+const { did } = await ad4m.agent.me();
+await ad4m.agent.updatePublicPerspective({
+  links: [
+    { source: did, predicate: "foaf://name", target: "literal://string:Alice" },
+    { source: did, predicate: "foaf://knows", target: "did:key:other-agent" }
+  ]
+});
+```
+
+## Security and Privacy
+
+The agent-centric model provides several security benefits:
+- All expressions are cryptographically signed
+- Agents have full control over their keys and identity
+- Communication can be encrypted end-to-end
+- Trust is built on verifiable claims and signatures
+
+--- 
+
+For more details about working with agents programmatically, see the [Agent class definition](/jsdoc/classes/Agent).

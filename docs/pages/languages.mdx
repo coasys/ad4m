@@ -1,29 +1,276 @@
-# Languages
+# Languages: Communication Protocols for Agents
 
-Languages are essentially Node.js modules that encapsulate how to retrieve
-and create content. You can think of them as **small edge functions** that are executed on the Agents device and that can communicate with different backends and technologies.
+## Understanding Languages in AD4M
 
-## Why Deno Compatibility?
+In AD4M, Languages are the fundamental building blocks that define how agents communicate and share data. While we call them "Languages", they could just as well be called "Protocols" or "Data Storage Adapters" – they define the rules and mechanisms by which nodes in the network exchange information.
 
-Deno compatibility is required because Languages get executed inside a sandbox that the ADAM executor spawns, and since it needs access to internals of ADAM, this needs to be an integrated JavaScript interpreter that is intertwined with the ADAM implementation. We've decided to build this Language engine on Deno of its several advantages:
+The term "Language" was chosen deliberately: just as human languages enable people to communicate and share ideas, AD4M Languages enable digital agents to exchange data and interact. Alternative metaphors could have been "Games" or "Dances" – patterns of interaction between agents.
 
-- **Security**: Deno is secure by default. No file, network, or environment access (unless explicitly enabled).
-- **TypeScript Support**: Deno supports TypeScript out of the box.
-- **Standard Modules**: Deno provides a set of reviewed (audited) standard modules that are guaranteed to work with Deno.
+### Core Mechanism
 
-## How to Make Your Language Deno Compatible?
+At their heart, Languages implement a simple but powerful mechanism:
 
-To make your Language Deno compatible, you need to follow these steps:
+1. **Storage**: Take some data, store it in a shared space (could be a server, Holochain DHT, blockchain, etc.), and return a URI that points to that data
+2. **Retrieval**: Take a URI and return the previously stored data (called an "[Expression](/expressions)" in AD4M)
 
-1. **Use ES Modules**: Deno uses ES Modules (ESM) instead of CommonJS, which is used by Node.js. So, you need to use `import` and `export` instead of `require()` and `module.exports`.
+This mechanism creates a universal way for agents to share and reference information, regardless of where or how it's actually stored. For example:
+- An IPFS Language might store data in the IPFS network and return a CID
+- A Holochain Language might store data in a DHT and return an entry hash
+- A Web2 Language might store data on a server and return a URL
 
-2. **Use Node Specifiers**: Unlike Node.js, Deno requires the full file name including its extension when importing modules. For example, use `import { serve } from "./server.ts";` instead of `import { serve } from "./server";`.
+### Universal Addressing Mechanism
 
-3. **No `node_modules`**: Deno doesn't use the `node_modules` directory or `package.json`. Instead, it imports modules from URLs or file paths.
+AD4M's Language system extends the familiar URI/URL model into a truly universal addressing scheme. Every [Expression](/expressions) (the signed data objects in AD4M) is addressable through a URI that combines:
+1. The Language's unique identifier (a hash of its implementation code)
+2. The Language-specific address for that data
 
-4. **Use Built-in Functions and Standard Modules**: Deno has several built-in functions and does not rely on a `package.json`. So, you need to use Deno's built-in functions and standard modules instead of npm packages. You can find more about Deno's standard modules [here](https://deno.land/std).
+For example:
+```
+<language_hash>://<language-specific-address>
+```
 
-Remember, making your Language Deno compatible means it can run in more environments and take advantage of the benefits that Deno provides.
+This means AD4M can seamlessly integrate with and extend existing addressing systems:
+- Web URLs become: `http://example.com/resource`
+- IPFS content becomes: `QmIPFS123://<cid>`
+- Agent DIDs become: `did:key:z6Mk...`
+- Custom protocols become: `QmCustom789://user123/post456`
+
+The Language-Language (one of AD4M's bootstrap Languages) makes this system dynamic and extensible:
+1. New Languages can be published and their code verified
+2. Any AD4M instance can discover and install Languages as needed
+3. The system can evolve without central coordination
+
+This creates a spanning layer across the internet where:
+- Every piece of data has a globally unique address
+- Addresses are self-describing (include their protocol)
+- New protocols can be added dynamically
+- Existing systems can be integrated seamlessly
+
+### Why Languages Matter
+
+Languages in AD4M serve several crucial purposes:
+- Define how data is stored and retrieved
+- Specify how agents communicate
+- Enable different storage backends (IPFS, Holochain, centralized servers, etc.)
+- Allow for extensible and pluggable protocols
+- Create semantic meaning through shared understanding
+
+## Technical Implementation
+
+At its core, AD4M is a Language runtime. Languages are implemented as JavaScript modules that run in a sandboxed Deno environment within the AD4M executor. This provides:
+- Secure execution environment
+- TypeScript support out of the box
+- Modern ES module system
+- Built-in permissions model
+
+### Language Module Contract
+
+Every Language module must export a default `create` function with this signature:
+
+```typescript
+export default function create(context: LanguageContext): Language | Promise<Language>
+```
+
+This function is the entry point for your Language. The AD4M executor will:
+1. Load your Language module in the Deno sandbox
+2. Call the `create` function with a `LanguageContext`
+3. Use the returned Language object to interact with your implementation
+
+### The LanguageContext
+
+The `LanguageContext` provides essential services and capabilities to your Language:
+
+```typescript
+interface LanguageContext {
+    // Access to the agent's signing capabilities
+    agent: AgentService;
+    
+    // For verifying signatures
+    signatures: SignaturesService;
+    
+    // Path for persistent storage
+    storageDirectory: string;
+    
+    // Language-specific settings
+    customSettings: object;
+    
+    // Access to Holochain functionality
+    Holochain?: HolochainLanguageDelegate;
+    
+    // For handling AD4M signals
+    ad4mSignal: Ad4mSignalCB;
+}
+```
+
+Key features provided by the context:
+
+1. **Agent Service**
+   ```typescript
+   // Sign expressions with the agent's keys
+   const expression = context.agent.createSignedExpression(data);
+   
+   // Get the agent's DID
+   const did = context.agent.did;
+   ```
+
+2. **Holochain Integration**
+   ```typescript
+   // Register a Holochain DNA
+   await context.Holochain.registerDNAs([{
+     file: dnaPath,
+     nick: 'my-dna'
+   }]);
+   
+   // Call Holochain zome functions
+   const result = await context.Holochain.call(
+     'my-dna',
+     'zome-name',
+     'function-name',
+     payload
+   );
+   ```
+
+3. **Storage and Settings**
+   ```typescript
+   // Access persistent storage
+   const storagePath = context.storageDirectory;
+   
+   // Use custom settings
+   const settings = context.customSettings;
+   ```
+
+### The Language Interface
+
+Here's the core interface that all Languages must implement:
+
+```typescript
+interface Language {
+    // Required: Name of the language
+    readonly name: string;
+
+    // Optional adapters for different functionalities:
+
+    // For languages that store and retrieve expressions
+    readonly expressionAdapter?: ExpressionAdapter;
+
+    // For languages that handle UI rendering
+    readonly expressionUI?: ExpressionUI;
+
+    // For languages that manage links (used in Neighbourhoods)
+    readonly linksAdapter?: LinkSyncAdapter;
+
+    // For real-time presence and p2p signals
+    readonly telepresenceAdapter?: TelepresenceAdapter;
+
+    // For direct messaging between agents
+    readonly directMessageAdapter?: DirectMessageAdapter;
+
+    // For language-specific settings UI
+    readonly settingsUI?: SettingsUI;
+
+    // Optional: Mark expressions as immutable for caching
+    isImmutableExpression?(expression: Address): boolean;
+
+    // Define available interactions with expressions
+    interactions(expression: Address): Interaction[];
+}
+```
+[Language interface in the API reference](/jsdoc/interfaces/Language) |
+[Language.ts in the codebase](https://github.com/coasys/ad4m/blob/main/core/src/language/Language.ts)
+
+### Types of Languages
+
+AD4M supports several types of Languages for different purposes:
+
+1. **Expression Languages**
+   - Store and retrieve data
+   - Most common type
+   - Example: IPFS-based file storage
+
+2. **Link Languages**
+   - Core building block of Neighbourhoods
+   - Enable shared semantic spaces
+   - Example: Holochain-based p2p links
+
+3. **Direct Message Languages**
+   - Enable agent-to-agent communication
+   - Support private messaging
+   - Example: Encrypted p2p messaging
+
+## Working with Languages
+
+### The Core Expression Mechanism
+
+Before diving into examples, it's important to understand that most Languages (all basic "Expression Languages") operate around the same core pattern:
+
+```typescript
+interface ExpressionAdapter {
+    // Store data and get a reference
+    putAdapter: {
+        createPublic(content: object): Promise<Address>;
+        // or for read-only languages:
+        addressOf(content: object): Promise<Address>;
+    };
+    
+    // Retrieve data using its reference
+    get(address: Address): Promise<Expression | null>;
+}
+```
+
+This simple pattern enables AD4M to create a web of semantic references, where any piece of data can be stored and referenced by its address, regardless of the underlying storage mechanism.
+
+### Installing Languages
+
+```js
+// Install a language from its address
+await ad4m.languages.install("Qm...");
+
+// List all installed languages
+const languages = await ad4m.languages.all();
+```
+
+### Publishing Languages
+
+```js
+// Publish a new language
+const address = await ad4m.languages.publish({
+  name: "my-language",
+  description: "A custom language implementation",
+  sourceCodeLink: "https://github.com/...",
+  bundle: languageBundle
+});
+```
+
+### Using Languages
+
+```js
+// Create an expression in a language
+const expression = await ad4m.expression.create(
+  languageAddress,
+  { content: "Hello, World!" }
+);
+
+// Retrieve an expression
+const retrieved = await ad4m.expression.get(expression.address);
+```
+
+## Built-in Languages
+
+AD4M comes with several bootstrap languages:
+- **Agent Language**: Resolves DIDs to agent information
+- **Language Language**: Manages language publication and installation
+- **Perspective Language**: Handles perspective storage and sharing
+- **Neighbourhood Language**: Enables creation of shared spaces
+
+## Security Considerations
+
+Languages run in a sandboxed environment with:
+- Controlled access to system resources
+- Explicit permission model
+- Isolated execution context
+- Secure communication channels
+
+For a detailed guide on creating your own Language, see the [Language Development Guide](/developer-guides/languages).
 
 # Language Templates
 
@@ -35,55 +282,3 @@ To help you get started with creating your own languages, we have provided some 
 - [Link Language with DNA template](https://github.com/coasys/ad4m-link-template-language-dna)
 
 You can clone these repositories and modify them to create your own language. Remember to follow the guidelines for making your language Deno compatible.
-
-## Creating a Language
-
-There are several types of Languages, but let's start with the most common one – an Expression Language.
-Let's create a super simple `Readonly` Language that gives you the Open Graph data for a given website.
-
-```js filename="adapter.js"
-import type {
-  Address,
-  Expression,
-  ExpressionAdapter,
-  ReadonlyLanguage,
-  LanguageContext,
-} from "@coasys/ad4m";
-import PutAdapter from "./putAdapter.js";
-import openGraph from "open-graph-scraper";
-
-class PutAdapter implements ReadonlyLanguage {
-  getAddress(url: string) {
-    return url;
-  }
-}
-
-class Adapter implements ExpressionAdapter {
-  putAdapter: ReadonlyLanguage;
-
-  constructor() {
-    this.putAdapter = new PutAdapter();
-  }
-
-  async get(address: Address): Promise<Expression> {
-    const url = address.toString();
-    const data = await openGraph({ url });
-    return data;
-  }
-}
-```
-
-```js
-import type { LanguageContext, Language} from '@coasys/ad4m'
-
-
-export default function create(context: LanguageContext): Language {
-    return {
-        name: 'open-graph',
-        expressionAdapter: new Adapter(context),
-        isImmutableExpression: true
-    } as Language
-}
-```
-
-[Language interface](/jsdoc/interfaces/Language)
