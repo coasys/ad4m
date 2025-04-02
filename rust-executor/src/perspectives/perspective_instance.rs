@@ -1805,8 +1805,12 @@ impl PerspectiveInstance {
         }
 
         // Execute the merged commands
-        self.execute_commands(commands, expression_address.clone(), vec![], batch_id)
+        self.execute_commands(commands, expression_address.clone(), vec![], batch_id.clone())
             .await?;
+
+        if batch_id.is_some() {
+            return Ok(());
+        }
 
         // Verify instance was created successfully
         let mut tries = 0;
