@@ -25,12 +25,16 @@ export function useAd4mModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
   const pageNumber = ref(1);
   const totalCount = ref(0);
   const subjectEnsured = ref(false);
-
   const perspectiveRef = typeof perspective === "function" ? computed(() => perspective()) : shallowRef(perspective);
 
   async function ensureSubject() {
-    if (typeof model !== "string") await perspectiveRef.value.ensureSDNASubjectClass(model);
-    subjectEnsured.value = true;
+    try {
+      if (typeof model !== "string") await perspectiveRef.value.ensureSDNASubjectClass(model);
+      subjectEnsured.value = true;
+    } catch (e) {
+      console.error("Failed to ensure subject:", e);
+      error.value = e instanceof Error ? e.message : String(e);
+    }
   }
 
   function includeBaseExpressions(entries: T[]): T[] {
@@ -124,11 +128,5 @@ export function useAd4mModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
     if (subjectEnsured.value && perspectiveRef.value) await subscribeToCollection();
   });
 
-  return {
-    entries,
-    loading,
-    error,
-    totalCount,
-    loadMore,
-  };
+  return { entries, loading, error, totalCount, loadMore };
 }
