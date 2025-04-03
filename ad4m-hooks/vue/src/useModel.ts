@@ -17,7 +17,7 @@ type Result<T extends Ad4mModel> = {
   loadMore: () => void;
 };
 
-export function useAd4mModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
+export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
   const { perspective, model, query = {}, preserveReferences = false, pageSize } = props;
   const entries = ref<T[]>([]) as Ref<T[]>;
   const loading = ref(true);
