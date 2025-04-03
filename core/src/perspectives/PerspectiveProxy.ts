@@ -36,7 +36,8 @@ interface Unsubscribable {
  * 
  * The subscription goes through an initialization process where it waits for the first
  * result to come through the subscription channel. You can await the `initialized` 
- * promise to ensure the subscription is ready:
+ * promise to ensure the subscription is ready. The initialization will timeout after
+ * 30 seconds if no result is received.
  * 
  * Example usage:
  * ```typescript
@@ -62,6 +63,8 @@ export class QuerySubscriptionProxy {
     #latestResult: AllInstancesResult;
     #disposed: boolean = false;
     #initialized: Promise<boolean>;
+    #initTimeoutId?: NodeJS.Timeout;
+
     /** Creates a new query subscription
      * @param uuid - The UUID of the perspective
      * @param subscriptionId - The ID returned by the subscription mutation
@@ -75,20 +78,26 @@ export class QuerySubscriptionProxy {
         this.#callbacks = new Set();
         this.#latestResult = initialResult;
 
-        this.#initialized = new Promise<boolean>((resolve) => {
+        this.#initialized = new Promise<boolean>((resolve, reject) => {
+            // Add timeout to prevent hanging promises
+            this.#initTimeoutId = setTimeout(() => {
+                reject(new Error('Subscription initialization timed out after 30 seconds'));
+            }, 30000); // 30 seconds timeout
+            
             // Subscribe to query updates
             this.#unsubscribe = this.#client.subscribeToQueryUpdates(
                 this.#subscriptionId,
                 (result) => {
+                    if (this.#initTimeoutId) {
+                        clearTimeout(this.#initTimeoutId);
+                        this.#initTimeoutId = undefined;
+                    }
                     resolve(true);
                     this.#latestResult = result;
                     this.#notifyCallbacks(result);
                 }
             );
         });
-
-
-
 
         // Start keepalive loop using platform-agnostic setTimeout
         const keepaliveLoop = async () => {
@@ -113,6 +122,8 @@ export class QuerySubscriptionProxy {
     /** Promise that resolves when the subscription has received its first result
      * through the subscription channel. This ensures the subscription is fully
      * set up before allowing access to results or updates.
+     * 
+     * The promise will reject if no result is received within 30 seconds.
      * 
      * Note: You typically don't need to await this directly since the subscription
      * creation methods (like subscribeInfer) already wait for initialization.
@@ -174,6 +185,7 @@ export class QuerySubscriptionProxy {
      * 1. Stops the keepalive timer
      * 2. Unsubscribes from GraphQL subscription updates
      * 3. Clears all registered callbacks
+     * 4. Cleans up any pending initialization timeout
      * 
      * After calling this method, the subscription is no longer active and
      * will not receive any more updates. The instance should be discarded.
@@ -183,6 +195,10 @@ export class QuerySubscriptionProxy {
         clearTimeout(this.#keepaliveTimer);
         if (this.#unsubscribe) {
             this.#unsubscribe();
+        }
+        if (this.#initTimeoutId) {
+            clearTimeout(this.#initTimeoutId);
+            this.#initTimeoutId = undefined;
         }
         this.#callbacks.clear();
     }
