@@ -241,7 +241,35 @@ await client.ai.feedTranscriptionStream(streamId, audioSamples);
 
 // Close stream when done
 await client.ai.closeTranscriptionStream(streamId);
+
+// Or use multiple streams simultaneously
+const fastStreamId = await client.ai.openTranscriptionStream(
+  "whisper_tiny",
+  (text) => console.log("Fast preview:", text),
+  {
+    startThreshold: 0.25,
+    startWindow: 100,
+    endThreshold: 0.15,
+    endWindow: 100
+  }
+);
+
+const accurateStreamId = await client.ai.openTranscriptionStream(
+  "whisper_small",
+  (text) => console.log("Accurate:", text),
+  {
+    startThreshold: 0.3,
+    startWindow: 150,
+    endThreshold: 0.2,
+    endWindow: 500
+  }
+);
+
+// Feed same audio to both streams with a single call
+await client.ai.feedTranscriptionStream([fastStreamId, accurateStreamId], audioSamples);
 ```
+
+Note: Transcription streams are automatically cleaned up after 30 seconds of inactivity.
 
 ## Best Practices
 
@@ -324,3 +352,33 @@ const streamId = await client.ai.openTranscriptionStream(
   }
 );
 ```
+
+### Multiple Transcription Streams
+
+You can process the same audio through multiple models simultaneously:
+
+```typescript
+// Use a fast model for real-time preview
+const fastStreamId = await client.ai.openTranscriptionStream(
+  "whisper_tiny",
+  (text) => console.log("Preview:", text),
+  { startThreshold: 0.25, endWindow: 100 }
+);
+
+// Use a more accurate model for final results
+const accurateStreamId = await client.ai.openTranscriptionStream(
+  "whisper_small",
+  (text) => console.log("Final:", text),
+  { startThreshold: 0.3, endWindow: 500 }
+);
+
+// Feed audio to both streams efficiently
+await client.ai.feedTranscriptionStream([fastStreamId, accurateStreamId], audioSamples);
+```
+
+### Automatic Stream Cleanup
+
+Transcription streams are automatically cleaned up after 30 seconds of inactivity to prevent resource leaks. This means:
+- No need to manually close streams if the client disconnects
+- Resources are freed automatically when streams are abandoned
+- Streams remain active as long as they receive audio data regularly
