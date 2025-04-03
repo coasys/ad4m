@@ -70,9 +70,6 @@ export class QuerySubscriptionProxy {
         this.#callbacks = new Set();
         this.#latestResult = initialResult;
 
-        // Call all callbacks with initial result
-        this.#notifyCallbacks(initialResult);
-
         this.#initialized = new Promise<boolean>((resolve) => {
             // Subscribe to query updates
             this.#unsubscribe = this.#client.subscribeToQueryUpdates(
