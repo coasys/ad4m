@@ -147,67 +147,39 @@ function PerspectivesList({ client }) {
 }
 ```
 
-## useSubject
+## useModel
 
-Manages state for a single subject instance within a perspective.
-
-```typescript
-import { useSubject } from '@coasys/ad4m-react-hooks';
-
-function TodoItem({ perspective, id }) {
-  const { entry, error, repo, reload } = useSubject({
-    id,
-    perspective,
-    subject: 'Todo'
-  });
-
-  if (error) return <div>Error: {error}</div>;
-  if (!entry) return <div>Loading...</div>;
-
-  return (
-    <div>
-      <h3>{entry.title}</h3>
-      <p>{entry.description}</p>
-      <button onClick={() => repo.remove(id)}>Delete</button>
-      <button onClick={reload}>Refresh</button>
-    </div>
-  );
-}
-```
-
-## useSubjects
-
-Manages state for multiple subject instances with filtering and pagination.
+Provides a convenient way to query and subscribe to AD4M models with pagination support.
 
 ```typescript
-import { useSubjects } from '@coasys/ad4m-react-hooks';
+import { useModel } from '@coasys/ad4m-react-hooks';
+import { Todo } from './models/Todo';
 
 function TodoList({ perspective }) {
-  const { entries, error, repo, isLoading, isMore, setQuery } = useSubjects({
+  const { entries, loading, error, totalCount, loadMore } = useModel<Todo>({
     perspective,
-    subject: 'Todo',
-    source: 'ad4m://self',
-    query: {
-      page: 1,
-      size: 10,
-      infinite: false
-    }
+    model: Todo,
+    query: { /* optional query parameters */ },
+    pageSize: 10, // Optional - enables pagination
+    preserveReferences: true // Optional - improves rendering performance
   });
 
   if (error) return <div>Error: {error}</div>;
-  if (isLoading) return <div>Loading...</div>;
+  if (loading && entries.length === 0) return <div>Loading...</div>;
 
   return (
     <div>
+      <h2>Todos ({totalCount})</h2>
       {entries.map(todo => (
-        <div key={todo.id}>
+        <div key={todo.baseExpression}>
           <h3>{todo.title}</h3>
           <p>{todo.description}</p>
         </div>
       ))}
-      {isMore && (
-        <button onClick={() => setQuery(prev => ({ ...prev, page: prev.page + 1 }))}>
-          Load More
+
+      {entries.length < totalCount && (
+        <button onClick={loadMore} disabled={loading}>
+          {loading ? 'Loading...' : 'Load More'}
         </button>
       )}
     </div>
