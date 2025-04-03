@@ -1505,15 +1505,23 @@ impl Mutation {
     async fn ai_feed_transcription_stream(
         &self,
         context: &RequestContext,
-        stream_id: String,
+        stream_ids: Vec<String>,
         audio: Vec<f64>,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
         let audio_f32: Vec<f32> = audio.into_iter().map(|x| x as f32).collect();
-        AIService::global_instance()
-            .await?
-            .feed_transcription_stream(&stream_id, audio_f32)
-            .await?;
+        let service = AIService::global_instance().await?;
+
+        // Feed each stream individually
+        for stream_id in &stream_ids {
+            if let Err(e) = service
+                .feed_transcription_stream(&stream_id, audio_f32.clone())
+                .await
+            {
+                log::warn!("Error feeding stream {}: {}", stream_id, e);
+            }
+        }
+
         Ok(String::from("true"))
     }
 

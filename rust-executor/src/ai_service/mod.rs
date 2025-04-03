@@ -33,6 +33,8 @@ use log::error;
 pub type Result<T> = std::result::Result<T, AnyError>;
 
 static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
+static TRANSCRIPTION_TIMEOUT_SECS: u64 = 120; // 2 minutes
+static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 10;
 
 lazy_static! {
     static ref AI_SERVICE: Arc<Mutex<Option<AIService>>> = Arc::new(Mutex::new(None));
@@ -41,6 +43,7 @@ lazy_static! {
 struct TranscriptionSession {
     samples_tx: futures_channel::mpsc::UnboundedSender<Vec<f32>>,
     drop_tx: oneshot::Sender<()>,
+    last_activity: Arc<Mutex<std::time::Instant>>,
 }
 
 #[derive(Clone)]
@@ -48,6 +51,18 @@ pub struct AIService {
     embedding_channel: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<EmbeddingRequest>>>>,
     llm_channel: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<LLMTaskRequest>>>>,
     transcription_streams: Arc<Mutex<HashMap<String, TranscriptionSession>>>,
+    cleanup_task_shutdown: Arc<std::sync::Mutex<Option<oneshot::Sender<()>>>>,
+}
+
+impl Drop for AIService {
+    fn drop(&mut self) {
+        // Try to get the shutdown sender - using std::sync::Mutex so this works in Drop
+        if let Ok(mut shutdown) = self.cleanup_task_shutdown.lock() {
+            if let Some(sender) = shutdown.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
 }
 
 struct EmbeddingRequest {
@@ -158,6 +173,7 @@ impl AIService {
             embedding_channel: Arc::new(Mutex::new(HashMap::new())),
             llm_channel: Arc::new(Mutex::new(HashMap::new())),
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
+            cleanup_task_shutdown: Arc::new(std::sync::Mutex::new(None)),
         };
 
         let clone = service.clone();
@@ -167,7 +183,50 @@ impl AIService {
             }
         });
 
+        // Create shutdown channel
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        if let Ok(mut shutdown) = service.cleanup_task_shutdown.lock() {
+            *shutdown = Some(shutdown_tx);
+        }
+
+        // Spawn background task to clean up timed out streams
+        let service_clone = service.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown_rx => {
+                    log::info!("Shutting down transcription cleanup task");
+                }
+                _ = async {
+                    loop {
+                        sleep(Duration::from_secs(TRANSCRIPTION_CHECK_INTERVAL_SECS)).await;
+                        if let Err(e) = service_clone.cleanup_timed_out_streams().await {
+                            error!("Error cleaning up timed out streams: {:?}", e);
+                        }
+                    }
+                } => {}
+            }
+        });
+
         Ok(service)
+    }
+
+    async fn cleanup_timed_out_streams(&self) -> Result<()> {
+        let mut map_lock = self.transcription_streams.lock().await;
+
+        let mut timed_out_streams = Vec::new();
+        for (id, stream) in map_lock.iter() {
+            let last_activity = stream.last_activity.lock().await;
+            if last_activity.elapsed() > Duration::from_secs(TRANSCRIPTION_TIMEOUT_SECS) {
+                timed_out_streams.push(id.clone());
+            }
+        }
+
+        for id in timed_out_streams {
+            if let Some(stream) = map_lock.remove(&id) {
+                let _ = stream.drop_tx.send(());
+            }
+        }
+        Ok(())
     }
 
     pub async fn load(&self) -> Result<()> {
@@ -1000,9 +1059,9 @@ impl AIService {
         let stream_id = uuid::Uuid::new_v4().to_string();
         let stream_id_clone = stream_id.clone();
         let (samples_tx, samples_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
-        //TODO: use drop_rx to exit thread
         let (drop_tx, drop_rx) = oneshot::channel();
         let (done_tx, done_rx) = oneshot::channel();
+        let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
 
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1091,6 +1150,7 @@ impl AIService {
             TranscriptionSession {
                 samples_tx,
                 drop_tx,
+                last_activity,
             },
         );
 
@@ -1103,9 +1163,13 @@ impl AIService {
         audio_samples: Vec<f32>,
     ) -> Result<()> {
         let mut map_lock = self.transcription_streams.lock().await;
-        let maybe_stream = map_lock.get_mut(stream_id);
-        if let Some(stream) = maybe_stream {
-            stream.samples_tx.send(audio_samples).await?;
+
+        if let Some(stream) = map_lock.get_mut(stream_id) {
+            // Update last activity time
+            *stream.last_activity.lock().await = std::time::Instant::now();
+            stream.samples_tx.send(audio_samples).await.map_err(|e| {
+                AIServiceError::CrazyError(format!("Failed to feed stream {}: {}", stream_id, e))
+            })?;
             Ok(())
         } else {
             Err(AIServiceError::StreamNotFound.into())
