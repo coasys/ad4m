@@ -90,5 +90,8 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
     if (subjectEnsured) subscribeToCollection();
   }, [subjectEnsured, model, JSON.stringify(query), pageNumber]);
 
-  return useMemo(() => ({ entries, loading, error, totalCount, loadMore }), [entries, loading, error]);
+  return useMemo(
+    () => ({ entries, loading, error, totalCount, loadMore }),
+    [entries, loading, error, totalCount, loadMore]
+  );
 }
