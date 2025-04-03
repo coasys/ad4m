@@ -77,7 +77,7 @@ pub(crate) async fn subscribe_and_process<
     topic: Topic,
     filter: Option<String>,
 ) -> Pin<Box<dyn Stream<Item = FieldResult<T::Value>> + Send>> {
-    debug!("Subscribing to topic: {}", topic);
+    //debug!("Subscribing to topic: {}", topic);
     pubsub.remove_dead_subscribers().await;
     let receiver = pubsub.subscribe(&topic).await;
     let receiver_stream = WatchStream::from_changes(receiver);
