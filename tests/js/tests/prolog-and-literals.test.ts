@@ -1747,20 +1747,31 @@ describe("Prolog + Literals", () => {
 
                     expect(initialResult.results.length).to.equal(3);
                     expect(initialResult.totalCount).to.equal(10);
+                    // Reset lastResult to verify we get an update
+                    lastResult = null;
 
                     // Add a new recipe and verify subscription updates
                     const newRecipe = new Recipe(perspective!);
                     newRecipe.name = "Recipe 11";
                     await newRecipe.save();
 
-                    let tries = 0;
-                    while (!lastResult) {
-                        await sleep(500);
-                        tries++;
-                        if (tries > 20) {
-                            throw new Error("Timeout waiting for subscription to update");
-                        }
+                    
+
+                    // Wait for subscription update with a timeout
+                    const maxTries = 50;
+                    const sleepMs = 100;
+                    const timeout = maxTries * sleepMs;
+                    
+                    for (let i = 0; i < maxTries; i++) {
+                        if (lastResult) break;
+                        await sleep(sleepMs);
+                        console.log("Waiting for subscription update - try:", i + 1);
                     }
+                    
+                    if (!lastResult) {
+                        throw new Error(`Subscription did not update after ${timeout}ms`);
+                    }
+
                     expect(lastResult.totalCount).to.equal(11);
 
                     // Clean up
