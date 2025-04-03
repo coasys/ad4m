@@ -56,7 +56,7 @@ export class QuerySubscriptionProxy {
     #unsubscribe?: () => void;
     #latestResult: AllInstancesResult;
     #disposed: boolean = false;
-
+    #initialized: Promise<boolean>;
     /** Creates a new query subscription
      * @param uuid - The UUID of the perspective
      * @param subscriptionId - The ID returned by the subscription mutation
@@ -73,14 +73,20 @@ export class QuerySubscriptionProxy {
         // Call all callbacks with initial result
         this.#notifyCallbacks(initialResult);
 
-        // Subscribe to query updates
-        this.#unsubscribe = this.#client.subscribeToQueryUpdates(
-            this.#subscriptionId,
-            (result) => {
-                this.#latestResult = result;
-                this.#notifyCallbacks(result);
-            }
-        );
+        this.#initialized = new Promise<boolean>((resolve) => {
+            // Subscribe to query updates
+            this.#unsubscribe = this.#client.subscribeToQueryUpdates(
+                this.#subscriptionId,
+                (result) => {
+                    resolve(true);
+                    this.#latestResult = result;
+                    this.#notifyCallbacks(result);
+                }
+            );
+        });
+
+
+
 
         // Start keepalive loop using platform-agnostic setTimeout
         const keepaliveLoop = async () => {
@@ -100,6 +106,10 @@ export class QuerySubscriptionProxy {
 
         // Start the first keepalive loop
         this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
+    }
+
+    get initialized(): Promise<boolean> {
+        return this.#initialized;
     }
 
     /** Get the latest query result
@@ -1078,13 +1088,19 @@ export class PerspectiveProxy {
      * ```
      */
     async subscribeInfer(query: string): Promise<QuerySubscriptionProxy> {
+        // Start the subscription on the Rust side first to get the real subscription ID
         const result = await this.#client.subscribeQuery(this.uuid, query);
-        return new QuerySubscriptionProxy(
+        const subscriptionProxy = new QuerySubscriptionProxy(
             this.uuid,
             result.subscriptionId,
             result.result,
             this.#client
         );
+
+        // Wait for the initial result
+        await subscriptionProxy.initialized;
+
+        return subscriptionProxy;
     }
 
 }

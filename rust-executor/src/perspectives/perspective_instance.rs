@@ -2041,6 +2041,28 @@ impl PerspectiveInstance {
             .lock()
             .await
             .insert(subscription_id.clone(), subscribed_query);
+
+        // Send initial result after a short delay
+        let uuid = self.persisted.lock().await.uuid.clone();
+        let subscription_id_clone = subscription_id.clone();
+        let result_string_clone = result_string.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(100)).await;
+            let filter = PerspectiveQuerySubscriptionFilter {
+                uuid,
+                subscription_id: subscription_id_clone,
+                result: result_string_clone,
+            };
+            log::info!("publishing initial result for query {:?}", filter);
+            get_global_pubsub()
+                .await
+                .publish(
+                    &PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC.to_string(),
+                    &serde_json::to_string(&filter).unwrap(),
+                )
+                .await;
+        });
+
         Ok((subscription_id, result_string))
     }
 
