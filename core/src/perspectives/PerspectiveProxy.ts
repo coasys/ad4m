@@ -28,17 +28,23 @@ interface Unsubscribable {
  * - Managing callbacks for result updates
  * - Subscribing to query updates via GraphQL subscriptions
  * - Maintaining the latest query result
+ * - Ensuring subscription is fully initialized before allowing access
  * 
  * The subscription will remain active as long as keepalive signals are sent.
  * Make sure to call dispose() when you're done with the subscription to clean up
  * resources and stop keepalive signals.
  * 
+ * The subscription goes through an initialization process where it waits for the first
+ * result to come through the subscription channel. You can await the `initialized` 
+ * promise to ensure the subscription is ready. The initialization will timeout after
+ * 30 seconds if no result is received.
+ * 
  * Example usage:
  * ```typescript
  * const subscription = await perspective.subscribeInfer("my_query(X)");
- * console.log("Initial result:", subscription.result);
+ * // At this point the subscription is already initialized since subscribeInfer waits
  * 
- * // Set up callback for updates
+ * // Set up callback for future updates
  * const removeCallback = subscription.onResult(result => {
  *     console.log("New result:", result);
  * });
@@ -56,6 +62,8 @@ export class QuerySubscriptionProxy {
     #unsubscribe?: () => void;
     #latestResult: AllInstancesResult;
     #disposed: boolean = false;
+    #initialized: Promise<boolean>;
+    #initTimeoutId?: NodeJS.Timeout;
 
     /** Creates a new query subscription
      * @param uuid - The UUID of the perspective
@@ -70,17 +78,26 @@ export class QuerySubscriptionProxy {
         this.#callbacks = new Set();
         this.#latestResult = initialResult;
 
-        // Call all callbacks with initial result
-        this.#notifyCallbacks(initialResult);
-
-        // Subscribe to query updates
-        this.#unsubscribe = this.#client.subscribeToQueryUpdates(
-            this.#subscriptionId,
-            (result) => {
-                this.#latestResult = result;
-                this.#notifyCallbacks(result);
-            }
-        );
+        this.#initialized = new Promise<boolean>((resolve, reject) => {
+            // Add timeout to prevent hanging promises
+            this.#initTimeoutId = setTimeout(() => {
+                reject(new Error('Subscription initialization timed out after 30 seconds'));
+            }, 30000); // 30 seconds timeout
+            
+            // Subscribe to query updates
+            this.#unsubscribe = this.#client.subscribeToQueryUpdates(
+                this.#subscriptionId,
+                (result) => {
+                    if (this.#initTimeoutId) {
+                        clearTimeout(this.#initTimeoutId);
+                        this.#initTimeoutId = undefined;
+                    }
+                    resolve(true);
+                    this.#latestResult = result;
+                    this.#notifyCallbacks(result);
+                }
+            );
+        });
 
         // Start keepalive loop using platform-agnostic setTimeout
         const keepaliveLoop = async () => {
@@ -100,6 +117,19 @@ export class QuerySubscriptionProxy {
 
         // Start the first keepalive loop
         this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
+    }
+
+    /** Promise that resolves when the subscription has received its first result
+     * through the subscription channel. This ensures the subscription is fully
+     * set up before allowing access to results or updates.
+     * 
+     * The promise will reject if no result is received within 30 seconds.
+     * 
+     * Note: You typically don't need to await this directly since the subscription
+     * creation methods (like subscribeInfer) already wait for initialization.
+     */
+    get initialized(): Promise<boolean> {
+        return this.#initialized;
     }
 
     /** Get the latest query result
@@ -155,6 +185,7 @@ export class QuerySubscriptionProxy {
      * 1. Stops the keepalive timer
      * 2. Unsubscribes from GraphQL subscription updates
      * 3. Clears all registered callbacks
+     * 4. Cleans up any pending initialization timeout
      * 
      * After calling this method, the subscription is no longer active and
      * will not receive any more updates. The instance should be discarded.
@@ -164,6 +195,10 @@ export class QuerySubscriptionProxy {
         clearTimeout(this.#keepaliveTimer);
         if (this.#unsubscribe) {
             this.#unsubscribe();
+        }
+        if (this.#initTimeoutId) {
+            clearTimeout(this.#initTimeoutId);
+            this.#initTimeoutId = undefined;
         }
         this.#callbacks.clear();
     }
@@ -1061,8 +1096,17 @@ export class PerspectiveProxy {
     /**
      * Creates a subscription for a Prolog query that updates in real-time.
      * 
+     * This method:
+     * 1. Creates the subscription on the Rust side
+     * 2. Sets up the subscription callback
+     * 3. Waits for the initial result to come through the subscription channel
+     * 4. Returns a fully initialized QuerySubscriptionProxy
+     * 
+     * The returned subscription is guaranteed to be ready to receive updates,
+     * as this method waits for the initialization process to complete.
+     * 
      * @param query - Prolog query string
-     * @returns QuerySubscriptionProxy instance
+     * @returns Initialized QuerySubscriptionProxy instance
      * 
      * @example
      * ```typescript
@@ -1072,19 +1116,29 @@ export class PerspectiveProxy {
      *   property_getter("Todo", Todo, "state", "active")
      * `);
      * 
+     * // Subscription is already initialized here
+     * console.log("Initial result:", subscription.result);
+     * 
+     * // Set up callback for future updates
      * subscription.onResult((todos) => {
      *   console.log("Active todos:", todos);
      * });
      * ```
      */
     async subscribeInfer(query: string): Promise<QuerySubscriptionProxy> {
+        // Start the subscription on the Rust side first to get the real subscription ID
         const result = await this.#client.subscribeQuery(this.uuid, query);
-        return new QuerySubscriptionProxy(
+        const subscriptionProxy = new QuerySubscriptionProxy(
             this.uuid,
             result.subscriptionId,
             result.result,
             this.#client
         );
+
+        // Wait for the initial result
+        await subscriptionProxy.initialized;
+
+        return subscriptionProxy;
     }
 
 }

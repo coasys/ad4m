@@ -3,7 +3,7 @@ use crate::graphql::graphql_types::GetValue;
 use coasys_juniper::{graphql_value, FieldError, FieldResult};
 use futures::Stream;
 use futures::StreamExt;
-use log::{debug, error, warn};
+use log::{error, warn};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -77,7 +77,7 @@ pub(crate) async fn subscribe_and_process<
     topic: Topic,
     filter: Option<String>,
 ) -> Pin<Box<dyn Stream<Item = FieldResult<T::Value>> + Send>> {
-    debug!("Subscribing to topic: {}", topic);
+    //debug!("Subscribing to topic: {}", topic);
     pubsub.remove_dead_subscribers().await;
     let receiver = pubsub.subscribe(&topic).await;
     let receiver_stream = WatchStream::from_changes(receiver);

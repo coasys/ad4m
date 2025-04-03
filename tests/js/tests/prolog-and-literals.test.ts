@@ -1747,20 +1747,31 @@ describe("Prolog + Literals", () => {
 
                     expect(initialResult.results.length).to.equal(3);
                     expect(initialResult.totalCount).to.equal(10);
+                    // Reset lastResult to verify we get an update
+                    lastResult = null;
 
                     // Add a new recipe and verify subscription updates
                     const newRecipe = new Recipe(perspective!);
                     newRecipe.name = "Recipe 11";
                     await newRecipe.save();
 
-                    let tries = 0;
-                    while (!lastResult) {
-                        await sleep(500);
-                        tries++;
-                        if (tries > 20) {
-                            throw new Error("Timeout waiting for subscription to update");
-                        }
+                    
+
+                    // Wait for subscription update with a timeout
+                    const maxTries = 50;
+                    const sleepMs = 100;
+                    const timeout = maxTries * sleepMs;
+                    
+                    for (let i = 0; i < maxTries; i++) {
+                        if (lastResult) break;
+                        await sleep(sleepMs);
+                        console.log("Waiting for subscription update - try:", i + 1);
                     }
+                    
+                    if (!lastResult) {
+                        throw new Error(`Subscription did not update after ${timeout}ms`);
+                    }
+
                     expect(lastResult.totalCount).to.equal(11);
 
                     // Clean up
@@ -2117,10 +2128,8 @@ describe("Prolog + Literals", () => {
                     const recipe = new BatchRecipe(perspective!);
                     recipe.name = "Pasta";
                     recipe.ingredients = ["pasta", "sauce", "cheese"];
-                    console.log("recipe: ", recipe)
-                    console.log("first save")
                     await recipe.save(batchId);
-                    console.log("saved")
+                    
 
                     const note = new BatchNote(perspective!);
                     note.title = "Recipe Notes";
@@ -2135,9 +2144,7 @@ describe("Prolog + Literals", () => {
                     expect(notesBeforeCommit.length).to.equal(0);
 
                     // Commit batch
-                    console.log("committing batch")
                     const result = await perspective!.commitBatch(batchId);
-                    console.log("done committed batch")
                     expect(result.additions.length).to.be.greaterThan(0);
                     expect(result.removals.length).to.equal(0);
                     
@@ -2152,11 +2159,8 @@ describe("Prolog + Literals", () => {
                     expect(notesAfterCommit[0].title).to.equal("Recipe Notes");
                     expect(notesAfterCommit[0].content).to.equal("Make sure to use fresh ingredients");
 
-                    console.log("creation batch done")
-
                     // Test updating models in batch
                     const updateBatchId = await perspective!.createBatch();
-                    console.log("update batch created")
                     recipe.ingredients.push("garlic");
                     await recipe.update(updateBatchId);
 
@@ -2172,7 +2176,6 @@ describe("Prolog + Literals", () => {
 
                     // Commit update batch
                     const updateResult = await perspective!.commitBatch(updateBatchId);
-                    console.log("update batch done")
                     expect(updateResult.additions.length).to.be.greaterThan(0);
 
                     // Verify models are updated
