@@ -2128,10 +2128,8 @@ describe("Prolog + Literals", () => {
                     const recipe = new BatchRecipe(perspective!);
                     recipe.name = "Pasta";
                     recipe.ingredients = ["pasta", "sauce", "cheese"];
-                    console.log("recipe: ", recipe)
-                    console.log("first save")
                     await recipe.save(batchId);
-                    console.log("saved")
+                    
 
                     const note = new BatchNote(perspective!);
                     note.title = "Recipe Notes";
@@ -2146,9 +2144,7 @@ describe("Prolog + Literals", () => {
                     expect(notesBeforeCommit.length).to.equal(0);
 
                     // Commit batch
-                    console.log("committing batch")
                     const result = await perspective!.commitBatch(batchId);
-                    console.log("done committed batch")
                     expect(result.additions.length).to.be.greaterThan(0);
                     expect(result.removals.length).to.equal(0);
                     
@@ -2163,11 +2159,8 @@ describe("Prolog + Literals", () => {
                     expect(notesAfterCommit[0].title).to.equal("Recipe Notes");
                     expect(notesAfterCommit[0].content).to.equal("Make sure to use fresh ingredients");
 
-                    console.log("creation batch done")
-
                     // Test updating models in batch
                     const updateBatchId = await perspective!.createBatch();
-                    console.log("update batch created")
                     recipe.ingredients.push("garlic");
                     await recipe.update(updateBatchId);
 
@@ -2183,7 +2176,6 @@ describe("Prolog + Literals", () => {
 
                     // Commit update batch
                     const updateResult = await perspective!.commitBatch(updateBatchId);
-                    console.log("update batch done")
                     expect(updateResult.additions.length).to.be.greaterThan(0);
 
                     // Verify models are updated
