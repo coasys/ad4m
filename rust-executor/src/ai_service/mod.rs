@@ -212,7 +212,7 @@ impl AIService {
 
     async fn cleanup_timed_out_streams(&self) -> Result<()> {
         let mut map_lock = self.transcription_streams.lock().await;
-        
+
         let mut timed_out_streams = Vec::new();
         for (id, stream) in map_lock.iter() {
             let last_activity = stream.last_activity.lock().await;
@@ -220,7 +220,7 @@ impl AIService {
                 timed_out_streams.push(id.clone());
             }
         }
-        
+
         for id in timed_out_streams {
             if let Some(stream) = map_lock.remove(&id) {
                 let _ = stream.drop_tx.send(());
@@ -1163,15 +1163,12 @@ impl AIService {
         audio_samples: Vec<f32>,
     ) -> Result<()> {
         let mut map_lock = self.transcription_streams.lock().await;
-        
+
         if let Some(stream) = map_lock.get_mut(stream_id) {
             // Update last activity time
             *stream.last_activity.lock().await = std::time::Instant::now();
             stream.samples_tx.send(audio_samples).await.map_err(|e| {
-                AIServiceError::CrazyError(format!(
-                    "Failed to feed stream {}: {}",
-                    stream_id, e
-                ))
+                AIServiceError::CrazyError(format!("Failed to feed stream {}: {}", stream_id, e))
             })?;
             Ok(())
         } else {
