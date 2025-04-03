@@ -2053,7 +2053,6 @@ impl PerspectiveInstance {
                 subscription_id: subscription_id_clone,
                 result: result_string_clone,
             };
-            log::info!("publishing initial result for query {:?}", filter);
             get_global_pubsub()
                 .await
                 .publish(
