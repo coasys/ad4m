@@ -28,17 +28,22 @@ interface Unsubscribable {
  * - Managing callbacks for result updates
  * - Subscribing to query updates via GraphQL subscriptions
  * - Maintaining the latest query result
+ * - Ensuring subscription is fully initialized before allowing access
  * 
  * The subscription will remain active as long as keepalive signals are sent.
  * Make sure to call dispose() when you're done with the subscription to clean up
  * resources and stop keepalive signals.
  * 
+ * The subscription goes through an initialization process where it waits for the first
+ * result to come through the subscription channel. You can await the `initialized` 
+ * promise to ensure the subscription is ready:
+ * 
  * Example usage:
  * ```typescript
  * const subscription = await perspective.subscribeInfer("my_query(X)");
- * console.log("Initial result:", subscription.result);
+ * // At this point the subscription is already initialized since subscribeInfer waits
  * 
- * // Set up callback for updates
+ * // Set up callback for future updates
  * const removeCallback = subscription.onResult(result => {
  *     console.log("New result:", result);
  * });
@@ -105,6 +110,13 @@ export class QuerySubscriptionProxy {
         this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
     }
 
+    /** Promise that resolves when the subscription has received its first result
+     * through the subscription channel. This ensures the subscription is fully
+     * set up before allowing access to results or updates.
+     * 
+     * Note: You typically don't need to await this directly since the subscription
+     * creation methods (like subscribeInfer) already wait for initialization.
+     */
     get initialized(): Promise<boolean> {
         return this.#initialized;
     }
@@ -1068,8 +1080,17 @@ export class PerspectiveProxy {
     /**
      * Creates a subscription for a Prolog query that updates in real-time.
      * 
+     * This method:
+     * 1. Creates the subscription on the Rust side
+     * 2. Sets up the subscription callback
+     * 3. Waits for the initial result to come through the subscription channel
+     * 4. Returns a fully initialized QuerySubscriptionProxy
+     * 
+     * The returned subscription is guaranteed to be ready to receive updates,
+     * as this method waits for the initialization process to complete.
+     * 
      * @param query - Prolog query string
-     * @returns QuerySubscriptionProxy instance
+     * @returns Initialized QuerySubscriptionProxy instance
      * 
      * @example
      * ```typescript
@@ -1079,6 +1100,10 @@ export class PerspectiveProxy {
      *   property_getter("Todo", Todo, "state", "active")
      * `);
      * 
+     * // Subscription is already initialized here
+     * console.log("Initial result:", subscription.result);
+     * 
+     * // Set up callback for future updates
      * subscription.onResult((todos) => {
      *   console.log("Active todos:", todos);
      * });

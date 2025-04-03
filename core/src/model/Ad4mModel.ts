@@ -1028,18 +1028,30 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Subscribes to the query and receives updates when results change.
-   * Also returns initial results immediately.
+   * 
+   * This method:
+   * 1. Creates and initializes a Prolog query subscription
+   * 2. Sets up the callback to process future updates
+   * 3. Returns the initial results immediately
+   * 
+   * The subscription is guaranteed to be ready when this method returns,
+   * as it waits for the initialization process to complete.
    * 
    * @param callback - Function to call with updated results
    * @returns Initial results array
    * 
    * @example
    * ```typescript
-   * await Recipe.query(perspective)
+   * // Subscribe to cooking recipes
+   * const initialRecipes = await Recipe.query(perspective)
    *   .where({ status: "cooking" })
    *   .subscribe(recipes => {
+   *     // This callback will be called with future updates
    *     console.log("Currently cooking:", recipes);
    *   });
+   * 
+   * // initialRecipes contains the current state
+   * console.log("Initial recipes:", initialRecipes);
    * ```
    */
   async subscribe(callback: (results: T[]) => void): Promise<T[]> {
@@ -1081,16 +1093,29 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   /**
    * Subscribes to count updates for matching entities.
    * 
+   * This method:
+   * 1. Creates and initializes a Prolog query subscription for the count
+   * 2. Sets up the callback to process future count updates
+   * 3. Returns the initial count immediately
+   * 
+   * The subscription is guaranteed to be ready when this method returns,
+   * as it waits for the initialization process to complete.
+   * 
    * @param callback - Function to call with updated count
    * @returns Initial count
    * 
    * @example
    * ```typescript
-   * await Recipe.query(perspective)
+   * // Subscribe to active recipe count
+   * const initialCount = await Recipe.query(perspective)
    *   .where({ status: "active" })
    *   .countSubscribe(count => {
+   *     // This callback will be called when the count changes
    *     console.log("Active items:", count);
    *   });
+   * 
+   * // initialCount contains the current count
+   * console.log("Initial count:", initialCount);
    * ```
    */
   async countSubscribe(callback: (count: number) => void): Promise<number> {
@@ -1132,6 +1157,14 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   /**
    * Subscribes to paginated results updates.
    * 
+   * This method:
+   * 1. Creates and initializes a Prolog query subscription for the paginated results
+   * 2. Sets up the callback to process future page updates
+   * 3. Returns the initial page immediately
+   * 
+   * The subscription is guaranteed to be ready when this method returns,
+   * as it waits for the initialization process to complete.
+   * 
    * @param pageSize - Number of items per page
    * @param pageNumber - Which page to retrieve (1-based)
    * @param callback - Function to call with updated pagination results
@@ -1139,11 +1172,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * 
    * @example
    * ```typescript
-   * await Recipe.query(perspective)
+   * // Subscribe to first page of main recipes
+   * const initialPage = await Recipe.query(perspective)
    *   .where({ category: "Main" })
    *   .paginateSubscribe(10, 1, page => {
+   *     // This callback will be called when the page content changes
    *     console.log("Updated page:", page.results);
    *   });
+   * 
+   * // initialPage contains the current page state
+   * console.log("Initial page:", initialPage.results);
    * ```
    */
   async paginateSubscribe(
