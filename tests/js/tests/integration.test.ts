@@ -129,62 +129,62 @@ describe("Integration tests", function () {
     })
 
     describe('Agent / Agent-Setup', agentTests(testContext))
-    //describe('Artificial Intelligence', aiTests(testContext))
-    //describe('Runtime', runtimeTests(testContext))
-    //describe('Expression', expressionTests(testContext))
+    describe('Artificial Intelligence', aiTests(testContext))
+    describe('Runtime', runtimeTests(testContext))
+    describe('Expression', expressionTests(testContext))
     describe('Perspective', perspectiveTests(testContext))
-    //describe('Social DNA', socialDNATests(testContext))
+    describe('Social DNA', socialDNATests(testContext))
 
-    // describe('with Alice and Bob', () => {
-    //     let bobExecutorProcess: ChildProcess | null = null
-    //     before(async () => {
-    //       const bobAppDataPath = path.join(TEST_DIR, 'agents', 'bob')
-    //       const bobBootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
-    //       const bobGqlPort = 15400
-    //       const bobHcAdminPort = 15401
-    //       const bobHcAppPort = 15402
+    describe('with Alice and Bob', () => {
+        let bobExecutorProcess: ChildProcess | null = null
+        before(async () => {
+          const bobAppDataPath = path.join(TEST_DIR, 'agents', 'bob')
+          const bobBootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
+          const bobGqlPort = 15400
+          const bobHcAdminPort = 15401
+          const bobHcAppPort = 15402
 
-    //       if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
-    //         fs.mkdirSync(path.join(TEST_DIR, 'agents'))
-    //       if(!fs.existsSync(bobAppDataPath))
-    //         fs.mkdirSync(bobAppDataPath)
+          if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
+            fs.mkdirSync(path.join(TEST_DIR, 'agents'))
+          if(!fs.existsSync(bobAppDataPath))
+            fs.mkdirSync(bobAppDataPath)
 
-    //       bobExecutorProcess = await startExecutor(bobAppDataPath, bobBootstrapSeedPath,
-    //         bobGqlPort, bobHcAdminPort, bobHcAppPort, false, undefined, proxyUrl!, bootstrapUrl!);
+          bobExecutorProcess = await startExecutor(bobAppDataPath, bobBootstrapSeedPath,
+            bobGqlPort, bobHcAdminPort, bobHcAppPort, false, undefined, proxyUrl!, bootstrapUrl!);
 
-    //       testContext.bob = new Ad4mClient(apolloClient(bobGqlPort))
-    //       testContext.bobCore = bobExecutorProcess
-    //       await testContext.bob.agent.generate("passphrase")
+          testContext.bob = new Ad4mClient(apolloClient(bobGqlPort))
+          testContext.bobCore = bobExecutorProcess
+          await testContext.bob.agent.generate("passphrase")
 
-    //       const status = await testContext.bob.agent.status()
+          const status = await testContext.bob.agent.status()
 
-    //       expect(status.isInitialized).to.be.true;
-    //       expect(status.isUnlocked).to.be.true;
+          expect(status.isInitialized).to.be.true;
+          expect(status.isUnlocked).to.be.true;
 
-    //       let link = new LinkExpression();
-    //       link.author = "did:test";
-    //       link.timestamp = new Date().toISOString();
-    //       link.data = new Link({source: "src", target: "target", predicate: "pred"});
-    //       link.proof = new ExpressionProof("sig", "key")
+          let link = new LinkExpression();
+          link.author = "did:test";
+          link.timestamp = new Date().toISOString();
+          link.data = new Link({source: "src", target: "target", predicate: "pred"});
+          link.proof = new ExpressionProof("sig", "key")
 
-    //       await testContext.bob.agent.updatePublicPerspective(new Perspective([link]))
+          await testContext.bob.agent.updatePublicPerspective(new Perspective([link]))
 
-    //       await testContext.makeAllNodesKnown()
-    //     })
+          await testContext.makeAllNodesKnown()
+        })
 
-    //     after(async () => {
-    //       if (executorProcess) {
-    //         while (!bobExecutorProcess?.killed) {
-    //           let status  = bobExecutorProcess?.kill();
-    //           console.log("killed bobs executor with", status);
-    //           await sleep(500);
-    //         }
-    //       }
-    //     })
+        after(async () => {
+          if (executorProcess) {
+            while (!bobExecutorProcess?.killed) {
+              let status  = bobExecutorProcess?.kill();
+              console.log("killed bobs executor with", status);
+              await sleep(500);
+            }
+          }
+        })
 
-    //     describe('Agent Language', agentLanguageTests(testContext))
-    //     describe('Language', languageTests(testContext))
-    //     describe('Neighbourhood', neighbourhoodTests(testContext))
-    //     //describe('Direct Messages', directMessageTests(testContext))
-    // })
+        describe('Agent Language', agentLanguageTests(testContext))
+        describe('Language', languageTests(testContext))
+        describe('Neighbourhood', neighbourhoodTests(testContext))
+        //describe('Direct Messages', directMessageTests(testContext))
+    })
 })
