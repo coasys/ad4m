@@ -878,11 +878,23 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   private queryParams: Query = {};
   private modelClassName: string | null = null;
   private ctor: typeof Ad4mModel;
+  private currentSubscription?: any;
 
   constructor(perspective: PerspectiveProxy, ctor: typeof Ad4mModel, query?: Query) {
     this.perspective = perspective;
     this.ctor = ctor;
     if (query) this.queryParams = query;
+  }
+
+  /**
+   * Disposes of any active subscriptions created by this query builder.
+   * Call this when you're done with the subscription to clean up resources.
+   */
+  dispose() {
+    if (this.currentSubscription) {
+      this.currentSubscription.dispose();
+      this.currentSubscription = undefined;
+    }
   }
 
   /**
@@ -1034,40 +1046,42 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * 2. Sets up the callback to process future updates
    * 3. Returns the initial results immediately
    * 
-   * The subscription is guaranteed to be ready when this method returns,
-   * as it waits for the initialization process to complete.
+   * Remember to call dispose() when you're done with the subscription
+   * to clean up resources.
    * 
    * @param callback - Function to call with updated results
    * @returns Initial results array
    * 
    * @example
    * ```typescript
-   * // Subscribe to cooking recipes
-   * const initialRecipes = await Recipe.query(perspective)
-   *   .where({ status: "cooking" })
-   *   .subscribe(recipes => {
-   *     // This callback will be called with future updates
-   *     console.log("Currently cooking:", recipes);
-   *   });
+   * const builder = Recipe.query(perspective)
+   *   .where({ status: "cooking" });
    * 
-   * // initialRecipes contains the current state
-   * console.log("Initial recipes:", initialRecipes);
+   * const initialRecipes = await builder.subscribe(recipes => {
+   *   console.log("Updated recipes:", recipes);
+   * });
+   * 
+   * // When done with subscription:
+   * builder.dispose();
    * ```
    */
   async subscribe(callback: (results: T[]) => void): Promise<T[]> {
+    // Clean up any existing subscription
+    this.dispose();
+
     const query = await this.ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
-    const subscription = await this.perspective.subscribeInfer(query);
+    this.currentSubscription = await this.perspective.subscribeInfer(query);
 
     const processResults = async (result: AllInstancesResult) => {
       const { results } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
       callback(results as T[]);
     };
 
-    subscription.onResult(processResults);
+    this.currentSubscription.onResult(processResults);
     const { results } = await this.ctor.instancesFromPrologResult(
       this.perspective,
       this.queryParams,
-      subscription.result
+      this.currentSubscription.result
     );
     return results as T[];
   }
@@ -1098,37 +1112,39 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * 2. Sets up the callback to process future count updates
    * 3. Returns the initial count immediately
    * 
-   * The subscription is guaranteed to be ready when this method returns,
-   * as it waits for the initialization process to complete.
+   * Remember to call dispose() when you're done with the subscription
+   * to clean up resources.
    * 
    * @param callback - Function to call with updated count
    * @returns Initial count
    * 
    * @example
    * ```typescript
-   * // Subscribe to active recipe count
-   * const initialCount = await Recipe.query(perspective)
-   *   .where({ status: "active" })
-   *   .countSubscribe(count => {
-   *     // This callback will be called when the count changes
-   *     console.log("Active items:", count);
-   *   });
+   * const builder = Recipe.query(perspective)
+   *   .where({ status: "active" });
    * 
-   * // initialCount contains the current count
-   * console.log("Initial count:", initialCount);
+   * const initialCount = await builder.countSubscribe(count => {
+   *   console.log("Active items:", count);
+   * });
+   * 
+   * // When done with subscription:
+   * builder.dispose();
    * ```
    */
   async countSubscribe(callback: (count: number) => void): Promise<number> {
+    // Clean up any existing subscription
+    this.dispose();
+
     const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
-    const subscription = await this.perspective.subscribeInfer(query);
+    this.currentSubscription = await this.perspective.subscribeInfer(query);
 
     const processResults = async (result: any) => {
       const newCount = result?.[0]?.TotalCount || 0;
       callback(newCount);
     };
 
-    subscription.onResult(processResults);
-    return  subscription.result?.[0]?.TotalCount || 0;
+    this.currentSubscription.onResult(processResults);
+    return this.currentSubscription.result?.[0]?.TotalCount || 0;
   }
 
   /**
@@ -1162,8 +1178,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * 2. Sets up the callback to process future page updates
    * 3. Returns the initial page immediately
    * 
-   * The subscription is guaranteed to be ready when this method returns,
-   * as it waits for the initialization process to complete.
+   * Remember to call dispose() when you're done with the subscription
+   * to clean up resources.
    * 
    * @param pageSize - Number of items per page
    * @param pageNumber - Which page to retrieve (1-based)
@@ -1172,16 +1188,15 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * 
    * @example
    * ```typescript
-   * // Subscribe to first page of main recipes
-   * const initialPage = await Recipe.query(perspective)
-   *   .where({ category: "Main" })
-   *   .paginateSubscribe(10, 1, page => {
-   *     // This callback will be called when the page content changes
-   *     console.log("Updated page:", page.results);
-   *   });
+   * const builder = Recipe.query(perspective)
+   *   .where({ category: "Main" });
    * 
-   * // initialPage contains the current page state
-   * console.log("Initial page:", initialPage.results);
+   * const initialPage = await builder.paginateSubscribe(10, 1, page => {
+   *   console.log("Updated page:", page.results);
+   * });
+   * 
+   * // When done with subscription:
+   * builder.dispose();
    * ```
    */
   async paginateSubscribe(
@@ -1189,18 +1204,20 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     pageNumber: number, 
     callback: (results: PaginationResult<T>) => void
   ): Promise<PaginationResult<T>> {
+    // Clean up any existing subscription
+    this.dispose();
+
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
     const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
-    const subscription = await this.perspective.subscribeInfer(prologQuery);
-    
+    this.currentSubscription = await this.perspective.subscribeInfer(prologQuery);
 
     const processResults = async (r: AllInstancesResult) => {
       const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, r)) as ResultsWithTotalCount<T>;
       callback({ results, totalCount, pageSize, pageNumber });
     };
 
-    subscription.onResult(processResults);
-    const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, subscription.result)) as ResultsWithTotalCount<T>;
+    this.currentSubscription.onResult(processResults);
+    const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, this.currentSubscription.result)) as ResultsWithTotalCount<T>;
     return { results, totalCount, pageSize, pageNumber };
   }
 }

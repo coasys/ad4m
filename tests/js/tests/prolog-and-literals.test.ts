@@ -17,6 +17,7 @@ import { startExecutor, apolloClient } from "../utils/utils";
 import path from "path";
 import { fileURLToPath } from 'url';
 import fetch from 'node-fetch'
+import sinon from 'sinon';
 
 //@ts-ignore
 global.fetch = fetch
@@ -2208,6 +2209,183 @@ describe("Prolog + Literals", () => {
 
                     const notesAfterDelete = await BatchNote.findAll(perspective!);
                     expect(notesAfterDelete.length).to.equal(0);
+                });
+
+                describe('ModelQueryBuilder', () => {
+                    let perspective: PerspectiveProxy;
+
+                    // Define a simple test model
+                    @ModelOptions({ name: "TestModel" })
+                    class TestModel extends Ad4mModel {
+                        @Property({
+                            through: "test://name",
+                            resolveLanguage: "literal"
+                        })
+                        name: string = "";
+
+                        @Property({
+                            through: "test://status",
+                            resolveLanguage: "literal"
+                        })
+                        status: string = "";
+                    }
+
+                    beforeEach(async () => {
+                        perspective = await ad4m!.perspective.add("query-builder-test");
+                        await perspective!.ensureSDNASubjectClass(TestModel);
+                    });
+
+                    it('handles subscriptions and disposal correctly', async () => {
+                        // Create a query builder
+                        const builder = TestModel.query(perspective)
+                            .where({ status: "active" });
+
+                        // Set up callback spies
+                        const callback1 = sinon.fake();
+                        const callback2 = sinon.fake();
+
+                        // Create first subscription
+                        const initialResults1 = await builder.subscribe(callback1);
+                        expect(initialResults1).to.be.an('array');
+                        expect(initialResults1.length).to.equal(0);
+
+                        // Add a matching model
+                        const model1 = new TestModel(perspective);
+                        model1.name = "Test 1";
+                        model1.status = "active";
+                        await model1.save();
+
+                        // Wait for subscription update
+                        await sleep(1000);
+
+                        // Verify callback was called
+                        expect(callback1.called).to.be.true;
+                        expect(callback1.lastCall.args[0]).to.be.an('array');
+                        expect(callback1.lastCall.args[0].length).to.equal(1);
+                        expect(callback1.lastCall.args[0][0].name).to.equal("Test 1");
+
+                        // Create second subscription (should dispose first one)
+                        const initialResults2 = await builder.subscribe(callback2);
+                        expect(initialResults2).to.be.an('array');
+                        expect(initialResults2.length).to.equal(1);
+
+                        // Add another matching model
+                        const model2 = new TestModel(perspective);
+                        model2.name = "Test 2";
+                        model2.status = "active";
+                        await model2.save();
+
+                        // Wait for subscription update
+                        await sleep(1000);
+
+                        // Verify only second callback was called
+                        expect(callback1.callCount).to.equal(1); // No new calls
+                        expect(callback2.called).to.be.true;
+                        expect(callback2.lastCall.args[0]).to.be.an('array');
+                        expect(callback2.lastCall.args[0].length).to.equal(2);
+
+                        // Dispose subscription
+                        builder.dispose();
+
+                        // Add another model - should not trigger callback
+                        const model3 = new TestModel(perspective);
+                        model3.name = "Test 3";
+                        model3.status = "active";
+                        await model3.save();
+
+                        // Wait to ensure no callbacks
+                        await sleep(1000);
+
+                        // Verify no new callbacks
+                        expect(callback1.callCount).to.equal(1);
+                        expect(callback2.callCount).to.equal(1);
+                    });
+
+                    it('handles count subscriptions and disposal', async () => {
+                        const builder = TestModel.query(perspective)
+                            .where({ status: "active" });
+
+                        const countCallback = sinon.fake();
+                        const initialCount = await builder.countSubscribe(countCallback);
+                        expect(initialCount).to.equal(0);
+
+                        // Add a matching model
+                        const model = new TestModel(perspective);
+                        model.name = "Test";
+                        model.status = "active";
+                        await model.save();
+
+                        // Wait for subscription update
+                        await sleep(1000);
+
+                        // Verify callback was called with new count
+                        expect(countCallback.called).to.be.true;
+                        expect(countCallback.lastCall.args[0]).to.equal(1);
+                        console.log("countCallback", countCallback.lastCall.args[0])
+                        let count = countCallback.callCount
+
+                        // Dispose subscription
+                        builder.dispose();
+
+                        // Add another model - should not trigger callback
+                        const model2 = new TestModel(perspective);
+                        model2.name = "Test 2";
+                        model2.status = "active";
+                        await model2.save();
+
+                        // Wait to ensure no callback
+                        await sleep(1000);
+
+                        // Verify no new callbacks
+                        expect(countCallback.callCount).to.equal(count);
+                    });
+
+                    it('handles paginated subscriptions and disposal', async () => {
+                        const builder = TestModel.query(perspective)
+                            .where({ status: "active" });
+
+                        const pageCallback = sinon.fake();
+                        const initialPage = await builder.paginateSubscribe(2, 1, pageCallback);
+                        expect(initialPage.results.length).to.equal(0);
+                        expect(initialPage.totalCount).to.equal(0);
+
+                        // Add models
+                        const model1 = new TestModel(perspective);
+                        model1.name = "Test 1";
+                        model1.status = "active";
+                        await model1.save();
+
+                        const model2 = new TestModel(perspective);
+                        model2.name = "Test 2";
+                        model2.status = "active";
+                        await model2.save();
+
+                        // Wait for subscription update
+                        await sleep(1000);
+
+                        // Verify callback was called with updated page
+                        expect(pageCallback.called).to.be.true;
+                        expect(pageCallback.lastCall.args[0].results.length).to.equal(2);
+                        expect(pageCallback.lastCall.args[0].totalCount).to.equal(2);
+
+                        console.log("countCallback", pageCallback.lastCall.args[0])
+                        let count = pageCallback.callCount
+
+                        // Dispose subscription
+                        builder.dispose();
+
+                        // Add another model - should not trigger callback
+                        const model3 = new TestModel(perspective);
+                        model3.name = "Test 3";
+                        model3.status = "active";
+                        await model3.save();
+
+                        // Wait to ensure no callback
+                        await sleep(1000);
+
+                        // Verify no new callbacks
+                        expect(pageCallback.callCount).to.equal(count);
+                    });
                 });
             })
         })
