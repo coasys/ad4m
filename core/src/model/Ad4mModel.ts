@@ -887,8 +887,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /**
-   * Disposes of any active subscriptions created by this query builder.
-   * Call this when you're done with the subscription to clean up resources.
+   * Disposes of the current subscription if one exists.
+   * 
+   * This method:
+   * 1. Stops the keepalive signals to the subscription
+   * 2. Unsubscribes from GraphQL subscription updates
+   * 3. Notifies the backend to clean up subscription resources
+   * 4. Clears the subscription reference
+   * 
+   * You should call this method when you're done with a subscription
+   * to prevent memory leaks and ensure proper cleanup.
    */
   dispose() {
     if (this.currentSubscription) {

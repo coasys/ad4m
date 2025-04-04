@@ -29,10 +29,11 @@ interface Unsubscribable {
  * - Subscribing to query updates via GraphQL subscriptions
  * - Maintaining the latest query result
  * - Ensuring subscription is fully initialized before allowing access
+ * - Cleaning up resources when disposed
  * 
  * The subscription will remain active as long as keepalive signals are sent.
  * Make sure to call dispose() when you're done with the subscription to clean up
- * resources and stop keepalive signals.
+ * resources, stop keepalive signals, and notify the backend to remove the subscription.
  * 
  * The subscription goes through an initialization process where it waits for the first
  * result to come through the subscription channel. You can await the `initialized` 
@@ -49,7 +50,7 @@ interface Unsubscribable {
  *     console.log("New result:", result);
  * });
  * 
- * // Later: clean up
+ * // Later: clean up subscription and notify backend
  * subscription.dispose();
  * ```
  */
@@ -1123,6 +1124,10 @@ export class PerspectiveProxy {
      * The returned subscription is guaranteed to be ready to receive updates,
      * as this method waits for the initialization process to complete.
      * 
+     * The subscription will be automatically cleaned up on both frontend and backend
+     * when dispose() is called. Make sure to call dispose() when you're done to
+     * prevent memory leaks and ensure proper cleanup of resources.
+     * 
      * @param query - Prolog query string
      * @returns Initialized QuerySubscriptionProxy instance
      * 
@@ -1141,6 +1146,9 @@ export class PerspectiveProxy {
      * subscription.onResult((todos) => {
      *   console.log("Active todos:", todos);
      * });
+     * 
+     * // Clean up subscription when done
+     * subscription.dispose();
      * ```
      */
     async subscribeInfer(query: string): Promise<QuerySubscriptionProxy> {
