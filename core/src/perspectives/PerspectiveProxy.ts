@@ -65,20 +65,25 @@ export class QuerySubscriptionProxy {
     #disposed: boolean = false;
     #initialized: Promise<boolean>;
     #initTimeoutId?: NodeJS.Timeout;
+    #query: string;
 
     /** Creates a new query subscription
      * @param uuid - The UUID of the perspective
-     * @param subscriptionId - The ID returned by the subscription mutation
-     * @param initialResult - The initial query result
+     * @param query - The Prolog query to subscribe to
      * @param client - The PerspectiveClient instance to use for communication
      */
-    constructor(uuid: string, subscriptionId: string, initialResult: AllInstancesResult, client: PerspectiveClient) {
+    constructor(uuid: string, query: string, client: PerspectiveClient) {
         this.#uuid = uuid;
-        this.#subscriptionId = subscriptionId;
+        this.#query = query;
         this.#client = client;
         this.#callbacks = new Set();
-        this.#latestResult = initialResult;
+    }
 
+    async subscribe() {
+        // initialize the query subscription
+        const result = await this.#client.subscribeQuery(this.#uuid, this.#query);
+        this.#subscriptionId = result.subscriptionId;
+        // Subscribe to query updates
         this.#initialized = new Promise<boolean>((resolve, reject) => {
             // Add timeout to prevent hanging promises
             this.#initTimeoutId = setTimeout(() => {
@@ -108,6 +113,10 @@ export class QuerySubscriptionProxy {
                 await this.#client.keepAliveQuery(this.#uuid, this.#subscriptionId);
             } catch (e) {
                 console.error('Error in keepalive:', e);
+                // try to reinitialize the subscription
+                console.log('Reinitializing subscription for query:', this.#query);
+                await this.subscribe();
+                console.log('Subscription reinitialized');
             }
 
             // Schedule next keepalive if not disposed
@@ -1152,14 +1161,14 @@ export class PerspectiveProxy {
      * ```
      */
     async subscribeInfer(query: string): Promise<QuerySubscriptionProxy> {
-        // Start the subscription on the Rust side first to get the real subscription ID
-        const result = await this.#client.subscribeQuery(this.uuid, query);
         const subscriptionProxy = new QuerySubscriptionProxy(
             this.uuid,
-            result.subscriptionId,
-            result.result,
+            query,
             this.#client
         );
+
+        // Start the subscription on the Rust side first to get the real subscription ID
+        await subscriptionProxy.subscribe();
 
         // Wait for the initial result
         await subscriptionProxy.initialized;
