@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { PerspectiveProxy, Ad4mModel, Query, PaginationResult } from "@coasys/ad4m";
+import { PerspectiveProxy, Ad4mModel, Query, PaginationResult, ModelQueryBuilder } from "@coasys/ad4m";
 
 type Props<T extends Ad4mModel> = {
   perspective: PerspectiveProxy;
@@ -25,6 +25,7 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
   const [error, setError] = useState<string>("");
   const [pageNumber, setPageNumber] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
+  let modelQuery: ModelQueryBuilder<T|Ad4mModel> | null = null;
 
   async function ensureSubject() {
     if (typeof model !== "string") await perspective.ensureSDNASubjectClass(model);
@@ -48,7 +49,11 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
 
   async function subscribeToCollection() {
     try {
-      const modelQuery =
+      if(modelQuery) {
+        modelQuery.dispose();
+      }
+
+      modelQuery =
         typeof model === "string"
           ? Ad4mModel.query(perspective, query).overrideModelClassName(model)
           : model.query(perspective, query);

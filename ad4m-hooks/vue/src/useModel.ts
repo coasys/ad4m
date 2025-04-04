@@ -1,5 +1,5 @@
 import { ref, Ref, watch, shallowRef, ComputedRef } from "vue";
-import { PerspectiveProxy, Ad4mModel, Query, PaginationResult } from "@coasys/ad4m";
+import { PerspectiveProxy, Ad4mModel, Query, PaginationResult, ModelQueryBuilder } from "@coasys/ad4m";
 
 type Props<T extends Ad4mModel> = {
   perspective: PerspectiveProxy | ComputedRef<PerspectiveProxy | null>;
@@ -24,6 +24,7 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
   const error = ref<string>("");
   const pageNumber = ref(1);
   const totalCount = ref(0);
+  let modelQuery: ModelQueryBuilder<T|Ad4mModel> | null = null;
 
   // Handle perspective as a ref/computed or direct value
   const isPerspectiveRef = perspective && typeof perspective === "object" && "value" in perspective;
@@ -71,7 +72,11 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
         return;
       }
 
-      const modelQuery =
+      if(modelQuery) {
+        modelQuery.dispose();
+      }
+
+      modelQuery =
         typeof model === "string"
           ? Ad4mModel.query(perspectiveRef.value, query).overrideModelClassName(model)
           : model.query(perspectiveRef.value, query);
