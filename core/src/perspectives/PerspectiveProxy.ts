@@ -119,6 +119,10 @@ export class QuerySubscriptionProxy {
         this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
     }
 
+    get id(): string {
+        return this.#subscriptionId;
+    }
+
     /** Promise that resolves when the subscription has received its first result
      * through the subscription channel. This ensures the subscription is fully
      * set up before allowing access to results or updates.
