@@ -214,6 +214,17 @@ export class PerspectiveClient {
         return perspectiveKeepAliveQuery
     }
 
+    async disposeQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
+        const { perspectiveDisposeQuerySubscription } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveDisposeQuerySubscription($uuid: String!, $subscriptionId: String!) {
+                perspectiveDisposeQuerySubscription(uuid: $uuid, subscriptionId: $subscriptionId)
+            }`,
+            variables: { uuid, subscriptionId }
+        }))
+
+        return perspectiveDisposeQuerySubscription
+    }
+
     async add(name: string): Promise<PerspectiveProxy> {
         const { perspectiveAdd } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveAdd($name: String!) {

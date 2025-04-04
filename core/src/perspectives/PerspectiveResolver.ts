@@ -353,4 +353,12 @@ export default class PerspectiveResolver {
     ): string {
         return payload.result
     }
+
+    @Mutation(returns => Boolean)
+    async perspectiveDisposeQuerySubscription(
+        @Arg('uuid') uuid: string,
+        @Arg('subscriptionId') subscriptionId: string
+    ): Promise<boolean> {
+        return true
+    }
 }

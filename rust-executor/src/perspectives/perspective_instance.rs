@@ -2105,6 +2105,11 @@ impl PerspectiveInstance {
         }
     }
 
+    pub async fn dispose_query_subscription(&self, subscription_id: String) -> Result<bool, AnyError> {
+        let mut queries = self.subscribed_queries.lock().await;
+        Ok(queries.remove(&subscription_id).is_some())
+    }
+
     async fn check_subscribed_queries(&self) {
         let mut queries_to_remove = Vec::new();
         let mut queries_with_changes = Vec::new();

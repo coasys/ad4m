@@ -119,6 +119,14 @@ export class QuerySubscriptionProxy {
         this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
     }
 
+    /** Get the subscription ID for this query subscription
+     * 
+     * This is a unique identifier assigned when the subscription was created.
+     * It can be used to reference this specific subscription, for example when
+     * sending keepalive signals.
+     * 
+     * @returns The subscription ID string
+     */
     get id(): string {
         return this.#subscriptionId;
     }
@@ -200,11 +208,17 @@ export class QuerySubscriptionProxy {
         if (this.#unsubscribe) {
             this.#unsubscribe();
         }
+        this.#callbacks.clear();
         if (this.#initTimeoutId) {
             clearTimeout(this.#initTimeoutId);
             this.#initTimeoutId = undefined;
         }
-        this.#callbacks.clear();
+
+        // Tell the backend to dispose of the subscription
+        if (this.#subscriptionId) {
+            this.#client.disposeQuerySubscription(this.#uuid, this.#subscriptionId)
+                .catch(e => console.error('Error disposing query subscription:', e));
+        }
     }
 }
 

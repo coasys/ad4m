@@ -1032,6 +1032,21 @@ impl Mutation {
         Ok(true)
     }
 
+    async fn perspective_dispose_query_subscription(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        subscription_id: String,
+    ) -> FieldResult<bool> {
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
+
+        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        Ok(perspective.dispose_query_subscription(subscription_id).await?)
+    }
+
     async fn runtime_add_friends(
         &self,
         context: &RequestContext,
