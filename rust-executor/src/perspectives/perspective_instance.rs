@@ -2127,7 +2127,7 @@ impl PerspectiveInstance {
         {
             let mut queries = self.subscribed_queries.lock().await;
             let now = Instant::now();
-            log::info!("Checking {} subscribed queries", queries.len());
+            //log::info!("Checking {} subscribed queries", queries.len());
 
             for (id, query) in queries.iter_mut() {
                 // Check for timeout
@@ -2136,7 +2136,7 @@ impl PerspectiveInstance {
                     continue;
                 }
 
-                log::info!("Checking query: {}", query.query);
+                //log::info!("Checking query: {}", query.query);
                 // Check for changes
                 if let Ok(result) = self.prolog_query(query.query.clone()).await {
                     let result_string = prolog_resolution_to_string(result);
