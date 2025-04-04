@@ -2026,12 +2026,17 @@ impl PerspectiveInstance {
         Ok(format!("{{ {} }}", stringified))
     }
 
-    async fn send_subscription_update(&self, subscription_id: String, result: String, delay: Option<Duration>) {
+    async fn send_subscription_update(
+        &self,
+        subscription_id: String,
+        result: String,
+        delay: Option<Duration>,
+    ) {
         let uuid = self.persisted.lock().await.uuid.clone();
         tokio::spawn(async move {
             if let Some(delay) = delay {
                 sleep(delay).await;
-            } 
+            }
             let filter = PerspectiveQuerySubscriptionFilter {
                 uuid,
                 subscription_id,
@@ -2062,10 +2067,11 @@ impl PerspectiveInstance {
             let queries = self.subscribed_queries.lock().await;
             if let Some(query) = queries.get(&existing_id) {
                 self.send_subscription_update(
-                    existing_id.clone(), 
-                    query.last_result.clone(), 
-                    Some(Duration::from_millis(100))
-                ).await;
+                    existing_id.clone(),
+                    query.last_result.clone(),
+                    Some(Duration::from_millis(100)),
+                )
+                .await;
                 return Ok((existing_id, query.last_result.clone()));
             }
         }
@@ -2087,10 +2093,11 @@ impl PerspectiveInstance {
 
         // Send initial result after a short delay
         self.send_subscription_update(
-            subscription_id.clone(), 
-            result_string.clone(), 
-            Some(Duration::from_millis(100))
-        ).await;
+            subscription_id.clone(),
+            result_string.clone(),
+            Some(Duration::from_millis(100)),
+        )
+        .await;
 
         Ok((subscription_id, result_string))
     }
@@ -2105,7 +2112,10 @@ impl PerspectiveInstance {
         }
     }
 
-    pub async fn dispose_query_subscription(&self, subscription_id: String) -> Result<bool, AnyError> {
+    pub async fn dispose_query_subscription(
+        &self,
+        subscription_id: String,
+    ) -> Result<bool, AnyError> {
         let mut queries = self.subscribed_queries.lock().await;
         Ok(queries.remove(&subscription_id).is_some())
     }
@@ -2146,11 +2156,8 @@ impl PerspectiveInstance {
 
         // Publish changes
         for (id, result) in queries_with_changes {
-            self.send_subscription_update(
-                id.clone(), 
-                result.clone(), 
-                None
-            ).await;
+            self.send_subscription_update(id.clone(), result.clone(), None)
+                .await;
         }
     }
 

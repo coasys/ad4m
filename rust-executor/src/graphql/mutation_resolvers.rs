@@ -1044,7 +1044,9 @@ impl Mutation {
         )?;
 
         let perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        Ok(perspective.dispose_query_subscription(subscription_id).await?)
+        Ok(perspective
+            .dispose_query_subscription(subscription_id)
+            .await?)
     }
 
     async fn runtime_add_friends(
