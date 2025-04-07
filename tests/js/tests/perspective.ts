@@ -330,6 +330,11 @@ export default function perspectiveTests(testContext: TestContext) {
                 // Assert they got same subscription ID
                 expect(sub1Id).to.equal(sub2Id)
 
+                // Wait for the subscriptions to be established
+                // it's sending the initial result a couple of times
+                // to allow clients to wait and ensure for the subscription to be established
+                await sleep(1000)
+
                 // Add a link that matches the query
                 await p.add(new Link({
                     source: "test://source",
