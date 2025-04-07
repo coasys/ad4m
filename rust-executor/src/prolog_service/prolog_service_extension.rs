@@ -1,18 +1,21 @@
 use deno_core::{anyhow::bail, error::AnyError, op2};
 use scryer_prolog::{QueryMatch, QueryResolution, Value};
+use anyhow::anyhow;
 
 use super::get_prolog_service;
 
 #[op2(async)]
 async fn spawn_engine(#[string] engine_name: String) -> Result<(), AnyError> {
-    let mut service = get_prolog_service().await;
-    service.spawn_engine(engine_name).await
+    Err(anyhow!("Not implemented"))
+    //let mut service = get_prolog_service().await;
+    //service.spawn_engine(engine_name).await
 }
 
 #[op2(async)]
 async fn remove_engine(#[string] engine_name: String) -> Result<(), AnyError> {
-    let mut service = get_prolog_service().await;
-    service.remove_engine(engine_name).await
+    Err(anyhow!("Not implemented"))
+    //let mut service = get_prolog_service().await;
+    //service.remove_engine(engine_name).await
 }
 
 pub fn prolog_value_to_json_tring(value: Value) -> String {
@@ -109,10 +112,11 @@ async fn load_module_string(
     #[string] module_name: String,
     #[serde] program_lines: Vec<String>,
 ) -> Result<(), AnyError> {
-    let service = get_prolog_service().await;
-    service
-        .load_module_string(engine_name, module_name, program_lines)
-        .await
+    Err(anyhow!("Not implemented"))
+    //let service = get_prolog_service().await;
+    //service
+    //    .load_module_string(engine_name, module_name, program_lines)
+    //    .await
 }
 
 deno_core::extension!(
