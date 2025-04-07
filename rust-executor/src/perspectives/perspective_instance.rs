@@ -1202,7 +1202,7 @@ impl PerspectiveInstance {
     async fn ensure_prolog_engine_pool(&self) -> Result<(), AnyError> {
         let uuid = self.persisted.lock().await.uuid.clone();
         let service = get_prolog_service().await;
-        
+
         // Check if pool exists
         if !service.has_perspective_pool(uuid.clone()).await {
             let _guard = self.prolog_update_mutex.write().await;
@@ -1219,9 +1219,12 @@ impl PerspectiveInstance {
                     .neighbourhood
                     .as_ref()
                     .map(|n| n.author.clone()),
-            ).await?;
+            )
+            .await?;
 
-            service.update_perspective_facts(uuid, "facts".to_string(), facts).await?;
+            service
+                .update_perspective_facts(uuid, "facts".to_string(), facts)
+                .await?;
         }
 
         Ok(())
@@ -1411,7 +1414,7 @@ impl PerspectiveInstance {
     async fn update_prolog_engine_facts(&self) -> Result<(), AnyError> {
         let service = get_prolog_service().await;
         let uuid = self.persisted.lock().await.uuid.clone();
-        
+
         let all_links = self.get_links(&LinkQuery::default()).await?;
         let facts = init_engine_facts(
             all_links,
@@ -1421,9 +1424,12 @@ impl PerspectiveInstance {
                 .neighbourhood
                 .as_ref()
                 .map(|n| n.author.clone()),
-        ).await?;
+        )
+        .await?;
 
-        service.update_perspective_facts(uuid, "facts".to_string(), facts).await?;
+        service
+            .update_perspective_facts(uuid, "facts".to_string(), facts)
+            .await?;
         Ok(())
     }
 

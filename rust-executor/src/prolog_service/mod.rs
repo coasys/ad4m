@@ -43,23 +43,35 @@ impl PrologService {
         Ok(())
     }
 
-    pub async fn run_query(&self, perspective_id: String, query: String) -> Result<QueryResult, Error> {
+    pub async fn run_query(
+        &self,
+        perspective_id: String,
+        query: String,
+    ) -> Result<QueryResult, Error> {
         let pools = self.engine_pools.read().await;
-        let pool = pools.get(&perspective_id)
+        let pool = pools
+            .get(&perspective_id)
             .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?;
         pool.run_query(query).await
     }
 
     pub async fn run_query_all(&self, perspective_id: String, query: String) -> Result<(), Error> {
         let pools = self.engine_pools.read().await;
-        let pool = pools.get(&perspective_id)
+        let pool = pools
+            .get(&perspective_id)
             .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?;
         pool.run_query_all(query).await
     }
 
-    pub async fn update_perspective_facts(&self, perspective_id: String, module_name: String, program_lines: Vec<String>) -> Result<(), Error> {
+    pub async fn update_perspective_facts(
+        &self,
+        perspective_id: String,
+        module_name: String,
+        program_lines: Vec<String>,
+    ) -> Result<(), Error> {
         let pools = self.engine_pools.read().await;
-        let pool = pools.get(&perspective_id)
+        let pool = pools
+            .get(&perspective_id)
             .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?;
         pool.update_all_engines(module_name, program_lines).await
     }
@@ -99,7 +111,10 @@ mod prolog_test {
         let perspective_id = "test".to_string();
 
         // Ensure pool is created
-        assert!(service.ensure_perspective_pool(perspective_id.clone()).await.is_ok());
+        assert!(service
+            .ensure_perspective_pool(perspective_id.clone())
+            .await
+            .is_ok());
 
         let facts = String::from(
             r#"
@@ -152,7 +167,10 @@ mod prolog_test {
         );
 
         // Test pool removal
-        assert!(service.remove_perspective_pool(perspective_id.clone()).await.is_ok());
+        assert!(service
+            .remove_perspective_pool(perspective_id.clone())
+            .await
+            .is_ok());
         assert!(!service.has_perspective_pool(perspective_id.clone()).await);
     }
 }

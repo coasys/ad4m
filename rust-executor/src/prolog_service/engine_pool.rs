@@ -1,16 +1,16 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::RwLock;
-use deno_core::anyhow::{Error, anyhow};
-use scryer_prolog::{QueryResult, QueryResolution};
-use futures::future::join_all;
 use super::engine::PrologEngine;
+use deno_core::anyhow::{anyhow, Error};
+use futures::future::join_all;
+use scryer_prolog::{QueryResolution, QueryResult};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub struct PrologEnginePool {
     engines: Arc<RwLock<Vec<Option<PrologEngine>>>>,
     next_engine: Arc<RwLock<usize>>,
     active_queries: Arc<AtomicUsize>,
-    bulk_operation_lock: Arc<RwLock<()>>,  // RwLock instead of Mutex for bulk operations
+    bulk_operation_lock: Arc<RwLock<()>>, // RwLock instead of Mutex for bulk operations
 }
 
 impl PrologEnginePool {
@@ -39,25 +39,29 @@ impl PrologEnginePool {
         {
             let _bulk_op_guard = self.bulk_operation_lock.read().await;
         }
-        
+
         // Increment active queries counter
         self.active_queries.fetch_add(1, Ordering::SeqCst);
-        
+
         // Ensure we decrement the counter when we're done
         struct QueryGuard<'a> {
             counter: &'a AtomicUsize,
         }
-        
+
         impl<'a> Drop for QueryGuard<'a> {
             fn drop(&mut self) {
                 self.counter.fetch_sub(1, Ordering::SeqCst);
             }
         }
-        
-        let _guard = QueryGuard { counter: &self.active_queries };
+
+        let _guard = QueryGuard {
+            counter: &self.active_queries,
+        };
 
         let engines = self.engines.read().await;
-        let valid_engines: Vec<_> = engines.iter().enumerate()
+        let valid_engines: Vec<_> = engines
+            .iter()
+            .enumerate()
             .filter_map(|(i, e)| e.as_ref().map(|engine| (i, engine)))
             .collect();
 
@@ -70,14 +74,14 @@ impl PrologEnginePool {
         let (engine_idx, engine) = valid_engines[*next_idx];
 
         let result = engine.run_query(query.clone()).await;
-        
+
         if let Err(e) = &result {
             log::error!("Prolog engine error: {}", e);
             drop(engines);
-            
+
             let mut engines = self.engines.write().await;
             engines[engine_idx] = None;
-            
+
             return Err(anyhow!("Engine failed and was invalidated: {}", e));
         }
 
@@ -94,25 +98,24 @@ impl PrologEnginePool {
     pub async fn run_query_all(&self, query: String) -> Result<(), Error> {
         // Get exclusive access for bulk operation
         let _bulk_lock = self.bulk_operation_lock.write().await;
-        
+
         // Wait for any active queries to complete
         self.wait_for_active_queries().await;
-        
+
         let engines = self.engines.write().await;
-        let valid_engines: Vec<_> = engines.iter()
-            .filter_map(|e| e.as_ref())
-            .collect();
+        let valid_engines: Vec<_> = engines.iter().filter_map(|e| e.as_ref()).collect();
 
         if valid_engines.is_empty() {
             return Err(anyhow!("No valid Prolog engines available"));
         }
-        
-        let futures: Vec<_> = valid_engines.iter()
+
+        let futures: Vec<_> = valid_engines
+            .iter()
             .map(|engine| engine.run_query(query.clone()))
             .collect();
 
         let results = join_all(futures).await;
-        
+
         for result in results {
             match result? {
                 Ok(QueryResolution::True) => continue,
@@ -120,19 +123,23 @@ impl PrologEnginePool {
                 Err(e) => return Err(anyhow!("Query failed: {}", e)),
             }
         }
-        
+
         Ok(())
     }
 
-    pub async fn update_all_engines(&self, module_name: String, program_lines: Vec<String>) -> Result<(), Error> {
+    pub async fn update_all_engines(
+        &self,
+        module_name: String,
+        program_lines: Vec<String>,
+    ) -> Result<(), Error> {
         // Get exclusive access for bulk operation
         let _bulk_lock = self.bulk_operation_lock.write().await;
-        
+
         // Wait for any active queries to complete
         self.wait_for_active_queries().await;
-        
+
         let mut engines = self.engines.write().await;
-        
+
         // Reinitialize any invalid engines
         for engine_slot in engines.iter_mut() {
             if engine_slot.is_none() {
@@ -141,16 +148,17 @@ impl PrologEnginePool {
                 *engine_slot = Some(new_engine);
             }
         }
-        
+
         // Update all engines with new facts
         let mut update_futures = Vec::new();
         for engine in engines.iter().filter_map(|e| e.as_ref()) {
-            let update_future = engine.load_module_string(module_name.clone(), program_lines.clone());
+            let update_future =
+                engine.load_module_string(module_name.clone(), program_lines.clone());
             update_futures.push(update_future);
         }
-        
+
         join_all(update_futures).await;
-        
+
         Ok(())
     }
 
@@ -192,7 +200,10 @@ mod tests {
         assert_eq!(result, Ok(QueryResolution::False));
 
         // Test invalid query
-        let result = pool.run_query("invalid_predicate(x).".to_string()).await.unwrap();
+        let result = pool
+            .run_query("invalid_predicate(x).".to_string())
+            .await
+            .unwrap();
         assert!(result.is_err());
     }
 
@@ -242,7 +253,10 @@ mod tests {
         // Check that we still have valid engines
         let engines = pool.engines.read().await;
         let valid_count = engines.iter().filter(|e| e.is_some()).count();
-        assert!(valid_count > 0, "Should still have valid engines after failure");
+        assert!(
+            valid_count > 0,
+            "Should still have valid engines after failure"
+        );
 
         // Verify we can still run queries
         let result = pool.run_query("true.".to_string()).await;
@@ -279,4 +293,4 @@ mod tests {
         assert_eq!(engines.len(), 2);
         assert!(engines.iter().all(|e| e.is_some()));
     }
-} 
+}

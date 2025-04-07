@@ -1,6 +1,6 @@
+use anyhow::anyhow;
 use deno_core::{anyhow::bail, error::AnyError, op2};
 use scryer_prolog::{QueryMatch, QueryResolution, Value};
-use anyhow::anyhow;
 
 use super::get_prolog_service;
 
