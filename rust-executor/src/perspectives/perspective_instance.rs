@@ -1205,6 +1205,7 @@ impl PerspectiveInstance {
         
         // Check if pool exists
         if !service.has_perspective_pool(uuid.clone()).await {
+            let _guard = self.prolog_update_mutex.write().await;
             // Create and initialize new pool
             service.ensure_perspective_pool(uuid.clone()).await?;
 
@@ -1259,9 +1260,16 @@ impl PerspectiveInstance {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
+            // Take write lock for the entire facts update operation
+            let _write_guard = self_clone.prolog_update_mutex.write().await;
+
             if let Err(e) = self_clone.ensure_prolog_engine_pool().await {
-                log::error!("Error spawning Prolog engine pool: {:?}", e)
-            };
+                log::error!("Error spawning Prolog engine pool: {:?}", e);
+                if let Some(sender) = completion_sender {
+                    let _ = sender.send(());
+                }
+                return;
+            }
 
             let fact_rebuild_needed = !diff.removals.is_empty()
                 || diff.additions.iter().any(|link| is_sdna_link(&link.data));
