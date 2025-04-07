@@ -11,7 +11,7 @@ pub(crate) mod prolog_service_extension;
 
 use self::engine_pool::PrologEnginePool;
 
-const DEFAULT_POOL_SIZE: usize = 4;
+const DEFAULT_POOL_SIZE: usize = 10;
 
 #[derive(Clone)]
 pub struct PrologService {
