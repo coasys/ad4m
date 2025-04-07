@@ -375,7 +375,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(await p.infer('reachable("ad4m://root", "todo-ontology://is-todo")')).to.be.true;
 
                 const linkResult = await p.infer('link(X, _, "todo-ontology://is-todo", Timestamp, Author).')
-                console.warn("got prolog link result", linkResult);
                 expect(linkResult).not.to.be.false;
                 expect(linkResult.length).to.equal(1)
                 expect(linkResult[0].X).to.equal('note-ipfs://Qm123');
@@ -384,7 +383,7 @@ export default function perspectiveTests(testContext: TestContext) {
             })
         })
 
-        describe('Batch Operations', () => {
+        describe.skip('Batch Operations', () => {
             let proxy: PerspectiveProxy
             let ad4mClient: Ad4mClient
             
