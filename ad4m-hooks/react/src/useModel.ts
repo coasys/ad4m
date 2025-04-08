@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo } from "react";
-import { PerspectiveProxy, Ad4mModel, Query, PaginationResult } from "@coasys/ad4m";
+import { useState, useEffect, useMemo, useRef } from "react";
+import { PerspectiveProxy, Ad4mModel, Query, PaginationResult, ModelQueryBuilder } from "@coasys/ad4m";
 
 type Props<T extends Ad4mModel> = {
   perspective: PerspectiveProxy;
@@ -25,6 +25,7 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
   const [error, setError] = useState<string>("");
   const [pageNumber, setPageNumber] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
+  const modelQueryRef = useRef<ModelQueryBuilder<T|Ad4mModel> | null>(null);
 
   async function ensureSubject() {
     if (typeof model !== "string") await perspective.ensureSDNASubjectClass(model);
@@ -48,14 +49,17 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
 
   async function subscribeToCollection() {
     try {
-      const modelQuery =
+      if (modelQueryRef.current) modelQueryRef.current.dispose();
+
+      modelQueryRef.current =
         typeof model === "string"
           ? Ad4mModel.query(perspective, query).overrideModelClassName(model)
           : model.query(perspective, query);
+
       if (pageSize) {
         // Handle paginated results
         const totalPageSize = pageSize * pageNumber;
-        const { results, totalCount: count } = await modelQuery.paginateSubscribe(
+        const { results, totalCount: count } = await modelQueryRef.current.paginateSubscribe(
           totalPageSize,
           1,
           paginateSubscribeCallback as (results: PaginationResult<Ad4mModel>) => void
@@ -64,7 +68,7 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
         setTotalCount(count as number);
       } else {
         // Handle non-paginated results
-        const results = await modelQuery.subscribe(handleNewEntires as (results: Ad4mModel[]) => void);
+        const results = await modelQueryRef.current.subscribe(handleNewEntires as (results: Ad4mModel[]) => void);
         setEntries(results as T[]);
       }
     } catch (err) {
