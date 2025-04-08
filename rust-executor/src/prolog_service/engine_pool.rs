@@ -9,8 +9,6 @@ use tokio::sync::RwLock;
 pub struct PrologEnginePool {
     engines: Arc<RwLock<Vec<Option<PrologEngine>>>>,
     next_engine: Arc<RwLock<usize>>,
-    active_queries: Arc<AtomicUsize>,
-    bulk_operation_lock: Arc<RwLock<()>>, // RwLock instead of Mutex for bulk operations
 }
 
 impl PrologEnginePool {
@@ -18,13 +16,10 @@ impl PrologEnginePool {
         PrologEnginePool {
             engines: Arc::new(RwLock::new(Vec::with_capacity(pool_size))),
             next_engine: Arc::new(RwLock::new(0)),
-            active_queries: Arc::new(AtomicUsize::new(0)),
-            bulk_operation_lock: Arc::new(RwLock::new(())),
         }
     }
 
     pub async fn initialize(&self, pool_size: usize) -> Result<(), Error> {
-        let _bulk_lock = self.bulk_operation_lock.write().await;
         let mut engines = self.engines.write().await;
         for _ in 0..pool_size {
             let mut engine = PrologEngine::new();
@@ -35,29 +30,6 @@ impl PrologEnginePool {
     }
 
     pub async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
-        // Wait for any bulk operation to complete by acquiring a read lock
-        {
-            let _bulk_op_guard = self.bulk_operation_lock.read().await;
-        }
-
-        // Increment active queries counter
-        self.active_queries.fetch_add(1, Ordering::SeqCst);
-
-        // Ensure we decrement the counter when we're done
-        struct QueryGuard<'a> {
-            counter: &'a AtomicUsize,
-        }
-
-        impl<'a> Drop for QueryGuard<'a> {
-            fn drop(&mut self) {
-                self.counter.fetch_sub(1, Ordering::SeqCst);
-            }
-        }
-
-        let _guard = QueryGuard {
-            counter: &self.active_queries,
-        };
-
         let engines = self.engines.read().await;
         let valid_engines: Vec<_> = engines
             .iter()
@@ -78,7 +50,8 @@ impl PrologEnginePool {
         if let Err(e) = &result {
             log::error!("Prolog engine error: {}", e);
             drop(engines);
-
+            
+            // Invalidate the failed engine
             let mut engines = self.engines.write().await;
             engines[engine_idx] = None;
 
@@ -88,20 +61,7 @@ impl PrologEnginePool {
         result
     }
 
-    async fn wait_for_active_queries(&self) {
-        // Wait for active queries to complete
-        while self.active_queries.load(Ordering::SeqCst) > 0 {
-            tokio::task::yield_now().await;
-        }
-    }
-
     pub async fn run_query_all(&self, query: String) -> Result<(), Error> {
-        // Get exclusive access for bulk operation
-        let _bulk_lock = self.bulk_operation_lock.write().await;
-
-        // Wait for any active queries to complete
-        self.wait_for_active_queries().await;
-
         let engines = self.engines.write().await;
         let valid_engines: Vec<_> = engines.iter().filter_map(|e| e.as_ref()).collect();
 
@@ -132,12 +92,6 @@ impl PrologEnginePool {
         module_name: String,
         program_lines: Vec<String>,
     ) -> Result<(), Error> {
-        // Get exclusive access for bulk operation
-        let _bulk_lock = self.bulk_operation_lock.write().await;
-
-        // Wait for any active queries to complete
-        self.wait_for_active_queries().await;
-
         let mut engines = self.engines.write().await;
 
         // Reinitialize any invalid engines
