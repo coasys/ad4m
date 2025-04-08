@@ -40,18 +40,18 @@ impl PrologEnginePool {
             log::error!("No valid Prolog engines available");
             return Err(anyhow!("No valid Prolog engines available"));
         }
-        
+
         // Use fetch_add to atomically increment and get the previous value
         let current = self.next_engine.fetch_add(1, Ordering::SeqCst);
         let idx = current % valid_engines.len();
-        
+
         let (engine_idx, engine) = valid_engines[idx];
         let result = engine.run_query(query.clone()).await;
-        
+
         if let Err(e) = &result {
             log::error!("Prolog engine error: {}", e);
             drop(engines);
-            
+
             // Invalidate the failed engine
             let mut engines = self.engines.write().await;
             engines[engine_idx] = None;

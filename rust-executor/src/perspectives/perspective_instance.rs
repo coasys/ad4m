@@ -1202,11 +1202,11 @@ impl PerspectiveInstance {
     async fn ensure_prolog_engine_pool(&self) -> Result<(), AnyError> {
         // Take write lock and check if we need to initialize
         let _guard = self.prolog_update_mutex.write().await;
-        
+
         // Get service reference before taking any locks
         let service = get_prolog_service().await;
         let uuid = self.persisted.lock().await.uuid.clone();
-        
+
         // Check if pool exists under the write lock
         if !service.has_perspective_pool(uuid.clone()).await {
             // Create and initialize new pool
@@ -1237,7 +1237,7 @@ impl PerspectiveInstance {
         // Get service reference before any locks
         let service = get_prolog_service().await;
         let uuid = self.persisted.lock().await.uuid.clone();
-        
+
         // Ensure pool exists
         self.ensure_prolog_engine_pool().await?;
 
