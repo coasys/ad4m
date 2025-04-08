@@ -24,7 +24,7 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
   const error = ref<string>("");
   const pageNumber = ref(1);
   const totalCount = ref(0);
-  const modelQueryRef = ref<ModelQueryBuilder<T|Ad4mModel> | null>(null);
+  let modelQuery: ModelQueryBuilder<T|Ad4mModel> | null = null;
 
   // Handle perspective as a ref/computed or direct value
   const isPerspectiveRef = perspective && typeof perspective === "object" && "value" in perspective;
@@ -72,9 +72,9 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
         return;
       }
 
-      if (modelQueryRef.value) modelQueryRef.value.dispose();
+      if (modelQuery) modelQuery.dispose();
 
-      modelQueryRef.value =
+      modelQuery =
         typeof model === "string"
           ? Ad4mModel.query(perspectiveRef.value, query).overrideModelClassName(model)
           : model.query(perspectiveRef.value, query);
@@ -82,7 +82,7 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
       if (pageSize) {
         // Handle paginated results
         const totalPageSize = pageSize * pageNumber.value;
-        const { results, totalCount: count } = await modelQueryRef.value.paginateSubscribe(
+        const { results, totalCount: count } = await modelQuery.paginateSubscribe(
           totalPageSize,
           1,
           paginateSubscribeCallback
@@ -91,7 +91,7 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
         totalCount.value = count as number;
       } else {
         // Handle non-paginated results
-        const results = await modelQueryRef.value.subscribe((results: Ad4mModel[]) => handleNewEntires(results as T[]));
+        const results = await modelQuery.subscribe((results: Ad4mModel[]) => handleNewEntires(results as T[]));
         entries.value = includeBaseExpressions(results as T[]);
       }
     } catch (err) {
