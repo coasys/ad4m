@@ -7,7 +7,6 @@ use tokio::sync::RwLock;
 
 pub(crate) mod engine;
 pub(crate) mod engine_pool;
-pub(crate) mod prolog_service_extension;
 
 use self::engine_pool::PrologEnginePool;
 
