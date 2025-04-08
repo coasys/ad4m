@@ -1,8 +1,8 @@
-import { ref, Ref, watch, computed, shallowRef } from "vue";
-import { PerspectiveProxy, Ad4mModel, Query, PaginationResult } from "@coasys/ad4m";
+import { ref, Ref, watch, shallowRef, ComputedRef } from "vue";
+import { PerspectiveProxy, Ad4mModel, Query, PaginationResult, ModelQueryBuilder } from "@coasys/ad4m";
 
 type Props<T extends Ad4mModel> = {
-  perspective: PerspectiveProxy | any;
+  perspective: PerspectiveProxy | ComputedRef<PerspectiveProxy | null>;
   model: string | ((new (...args: any[]) => T) & typeof Ad4mModel);
   query?: Query;
   pageSize?: number;
@@ -24,17 +24,22 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
   const error = ref<string>("");
   const pageNumber = ref(1);
   const totalCount = ref(0);
-  const subjectEnsured = ref(false);
-  const perspectiveRef = typeof perspective === "function" ? computed(() => perspective()) : shallowRef(perspective);
+  let modelQuery: ModelQueryBuilder<T|Ad4mModel> | null = null;
 
-  async function ensureSubject() {
-    try {
-      if (typeof model !== "string") await perspectiveRef.value.ensureSDNASubjectClass(model);
-      subjectEnsured.value = true;
-    } catch (e) {
-      console.error("Failed to ensure subject:", e);
-      error.value = e instanceof Error ? e.message : String(e);
-    }
+  // Handle perspective as a ref/computed or direct value
+  const isPerspectiveRef = perspective && typeof perspective === "object" && "value" in perspective;
+  const perspectiveValue = isPerspectiveRef ? (perspective as Ref<PerspectiveProxy | null>).value : perspective;
+  const perspectiveRef = shallowRef(perspectiveValue);
+
+  // Set up a watch if perspective is a ref/computed
+  if (isPerspectiveRef) {
+    watch(
+      () => (perspective as Ref<PerspectiveProxy | null>).value,
+      (newVal) => {
+        perspectiveRef.value = newVal;
+      },
+      { immediate: true }
+    );
   }
 
   function includeBaseExpressions(entries: T[]): T[] {
@@ -44,7 +49,6 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
   }
 
   function preserveEntryReferences(oldEntries: T[], newEntries: T[]): T[] {
-    // Merge new results into old results, preserving references for optimized rendering
     const existingMap = new Map(oldEntries.map((entry) => [entry.baseExpression, entry]));
     return newEntries.map((newEntry) => existingMap.get(newEntry.baseExpression) || newEntry);
   }
@@ -62,7 +66,15 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
 
   async function subscribeToCollection() {
     try {
-      const modelQuery =
+      // Return early if no perspective
+      if (!perspectiveRef.value) {
+        loading.value = false;
+        return;
+      }
+
+      if (modelQuery) modelQuery.dispose();
+
+      modelQuery =
         typeof model === "string"
           ? Ad4mModel.query(perspectiveRef.value, query).overrideModelClassName(model)
           : model.query(perspectiveRef.value, query);
@@ -97,35 +109,35 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
     }
   }
 
-  // First watch perspective changes
+  // Watch for perspective changes
   watch(
     perspectiveRef,
     async (newPerspective, oldPerspective) => {
-      if (newPerspective) {
-        // Reset state for new perspective
-        if (newPerspective !== oldPerspective) {
-          loading.value = true;
-          subjectEnsured.value = false;
+      if (!oldPerspective || newPerspective?.uuid !== oldPerspective?.uuid) {
+        loading.value = true;
+        entries.value = [];
+        if (newPerspective) {
+          try {
+            if (typeof model !== "string") {
+              await newPerspective.ensureSDNASubjectClass(model);
+            }
+            await subscribeToCollection();
+          } finally {
+            loading.value = false;
+          }
+        } else {
+          loading.value = false;
         }
-        // Ensure subject for new perspective
-        await ensureSubject();
       }
     },
     { immediate: true }
   );
 
-  // Then watch for when subject is ensured
-  watch(
-    subjectEnsured,
-    async (newValue) => {
-      if (newValue && perspectiveRef.value) await subscribeToCollection();
-    },
-    { immediate: true }
-  );
-
-  // Also watch for query/page changes after subject is ensured
+  // Watch for query/page changes
   watch([() => JSON.stringify(query), pageNumber], async () => {
-    if (subjectEnsured.value && perspectiveRef.value) await subscribeToCollection();
+    if (perspectiveRef.value) {
+      await subscribeToCollection();
+    }
   });
 
   return { entries, loading, error, totalCount, loadMore };
