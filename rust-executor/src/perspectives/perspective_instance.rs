@@ -1200,12 +1200,15 @@ impl PerspectiveInstance {
     }
 
     async fn ensure_prolog_engine_pool(&self) -> Result<(), AnyError> {
-        let uuid = self.persisted.lock().await.uuid.clone();
+        // Take write lock and check if we need to initialize
+        let _guard = self.prolog_update_mutex.write().await;
+        
+        // Get service reference before taking any locks
         let service = get_prolog_service().await;
-
-        // Check if pool exists
+        let uuid = self.persisted.lock().await.uuid.clone();
+        
+        // Check if pool exists under the write lock
         if !service.has_perspective_pool(uuid.clone()).await {
-            let _guard = self.prolog_update_mutex.write().await;
             // Create and initialize new pool
             service.ensure_perspective_pool(uuid.clone()).await?;
 
@@ -1221,7 +1224,6 @@ impl PerspectiveInstance {
                     .map(|n| n.author.clone()),
             )
             .await?;
-
             service
                 .update_perspective_facts(uuid, "facts".to_string(), facts)
                 .await?;
@@ -1232,11 +1234,14 @@ impl PerspectiveInstance {
 
     /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
     pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
+        // Get service reference before any locks
+        let service = get_prolog_service().await;
+        let uuid = self.persisted.lock().await.uuid.clone();
+        
+        // Ensure pool exists
         self.ensure_prolog_engine_pool().await?;
 
         let _read_lock = self.prolog_update_mutex.read().await;
-        let service = get_prolog_service().await;
-        let uuid = self.persisted.lock().await.uuid.clone();
 
         let query = if !query.ends_with('.') {
             query + "."
@@ -1263,9 +1268,6 @@ impl PerspectiveInstance {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
-            // Take write lock for the entire facts update operation
-            let _write_guard = self_clone.prolog_update_mutex.write().await;
-
             if let Err(e) = self_clone.ensure_prolog_engine_pool().await {
                 log::error!("Error spawning Prolog engine pool: {:?}", e);
                 if let Some(sender) = completion_sender {
@@ -1273,6 +1275,9 @@ impl PerspectiveInstance {
                 }
                 return;
             }
+
+            // Take write lock for the entire facts update operation
+            let _write_guard = self_clone.prolog_update_mutex.write().await;
 
             let fact_rebuild_needed = !diff.removals.is_empty()
                 || diff.additions.iter().any(|link| is_sdna_link(&link.data));
