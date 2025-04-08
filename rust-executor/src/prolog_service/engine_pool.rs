@@ -8,14 +8,14 @@ use tokio::sync::RwLock;
 
 pub struct PrologEnginePool {
     engines: Arc<RwLock<Vec<Option<PrologEngine>>>>,
-    next_engine: Arc<RwLock<usize>>,
+    next_engine: Arc<AtomicUsize>,
 }
 
 impl PrologEnginePool {
     pub fn new(pool_size: usize) -> Self {
         PrologEnginePool {
             engines: Arc::new(RwLock::new(Vec::with_capacity(pool_size))),
-            next_engine: Arc::new(RwLock::new(0)),
+            next_engine: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -36,17 +36,18 @@ impl PrologEnginePool {
             .enumerate()
             .filter_map(|(i, e)| e.as_ref().map(|engine| (i, engine)))
             .collect();
-
         if valid_engines.is_empty() {
+            log::error!("No valid Prolog engines available");
             return Err(anyhow!("No valid Prolog engines available"));
         }
-
-        let mut next_idx = self.next_engine.write().await;
-        *next_idx = (*next_idx + 1) % valid_engines.len();
-        let (engine_idx, engine) = valid_engines[*next_idx];
-
+        
+        // Use fetch_add to atomically increment and get the previous value
+        let current = self.next_engine.fetch_add(1, Ordering::SeqCst);
+        let idx = current % valid_engines.len();
+        
+        let (engine_idx, engine) = valid_engines[idx];
         let result = engine.run_query(query.clone()).await;
-
+        
         if let Err(e) = &result {
             log::error!("Prolog engine error: {}", e);
             drop(engines);
