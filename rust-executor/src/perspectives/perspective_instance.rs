@@ -2026,7 +2026,58 @@ impl PerspectiveInstance {
         Ok(format!("{{ {} }}", stringified))
     }
 
+    async fn send_subscription_update(
+        &self,
+        subscription_id: String,
+        result: String,
+        delay: Option<Duration>,
+    ) {
+        let uuid = self.persisted.lock().await.uuid.clone();
+        tokio::spawn(async move {
+            if let Some(delay) = delay {
+                sleep(delay).await;
+            }
+            let filter = PerspectiveQuerySubscriptionFilter {
+                uuid,
+                subscription_id,
+                result,
+            };
+            get_global_pubsub()
+                .await
+                .publish(
+                    &PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC.to_string(),
+                    &serde_json::to_string(&filter).unwrap(),
+                )
+                .await;
+        });
+    }
+
     pub async fn subscribe_and_query(&self, query: String) -> Result<(String, String), AnyError> {
+        // Check if we already have a subscription with the same query
+        let existing_subscription = {
+            let queries = self.subscribed_queries.lock().await;
+            queries
+                .iter()
+                .find(|(_, q)| q.query == query)
+                .map(|(id, _)| id.clone())
+        };
+
+        // Return existing subscription if found
+        if let Some(existing_id) = existing_subscription {
+            let queries = self.subscribed_queries.lock().await;
+            if let Some(query) = queries.get(&existing_id) {
+                for delay in [100, 500, 1000] {
+                    self.send_subscription_update(
+                        existing_id.clone(),
+                        query.last_result.clone(),
+                        Some(Duration::from_millis(delay)),
+                    )
+                    .await;
+                }
+                return Ok((existing_id, query.last_result.clone()));
+            }
+        }
+
         let subscription_id = uuid::Uuid::new_v4().to_string();
         let initial_result = self.prolog_query(query.clone()).await?;
         let result_string = prolog_resolution_to_string(initial_result);
@@ -2043,24 +2094,12 @@ impl PerspectiveInstance {
             .insert(subscription_id.clone(), subscribed_query);
 
         // Send initial result after a short delay
-        let uuid = self.persisted.lock().await.uuid.clone();
-        let subscription_id_clone = subscription_id.clone();
-        let result_string_clone = result_string.clone();
-        tokio::spawn(async move {
-            sleep(Duration::from_millis(100)).await;
-            let filter = PerspectiveQuerySubscriptionFilter {
-                uuid,
-                subscription_id: subscription_id_clone,
-                result: result_string_clone,
-            };
-            get_global_pubsub()
-                .await
-                .publish(
-                    &PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC.to_string(),
-                    &serde_json::to_string(&filter).unwrap(),
-                )
-                .await;
-        });
+        self.send_subscription_update(
+            subscription_id.clone(),
+            result_string.clone(),
+            Some(Duration::from_millis(100)),
+        )
+        .await;
 
         Ok((subscription_id, result_string))
     }
@@ -2075,14 +2114,22 @@ impl PerspectiveInstance {
         }
     }
 
+    pub async fn dispose_query_subscription(
+        &self,
+        subscription_id: String,
+    ) -> Result<bool, AnyError> {
+        let mut queries = self.subscribed_queries.lock().await;
+        Ok(queries.remove(&subscription_id).is_some())
+    }
+
     async fn check_subscribed_queries(&self) {
         let mut queries_to_remove = Vec::new();
         let mut queries_with_changes = Vec::new();
-        let uuid = self.persisted.lock().await.uuid.clone();
 
         {
             let mut queries = self.subscribed_queries.lock().await;
             let now = Instant::now();
+            //log::info!("Checking {} subscribed queries", queries.len());
 
             for (id, query) in queries.iter_mut() {
                 // Check for timeout
@@ -2091,10 +2138,12 @@ impl PerspectiveInstance {
                     continue;
                 }
 
+                //log::info!("Checking query: {}", query.query);
                 // Check for changes
                 if let Ok(result) = self.prolog_query(query.query.clone()).await {
                     let result_string = prolog_resolution_to_string(result);
                     if result_string != query.last_result {
+                        log::info!("Query {} has changed: {}", id, result_string);
                         query.last_result = result_string.clone();
                         queries_with_changes.push((id.clone(), result_string));
                     }
@@ -2109,17 +2158,7 @@ impl PerspectiveInstance {
 
         // Publish changes
         for (id, result) in queries_with_changes {
-            let filter = PerspectiveQuerySubscriptionFilter {
-                uuid: uuid.clone(),
-                subscription_id: id,
-                result,
-            };
-            get_global_pubsub()
-                .await
-                .publish(
-                    &PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC.to_string(),
-                    &serde_json::to_string(&filter).unwrap(),
-                )
+            self.send_subscription_update(id.clone(), result.clone(), None)
                 .await;
         }
     }

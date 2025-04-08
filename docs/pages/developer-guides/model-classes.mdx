@@ -238,11 +238,43 @@ const recipes = await Recipe.query(perspective)
 Subscribe to changes in your data:
 
 ```typescript
-await Recipe.query(perspective)
-  .where({ status: "cooking" })
-  .subscribe(recipes => {
-    console.log("Currently cooking:", recipes);
-  });
+// Create a query builder
+const builder = Recipe.query(perspective)
+  .where({ status: "cooking" });
+
+// Subscribe to updates
+const initialRecipes = await builder.subscribe(recipes => {
+  console.log("Currently cooking:", recipes);
+});
+
+// Important: Clean up when done
+builder.dispose();
+```
+
+The query builder's subscription system:
+1. Returns initial results immediately
+2. Calls your callback whenever the results change
+3. Maintains an active connection to receive updates
+4. Automatically cleans up resources when disposed
+
+Always call `dispose()` when you're done with the subscription to:
+- Stop keepalive signals
+- Unsubscribe from updates
+- Notify the backend to clean up resources
+- Prevent memory leaks
+
+You can also subscribe to just the count of matching items:
+
+```typescript
+const builder = Recipe.query(perspective)
+  .where({ category: "Dessert" });
+
+const initialCount = await builder.countSubscribe(count => {
+  console.log("Number of desserts:", count);
+});
+
+// Remember to clean up
+builder.dispose();
 ```
 
 ## Under the Hood

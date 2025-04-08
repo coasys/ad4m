@@ -114,15 +114,43 @@ Every Perspective is automatically enhanced with a Prolog engine, which:
 - Initializes with all Links as Prolog facts
 - Enables powerful semantic querying
 - Supports complex reasoning about graph structures
+- Provides real-time query subscriptions with automatic cleanup
 
 ```typescript
-// Query using Prolog
+// Basic Prolog query
 const results = await perspective.queryProlog(`
     triple(Post, "sioc://likes", Agent),
     triple(Agent, "foaf://knows", "did:key:z6Mk...")
 `);
 // Finds posts liked by agents who know a specific person
+
+// Real-time query subscription
+const subscription = await perspective.subscribeInfer(`
+    triple(Post, "sioc://status", "active"),
+    triple(Post, "sioc://author", Author)
+`);
+
+// Set up callback for updates
+subscription.onResult(results => {
+    console.log("Active posts and their authors:", results);
+});
+
+// Important: Clean up subscription when done
+subscription.dispose();
 ```
+
+Query subscriptions provide real-time updates but require proper cleanup:
+
+1. **Initialization**: When you create a subscription, it waits for the first result before becoming active
+2. **Keepalive**: The subscription stays active through periodic keepalive signals
+3. **Updates**: Receive real-time updates through your callback as the data changes
+4. **Cleanup**: Call `dispose()` when done to:
+   - Stop keepalive signals
+   - Unsubscribe from updates
+   - Notify the backend to clean up resources
+   - Prevent memory leaks
+
+Always remember to call `dispose()` when you're done with a subscription.
 
 ### Advanced Data Modeling
 

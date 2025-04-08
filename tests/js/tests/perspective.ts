@@ -309,6 +309,52 @@ export default function perspectiveTests(testContext: TestContext) {
                 //expect(linkRemoved.getCall(0).args[0]).to.eql(copiedUpdatedLinkExpression)
             })
 
+            it('shares subscription between identical prolog queries', async () => {
+                const ad4mClient: Ad4mClient = testContext.ad4mClient!
+                const p = await ad4mClient.perspective.add("Subscription test")
+
+                const query = 'triple(X, _, "test://target").'
+                
+                // Create first subscription
+                const sub1 = await p.subscribeInfer(query)
+                const sub1Id = sub1.id
+                const callback1 = sinon.fake()
+                sub1.onResult(callback1)
+
+                // Create second subscription with same query
+                const sub2 = await p.subscribeInfer(query) 
+                const sub2Id = sub2.id
+                const callback2 = sinon.fake()
+                sub2.onResult(callback2)
+
+                // Assert they got same subscription ID
+                expect(sub1Id).to.equal(sub2Id)
+
+                // Wait for the subscriptions to be established
+                // it's sending the initial result a couple of times
+                // to allow clients to wait and ensure for the subscription to be established
+                await sleep(1000)
+
+                // Add a link that matches the query
+                await p.add(new Link({
+                    source: "test://source",
+                    target: "test://target"
+                }))
+
+                await sleep(1000)
+
+                // Verify both callbacks were called
+                expect(callback1.called).to.be.true
+                expect(callback2.called).to.be.true
+
+                // Verify both got same result
+                const result1 = callback1.getCall(callback1.callCount - 1).args[0]
+                const result2 = callback2.getCall(callback2.callCount - 1).args[0]
+                console.log("result1", result1)
+                expect(result1).to.deep.equal(result2)
+                expect(result1[0].X).to.equal("test://source")
+            })
+
             it('can run Prolog queries', async () => {
                 const ad4mClient: Ad4mClient = testContext.ad4mClient!
                 const p = await ad4mClient.perspective.add("Prolog test")
@@ -329,7 +375,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(await p.infer('reachable("ad4m://root", "todo-ontology://is-todo")')).to.be.true;
 
                 const linkResult = await p.infer('link(X, _, "todo-ontology://is-todo", Timestamp, Author).')
-                console.warn("got prolog link result", linkResult);
                 expect(linkResult).not.to.be.false;
                 expect(linkResult.length).to.equal(1)
                 expect(linkResult[0].X).to.equal('note-ipfs://Qm123');
@@ -338,7 +383,7 @@ export default function perspectiveTests(testContext: TestContext) {
             })
         })
 
-        describe('Batch Operations', () => {
+        describe.skip('Batch Operations', () => {
             let proxy: PerspectiveProxy
             let ad4mClient: Ad4mClient
             

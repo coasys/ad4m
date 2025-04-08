@@ -29,10 +29,11 @@ interface Unsubscribable {
  * - Subscribing to query updates via GraphQL subscriptions
  * - Maintaining the latest query result
  * - Ensuring subscription is fully initialized before allowing access
+ * - Cleaning up resources when disposed
  * 
  * The subscription will remain active as long as keepalive signals are sent.
  * Make sure to call dispose() when you're done with the subscription to clean up
- * resources and stop keepalive signals.
+ * resources, stop keepalive signals, and notify the backend to remove the subscription.
  * 
  * The subscription goes through an initialization process where it waits for the first
  * result to come through the subscription channel. You can await the `initialized` 
@@ -49,7 +50,7 @@ interface Unsubscribable {
  *     console.log("New result:", result);
  * });
  * 
- * // Later: clean up
+ * // Later: clean up subscription and notify backend
  * subscription.dispose();
  * ```
  */
@@ -64,20 +65,25 @@ export class QuerySubscriptionProxy {
     #disposed: boolean = false;
     #initialized: Promise<boolean>;
     #initTimeoutId?: NodeJS.Timeout;
+    #query: string;
 
     /** Creates a new query subscription
      * @param uuid - The UUID of the perspective
-     * @param subscriptionId - The ID returned by the subscription mutation
-     * @param initialResult - The initial query result
+     * @param query - The Prolog query to subscribe to
      * @param client - The PerspectiveClient instance to use for communication
      */
-    constructor(uuid: string, subscriptionId: string, initialResult: AllInstancesResult, client: PerspectiveClient) {
+    constructor(uuid: string, query: string, client: PerspectiveClient) {
         this.#uuid = uuid;
-        this.#subscriptionId = subscriptionId;
+        this.#query = query;
         this.#client = client;
         this.#callbacks = new Set();
-        this.#latestResult = initialResult;
+    }
 
+    async subscribe() {
+        // initialize the query subscription
+        const result = await this.#client.subscribeQuery(this.#uuid, this.#query);
+        this.#subscriptionId = result.subscriptionId;
+        // Subscribe to query updates
         this.#initialized = new Promise<boolean>((resolve, reject) => {
             // Add timeout to prevent hanging promises
             this.#initTimeoutId = setTimeout(() => {
@@ -107,6 +113,10 @@ export class QuerySubscriptionProxy {
                 await this.#client.keepAliveQuery(this.#uuid, this.#subscriptionId);
             } catch (e) {
                 console.error('Error in keepalive:', e);
+                // try to reinitialize the subscription
+                console.log('Reinitializing subscription for query:', this.#query);
+                await this.subscribe();
+                console.log('Subscription reinitialized');
             }
 
             // Schedule next keepalive if not disposed
@@ -117,6 +127,18 @@ export class QuerySubscriptionProxy {
 
         // Start the first keepalive loop
         this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
+    }
+
+    /** Get the subscription ID for this query subscription
+     * 
+     * This is a unique identifier assigned when the subscription was created.
+     * It can be used to reference this specific subscription, for example when
+     * sending keepalive signals.
+     * 
+     * @returns The subscription ID string
+     */
+    get id(): string {
+        return this.#subscriptionId;
     }
 
     /** Promise that resolves when the subscription has received its first result
@@ -196,11 +218,17 @@ export class QuerySubscriptionProxy {
         if (this.#unsubscribe) {
             this.#unsubscribe();
         }
+        this.#callbacks.clear();
         if (this.#initTimeoutId) {
             clearTimeout(this.#initTimeoutId);
             this.#initTimeoutId = undefined;
         }
-        this.#callbacks.clear();
+
+        // Tell the backend to dispose of the subscription
+        if (this.#subscriptionId) {
+            this.#client.disposeQuerySubscription(this.#uuid, this.#subscriptionId)
+                .catch(e => console.error('Error disposing query subscription:', e));
+        }
     }
 }
 
@@ -1105,6 +1133,10 @@ export class PerspectiveProxy {
      * The returned subscription is guaranteed to be ready to receive updates,
      * as this method waits for the initialization process to complete.
      * 
+     * The subscription will be automatically cleaned up on both frontend and backend
+     * when dispose() is called. Make sure to call dispose() when you're done to
+     * prevent memory leaks and ensure proper cleanup of resources.
+     * 
      * @param query - Prolog query string
      * @returns Initialized QuerySubscriptionProxy instance
      * 
@@ -1123,17 +1155,20 @@ export class PerspectiveProxy {
      * subscription.onResult((todos) => {
      *   console.log("Active todos:", todos);
      * });
+     * 
+     * // Clean up subscription when done
+     * subscription.dispose();
      * ```
      */
     async subscribeInfer(query: string): Promise<QuerySubscriptionProxy> {
-        // Start the subscription on the Rust side first to get the real subscription ID
-        const result = await this.#client.subscribeQuery(this.uuid, query);
         const subscriptionProxy = new QuerySubscriptionProxy(
             this.uuid,
-            result.subscriptionId,
-            result.result,
+            query,
             this.#client
         );
+
+        // Start the subscription on the Rust side first to get the real subscription ID
+        await subscriptionProxy.subscribe();
 
         // Wait for the initial result
         await subscriptionProxy.initialized;
