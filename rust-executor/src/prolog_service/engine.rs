@@ -8,6 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 pub enum PrologServiceRequest {
     RunQuery(String, oneshot::Sender<PrologServiceResponse>),
     LoadModuleString(String, Vec<String>, oneshot::Sender<PrologServiceResponse>),
+    #[allow(dead_code)]
     Drop,
 }
 
@@ -142,7 +143,7 @@ impl PrologEngine {
         }
     }
 
-    pub fn drop(&self) -> Result<(), Error> {
+    pub fn _drop(&self) -> Result<(), Error> {
         self.request_sender.send(PrologServiceRequest::Drop)?;
         Ok(())
     }

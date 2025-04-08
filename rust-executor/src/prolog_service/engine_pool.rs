@@ -117,10 +117,10 @@ impl PrologEnginePool {
         Ok(())
     }
 
-    pub async fn drop_all(&self) -> Result<(), Error> {
+    pub async fn _drop_all(&self) -> Result<(), Error> {
         let engines = self.engines.read().await;
         for engine in engines.iter().filter_map(|e| e.as_ref()) {
-            engine.drop()?;
+            engine._drop()?;
         }
         Ok(())
     }
