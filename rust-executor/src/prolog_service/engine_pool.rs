@@ -112,7 +112,12 @@ impl PrologEnginePool {
             update_futures.push(update_future);
         }
 
-        join_all(update_futures).await;
+        let results = join_all(update_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            if let Err(e) = result {
+                log::error!("Failed to update Prologengine {}: {}", i, e);
+            }
+        }
 
         Ok(())
     }
