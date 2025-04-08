@@ -167,7 +167,7 @@ mod prolog_test {
 
         // Test pool removal
         assert!(service
-            .remove_perspective_pool(perspective_id.clone())
+            ._remove_perspective_pool(perspective_id.clone())
             .await
             .is_ok());
         assert!(!service.has_perspective_pool(perspective_id.clone()).await);

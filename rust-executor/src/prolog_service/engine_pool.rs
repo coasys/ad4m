@@ -241,7 +241,7 @@ mod tests {
         let pool = PrologEnginePool::new(2);
         pool.initialize(2).await.unwrap();
 
-        assert!(pool.drop_all().await.is_ok());
+        assert!(pool._drop_all().await.is_ok());
 
         // Verify engines are still in place but can be reinitialized
         let engines = pool.engines.read().await;
