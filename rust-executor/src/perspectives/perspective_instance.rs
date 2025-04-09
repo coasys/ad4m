@@ -25,6 +25,7 @@ use ad4m_client::literal::Literal;
 use chrono::DateTime;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
+use futures::future;
 use json5;
 use scryer_prolog::{QueryMatch, QueryResolution};
 use serde::{Deserialize, Serialize};
@@ -37,7 +38,6 @@ use tokio::time::{sleep, Instant};
 use tokio::{join, time};
 use uuid;
 use uuid::Uuid;
-use futures::future;
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
@@ -2138,7 +2138,6 @@ impl PerspectiveInstance {
                 continue;
             }
 
-            
             // Spawn query check future
             let self_clone = self.clone();
             let query_future = async move {
@@ -2149,7 +2148,9 @@ impl PerspectiveInstance {
                         //log::info!("Query {} has changed: {}", id, result_string);
                         // Update the query result and send notification immediately
                         {
-                            self_clone.send_subscription_update(id.clone(), result_string.clone(), None).await;
+                            self_clone
+                                .send_subscription_update(id.clone(), result_string.clone(), None)
+                                .await;
                             let mut queries = self_clone.subscribed_queries.lock().await;
                             if let Some(stored_query) = queries.get_mut(&id) {
                                 stored_query.last_result = result_string.clone();
