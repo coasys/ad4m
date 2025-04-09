@@ -37,6 +37,7 @@ use tokio::time::{sleep, Instant};
 use tokio::{join, time};
 use uuid;
 use uuid::Uuid;
+use futures::future;
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
@@ -2117,42 +2118,60 @@ impl PerspectiveInstance {
 
     async fn check_subscribed_queries(&self) {
         let mut queries_to_remove = Vec::new();
-        let mut queries_with_changes = Vec::new();
+        let mut query_futures = Vec::new();
+        let now = Instant::now();
 
-        {
-            let mut queries = self.subscribed_queries.lock().await;
-            let now = Instant::now();
-            //log::info!("Checking {} subscribed queries", queries.len());
+        // First collect all the queries and their IDs
+        let queries = {
+            let queries = self.subscribed_queries.lock().await;
+            queries
+                .iter()
+                .map(|(id, query)| (id.clone(), query.clone()))
+                .collect::<Vec<_>>()
+        };
 
-            for (id, query) in queries.iter_mut() {
-                // Check for timeout
-                if now.duration_since(query.last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
-                    queries_to_remove.push(id.clone());
-                    continue;
-                }
-
-                //log::info!("Checking query: {}", query.query);
-                // Check for changes
-                if let Ok(result) = self.prolog_query(query.query.clone()).await {
-                    let result_string = prolog_resolution_to_string(result);
-                    if result_string != query.last_result {
-                        log::info!("Query {} has changed: {}", id, result_string);
-                        query.last_result = result_string.clone();
-                        queries_with_changes.push((id.clone(), result_string));
-                    }
-                }
+        // Create futures for each query check
+        for (id, query) in queries {
+            // Check for timeout
+            if now.duration_since(query.last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
+                queries_to_remove.push(id);
+                continue;
             }
 
-            // Remove timed out queries
+            
+            // Spawn query check future
+            let self_clone = self.clone();
+            let query_future = async move {
+                //let this_now = Instant::now();
+                if let Ok(result) = self_clone.prolog_query(query.query.clone()).await {
+                    let result_string = prolog_resolution_to_string(result);
+                    if result_string != query.last_result {
+                        //log::info!("Query {} has changed: {}", id, result_string);
+                        // Update the query result and send notification immediately
+                        {
+                            self_clone.send_subscription_update(id.clone(), result_string.clone(), None).await;
+                            let mut queries = self_clone.subscribed_queries.lock().await;
+                            if let Some(stored_query) = queries.get_mut(&id) {
+                                stored_query.last_result = result_string.clone();
+                            }
+                        }
+                    }
+                }
+                //log::info!("Query {} check took {:?}", id, this_now.elapsed());
+            };
+            query_futures.push(query_future);
+        }
+
+        // Wait for all query futures to complete
+        future::join_all(query_futures).await;
+        //log::info!("done checking subscribed queries in {:?}", now.elapsed());
+
+        // Remove timed out queries
+        if !queries_to_remove.is_empty() {
+            let mut queries = self.subscribed_queries.lock().await;
             for id in queries_to_remove {
                 queries.remove(&id);
             }
-        }
-
-        // Publish changes
-        for (id, result) in queries_with_changes {
-            self.send_subscription_update(id.clone(), result.clone(), None)
-                .await;
         }
     }
 
