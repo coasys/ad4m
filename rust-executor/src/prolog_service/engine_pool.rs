@@ -74,21 +74,6 @@ impl PrologEnginePool {
         }
     }
 
-    // Helper to process query results after running them
-    async fn postprocess_result(&self, mut result: QueryResult) -> QueryResult {
-        if let Ok(QueryResolution::Matches(ref mut matches)) = result {
-            for m in matches {
-                for (_, value) in m.bindings.iter_mut() {
-                    log::info!("Postprocessing result: {:?}", value);
-                    self.replace_embedding_url_in_value_recursively(value).await; 
-                    log::info!("Postprocessed result: {:?}", value);
-                }
-            }
-        }
-
-        result
-    }
-
     // Helper to preprocess program lines before loading into engines
     async fn preprocess_program_lines(&self, lines: Vec<String>) -> Vec<String> {
         let futures = lines.into_iter().map(|line| {
@@ -118,25 +103,34 @@ impl PrologEnginePool {
 
         let (engine_idx, engine) = valid_engines[idx];
 
-        // Preprocess query to replace vector URLs with IDs
+        // Preprocess query to replace huge vector URLs with small cache IDs
         let processed_query = self.replace_embedding_url(query.clone()).await;
-        let result = engine.run_query(query.clone()).await;
 
-        if let Err(e) = &result {
-            log::error!("Prolog engine error: {}", e);
-            log::error!("when running query: {}", query);
-            log::error!("processed query: {}", processed_query);
-            drop(engines);
+        // Run query
+        let result = engine.run_query(processed_query.clone()).await;
 
-            let mut engines = self.engines.write().await;
-            engines[engine_idx] = None;
-
-            return Err(anyhow!("Engine failed and was invalidated: {}", e));
+        match result {
+            Err(e) => {
+                log::error!("Prolog engine error: {}", e);
+                log::error!("when running query: {}", query);
+                drop(engines);
+                let mut engines = self.engines.write().await;
+                engines[engine_idx] = None;
+                Err(anyhow!("Engine failed and was invalidated: {}", e))
+            }
+            Ok(mut result) => {
+                // Postprocess result to replace small cache IDs with huge vector URLs
+                // In-place and async/parallel processing of all values in all matches
+                if let Ok(QueryResolution::Matches(ref mut matches)) = result {
+                    join_all(matches.iter_mut().map(|m| {
+                        join_all(m.bindings.iter_mut().map(|(_, value)| {
+                            self.replace_embedding_url_in_value_recursively(value)
+                        }))
+                    })).await;
+                }
+                Ok(result)
+            }
         }
-
-        // Postprocess result to replace IDs with vector URLs
-        let result = result?;
-        Ok(self.postprocess_result(result).await)
     }
 
     pub async fn run_query_all(&self, query: String) -> Result<(), Error> {
