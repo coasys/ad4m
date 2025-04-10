@@ -88,6 +88,8 @@ impl PrologEnginePool {
 
     pub async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
         let engines = self.engines.read().await;
+
+        // Get a vec with all non-None (invalidated) engines
         let valid_engines: Vec<_> = engines
             .iter()
             .enumerate()
@@ -98,9 +100,9 @@ impl PrologEnginePool {
             return Err(anyhow!("No valid Prolog engines available"));
         }
 
+        // Round-robin selection of engine
         let current = self.next_engine.fetch_add(1, Ordering::SeqCst);
         let idx = current % valid_engines.len();
-
         let (engine_idx, engine) = valid_engines[idx];
 
         // Preprocess query to replace huge vector URLs with small cache IDs
