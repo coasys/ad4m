@@ -35,7 +35,7 @@ impl EmbeddingCache {
         self.id_to_vector.get(id).cloned()
     }
 
-    pub fn clear(&mut self) {
+    pub fn _clear(&mut self) {
         self.id_to_vector.clear();
         self.vector_to_id.clear();
     }
