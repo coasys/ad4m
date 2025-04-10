@@ -27,6 +27,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Ad4mConnect detects running local ADAM agent on first open - no need to click try again [PR#570](https://github.com/coasys/ad4m/pull/570)
 - Fix multiple synchronous addSignalHandler calls losing the first handler - fixing usage of NH.sendSignal() [PR#576](https://github.com/coasys/ad4m/pull/576)
 - Fix flaky Prolog subscriptions [PR#589](https://github.com/coasys/ad4m/pull/589)
+- Install missing language during expression get [PR#594](https://github.com/coasys/ad4m/pull/594)
 
 ### Added
 - Prolog predicates needed in new Flux mention notification trigger:
