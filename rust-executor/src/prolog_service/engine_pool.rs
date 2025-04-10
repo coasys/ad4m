@@ -1,14 +1,23 @@
+use super::embedding_cache::EmbeddingCache;
 use super::engine::PrologEngine;
 use deno_core::anyhow::{anyhow, Error};
 use futures::future::join_all;
-use scryer_prolog::{QueryResolution, QueryResult};
+use lazy_static::lazy_static;
+use regex::Regex;
+use scryer_prolog::{QueryResolution, QueryResult, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+lazy_static! {
+    // Match embedding vector URLs inside string literals (both single and double quotes)
+    static ref EMBEDDING_URL_RE: Regex = Regex::new(r#"['"](QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c://[^'"]*)['"]"#).unwrap();
+}
+
 pub struct PrologEnginePool {
     engines: Arc<RwLock<Vec<Option<PrologEngine>>>>,
     next_engine: Arc<AtomicUsize>,
+    embedding_cache: Arc<RwLock<EmbeddingCache>>,
 }
 
 impl PrologEnginePool {
@@ -16,6 +25,7 @@ impl PrologEnginePool {
         PrologEnginePool {
             engines: Arc::new(RwLock::new(Vec::with_capacity(pool_size))),
             next_engine: Arc::new(AtomicUsize::new(0)),
+            embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
         }
     }
 
@@ -27,6 +37,86 @@ impl PrologEnginePool {
             engines.push(Some(engine));
         }
         Ok(())
+    }
+
+    async fn replace_embedding_url(&self, query: String) -> String {
+        let mut cache = self.embedding_cache.write().await;
+        let result = EMBEDDING_URL_RE
+            .replace_all(&query, |caps: &regex::Captures| {
+                let url = &caps[1];
+                log::info!("Replacing embedding URL: {}", url);
+                let id = cache.get_or_create_id(url);
+                log::info!("Replaced embedding URL with: {}", id);
+                format!("\"{}\"", id)
+            })
+            .to_string();
+        if result != query {
+            log::info!("Preprocessed line: {}", query);
+            log::info!("Into: {}", result);
+        }
+        result
+    }
+    // Helper to process query string before running it
+    async fn preprocess_query(&self, query: String) -> String {
+        let result = self.replace_embedding_url(query.clone()).await;
+        if result != query {
+            log::info!("Preprocessed query: {}", query);
+            log::info!("Into: {}", result);
+        }
+        result
+    }
+
+    async fn replace_embedding_url_in_value_recursively(&self,value: &mut Value) {
+        let cache = self.embedding_cache.read().await;
+        match value {
+            Value::String(s) => {
+                if let Some(url) = cache.get_vector_url(s) {
+                    *value = Value::String(url);
+                }
+            }
+            Value::Atom(s) => {
+                if let Some(url) = cache.get_vector_url(s) {
+                    *value = Value::Atom(url);
+                }
+            }
+            Value::List(list) => {
+                for item in list {
+                    Box::pin(self.replace_embedding_url_in_value_recursively(item)).await;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Helper to process query results after running them
+    async fn postprocess_result(&self, mut result: QueryResult) -> QueryResult {
+        if let Ok(QueryResolution::Matches(ref mut matches)) = result {
+            for m in matches {
+                for (_, value) in m.bindings.iter_mut() {
+                    log::info!("Postprocessing result: {:?}", value);
+                    self.replace_embedding_url_in_value_recursively(value).await; 
+                    log::info!("Postprocessed result: {:?}", value);
+                }
+            }
+        }
+
+        result
+    }
+
+    // Helper to preprocess program lines before loading into engines
+    async fn preprocess_program_lines(&self, lines: Vec<String>) -> Vec<String> {
+        let futures = lines.into_iter().map(|line| {
+            let line_clone = line.clone();
+            async move {
+                let new_line = self.replace_embedding_url(line_clone).await;
+                if new_line != line {
+                    log::info!("Preprocessed line: {}", line);
+                    log::info!("Into: {}", new_line);
+                }
+                new_line
+            }
+        });
+        join_all(futures).await.into_iter().collect()
     }
 
     pub async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
@@ -41,25 +131,30 @@ impl PrologEnginePool {
             return Err(anyhow!("No valid Prolog engines available"));
         }
 
-        // Use fetch_add to atomically increment and get the previous value
         let current = self.next_engine.fetch_add(1, Ordering::SeqCst);
         let idx = current % valid_engines.len();
 
         let (engine_idx, engine) = valid_engines[idx];
+
+        // Preprocess query to replace vector URLs with IDs
+        let processed_query = self.preprocess_query(query.clone()).await;
         let result = engine.run_query(query.clone()).await;
 
         if let Err(e) = &result {
             log::error!("Prolog engine error: {}", e);
+            log::error!("when running query: {}", query);
+            log::error!("processed query: {}", processed_query);
             drop(engines);
 
-            // Invalidate the failed engine
             let mut engines = self.engines.write().await;
             engines[engine_idx] = None;
 
             return Err(anyhow!("Engine failed and was invalidated: {}", e));
         }
 
-        result
+        // Postprocess result to replace IDs with vector URLs
+        let result = result?;
+        Ok(self.postprocess_result(result).await)
     }
 
     pub async fn run_query_all(&self, query: String) -> Result<(), Error> {
@@ -70,9 +165,12 @@ impl PrologEnginePool {
             return Err(anyhow!("No valid Prolog engines available"));
         }
 
+        // Preprocess query once for all engines
+        let processed_query = self.preprocess_query(query).await;
+
         let futures: Vec<_> = valid_engines
             .iter()
-            .map(|engine| engine.run_query(query.clone()))
+            .map(|engine| engine.run_query(processed_query.clone()))
             .collect();
 
         let results = join_all(futures).await;
@@ -80,8 +178,8 @@ impl PrologEnginePool {
         for result in results {
             match result? {
                 Ok(QueryResolution::True) => continue,
-                Ok(other) => return Err(anyhow!("Unexpected query result: {:?}", other)),
-                Err(e) => return Err(anyhow!("Query failed: {}", e)),
+                Ok(other) => log::info!("Unexpected query result: {:?}", other),
+                Err(e) => log::error!("Query failed: {}", e),
             }
         }
 
@@ -104,11 +202,15 @@ impl PrologEnginePool {
             }
         }
 
+
+        // Preprocess program lines once for all engines
+        let processed_lines = self.preprocess_program_lines(program_lines.clone()).await;
+
         // Update all engines with new facts
         let mut update_futures = Vec::new();
         for engine in engines.iter().filter_map(|e| e.as_ref()) {
             let update_future =
-                engine.load_module_string(module_name.clone(), program_lines.clone());
+                engine.load_module_string(module_name.clone(), processed_lines.clone());
             update_futures.push(update_future);
         }
 
