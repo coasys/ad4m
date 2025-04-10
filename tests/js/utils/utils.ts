@@ -77,8 +77,12 @@ export async function startExecutor(dataPath: string,
     console.log(dataPath);
     let executorProcess = null as ChildProcess | null;
     rmSync(dataPath, { recursive: true, force: true })
-    execSync(`${command} init --data-path ${dataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
-
+    execSync(`${command} init --data-path ${dataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {
+        cwd: process.cwd(),
+        maxBuffer: 10 * 1024 * 1024, // 10MB instead of 1MB
+        stdio: ['pipe', 'pipe', 'pipe'] // Default behavior, explicit for clarity
+    })
+    
     console.log("Starting executor")
 
     console.log("USING LOCAL BOOTSTRAP & PROXY URL: ", bootstrapUrl, proxyUrl);
