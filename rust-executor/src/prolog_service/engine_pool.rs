@@ -9,9 +9,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+pub const EMBEDDING_LANGUAGE_HASH: &str = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
+
 lazy_static! {
     // Match embedding vector URLs inside string literals (both single and double quotes)
-    static ref EMBEDDING_URL_RE: Regex = Regex::new(r#"['"](QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c://[^'"]*)['"]"#).unwrap();
+    static ref EMBEDDING_URL_RE: Regex = Regex::new(format!(r#"['"]({}://[^'"]*)['"]"#, EMBEDDING_LANGUAGE_HASH).as_str()).unwrap();
 }
 
 pub struct PrologEnginePool {
@@ -41,29 +43,13 @@ impl PrologEnginePool {
 
     async fn replace_embedding_url(&self, query: String) -> String {
         let mut cache = self.embedding_cache.write().await;
-        let result = EMBEDDING_URL_RE
+        EMBEDDING_URL_RE
             .replace_all(&query, |caps: &regex::Captures| {
                 let url = &caps[1];
-                log::info!("Replacing embedding URL: {}", url);
                 let id = cache.get_or_create_id(url);
-                log::info!("Replaced embedding URL with: {}", id);
                 format!("\"{}\"", id)
             })
-            .to_string();
-        if result != query {
-            log::info!("Preprocessed line: {}", query);
-            log::info!("Into: {}", result);
-        }
-        result
-    }
-    // Helper to process query string before running it
-    async fn preprocess_query(&self, query: String) -> String {
-        let result = self.replace_embedding_url(query.clone()).await;
-        if result != query {
-            log::info!("Preprocessed query: {}", query);
-            log::info!("Into: {}", result);
-        }
-        result
+            .to_string()
     }
 
     async fn replace_embedding_url_in_value_recursively(&self,value: &mut Value) {
@@ -109,10 +95,6 @@ impl PrologEnginePool {
             let line_clone = line.clone();
             async move {
                 let new_line = self.replace_embedding_url(line_clone).await;
-                if new_line != line {
-                    log::info!("Preprocessed line: {}", line);
-                    log::info!("Into: {}", new_line);
-                }
                 new_line
             }
         });
@@ -137,7 +119,7 @@ impl PrologEnginePool {
         let (engine_idx, engine) = valid_engines[idx];
 
         // Preprocess query to replace vector URLs with IDs
-        let processed_query = self.preprocess_query(query.clone()).await;
+        let processed_query = self.replace_embedding_url(query.clone()).await;
         let result = engine.run_query(query.clone()).await;
 
         if let Err(e) = &result {
@@ -166,7 +148,7 @@ impl PrologEnginePool {
         }
 
         // Preprocess query once for all engines
-        let processed_query = self.preprocess_query(query).await;
+        let processed_query = self.replace_embedding_url(query.clone()).await;
 
         let futures: Vec<_> = valid_engines
             .iter()
