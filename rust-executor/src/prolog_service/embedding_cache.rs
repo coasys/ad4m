@@ -23,11 +23,14 @@ impl EmbeddingCache {
         }
 
         // Create new short ID (ev_ prefix makes it clear this is an embedding vector ID)
-        let id = format!("ev_{}", Uuid::new_v4().to_string().split('-').next().unwrap());
-        
+        let id = format!(
+            "ev_{}",
+            Uuid::new_v4().to_string().split('-').next().unwrap()
+        );
+
         self.id_to_vector.insert(id.clone(), vector_url.to_string());
         self.vector_to_id.insert(vector_url.to_string(), id.clone());
-        
+
         id
     }
 
@@ -39,4 +42,4 @@ impl EmbeddingCache {
         self.id_to_vector.clear();
         self.vector_to_id.clear();
     }
-} 
+}

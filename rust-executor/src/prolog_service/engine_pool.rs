@@ -52,7 +52,7 @@ impl PrologEnginePool {
             .to_string()
     }
 
-    async fn replace_embedding_url_in_value_recursively(&self,value: &mut Value) {
+    async fn replace_embedding_url_in_value_recursively(&self, value: &mut Value) {
         let cache = self.embedding_cache.read().await;
         match value {
             Value::String(s) => {
@@ -128,7 +128,8 @@ impl PrologEnginePool {
                         join_all(m.bindings.iter_mut().map(|(_, value)| {
                             self.replace_embedding_url_in_value_recursively(value)
                         }))
-                    })).await;
+                    }))
+                    .await;
                 }
                 Ok(result)
             }
@@ -179,7 +180,6 @@ impl PrologEnginePool {
                 *engine_slot = Some(new_engine);
             }
         }
-
 
         // Preprocess program lines once for all engines
         let processed_lines = self.preprocess_program_lines(program_lines.clone()).await;
