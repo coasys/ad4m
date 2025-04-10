@@ -1055,7 +1055,12 @@ export default class LanguageController {
                     }
                 }
             } else {
-                const lang = this.languageForExpression(ref);
+                let lang
+                try {
+                    lang = this.languageForExpression(ref);
+                }catch(e) {
+                    lang = await this.languageByRef(ref.language);
+                }
                 if (!lang.expressionAdapter) {
                     throw Error("Language does not have an expresionAdapter!")
                 };
