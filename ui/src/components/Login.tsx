@@ -981,33 +981,42 @@ const Login = () => {
             </j-text>
           </j-flex>
 
-          <j-input
-            size="lg"
-            placeholder="Enter passphrase..."
-            minlength={10}
-            maxlength={30}
-            autovalidate
-            required
-            type={showPassword ? "text" : "password"}
-            onInput={(e: any) => setPassword(e.target.value)}
-            onKeyDown={(e: any) => {
-              if (e.key === "Enter") {
-                if (isInitialized) unlockAgent(password, holochain);
-                else if (passwordValid()) generateAgent(password);
-              }
-            }}
-            style={{ width: "100%" }}
-          >
-            <j-button
-              onClick={() => setShowPassword(!showPassword)}
-              slot="end"
-              variant="subtle"
-              square
-              style={{ marginRight: -13 }}
+          <j-flex direction="column" gap="400" style={{ width: "100%" }}>
+            <j-input
+              size="lg"
+              placeholder="Enter passphrase..."
+              minlength={10}
+              maxlength={30}
+              autovalidate
+              required
+              type={showPassword ? "text" : "password"}
+              onInput={(e: any) => setPassword(e.target.value)}
+              onKeyDown={(e: any) => {
+                if (e.key === "Enter") {
+                  if (isInitialized) unlockAgent(password, holochain);
+                  else if (passwordValid()) generateAgent(password);
+                }
+              }}
+              style={{ width: "100%" }}
             >
-              <j-icon name={showPassword ? "eye-slash" : "eye"} size="sm" />
-            </j-button>
-          </j-input>
+              <j-button
+                onClick={() => setShowPassword(!showPassword)}
+                slot="end"
+                variant="subtle"
+                square
+                style={{ marginRight: -13 }}
+                tabIndex={-1}
+              >
+                <j-icon name={showPassword ? "eye-slash" : "eye"} size="sm" />
+              </j-button>
+            </j-input>
+
+            {hasLoginError && (
+              <j-text color="danger-500" nomargin>
+                Invalid passphrase. Please try again.
+              </j-text>
+            )}
+          </j-flex>
 
           <j-flex
             direction="column"
