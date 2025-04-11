@@ -23,7 +23,9 @@ const Login = () => {
 
   const [currentIndex, setCurrentIndex] = useState(0);
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [username, setUsername] = useState("");
   const [firstName, setFirstName] = useState("");
@@ -59,9 +61,16 @@ const Login = () => {
   }
 
   function passwordValid(): boolean {
-    const valid = password.length > 0;
-    setPasswordError(valid ? null : "Password is requied");
-    return valid;
+    if (password.length === 0) {
+      setPasswordError("Password is required");
+      return false;
+    }
+    if (password !== confirmPassword) {
+      setPasswordError("Passwords do not match");
+      return false;
+    }
+    setPasswordError(null);
+    return true;
   }
 
   async function checkApi() {
@@ -197,10 +206,21 @@ const Login = () => {
   }
 
   useEffect(() => {
-    if (!connected && !connectedLoading) navigate("/connect");
-    else if (connected && isUnlocked) navigate("/apps");
-    else if (isInitialized) setCurrentIndex(7);
-  }, [connected, isUnlocked, navigate, isInitialized, connectedLoading]);
+    if (!connected && !connectedLoading) {
+      navigate("/connect");
+    } else if (connected && isUnlocked) {
+      navigate("/apps");
+    } else if (isInitialized && currentIndex === 0) {
+      setCurrentIndex(7);
+    }
+  }, [connected, isUnlocked, navigate, isInitialized, connectedLoading, currentIndex]);
+
+  const handlePasswordSubmit = () => {
+    if (passwordValid()) {
+      generateAgent(password);
+      setCurrentIndex(3);
+    }
+  };
 
   return (
     <div className="wrapper">
@@ -295,37 +315,87 @@ const Login = () => {
           >
             <j-icon name="key" size="xl" color="ui-700" />
             <j-text size="800" nomargin color="ui-0">
-              Create your password
+              Create your encryption passphrase
             </j-text>
           </j-flex>
 
-          <j-input
-            size="lg"
-            placeholder="Password..."
-            minlength={10}
-            maxlength={30}
-            autovalidate
-            required
-            type={showPassword ? "text" : "password"}
-            onInput={(e: any) => setPassword(e.target.value)}
-            onKeyDown={(e: any) => {
-              if (e.key === "Enter" && passwordValid()) {
-                generateAgent(password);
-                setCurrentIndex(3);
-              }
-            }}
-            style={{ width: "100%" }}
+          <j-flex
+            direction="column"
+            a="center"
+            gap="400"
+            style={{ textAlign: "center", width: "100%", maxWidth: 500, marginBottom: 30 }}
           >
-            <j-button
-              onClick={() => setShowPassword(!showPassword)}
-              slot="end"
-              variant="subtle"
-              square
-              style={{ marginRight: -13 }}
+            <j-text size="600" nomargin color="ui-900">
+              This passphrase will be used to encrypt your local keys. If you lose it, you will lose access to your agent and will need to create a new one.
+            </j-text>
+            <j-text size="600" nomargin color="ui-900">
+              Please choose a strong passphrase and store it securely.
+            </j-text>
+          </j-flex>
+
+          <j-flex direction="column" gap="400" style={{ width: "100%" }}>
+            <j-input
+              size="lg"
+              placeholder="Enter passphrase..."
+              minlength={10}
+              maxlength={30}
+              autovalidate
+              required
+              type={showPassword ? "text" : "password"}
+              onInput={(e: any) => setPassword(e.target.value)}
+              onKeyDown={(e: any) => {
+                if (e.key === "Enter") {
+                  handlePasswordSubmit();
+                }
+              }}
+              style={{ width: "100%" }}
             >
-              <j-icon name={showPassword ? "eye-slash" : "eye"} size="sm" />
-            </j-button>
-          </j-input>
+              <j-button
+                onClick={() => setShowPassword(!showPassword)}
+                slot="end"
+                variant="subtle"
+                square
+                style={{ marginRight: -13 }}
+                tabIndex={-1}
+              >
+                <j-icon name={showPassword ? "eye-slash" : "eye"} size="sm" />
+              </j-button>
+            </j-input>
+
+            <j-input
+              size="lg"
+              placeholder="Confirm passphrase..."
+              minlength={10}
+              maxlength={30}
+              autovalidate
+              required
+              type={showConfirmPassword ? "text" : "password"}
+              onInput={(e: any) => setConfirmPassword(e.target.value)}
+              onKeyDown={(e: any) => {
+                if (e.key === "Enter") {
+                  handlePasswordSubmit();
+                }
+              }}
+              style={{ width: "100%" }}
+            >
+              <j-button
+                onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                slot="end"
+                variant="subtle"
+                square
+                style={{ marginRight: -13 }}
+                tabIndex={-1}
+              >
+                <j-icon name={showConfirmPassword ? "eye-slash" : "eye"} size="sm" />
+              </j-button>
+            </j-input>
+
+            {passwordError && (
+              <j-text color="danger-500" nomargin>
+                {passwordError}
+              </j-text>
+            )}
+          </j-flex>
 
           <j-flex gap="500" j="center" wrap style={{ marginTop: 70 }}>
             <j-button size="xl" onClick={() => setCurrentIndex(1)}>
@@ -334,14 +404,9 @@ const Login = () => {
             <j-button
               variant="primary"
               size="xl"
-              onClick={() => {
-                if (passwordValid()) {
-                  generateAgent(password);
-                  setCurrentIndex(3);
-                }
-              }}
+              onClick={handlePasswordSubmit}
               loading={loading}
-              disabled={password.length === 0}
+              disabled={password.length === 0 || confirmPassword.length === 0}
             >
               Next
             </j-button>
@@ -898,13 +963,27 @@ const Login = () => {
           >
             <j-icon name="key" size="xl" color="ui-700" />
             <j-text size="800" nomargin color="ui-0">
-              Login
+              Unlock your agent
+            </j-text>
+          </j-flex>
+
+          <j-flex
+            direction="column"
+            a="center"
+            gap="400"
+            style={{ textAlign: "center", width: "100%", maxWidth: 500, marginBottom: 30 }}
+          >
+            <j-text size="600" nomargin color="ui-900">
+              Enter your encryption passphrase to unlock your agent and access your data.
+            </j-text>
+            <j-text size="600" nomargin color="ui-900">
+              If you've forgotten your passphrase, you'll need to create a new agent.
             </j-text>
           </j-flex>
 
           <j-input
             size="lg"
-            placeholder="Password..."
+            placeholder="Enter passphrase..."
             minlength={10}
             maxlength={30}
             autovalidate
@@ -946,7 +1025,7 @@ const Login = () => {
               Unlock Agent
             </j-button>
             <j-button size="xl" onClick={() => setClearAgentModalOpen(true)}>
-              Reset agent
+              Create new agent
             </j-button>
           </j-flex>
         </div>
