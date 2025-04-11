@@ -164,8 +164,14 @@ impl PrologEnginePool {
         }
 
         if !errors.is_empty() {
-            log::error!("Errors occurred while running queries: {}", errors.join(", "));
-            Err(anyhow!("Errors occurred while running queries: {}", errors.join(", ")))
+            log::error!(
+                "Errors occurred while running queries: {}",
+                errors.join(", ")
+            );
+            Err(anyhow!(
+                "Errors occurred while running queries: {}",
+                errors.join(", ")
+            ))
         } else {
             Ok(())
         }
