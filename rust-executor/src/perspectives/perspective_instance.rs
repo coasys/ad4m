@@ -1750,7 +1750,7 @@ impl PerspectiveInstance {
         {
             // Create an expression for the value
             let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
-            let content = serde_json::to_string(value).expect("json value to be serializable");
+            let content = serde_json::to_string(value).map_err(|e| anyhow!("Failed to serialize JSON value: {}", e))?;
             if let Some(ref mut js) = *lock {
                 let result = js.execute(format!(
                     r#"JSON.stringify(
