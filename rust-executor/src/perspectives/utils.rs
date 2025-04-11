@@ -1,4 +1,5 @@
-use scryer_prolog::{QueryMatch, QueryResolution, Value};
+use crate::prolog_service::types::{QueryMatch, QueryResolution};
+use scryer_prolog::Term;
 
 fn sanitize_into_json(s: String) -> String {
     match s.as_str() {
@@ -30,14 +31,14 @@ fn sanitize_into_json(s: String) -> String {
         }
     }
 }
-pub fn prolog_value_to_json_string(value: Value) -> String {
+pub fn prolog_value_to_json_string(value: Term) -> String {
     match value {
-        Value::Integer(i) => format!("{}", i),
-        Value::Float(f) => format!("{}", f),
-        Value::Rational(r) => format!("{}", r),
-        Value::Atom(a) => sanitize_into_json(a),
-        Value::String(s) => sanitize_into_json(s),
-        Value::List(l) => {
+        Term::Integer(i) => format!("{}", i),
+        Term::Float(f) => format!("{}", f),
+        Term::Rational(r) => format!("{}", r),
+        Term::Atom(a) => sanitize_into_json(a),
+        Term::String(s) => sanitize_into_json(s),
+        Term::List(l) => {
             let mut string_result = "[".to_string();
             for (i, v) in l.iter().enumerate() {
                 if i > 0 {
@@ -48,7 +49,7 @@ pub fn prolog_value_to_json_string(value: Value) -> String {
             string_result.push(']');
             string_result
         }
-        Value::Structure(s, l) => {
+        Term::Compound(s, l) => {
             let mut string_result = format!("\"{}\": [", s.as_str());
             for (i, v) in l.iter().enumerate() {
                 if i > 0 {
@@ -109,8 +110,8 @@ pub fn prolog_get_all_string_bindings(
             .iter()
             .filter_map(|m| m.bindings.get(variable_name))
             .filter_map(|value| match value {
-                scryer_prolog::Value::String(s) => Some(s),
-                scryer_prolog::Value::Atom(s) => Some(s),
+                Term::String(s) => Some(s),
+                Term::Atom(s) => Some(s),
                 _ => None,
             })
             .cloned()
@@ -123,7 +124,7 @@ pub fn prolog_get_all_string_bindings(
 pub fn prolog_get_first_binding(
     result: &QueryResolution,
     variable_name: &str,
-) -> Option<scryer_prolog::Value> {
+) -> Option<Term> {
     prolog_get_all_bindings(result, variable_name)
         .into_iter()
         .next()
@@ -132,7 +133,7 @@ pub fn prolog_get_first_binding(
 pub fn prolog_get_all_bindings(
     result: &QueryResolution,
     variable_name: &str,
-) -> Vec<scryer_prolog::Value> {
+) -> Vec<Term> {
     if let QueryResolution::Matches(matches) = result {
         matches
             .iter()

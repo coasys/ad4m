@@ -27,7 +27,7 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use futures::future;
 use json5;
-use scryer_prolog::{QueryMatch, QueryResolution};
+use crate::prolog_service::types::{QueryMatch, QueryResolution};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -1946,7 +1946,7 @@ impl PerspectiveInstance {
                 //println!("resolve_expression_uri for {}: {:?}", p, resolve_expression_uri);
                 let value = if resolve_expression_uri {
                     match &property_value {
-                        scryer_prolog::Value::String(s) => {
+                        scryer_prolog::Term::String(s) => {
                             //println!("getting expr url: {}", s);
                             let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
 

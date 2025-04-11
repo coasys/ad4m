@@ -89,7 +89,7 @@ holochain_types = { version = "0.3.6", git = "https://github.com/coasys/holochai
 holochain_cli_run_local_services = { version = "0.3.6", git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
 kitsune_p2p_types = { version = "0.3.6", git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
 
-scryer-prolog = { version = "0.9.4", git = "https://github.com/coasys/scryer-prolog" }
+scryer-prolog = { version = "0.9.4", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
 ad4m-client = { path = "../rust-client", version="0.10.1-release-candidate-2" }

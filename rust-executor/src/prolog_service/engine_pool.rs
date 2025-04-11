@@ -1,7 +1,7 @@
 use super::engine::PrologEngine;
 use deno_core::anyhow::{anyhow, Error};
 use futures::future::join_all;
-use scryer_prolog::{QueryResolution, QueryResult};
+use super::types::{QueryResolution, QueryResult};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -59,7 +59,7 @@ impl PrologEnginePool {
             return Err(anyhow!("Engine failed and was invalidated: {}", e));
         }
 
-        result
+        result.map_err(|e| anyhow!("{}", e))
     }
 
     pub async fn run_query_all(&self, query: String) -> Result<(), Error> {
@@ -134,8 +134,7 @@ impl PrologEnginePool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scryer_prolog::{QueryResolution, Value};
-
+    use scryer_prolog::Term;
     #[tokio::test]
     async fn test_pool_initialization() {
         let pool = PrologEnginePool::new(3);
@@ -196,7 +195,7 @@ mod tests {
         match result {
             Ok(QueryResolution::Matches(matches)) => {
                 assert_eq!(matches.len(), 1);
-                assert_eq!(matches[0].bindings["X"], Value::Atom("a".to_string()));
+                assert_eq!(matches[0].bindings["X"], Term::Atom("a".to_string()));
             }
             _ => panic!("Expected matches"),
         }

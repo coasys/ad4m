@@ -1,8 +1,10 @@
 use std::panic::AssertUnwindSafe;
 
 use deno_core::anyhow::Error;
-use scryer_prolog::{Machine, QueryResult};
+use scryer_prolog::{LeafAnswer, MachineBuilder, Term};
 use tokio::sync::{mpsc, oneshot};
+
+use super::types::{query_result_from_leaf_answer, QueryResult};
 
 #[derive(Debug)]
 pub enum PrologServiceRequest {
@@ -51,7 +53,7 @@ impl PrologEngine {
 
             tokio::task::block_in_place(|| {
                 rt.block_on(async move {
-                    let mut machine = Machine::new_lib();
+                    let mut machine = MachineBuilder::default().build();
 
                     response_sender
                         .send(PrologServiceResponse::InitComplete(Ok(())))
@@ -60,9 +62,13 @@ impl PrologEngine {
                     while let Some(message) = receiver.recv().await {
                         match message {
                             PrologServiceRequest::RunQuery(query, response) => {
-                                match std::panic::catch_unwind(AssertUnwindSafe(|| {
-                                    machine.run_query(query.clone())
-                                })) {
+                                let answer_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                                    query_result_from_leaf_answer(machine
+                                        .run_query(query.clone())
+                                        .collect::<Result<Vec<LeafAnswer>, Term>>())
+                                }));
+
+                                match answer_result {
                                     Ok(result) => {
                                         let _ = response
                                             .send(PrologServiceResponse::QueryResult(result));
