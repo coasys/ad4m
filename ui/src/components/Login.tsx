@@ -27,6 +27,7 @@ const Login = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [failedAttempts, setFailedAttempts] = useState(0);
   const [username, setUsername] = useState("");
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -976,9 +977,6 @@ const Login = () => {
             <j-text size="600" nomargin color="ui-900">
               Enter your encryption passphrase to unlock your agent and access your data.
             </j-text>
-            <j-text size="600" nomargin color="ui-900">
-              If you've forgotten your passphrase, you'll need to create a new agent.
-            </j-text>
           </j-flex>
 
           <j-flex direction="column" gap="400" style={{ width: "100%" }}>
@@ -990,10 +988,14 @@ const Login = () => {
               autovalidate
               required
               type={showPassword ? "text" : "password"}
+              disabled={loading}
               onInput={(e: any) => setPassword(e.target.value)}
               onKeyDown={(e: any) => {
                 if (e.key === "Enter") {
-                  if (isInitialized) unlockAgent(password, holochain);
+                  if (isInitialized) {
+                    setFailedAttempts(prev => prev + 1);
+                    unlockAgent(password, holochain);
+                  }
                   else if (passwordValid()) generateAgent(password);
                 }
               }}
@@ -1012,9 +1014,19 @@ const Login = () => {
             </j-input>
 
             {hasLoginError && (
-              <j-text color="danger-500" nomargin>
-                Invalid passphrase. Please try again.
-              </j-text>
+              <>
+                <j-text color="danger-500" nomargin style={{ maxWidth: 500 }}>
+                  Invalid passphrase. Please try again.
+                </j-text>
+                
+                {failedAttempts >= 2 && 
+                  <j-text color="danger-700" nomargin style={{ maxWidth: 500 }}>
+                    If you've forgotten your passphrase, you might need to create a new agent 
+                    with the "Reset agent" button below.
+                    This will delete keys and data and you'll have to start over.
+                  </j-text>
+                }
+              </>
             )}
           </j-flex>
 
@@ -1028,14 +1040,30 @@ const Login = () => {
             <j-button
               size="xl"
               variant="primary"
-              onClick={() => unlockAgent(password, holochain)}
+              onClick={() => {
+                setFailedAttempts(prev => prev + 1);
+                unlockAgent(password, holochain)
+              }}
               loading={loading}
             >
               Unlock Agent
             </j-button>
-            <j-button size="xl" onClick={() => setClearAgentModalOpen(true)}>
-              Create new agent
-            </j-button>
+            
+            <j-flex
+              direction="row"
+              a="center"
+              gap="400"
+              style={{ textAlign: "center", width: "100%", maxWidth: 500, marginBottom: 30 }}
+            >
+              <j-button size="xl" onClick={() => setClearAgentModalOpen(true)} disabled={loading}>
+                Reset agent
+              </j-button>
+              <j-button size="xl" onClick={() => invoke("close_application")} disabled={loading}>
+                Quit
+              </j-button>
+              
+              
+            </j-flex>
           </j-flex>
         </div>
       )}
@@ -1055,7 +1083,7 @@ const Login = () => {
               <j-text nomargin size="800">
                 Reset agent
               </j-text>
-              <j-text nomargin size="600">
+              <j-text nomargin size="600" color="danger-600">
                 Warning: by clearing the agent you will loose all the data and
                 will have to start with a fresh agent
               </j-text>
