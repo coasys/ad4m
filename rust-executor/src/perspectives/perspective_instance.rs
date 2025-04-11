@@ -13,7 +13,8 @@ use crate::graphql::graphql_types::{
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
-use crate::prolog_service::engine::PrologEngine;
+use crate::prolog_service::get_prolog_service;
+use crate::prolog_service::types::{QueryMatch, QueryResolution};
 use crate::pubsub::{
     get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC,
     PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
@@ -25,8 +26,8 @@ use ad4m_client::literal::Literal;
 use chrono::DateTime;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
+use futures::future;
 use json5;
-use scryer_prolog::{QueryMatch, QueryResolution};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -156,8 +157,6 @@ pub struct PerspectiveInstance {
     pub is_fast_polling: bool,
     pub retries: u32,
 
-    prolog_engine: Arc<Mutex<Option<PrologEngine>>>,
-    prolog_needs_rebuild: Arc<Mutex<bool>>,
     is_teardown: Arc<Mutex<bool>>,
     sdna_change_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
@@ -178,8 +177,6 @@ impl PerspectiveInstance {
             created_from_join: created_from_join.unwrap_or(false),
             is_fast_polling: false,
             retries: 0,
-            prolog_engine: Arc::new(Mutex::new(None)),
-            prolog_needs_rebuild: Arc::new(Mutex::new(true)),
             is_teardown: Arc::new(Mutex::new(false)),
             sdna_change_mutex: Arc::new(Mutex::new(())),
             prolog_update_mutex: Arc::new(RwLock::new(())),
@@ -187,7 +184,7 @@ impl PerspectiveInstance {
             trigger_notification_check: Arc::new(Mutex::new(false)),
             trigger_prolog_subscription_check: Arc::new(Mutex::new(false)),
             commit_debounce_timer: Arc::new(Mutex::new(None)),
-            immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)), // Default to 3 immediate commits
+            immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -1203,25 +1200,20 @@ impl PerspectiveInstance {
         Ok(added)
     }
 
-    async fn ensure_prolog_engine(&self) -> Result<(), AnyError> {
-        let has_prolog_engine = { self.prolog_engine.lock().await.is_some() };
+    async fn ensure_prolog_engine_pool(&self) -> Result<(), AnyError> {
+        // Take write lock and check if we need to initialize
+        let _guard = self.prolog_update_mutex.write().await;
 
-        let mut rebuild_flag = self.prolog_needs_rebuild.lock().await;
+        // Get service reference before taking any locks
+        let service = get_prolog_service().await;
+        let uuid = self.persisted.lock().await.uuid.clone();
 
-        if !has_prolog_engine || *rebuild_flag {
-            let _update_lock = self.prolog_update_mutex.write().await;
-            let mut maybe_prolog_engine = self.prolog_engine.lock().await;
-            if *rebuild_flag && maybe_prolog_engine.is_some() {
-                let old_engine = maybe_prolog_engine.as_ref().unwrap();
-                let _ = old_engine.drop();
-                *rebuild_flag = false;
-            }
+        // Check if pool exists under the write lock
+        if !service.has_perspective_pool(uuid.clone()).await {
+            // Create and initialize new pool
+            service.ensure_perspective_pool(uuid.clone()).await?;
 
-            let mut engine = PrologEngine::new();
-            engine
-                .spawn()
-                .await
-                .map_err(|e| anyhow!("Failed to spawn Prolog engine: {}", e))?;
+            // Initialize with facts
             let all_links = self.get_links(&LinkQuery::default()).await?;
             let facts = init_engine_facts(
                 all_links,
@@ -1233,10 +1225,9 @@ impl PerspectiveInstance {
                     .map(|n| n.author.clone()),
             )
             .await?;
-            engine
-                .load_module_string("facts".to_string(), facts)
+            service
+                .update_perspective_facts(uuid, "facts".to_string(), facts)
                 .await?;
-            *maybe_prolog_engine = Some(engine);
         }
 
         Ok(())
@@ -1244,14 +1235,14 @@ impl PerspectiveInstance {
 
     /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
     pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
-        self.ensure_prolog_engine().await?;
+        // Get service reference before any locks
+        let service = get_prolog_service().await;
+        let uuid = self.persisted.lock().await.uuid.clone();
+
+        // Ensure pool exists
+        self.ensure_prolog_engine_pool().await?;
 
         let _read_lock = self.prolog_update_mutex.read().await;
-        let prolog_engine_mutex = self.prolog_engine.lock().await;
-        let prolog_engine_option_ref = prolog_engine_mutex.as_ref();
-        let prolog_engine = prolog_engine_option_ref
-            .as_ref()
-            .expect("Must be some since we initialized the engine above");
 
         let query = if !query.ends_with('.') {
             query + "."
@@ -1259,12 +1250,11 @@ impl PerspectiveInstance {
             query
         };
 
-        let result = prolog_engine.run_query(query).await?;
+        let result = service.run_query(uuid, query).await?;
 
         match result {
             Err(e) => {
-                let mut flag = self.prolog_needs_rebuild.lock().await;
-                *flag = true;
+                // Engine error is handled at pool level now
                 Err(anyhow!(e))
             }
             Ok(resolution) => Ok(resolution),
@@ -1279,31 +1269,37 @@ impl PerspectiveInstance {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = self_clone.ensure_prolog_engine().await {
-                log::error!("Error spawning Prolog engine: {:?}", e)
-            };
+            if let Err(e) = self_clone.ensure_prolog_engine_pool().await {
+                log::error!("Error spawning Prolog engine pool: {:?}", e);
+                if let Some(sender) = completion_sender {
+                    let _ = sender.send(());
+                }
+                return;
+            }
+
+            // Take write lock for the entire facts update operation
+            let _write_guard = self_clone.prolog_update_mutex.write().await;
 
             let fact_rebuild_needed = !diff.removals.is_empty()
                 || diff.additions.iter().any(|link| is_sdna_link(&link.data));
 
             let did_update = if !fact_rebuild_needed {
+                // For additions only, use assertions
                 let mut assertions: Vec<String> = Vec::new();
                 for addition in &diff.additions {
                     assertions.push(generic_link_fact("assert_link_and_triple", addition));
                 }
 
+                let service = get_prolog_service().await;
+                let uuid = self_clone.persisted.lock().await.uuid.clone();
+
+                // Join all assertions into a single query and run on all engines
                 let query = format!("{}.", assertions.join(","));
-                match self_clone.prolog_query(query).await {
-                    Ok(QueryResolution::True) => true,
+                match service.run_query_all(uuid, query).await {
+                    Ok(()) => true,
                     Err(e) => {
                         log::error!(
-                            "Error while running assertion query to updating Prolog engine facts: {:?}", e
-                        );
-                        false
-                    }
-                    other => {
-                        log::error!(
-                            "Error getting non-true result from assertion query while updating Prolog engine facts: {:?}", other
+                            "Error while running assertion query to update Prolog engine facts: {:?}", e
                         );
                         false
                     }
@@ -1422,11 +1418,9 @@ impl PerspectiveInstance {
     }
 
     async fn update_prolog_engine_facts(&self) -> Result<(), AnyError> {
-        let prolog_engine_mutex = self.prolog_engine.lock().await;
-        let prolog_engine_option_ref = prolog_engine_mutex.as_ref();
-        let prolog_engine = prolog_engine_option_ref
-            .as_ref()
-            .expect("Must be some since we initialized the engine above");
+        let service = get_prolog_service().await;
+        let uuid = self.persisted.lock().await.uuid.clone();
+
         let all_links = self.get_links(&LinkQuery::default()).await?;
         let facts = init_engine_facts(
             all_links,
@@ -1438,10 +1432,10 @@ impl PerspectiveInstance {
                 .map(|n| n.author.clone()),
         )
         .await?;
-        prolog_engine
-            .load_module_string("facts".to_string(), facts)
-            .await?;
 
+        service
+            .update_perspective_facts(uuid, "facts".to_string(), facts)
+            .await?;
         Ok(())
     }
 
@@ -1952,7 +1946,7 @@ impl PerspectiveInstance {
                 //println!("resolve_expression_uri for {}: {:?}", p, resolve_expression_uri);
                 let value = if resolve_expression_uri {
                     match &property_value {
-                        scryer_prolog::Value::String(s) => {
+                        scryer_prolog::Term::String(s) => {
                             //println!("getting expr url: {}", s);
                             let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
 
@@ -2124,42 +2118,61 @@ impl PerspectiveInstance {
 
     async fn check_subscribed_queries(&self) {
         let mut queries_to_remove = Vec::new();
-        let mut queries_with_changes = Vec::new();
+        let mut query_futures = Vec::new();
+        let now = Instant::now();
 
-        {
-            let mut queries = self.subscribed_queries.lock().await;
-            let now = Instant::now();
-            //log::info!("Checking {} subscribed queries", queries.len());
+        // First collect all the queries and their IDs
+        let queries = {
+            let queries = self.subscribed_queries.lock().await;
+            queries
+                .iter()
+                .map(|(id, query)| (id.clone(), query.clone()))
+                .collect::<Vec<_>>()
+        };
 
-            for (id, query) in queries.iter_mut() {
-                // Check for timeout
-                if now.duration_since(query.last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
-                    queries_to_remove.push(id.clone());
-                    continue;
-                }
-
-                //log::info!("Checking query: {}", query.query);
-                // Check for changes
-                if let Ok(result) = self.prolog_query(query.query.clone()).await {
-                    let result_string = prolog_resolution_to_string(result);
-                    if result_string != query.last_result {
-                        log::info!("Query {} has changed: {}", id, result_string);
-                        query.last_result = result_string.clone();
-                        queries_with_changes.push((id.clone(), result_string));
-                    }
-                }
+        // Create futures for each query check
+        for (id, query) in queries {
+            // Check for timeout
+            if now.duration_since(query.last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
+                queries_to_remove.push(id);
+                continue;
             }
 
-            // Remove timed out queries
+            // Spawn query check future
+            let self_clone = self.clone();
+            let query_future = async move {
+                //let this_now = Instant::now();
+                if let Ok(result) = self_clone.prolog_query(query.query.clone()).await {
+                    let result_string = prolog_resolution_to_string(result);
+                    if result_string != query.last_result {
+                        //log::info!("Query {} has changed: {}", id, result_string);
+                        // Update the query result and send notification immediately
+                        {
+                            self_clone
+                                .send_subscription_update(id.clone(), result_string.clone(), None)
+                                .await;
+                            let mut queries = self_clone.subscribed_queries.lock().await;
+                            if let Some(stored_query) = queries.get_mut(&id) {
+                                stored_query.last_result = result_string.clone();
+                            }
+                        }
+                    }
+                }
+                //log::info!("Query {} check took {:?}", id, this_now.elapsed());
+            };
+            query_futures.push(query_future);
+        }
+
+        // Wait for all query futures to complete
+        future::join_all(query_futures).await;
+        //log::info!("done checking subscribed queries in {:?}", now.elapsed());
+
+        // Remove timed out queries
+        if !queries_to_remove.is_empty() {
+            let mut queries = self.subscribed_queries.lock().await;
             for id in queries_to_remove {
                 queries.remove(&id);
             }
-        }
-
-        // Publish changes
-        for (id, result) in queries_with_changes {
-            self.send_subscription_update(id.clone(), result.clone(), None)
-                .await;
         }
     }
 
