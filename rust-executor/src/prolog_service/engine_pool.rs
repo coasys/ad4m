@@ -1,7 +1,7 @@
 use super::engine::PrologEngine;
+use super::types::{QueryResolution, QueryResult};
 use deno_core::anyhow::{anyhow, Error};
 use futures::future::join_all;
-use super::types::{QueryResolution, QueryResult};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;

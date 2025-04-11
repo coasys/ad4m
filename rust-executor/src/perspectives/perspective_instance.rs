@@ -14,6 +14,7 @@ use crate::languages::language::Language;
 use crate::languages::LanguageController;
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
 use crate::prolog_service::get_prolog_service;
+use crate::prolog_service::types::{QueryMatch, QueryResolution};
 use crate::pubsub::{
     get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC,
     PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
@@ -27,7 +28,6 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use futures::future;
 use json5;
-use crate::prolog_service::types::{QueryMatch, QueryResolution};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};

@@ -98,10 +98,10 @@ pub async fn get_prolog_service() -> PrologService {
 
 #[cfg(test)]
 mod prolog_test {
+    use super::*;
+    use crate::prolog_service::types::{QueryMatch, QueryResolution};
     use maplit::btreemap;
     use scryer_prolog::Term;
-    use super::*;   
-    use crate::prolog_service::types::{QueryMatch, QueryResolution};
 
     #[tokio::test]
     async fn test_init_prolog_service() {

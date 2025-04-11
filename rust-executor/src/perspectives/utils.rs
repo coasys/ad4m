@@ -121,19 +121,13 @@ pub fn prolog_get_all_string_bindings(
     }
 }
 
-pub fn prolog_get_first_binding(
-    result: &QueryResolution,
-    variable_name: &str,
-) -> Option<Term> {
+pub fn prolog_get_first_binding(result: &QueryResolution, variable_name: &str) -> Option<Term> {
     prolog_get_all_bindings(result, variable_name)
         .into_iter()
         .next()
 }
 
-pub fn prolog_get_all_bindings(
-    result: &QueryResolution,
-    variable_name: &str,
-) -> Vec<Term> {
+pub fn prolog_get_all_bindings(result: &QueryResolution, variable_name: &str) -> Vec<Term> {
     if let QueryResolution::Matches(matches) = result {
         matches
             .iter()

@@ -13,10 +13,14 @@ impl From<std::collections::BTreeMap<String, Term>> for QueryMatch {
 
 impl From<std::collections::BTreeMap<&str, Term>> for QueryMatch {
     fn from(bindings: std::collections::BTreeMap<&str, Term>) -> Self {
-        QueryMatch { bindings: bindings.into_iter().map(|(k, v)| (k.to_string(), v)).collect() }
+        QueryMatch {
+            bindings: bindings
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        }
     }
 }
-
 
 #[derive(Debug, PartialEq)]
 pub enum QueryResolution {
@@ -58,14 +62,15 @@ impl From<Vec<LeafAnswer>> for QueryResolution {
             }
         }
     }
-} 
+}
 
 pub type QueryResult = Result<QueryResolution, String>;
 
 pub fn query_result_from_leaf_answer(result: Result<Vec<LeafAnswer>, Term>) -> QueryResult {
-    result.map(QueryResolution::from).map_err(|e| term_to_string(e))
+    result
+        .map(QueryResolution::from)
+        .map_err(|e| term_to_string(e))
 }
-
 
 pub fn term_to_string(value: Term) -> String {
     match value {
