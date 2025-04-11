@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+mod embedding_cache;
 pub(crate) mod engine;
 pub(crate) mod engine_pool;
 pub mod types;
