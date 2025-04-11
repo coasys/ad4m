@@ -119,11 +119,17 @@ export function AgentProvider({ children }: any) {
     console.log("Holochain config:", holochain);
     setLoading(true);
 
-    let agentStatus = await client?.agent.unlock(password, holochain);
+    let agentStatus: AgentStatus | null = null;
+    try {
+      agentStatus = await client?.agent.unlock(password, holochain);
+    } catch (error) {
+      console.error("Error unlocking agent:", error);
+      setState((prev) => ({ ...prev, hasLoginError: true }));
+    }
 
     setLoading(false);
 
-    if (agentStatus!.isUnlocked) {
+    if (agentStatus?.isUnlocked) {
       handleLogin(client!, agentStatus!.isUnlocked, agentStatus!.did!);
       console.log("agent status in unlock: ", agentStatus);
       await invoke("close_main_window");
