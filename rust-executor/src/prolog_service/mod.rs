@@ -1,6 +1,5 @@
 use deno_core::anyhow::Error;
 use lazy_static::lazy_static;
-use scryer_prolog::QueryResult;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -8,8 +7,10 @@ use tokio::sync::RwLock;
 mod embedding_cache;
 pub(crate) mod engine;
 pub(crate) mod engine_pool;
+pub mod types;
 
 use self::engine_pool::PrologEnginePool;
+use self::types::QueryResult;
 
 const DEFAULT_POOL_SIZE: usize = 10;
 
@@ -98,10 +99,10 @@ pub async fn get_prolog_service() -> PrologService {
 
 #[cfg(test)]
 mod prolog_test {
-    use maplit::btreemap;
-    use scryer_prolog::{QueryMatch, QueryResolution, Value};
-
     use super::*;
+    use crate::prolog_service::types::{QueryMatch, QueryResolution};
+    use maplit::btreemap;
+    use scryer_prolog::Term;
 
     #[tokio::test]
     async fn test_init_prolog_service() {
@@ -139,10 +140,10 @@ mod prolog_test {
             result,
             Ok(QueryResolution::Matches(vec![
                 QueryMatch::from(btreemap! {
-                    "P" => Value::from("p1"),
+                    "P" => Term::string("p1"),
                 }),
                 QueryMatch::from(btreemap! {
-                    "P" => Value::from("p2"),
+                    "P" => Term::string("p2"),
                 }),
             ]))
         );
@@ -163,7 +164,7 @@ mod prolog_test {
 
         assert_eq!(
             result,
-            Err(String::from("error existence_error procedure / non_existant_predicate 3 / non_existant_predicate 3"))
+            Err(String::from("{ 'error': [{ 'existence_error': ['procedure', { '/': ['non_existant_predicate', 3] }] }, { '/': ['non_existant_predicate', 3] }] }"))
         );
 
         // Test pool removal

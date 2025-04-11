@@ -105,12 +105,12 @@ export async function startExecutor(dataPath: string,
         });
     })
 
-    // executorProcess!.stdout!.on('data', (data) => {
-    //     console.log(`${data}`);
-    // });
-    // executorProcess!.stderr!.on('data', (data) => {
-    //     console.log(`${data}`);
-    // });
+    executorProcess!.stdout!.on('data', (data) => {
+        console.log(`${data}`);
+    });
+    executorProcess!.stderr!.on('data', (data) => {
+        console.log(`${data}`);
+    });
 
     console.log("Waiting for executor to settle...")
     await executorReady

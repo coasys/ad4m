@@ -1,5 +1,6 @@
 use super::embedding_cache::EmbeddingCache;
 use super::engine::PrologEngine;
+use super::types::{QueryResolution, QueryResult};
 use deno_core::anyhow::{anyhow, Error};
 use futures::future::join_all;
 use lazy_static::lazy_static;
@@ -134,6 +135,8 @@ impl PrologEnginePool {
                 Ok(result)
             }
         }
+
+        result.map_err(|e| anyhow!("{}", e))
     }
 
     pub async fn run_query_all(&self, query: String) -> Result<(), Error> {
@@ -226,8 +229,7 @@ impl PrologEnginePool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scryer_prolog::{QueryResolution, Value};
-
+    use scryer_prolog::Term;
     #[tokio::test]
     async fn test_pool_initialization() {
         let pool = PrologEnginePool::new(3);
@@ -288,7 +290,7 @@ mod tests {
         match result {
             Ok(QueryResolution::Matches(matches)) => {
                 assert_eq!(matches.len(), 1);
-                assert_eq!(matches[0].bindings["X"], Value::Atom("a".to_string()));
+                assert_eq!(matches[0].bindings["X"], Term::Atom("a".to_string()));
             }
             _ => panic!("Expected matches"),
         }
