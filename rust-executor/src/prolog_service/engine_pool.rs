@@ -5,7 +5,7 @@ use deno_core::anyhow::{anyhow, Error};
 use futures::future::join_all;
 use lazy_static::lazy_static;
 use regex::Regex;
-use scryer_prolog::{QueryResolution, QueryResult, Value};
+use scryer_prolog::Term;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -53,20 +53,20 @@ impl PrologEnginePool {
             .to_string()
     }
 
-    async fn replace_embedding_url_in_value_recursively(&self, value: &mut Value) {
+    async fn replace_embedding_url_in_value_recursively(&self, value: &mut Term) {
         let cache = self.embedding_cache.read().await;
         match value {
-            Value::String(s) => {
+            Term::String(s) => {
                 if let Some(url) = cache.get_vector_url(s) {
-                    *value = Value::String(url);
+                    *value = Term::String(url);
                 }
             }
-            Value::Atom(s) => {
+            Term::Atom(s) => {
                 if let Some(url) = cache.get_vector_url(s) {
-                    *value = Value::Atom(url);
+                    *value = Term::Atom(url);
                 }
             }
-            Value::List(list) => {
+            Term::List(list) => {
                 for item in list {
                     Box::pin(self.replace_embedding_url_in_value_recursively(item)).await;
                 }
@@ -112,7 +112,7 @@ impl PrologEnginePool {
         // Run query
         let result = engine.run_query(processed_query.clone()).await;
 
-        match result {
+        let result = match result {
             Err(e) => {
                 log::error!("Prolog engine error: {}", e);
                 log::error!("when running query: {}", query);
@@ -134,7 +134,7 @@ impl PrologEnginePool {
                 }
                 Ok(result)
             }
-        }
+        };
 
         result.map_err(|e| anyhow!("{}", e))
     }
