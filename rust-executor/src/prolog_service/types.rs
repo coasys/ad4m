@@ -31,30 +31,31 @@ impl From<Vec<LeafAnswer>> for QueryResolution {
             return QueryResolution::False;
         }
 
+        let mut found_true = false;
+
         let mut matches = Vec::new();
         for answer in answers {
             match answer {
                 LeafAnswer::True => {
-                    return QueryResolution::True;
-                }
-                LeafAnswer::False => {
-                    return QueryResolution::False;
+                    found_true = true;
                 }
                 LeafAnswer::LeafAnswer { bindings, .. } => {
                     matches.push(QueryMatch { bindings });
                 }
-                LeafAnswer::Exception(_) => {
-                    // For now, we'll treat exceptions as false
-                    // We could add an Exception variant to QueryResolution if needed
-                    return QueryResolution::False;
+                _ => {
+                    continue;
                 }
             }
         }
 
-        if matches.is_empty() {
-            QueryResolution::False
+        if found_true {
+            QueryResolution::True
         } else {
-            QueryResolution::Matches(matches)
+            if matches.is_empty() {
+                QueryResolution::False
+            } else {
+                QueryResolution::Matches(matches)
+            }
         }
     }
 } 
