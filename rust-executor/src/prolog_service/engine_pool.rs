@@ -154,15 +154,21 @@ impl PrologEnginePool {
 
         let results = join_all(futures).await;
 
+        let mut errors = Vec::new();
         for result in results {
             match result? {
                 Ok(QueryResolution::True) => continue,
                 Ok(other) => log::info!("Unexpected query result: {:?}", other),
-                Err(e) => log::error!("Query failed: {}", e),
+                Err(e) => errors.push(e),
             }
         }
 
-        Ok(())
+        if !errors.is_empty() {
+            log::error!("Errors occurred while running queries: {}", errors.join(", "));
+            Err(anyhow!("Errors occurred while running queries: {}", errors.join(", ")))
+        } else {
+            Ok(())
+        }
     }
 
     pub async fn update_all_engines(
@@ -257,7 +263,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Test query that should fail on all engines
-        let result = pool.run_query_all("false.".to_string()).await;
+        let result = pool.run_query_all("broken query".to_string()).await;
         assert!(result.is_err());
     }
 
