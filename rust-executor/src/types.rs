@@ -242,6 +242,47 @@ impl From<PerspectiveInput> for Perspective {
     }
 }
 
+impl From<crate::graphql::graphql_types::Perspective> for Perspective {
+    fn from(input: crate::graphql::graphql_types::Perspective) -> Self {
+        Perspective { links: input.links.into_iter().map(LinkExpression::try_from).filter_map(Result::ok).collect() }
+    }
+}
+
+#[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct PerspectiveExpression {
+    pub author: String,
+    pub data: Perspective,
+    pub proof: ExpressionProof,
+    pub timestamp: String,
+}
+
+impl From<Expression<Perspective>> for PerspectiveExpression {
+    fn from(expr: Expression<Perspective>) -> Self {
+        PerspectiveExpression {
+            author: expr.author,
+            data: expr.data,
+            proof: expr.proof,
+            timestamp: expr.timestamp,
+        }
+    }
+}
+
+impl From<crate::graphql::graphql_types::PerspectiveExpression> for PerspectiveExpression {
+    fn from(input: crate::graphql::graphql_types::PerspectiveExpression) -> Self {
+        PerspectiveExpression {
+            author: input.author,
+            data: input.data.into(),
+            proof: ExpressionProof {
+                key: input.proof.key,
+                signature: input.proof.signature,
+            },
+            timestamp: input.timestamp,
+        }
+    }
+}
+
+
+
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Neighbourhood {
     pub link_language: String,

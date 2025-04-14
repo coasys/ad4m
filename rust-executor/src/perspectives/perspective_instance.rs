@@ -1493,8 +1493,7 @@ impl PerspectiveInstance {
     pub async fn set_online_status(&self, status: PerspectiveExpression) -> Result<(), AnyError> {
         let handle = self.persisted.lock().await.clone();
         if let Some(neighbourhood) = &handle.neighbourhood {
-            let service = get_libp2p_service().await?;
-            service.set_online_status(&neighbourhood.data.link_language, status).await?;
+            Libp2pService::global_instance().await?.set_online_status(&neighbourhood.data.link_language, status.into()).await?;
             Ok(())
         } else {
             Err(anyhow!("Perspective is not part of a neighbourhood"))
@@ -1508,8 +1507,7 @@ impl PerspectiveInstance {
     ) -> Result<(), AnyError> {
         let handle = self.persisted.lock().await.clone();
         if let Some(neighbourhood) = &handle.neighbourhood {
-            let service = get_libp2p_service().await?;
-            service.send_signal(&neighbourhood.data.link_language, &remote_agent_did, payload).await?;
+            Libp2pService::global_instance().await?.send_signal(&neighbourhood.data.link_language, &remote_agent_did, payload.into()).await?;
             Ok(())
         } else {
             Err(anyhow!("Perspective is not part of a neighbourhood"))
@@ -1534,8 +1532,7 @@ impl PerspectiveInstance {
 
         let handle = self.persisted.lock().await.clone();
         if let Some(neighbourhood) = &handle.neighbourhood {
-            let service = get_libp2p_service().await?;
-            service.send_broadcast(&neighbourhood.data.link_language, payload).await?;
+            Libp2pService::global_instance().await?.send_broadcast(&neighbourhood.data.link_language, payload.into()).await?;
             Ok(())
         } else {
             Err(anyhow!("Perspective is not part of a neighbourhood"))

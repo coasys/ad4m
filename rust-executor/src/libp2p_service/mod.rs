@@ -1,5 +1,6 @@
 use std::{
     hash::{Hash, Hasher},
+    time::Duration,
 };
 
 use libp2p::{
@@ -19,11 +20,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use anyhow::{Result, anyhow};
-use crate::types::Expression;
-use std::io;
+use crate::types::PerspectiveExpression;
 
-// Define PerspectiveExpression as an alias for Expression<serde_json::Value>
-pub type PerspectiveExpression = Expression<serde_json::Value>;
+lazy_static! {
+    static ref LIBP2P_SERVICE: Arc<Mutex<Option<Libp2pService>>> = Arc::new(Mutex::new(None));
+}
 
 // Topic for each neighbourhood's telepresence signals
 const TELEPRESENCE_TOPIC_PREFIX: &str = "/ad4m/telepresence/";
@@ -67,6 +68,7 @@ struct MyBehaviour {
     request_response: json::Behaviour<TelepresenceMessage, TelepresenceMessage>,
 }
 
+#[derive(Clone)]
 pub struct Libp2pService {
     swarm: Arc<Mutex<Swarm<MyBehaviour>>>,
     online_agents: Arc<Mutex<HashMap<String, HashMap<String, OnlineAgent>>>>, // neighbourhood_id -> agent_did -> OnlineAgent
@@ -305,5 +307,41 @@ impl Libp2pService {
             .or_insert_with(Vec::new);
         neighbourhood_callbacks.push(Box::new(callback));
         Ok(())
+    }
+
+    pub async fn init_global_instance(bootstrap_nodes: Vec<String>) -> Result<()> {
+        let service = Libp2pService::new(bootstrap_nodes).await?;
+        service.start().await?;
+        
+        let mut global_service = LIBP2P_SERVICE.lock().await;
+        *global_service = Some(service);
+        
+        Ok(())
+    }
+
+    pub async fn global_instance() -> Result<Libp2pService> {
+        LIBP2P_SERVICE
+            .lock()
+            .await
+            .clone()
+            .ok_or(anyhow!("Libp2p service not initialized"))
+    }
+
+    pub async fn with_global_instance<F, R>(func: F) -> Result<R>
+    where
+        F: FnOnce(&Libp2pService) -> R,
+    {
+        let global_instance_arc = LIBP2P_SERVICE.lock().await;
+        let service_ref = global_instance_arc.as_ref().ok_or(anyhow!("Libp2p service not initialized"))?;
+        Ok(func(service_ref))
+    }
+
+    pub async fn with_mutable_global_instance<F, R>(func: F) -> Result<R>
+    where
+        F: FnOnce(&mut Libp2pService) -> R,
+    {
+        let mut global_instance_arc = LIBP2P_SERVICE.lock().await;
+        let service_mut = global_instance_arc.as_mut().ok_or(anyhow!("Libp2p service not initialized"))?;
+        Ok(func(service_mut))
     }
 } 

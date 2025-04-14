@@ -49,33 +49,6 @@ extern "C" fn handle_sigurg(_: libc::c_int) {
     //println!("Received SIGURG signal, but ignoring it.");
 }
 
-lazy_static! {
-    static ref LIBP2P_SERVICE: Arc<Mutex<Option<Libp2pService>>> = Arc::new(Mutex::new(None));
-}
-
-pub async fn init_libp2p_service() -> Result<()> {
-    let bootstrap_nodes = vec![
-        // TODO: Add the actual bootstrap node URL
-        "/ip4/127.0.0.1/tcp/4001".to_string(),
-    ];
-    
-    let service = Libp2pService::new(bootstrap_nodes).await?;
-    service.start().await?;
-    
-    let mut global_service = LIBP2P_SERVICE.lock().await;
-    *global_service = Some(service);
-    
-    Ok(())
-}
-
-pub async fn get_libp2p_service() -> Result<Arc<Libp2pService>> {
-    let service = LIBP2P_SERVICE.lock().await;
-    match &*service {
-        Some(s) => Ok(Arc::new(s.clone())),
-        None => Err(anyhow!("Libp2p service not initialized")),
-    }
-}
-
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     unsafe {
@@ -117,6 +90,15 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     AIService::init_global_instance()
         .await
         .expect("Couldn't initialize AI service");
+
+    info!("Initializing libp2p service...");
+    let bootstrap_nodes = vec![
+        // TODO: Add the actual bootstrap node URL
+        "/ip4/127.0.0.1/tcp/4001".to_string(),
+    ];
+    Libp2pService::init_global_instance(bootstrap_nodes)
+        .await
+        .expect("Couldn't initialize libp2p service");
 
     info!("Initializing Agent service...");
     AgentService::init_global_instance(config.app_data_path.clone().unwrap());
