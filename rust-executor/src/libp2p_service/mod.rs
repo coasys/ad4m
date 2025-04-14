@@ -74,6 +74,7 @@ pub struct Libp2pService {
     signal_callbacks:
         Arc<Mutex<HashMap<String, Vec<Box<dyn Fn(PerspectiveExpression) + Send + Sync>>>>>,
     peer_to_did: Arc<Mutex<HashMap<PeerId, String>>>, // Map peer IDs to agent DIDs
+    topic_to_neighbourhood: Arc<Mutex<HashMap<gossipsub::TopicHash, String>>>, // Map topic hashes to neighbourhood IDs
 }
 
 impl Libp2pService {
@@ -126,6 +127,7 @@ impl Libp2pService {
             bootstrap_nodes,
             signal_callbacks: Arc::new(Mutex::new(HashMap::new())),
             peer_to_did: Arc::new(Mutex::new(HashMap::new())),
+            topic_to_neighbourhood: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -147,6 +149,7 @@ impl Libp2pService {
         let online_agents_clone = self.online_agents.clone();
         let signal_callbacks_clone = self.signal_callbacks.clone();
         let peer_to_did_clone = self.peer_to_did.clone();
+        let topic_to_neighbourhood_clone = self.topic_to_neighbourhood.clone();
 
         tokio::spawn(async move {
             let mut swarm = swarm_clone.lock().await;
@@ -160,20 +163,14 @@ impl Libp2pService {
                             ..
                         },
                     )) => {
-                        // Extract neighbourhood_id from topic
-                        let topic_str = message.topic.to_string();
-                        if let Some(neighbourhood_id) =
-                            topic_str.strip_prefix(TELEPRESENCE_TOPIC_PREFIX)
-                        {
-                            if let Ok(msg) =
-                                serde_json::from_slice::<TelepresenceMessage>(&message.data)
-                            {
+                        let topic_hash = message.topic;
+                        let mapping = topic_to_neighbourhood_clone.lock().await;
+                        if let Some(neighbourhood_id) = mapping.get(&topic_hash) {
+                            if let Ok(msg) = serde_json::from_slice::<TelepresenceMessage>(&message.data) {
                                 match msg {
                                     TelepresenceMessage::Signal(payload) => {
                                         let callbacks = signal_callbacks_clone.lock().await;
-                                        if let Some(neighbourhood_callbacks) =
-                                            callbacks.get(neighbourhood_id)
-                                        {
+                                        if let Some(neighbourhood_callbacks) = callbacks.get(neighbourhood_id) {
                                             for callback in neighbourhood_callbacks {
                                                 callback(payload.clone());
                                             }
@@ -260,17 +257,31 @@ impl Libp2pService {
         Ok(())
     }
 
+    pub async fn subscribe_to_neighbourhood(&self, neighbourhood_id: String) -> Result<()> {
+        let topic = gossipsub::IdentTopic::new(format!("{}{}", TELEPRESENCE_TOPIC_PREFIX, neighbourhood_id));
+        let topic_hash = topic.hash();
+        
+        let mut swarm = self.swarm.lock().await;
+        swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
+        
+        // Store the mapping
+        let mut mapping = self.topic_to_neighbourhood.lock().await;
+        mapping.insert(topic_hash, neighbourhood_id);
+        
+        Ok(())
+    }
+
     pub async fn set_online_status(
         &self,
-        neighbourhood_id: &str,
+        neighbourhood_id: String,
         status: PerspectiveExpression,
-    ) -> Result<()> {
+    ) -> Result<()> {        
         let mut online_agents = self.online_agents.lock().await;
         // TODO: Get agent DID from somewhere
         let agent_did = "placeholder_did".to_string();
 
         let neighbourhood_agents = online_agents
-            .entry(neighbourhood_id.to_string())
+            .entry(neighbourhood_id)
             .or_insert_with(HashMap::new);
 
         neighbourhood_agents.insert(
@@ -281,18 +292,10 @@ impl Libp2pService {
             },
         );
 
-        // Subscribe to the neighbourhood's telepresence topic if not already subscribed
-        let topic = gossipsub::IdentTopic::new(format!(
-            "{}{}",
-            TELEPRESENCE_TOPIC_PREFIX, neighbourhood_id
-        ));
-        let mut swarm = self.swarm.lock().await;
-        swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
-
         Ok(())
     }
 
-    pub async fn get_online_agents(&self, neighbourhood_id: &str) -> Result<Vec<OnlineAgent>> {
+    pub async fn get_online_agents(&self, neighbourhood_id: String) -> Result<Vec<OnlineAgent>> {
         // First get local agents
         let mut online_agents = self.online_agents.lock().await;
         let neighbourhood_agents = online_agents
@@ -319,8 +322,8 @@ impl Libp2pService {
 
     pub async fn send_signal(
         &self,
-        neighbourhood_id: &str,
-        remote_agent_did: &str,
+        neighbourhood_id: String,
+        remote_agent_did: String,
         payload: PerspectiveExpression,
     ) -> Result<()> {
         let topic = gossipsub::IdentTopic::new(format!(
@@ -338,7 +341,7 @@ impl Libp2pService {
 
     pub async fn send_broadcast(
         &self,
-        neighbourhood_id: &str,
+        neighbourhood_id: String,
         payload: PerspectiveExpression,
     ) -> Result<()> {
         let topic = gossipsub::IdentTopic::new(format!(
@@ -356,7 +359,7 @@ impl Libp2pService {
 
     pub async fn register_signal_callback<F>(
         &self,
-        neighbourhood_id: &str,
+        neighbourhood_id: String,
         callback: F,
     ) -> Result<()>
     where

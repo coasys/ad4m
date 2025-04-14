@@ -207,6 +207,7 @@ impl PerspectiveInstance {
 
     async fn ensure_link_language(&self) {
         let mut interval = time::interval(Duration::from_secs(5));
+        let mut libp2p_subscribed = false;
         while !*self.is_teardown.lock().await {
             if self.link_language.lock().await.is_none()
                 && self.persisted.lock().await.neighbourhood.is_some()
@@ -253,6 +254,22 @@ impl PerspectiveInstance {
                             PerspectiveState::LinkLanguageFailedToInstall,
                         )
                         .await;
+                    }
+                }
+            } else {
+                if let Some(neighbourhood) = self.persisted.lock().await.neighbourhood.clone() {
+                    if !libp2p_subscribed {
+                        match Libp2pService::global_instance() 
+                            .await
+                            .expect("Failed to get Libp2pService global instance")
+                            .subscribe_to_neighbourhood(neighbourhood.data.link_language.clone())
+                            .await 
+                        {
+                                Ok(_) => libp2p_subscribed = true,
+                                Err(e) => {
+                                    log::error!("Error subscribing to neighbourhood: {:?}", e);
+                                }
+                        }
                     }
                 }
             }
@@ -1495,7 +1512,7 @@ impl PerspectiveInstance {
         if let Some(neighbourhood) = &handle.neighbourhood {
             Libp2pService::global_instance()
                 .await?
-                .set_online_status(&neighbourhood.data.link_language, status.into())
+                .set_online_status(neighbourhood.data.link_language.clone(), status.into())
                 .await?;
             Ok(())
         } else {
@@ -1513,8 +1530,8 @@ impl PerspectiveInstance {
             Libp2pService::global_instance()
                 .await?
                 .send_signal(
-                    &neighbourhood.data.link_language,
-                    &remote_agent_did,
+                    neighbourhood.data.link_language.clone(),
+                    remote_agent_did,
                     payload.into(),
                 )
                 .await?;
@@ -1544,7 +1561,7 @@ impl PerspectiveInstance {
         if let Some(neighbourhood) = &handle.neighbourhood {
             Libp2pService::global_instance()
                 .await?
-                .send_broadcast(&neighbourhood.data.link_language, payload.into())
+                .send_broadcast(neighbourhood.data.link_language.clone(), payload.into())
                 .await?;
             Ok(())
         } else {
