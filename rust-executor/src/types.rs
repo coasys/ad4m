@@ -244,7 +244,14 @@ impl From<PerspectiveInput> for Perspective {
 
 impl From<crate::graphql::graphql_types::Perspective> for Perspective {
     fn from(input: crate::graphql::graphql_types::Perspective) -> Self {
-        Perspective { links: input.links.into_iter().map(LinkExpression::try_from).filter_map(Result::ok).collect() }
+        Perspective {
+            links: input
+                .links
+                .into_iter()
+                .map(LinkExpression::try_from)
+                .filter_map(Result::ok)
+                .collect(),
+        }
     }
 }
 
@@ -280,8 +287,6 @@ impl From<crate::graphql::graphql_types::PerspectiveExpression> for PerspectiveE
         }
     }
 }
-
-
 
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Neighbourhood {

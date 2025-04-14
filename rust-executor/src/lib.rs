@@ -18,13 +18,13 @@ mod dapp_server;
 mod db;
 pub mod init;
 pub mod languages;
+pub mod libp2p_service;
 mod neighbourhoods;
 pub mod perspectives;
 mod pubsub;
 #[cfg(test)]
 mod test_utils;
 pub mod types;
-pub mod libp2p_service;
 
 use std::{env, thread::JoinHandle};
 
@@ -40,8 +40,8 @@ use crate::{
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
 use libc::{sigaction, sigemptyset, sighandler_t, SA_ONSTACK, SIGURG};
-use std::ptr;
 use libp2p_service::Libp2pService;
+use std::ptr;
 
 extern "C" fn handle_sigurg(_: libc::c_int) {
     //println!("Received SIGURG signal, but ignoring it.");

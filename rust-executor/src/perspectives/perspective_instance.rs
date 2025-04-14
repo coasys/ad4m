@@ -12,6 +12,7 @@ use crate::graphql::graphql_types::{
 };
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
+use crate::libp2p_service::Libp2pService;
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
 use crate::prolog_service::get_prolog_service;
 use crate::prolog_service::types::{QueryMatch, QueryResolution};
@@ -38,7 +39,6 @@ use tokio::time::{sleep, Instant};
 use tokio::{join, time};
 use uuid;
 use uuid::Uuid;
-use crate::libp2p_service::Libp2pService;
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
@@ -1493,7 +1493,10 @@ impl PerspectiveInstance {
     pub async fn set_online_status(&self, status: PerspectiveExpression) -> Result<(), AnyError> {
         let handle = self.persisted.lock().await.clone();
         if let Some(neighbourhood) = &handle.neighbourhood {
-            Libp2pService::global_instance().await?.set_online_status(&neighbourhood.data.link_language, status.into()).await?;
+            Libp2pService::global_instance()
+                .await?
+                .set_online_status(&neighbourhood.data.link_language, status.into())
+                .await?;
             Ok(())
         } else {
             Err(anyhow!("Perspective is not part of a neighbourhood"))
@@ -1507,7 +1510,14 @@ impl PerspectiveInstance {
     ) -> Result<(), AnyError> {
         let handle = self.persisted.lock().await.clone();
         if let Some(neighbourhood) = &handle.neighbourhood {
-            Libp2pService::global_instance().await?.send_signal(&neighbourhood.data.link_language, &remote_agent_did, payload.into()).await?;
+            Libp2pService::global_instance()
+                .await?
+                .send_signal(
+                    &neighbourhood.data.link_language,
+                    &remote_agent_did,
+                    payload.into(),
+                )
+                .await?;
             Ok(())
         } else {
             Err(anyhow!("Perspective is not part of a neighbourhood"))
@@ -1532,7 +1542,10 @@ impl PerspectiveInstance {
 
         let handle = self.persisted.lock().await.clone();
         if let Some(neighbourhood) = &handle.neighbourhood {
-            Libp2pService::global_instance().await?.send_broadcast(&neighbourhood.data.link_language, payload.into()).await?;
+            Libp2pService::global_instance()
+                .await?
+                .send_broadcast(&neighbourhood.data.link_language, payload.into())
+                .await?;
             Ok(())
         } else {
             Err(anyhow!("Perspective is not part of a neighbourhood"))
