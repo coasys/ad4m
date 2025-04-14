@@ -21,6 +21,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+const PORT: u16 = 15415;
+
 lazy_static! {
     static ref LIBP2P_SERVICE: Arc<Mutex<Option<Libp2pService>>> = Arc::new(Mutex::new(None));
 }
@@ -159,7 +161,8 @@ impl Libp2pService {
         }
 
         // Start listening on all interfaces
-        (*swarm).listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+        let listen_addr = format!("/ip4/0.0.0.0/tcp/{}", PORT);
+        (*swarm).listen_on(listen_addr.parse()?)?;
 
         // Start processing events
         let swarm_clone = self.swarm.clone();

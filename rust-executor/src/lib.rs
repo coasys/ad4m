@@ -47,6 +47,8 @@ extern "C" fn handle_sigurg(_: libc::c_int) {
     //println!("Received SIGURG signal, but ignoring it.");
 }
 
+const PERSISTENCE_NODE: &str = "207.148.16.17";
+
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     unsafe {
@@ -91,8 +93,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     info!("Initializing libp2p service...");
     let bootstrap_nodes = vec![
-        // TODO: Add the actual bootstrap node URL
-        "/ip4/127.0.0.1/tcp/4001".to_string(),
+        format!("/ip4/{}/tcp/{}", PERSISTENCE_NODE, libp2p_service::PORT),
     ];
     Libp2pService::init_global_instance(bootstrap_nodes)
         .await
