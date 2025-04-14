@@ -210,6 +210,22 @@ impl From<(LinkExpression, LinkStatus)> for DecoratedLinkExpression {
     }
 }
 
+impl From<LinkExpression> for DecoratedLinkExpression {
+    fn from(expr: LinkExpression) -> Self {
+        let status = expr.status.clone();
+        let mut expr: Expression<Link> = expr.into();
+        expr.data = expr.data.normalize();
+        let verified_expr: VerifiedExpression<Link> = expr.into();
+        DecoratedLinkExpression {
+            author: verified_expr.author,
+            timestamp: verified_expr.timestamp,
+            data: verified_expr.data,
+            proof: verified_expr.proof,
+            status,
+        }
+    }
+}
+
 impl From<DecoratedLinkExpression> for LinkExpression {
     fn from(decorated: DecoratedLinkExpression) -> Self {
         LinkExpression {

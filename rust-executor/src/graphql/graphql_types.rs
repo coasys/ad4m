@@ -2,8 +2,7 @@ use crate::agent::capabilities::{AuthInfo, Capability};
 use crate::agent::signatures::verify;
 use crate::js_core::JsCoreHandle;
 use crate::types::{
-    AIPromptExamples, AITask, DecoratedExpressionProof, DecoratedLinkExpression, Expression,
-    ExpressionProof, Link, ModelType, Notification, TriggeredNotification,
+    AIPromptExamples, AITask, DecoratedExpressionProof, DecoratedLinkExpression, Expression, ExpressionProof, Link, LinkExpression, ModelType, Notification, TriggeredNotification
 };
 use coasys_juniper::{
     FieldError, FieldResult, GraphQLEnum, GraphQLInputObject, GraphQLObject, GraphQLScalar,
@@ -375,6 +374,17 @@ impl Perspective {
     }
 }
 
+impl From<crate::types::Perspective> for Perspective {
+    fn from(perspective: crate::types::Perspective) -> Self {
+        let links = perspective
+            .links
+            .into_iter()
+            .map(|link: LinkExpression| DecoratedLinkExpression::from(link))
+            .collect();
+        Perspective { links }
+    }
+}
+
 impl From<PerspectiveInput> for Perspective {
     fn from(input: PerspectiveInput) -> Self {
         let links = input
@@ -424,6 +434,22 @@ impl From<Expression<Perspective>> for PerspectiveExpression {
         PerspectiveExpression {
             author: expr.author,
             data: expr.data,
+            proof: DecoratedExpressionProof {
+                key: expr.proof.key,
+                signature: expr.proof.signature,
+                valid: None,
+                invalid: None,
+            },
+            timestamp: expr.timestamp,
+        }
+    }
+}
+
+impl From<crate::types::PerspectiveExpression> for PerspectiveExpression {
+    fn from(expr: crate::types::PerspectiveExpression) -> Self {
+        PerspectiveExpression {
+            author: expr.author,
+            data: expr.data.into(),
             proof: DecoratedExpressionProof {
                 key: expr.proof.key,
                 signature: expr.proof.signature,

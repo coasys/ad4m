@@ -259,16 +259,28 @@ impl PerspectiveInstance {
             } else {
                 if let Some(neighbourhood) = self.persisted.lock().await.neighbourhood.clone() {
                     if !libp2p_subscribed {
-                        match Libp2pService::global_instance() 
+                        let subscribe_result = Libp2pService::global_instance() 
                             .await
                             .expect("Failed to get Libp2pService global instance")
                             .subscribe_to_neighbourhood(neighbourhood.data.link_language.clone())
-                            .await 
-                        {
-                                Ok(_) => libp2p_subscribed = true,
-                                Err(e) => {
-                                    log::error!("Error subscribing to neighbourhood: {:?}", e);
-                                }
+                            .await;
+
+                        if let Err(e) = subscribe_result {
+                            log::error!("Error subscribing to neighbourhood: {:?}", e);
+                        } else {
+                            libp2p_subscribed = true;
+                            let self_clone = self.clone();
+                            Libp2pService::global_instance()
+                                .await
+                                .expect("Failed to get Libp2pService global instance")
+                                .register_signal_callback(neighbourhood.data.link_language.clone(), move |signal: crate::types::PerspectiveExpression| {
+                                    let self_clone = self_clone.clone();
+                                    tokio::spawn(async move {
+                                        log::info!("Received libp2p signal from neighbourhood");
+                                        self_clone.telepresence_signal_from_link_language(signal.into()).await;
+                                    });
+                                })
+                                .await;
                         }
                     }
                 }
