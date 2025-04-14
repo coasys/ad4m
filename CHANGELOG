@@ -28,6 +28,8 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Fix multiple synchronous addSignalHandler calls losing the first handler - fixing usage of NH.sendSignal() [PR#576](https://github.com/coasys/ad4m/pull/576)
 - Fix flaky Prolog subscriptions [PR#589](https://github.com/coasys/ad4m/pull/589)
 - Install missing language during expression get [PR#594](https://github.com/coasys/ad4m/pull/594)
+- Fix expression content escaping issue that happened with Flux messages with URLs and mentions [PR#597](https://github.com/coasys/ad4m/pull/597)
+- Fix handling of wrong passphrase during unlock (was frozen) [PR#596](https://github.com/coasys/ad4m/pull/596)
 
 ### Added
 - Prolog predicates needed in new Flux mention notification trigger:
@@ -63,6 +65,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - `PerspectiveProxe.createSubject()` can take optional initial values to avoid multiple link mutations (used in Ad4mModel.save()) [PR#585](https://github.com/coasys/ad4m/pull/585)
 - Atomic batch processing of perspective mutations (used in all Ad4mModel methods) [PR#587](https://github.com/coasys/ad4m/pull/587)
 - Enable feeding two audio transcription streams at once with same data, and clean-up streams after inactivity [PR#590](https://github.com/coasys/ad4m/pull/590)
+- Cache-Map for large embedding vector URLs regard Prolog to prevent performance degradation of Prolog queries in Perspectives that include a lot of large embedding vectors [PR#595](https://github.com/coasys/ad4m/pull/595)
 
 ### Changed
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
@@ -79,6 +82,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Renamed SubjectEntity to Ad4mModel, and improved naming of decorators [PR#579](https://github.com/coasys/ad4m/pull/579)
 - Documentation at https://docs.ad4m.dev vastly improved [PR#582](https://github.com/coasys/ad4m/pull/582)
 - useSubjects hook changed to useModel hook, using new and faster Ad4mModel query subscriptions under the hood [PR#588](https://github.com/coasys/ad4m/pull/588)
+- Password entry during setup flow improved with reentry and better explanatory text [PR#596](https://github.com/coasys/ad4m/pull/596)
 
 ## [0.9.0] - 23/03/2024
 
