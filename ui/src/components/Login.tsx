@@ -168,11 +168,13 @@ const Login = () => {
     let whisperModel = "whisper_small";
     // add llm model
     if (aiMode !== "None") {
-      const llm = { name: "DeepHermes-3-Llama-3-8B", modelType: "LLM" } as ModelInput;
+      const llm = { modelType: "LLM" } as ModelInput;
       if (aiMode === "Local") {
         whisperModel = "whisper_distil_large_v3";
-        llm.local = { fileName: "deephermes-3-llama-3-8b-Q4" };
+        llm.name = "Qwen2.5.1-Coder-7B-Instruct";
+        llm.local = { fileName: "Qwen2.5.1-Coder-7B-Instruct" };
       } else {
+        llm.name = "Remote LLM";
         llm.api = {
           baseUrl: apiUrl,
           apiKey,
@@ -629,12 +631,12 @@ const Login = () => {
                   <a
                     onClick={() =>
                       open(
-                        "https://huggingface.co/NousResearch/DeepHermes-3-Llama-3-8B-Preview-GGUF"
+                        "https://huggingface.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF"
                       )
                     }
                     style={{ cursor: "pointer" }}
                   >
-                    DeepHermes-3-Llama-3-8B (4.66GB)
+                    Qwen2.5.1-Coder-7B-Instruct Q4_K_M (4.68GB)
                   </a>
                 </p>
                 and
@@ -745,33 +747,6 @@ const Login = () => {
                   )}
                 </j-flex>
 
-                <j-text>
-                  This will still download
-                  <p>
-                    <a
-                      onClick={() =>
-                        open(
-                          "https://huggingface.co/openai/whisper-small"
-                        )
-                      }
-                      style={{ cursor: "pointer" }}
-                    >Whisper small (244MB)</a>
-                  </p>
-                  and
-                  <p>
-                    <a
-                      onClick={() =>
-                        open(
-                          "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
-                        )
-                      }
-                      style={{ cursor: "pointer" }}
-                    >
-                      Bert Embedding model (90MB)
-                    </a>
-                  </p>
-                </j-text>
-
                 {apiValid && (
                   <j-flex direction="column" a="center" gap="400">
                     <j-flex a="center" gap="400">
@@ -836,6 +811,33 @@ const Login = () => {
                     )}
                   </>
                 )}
+
+                <j-text>
+                  This will still download
+                  <p>
+                    <a
+                      onClick={() =>
+                        open(
+                          "https://huggingface.co/openai/whisper-small"
+                        )
+                      }
+                      style={{ cursor: "pointer" }}
+                    >Whisper small (244MB)</a>
+                  </p>
+                  and
+                  <p>
+                    <a
+                      onClick={() =>
+                        open(
+                          "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
+                        )
+                      }
+                      style={{ cursor: "pointer" }}
+                    >
+                      Bert Embedding model (90MB)
+                    </a>
+                  </p>
+                </j-text>
               </j-flex>
             </j-box>
           )}
