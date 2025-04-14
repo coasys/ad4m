@@ -1,15 +1,13 @@
 use std::{
     hash::{Hash, Hasher},
-    time::Duration,
 };
 
 use libp2p::{
-    core::upgrade,
     futures::StreamExt,
     swarm::{Swarm, SwarmEvent, NetworkBehaviour},
-    Transport, PeerId,
-    gossipsub::{self, IdentTopic, MessageAuthenticity, Event as GossipsubEvent},
-    request_response::{self, ProtocolSupport, json, Event as RequestResponseEvent, Message as RequestResponseMessage},
+    PeerId,
+    gossipsub::{self, MessageAuthenticity},
+    request_response::{self, ProtocolSupport, json},
     noise, tcp, yamux,
     StreamProtocol,
     //NetworkBehaviour as _,
@@ -156,7 +154,7 @@ impl Libp2pService {
                 match event {
                     SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message { 
                         message, 
-                        propagation_source: peer_id,
+                        //propagation_source: peer_id,
                         ..
                     })) => {
                         // Extract neighbourhood_id from topic

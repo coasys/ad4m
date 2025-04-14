@@ -42,8 +42,6 @@ pub use holochain_service::run_local_hc_services;
 use libc::{sigaction, sigemptyset, sighandler_t, SA_ONSTACK, SIGURG};
 use std::ptr;
 use libp2p_service::Libp2pService;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 extern "C" fn handle_sigurg(_: libc::c_int) {
     //println!("Received SIGURG signal, but ignoring it.");
