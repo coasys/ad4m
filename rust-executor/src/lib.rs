@@ -24,6 +24,7 @@ mod pubsub;
 #[cfg(test)]
 mod test_utils;
 pub mod types;
+pub mod libp2p_service;
 
 use std::{env, thread::JoinHandle};
 
@@ -40,9 +41,39 @@ pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
 use libc::{sigaction, sigemptyset, sighandler_t, SA_ONSTACK, SIGURG};
 use std::ptr;
+use libp2p_service::Libp2pService;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 extern "C" fn handle_sigurg(_: libc::c_int) {
     //println!("Received SIGURG signal, but ignoring it.");
+}
+
+lazy_static! {
+    static ref LIBP2P_SERVICE: Arc<Mutex<Option<Libp2pService>>> = Arc::new(Mutex::new(None));
+}
+
+pub async fn init_libp2p_service() -> Result<()> {
+    let bootstrap_nodes = vec![
+        // TODO: Add the actual bootstrap node URL
+        "/ip4/127.0.0.1/tcp/4001".to_string(),
+    ];
+    
+    let service = Libp2pService::new(bootstrap_nodes).await?;
+    service.start().await?;
+    
+    let mut global_service = LIBP2P_SERVICE.lock().await;
+    *global_service = Some(service);
+    
+    Ok(())
+}
+
+pub async fn get_libp2p_service() -> Result<Arc<Libp2pService>> {
+    let service = LIBP2P_SERVICE.lock().await;
+    match &*service {
+        Some(s) => Ok(Arc::new(s.clone())),
+        None => Err(anyhow!("Libp2p service not initialized")),
+    }
 }
 
 /// Runs the GraphQL server and the deno core runtime

@@ -117,6 +117,8 @@ libc = "0.2"
 chat-gpt-lib-rs = { version = "0.5.1", git = "https://github.com/coasys/chat-gpt-lib-rs" }
 anyhow = "1.0.95"
 
+libp2p = { version = "0.55", features = ["tcp", "dns", "noise", "gossipsub", "kad", "request-response", "yamux", "tokio", "json", "macros", "identify", "relay", "quic", "ping"] }
+
 [dev-dependencies]
 maplit = "1.0.2"
 lazy_static = "1.4.0"

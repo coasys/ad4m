@@ -38,6 +38,7 @@ use tokio::time::{sleep, Instant};
 use tokio::{join, time};
 use uuid;
 use uuid::Uuid;
+use crate::libp2p_service::Libp2pService;
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
@@ -1490,11 +1491,13 @@ impl PerspectiveInstance {
     }
 
     pub async fn set_online_status(&self, status: PerspectiveExpression) -> Result<(), AnyError> {
-        let mut link_language_guard = self.link_language.lock().await;
-        if let Some(link_language) = link_language_guard.as_mut() {
-            link_language.set_online_status(status).await
+        let handle = self.persisted.lock().await.clone();
+        if let Some(neighbourhood) = &handle.neighbourhood {
+            let service = get_libp2p_service().await?;
+            service.set_online_status(&neighbourhood.data.link_language, status).await?;
+            Ok(())
         } else {
-            Err(self.no_link_language_error().await)
+            Err(anyhow!("Perspective is not part of a neighbourhood"))
         }
     }
 
@@ -1503,11 +1506,13 @@ impl PerspectiveInstance {
         remote_agent_did: String,
         payload: PerspectiveExpression,
     ) -> Result<(), AnyError> {
-        let mut link_language_guard = self.link_language.lock().await;
-        if let Some(link_language) = link_language_guard.as_mut() {
-            link_language.send_signal(remote_agent_did, payload).await
+        let handle = self.persisted.lock().await.clone();
+        if let Some(neighbourhood) = &handle.neighbourhood {
+            let service = get_libp2p_service().await?;
+            service.send_signal(&neighbourhood.data.link_language, &remote_agent_did, payload).await?;
+            Ok(())
         } else {
-            Err(self.no_link_language_error().await)
+            Err(anyhow!("Perspective is not part of a neighbourhood"))
         }
     }
 
@@ -1527,11 +1532,13 @@ impl PerspectiveInstance {
             });
         }
 
-        let mut link_language_guard = self.link_language.lock().await;
-        if let Some(link_language) = link_language_guard.as_mut() {
-            link_language.send_broadcast(payload).await
+        let handle = self.persisted.lock().await.clone();
+        if let Some(neighbourhood) = &handle.neighbourhood {
+            let service = get_libp2p_service().await?;
+            service.send_broadcast(&neighbourhood.data.link_language, payload).await?;
+            Ok(())
         } else {
-            Err(self.no_link_language_error().await)
+            Err(anyhow!("Perspective is not part of a neighbourhood"))
         }
     }
 
