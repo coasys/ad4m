@@ -361,7 +361,7 @@ impl Libp2pService {
         &self,
         neighbourhood_id: String,
         callback: F,
-    ) -> Result<()>
+    )
     where
         F: Fn(PerspectiveExpression) + Send + Sync + 'static,
     {
@@ -370,7 +370,6 @@ impl Libp2pService {
             .entry(neighbourhood_id.to_string())
             .or_insert_with(Vec::new);
         neighbourhood_callbacks.push(Box::new(callback));
-        Ok(())
     }
 
     pub async fn init_global_instance(bootstrap_nodes: Vec<String>) -> Result<()> {
