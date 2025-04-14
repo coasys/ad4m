@@ -8,6 +8,7 @@ use libp2p::{
     swarm::{NetworkBehaviour, Swarm, SwarmEvent},
     tcp,
     yamux,
+    mdns,
     PeerId,
     StreamProtocol,
     //NetworkBehaviour as _,
@@ -45,6 +46,7 @@ pub struct OnlineAgent {
 pub enum MyBehaviourEvent {
     Gossipsub(gossipsub::Event),
     RequestResponse(request_response::Event<TelepresenceMessage, TelepresenceMessage>),
+    Mdns(mdns::Event),
 }
 
 impl From<gossipsub::Event> for MyBehaviourEvent {
@@ -59,11 +61,18 @@ impl From<request_response::Event<TelepresenceMessage, TelepresenceMessage>> for
     }
 }
 
+impl From<mdns::Event> for MyBehaviourEvent {
+    fn from(event: mdns::Event) -> Self {
+        MyBehaviourEvent::Mdns(event)
+    }
+}
+
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "MyBehaviourEvent")]
 struct MyBehaviour {
     gossipsub: gossipsub::Behaviour,
     request_response: json::Behaviour<TelepresenceMessage, TelepresenceMessage>,
+    mdns: mdns::tokio::Behaviour,
 }
 
 #[derive(Clone)]
@@ -114,9 +123,13 @@ impl Libp2pService {
                     request_response::Config::default(),
                 );
 
+                // Set up mDNS
+                let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), PeerId::from_public_key(&key.public()))?;
+
                 Ok(MyBehaviour {
                     gossipsub,
                     request_response,
+                    mdns,
                 })
             })?
             .build();
@@ -247,6 +260,21 @@ impl Libp2pService {
                                     },
                                 );
                             }
+                        }
+                    }
+                    SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+                        for (peer_id, multiaddr) in list {
+                            log::info!("mDNS discovered peer {} at {}", peer_id, multiaddr);
+                            if let Err(e) = swarm.dial(multiaddr) {
+                                log::error!("Failed to dial mDNS peer: {}", e);
+                            } else {
+                                log::info!("Dialed mDNS peer: {}", peer_id);
+                            }
+                        }
+                    }
+                    SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
+                        for (peer_id, multiaddr) in list {
+                            log::info!("mDNS peer {} at {} expired", peer_id, multiaddr);
                         }
                     }
                     _ => {}
