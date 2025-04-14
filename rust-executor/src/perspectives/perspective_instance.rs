@@ -209,9 +209,11 @@ impl PerspectiveInstance {
         let mut interval = time::interval(Duration::from_secs(5));
         let mut libp2p_subscribed = false;
         while !*self.is_teardown.lock().await {
+            log::info!("Ensuring link language");
             if self.link_language.lock().await.is_none()
                 && self.persisted.lock().await.neighbourhood.is_some()
             {
+                log::info!("Link language not installed, installing...");
                 let nh = self
                     .persisted
                     .lock()
@@ -236,7 +238,6 @@ impl PerspectiveInstance {
                             PerspectiveState::LinkLanguageInstalledButNotSynced,
                         )
                         .await;
-                        break;
                     }
                     Ok(None) => {
                         log::debug!(
@@ -256,32 +257,35 @@ impl PerspectiveInstance {
                         .await;
                     }
                 }
-            } else {
+            }
+            
+            if !libp2p_subscribed {
+                log::info!("libp2p not subscribed");
                 if let Some(neighbourhood) = self.persisted.lock().await.neighbourhood.clone() {
-                    if !libp2p_subscribed {
-                        let subscribe_result = Libp2pService::global_instance() 
+                    log::info!("Subscribing to neighbourhood: {}", neighbourhood.data.link_language.clone());
+
+                    let subscribe_result = Libp2pService::global_instance() 
+                        .await
+                        .expect("Failed to get Libp2pService global instance")
+                        .subscribe_to_neighbourhood(neighbourhood.data.link_language.clone())
+                        .await;
+
+                    if let Err(e) = subscribe_result {
+                        log::error!("Error subscribing to neighbourhood: {:?}", e);
+                    } else {
+                        libp2p_subscribed = true;
+                        let self_clone = self.clone();
+                        Libp2pService::global_instance()
                             .await
                             .expect("Failed to get Libp2pService global instance")
-                            .subscribe_to_neighbourhood(neighbourhood.data.link_language.clone())
+                            .register_signal_callback(neighbourhood.data.link_language.clone(), move |signal: crate::types::PerspectiveExpression| {
+                                let self_clone = self_clone.clone();
+                                tokio::spawn(async move {
+                                    log::info!("Received libp2p signal from neighbourhood");
+                                    self_clone.telepresence_signal_from_link_language(signal.into()).await;
+                                });
+                            })
                             .await;
-
-                        if let Err(e) = subscribe_result {
-                            log::error!("Error subscribing to neighbourhood: {:?}", e);
-                        } else {
-                            libp2p_subscribed = true;
-                            let self_clone = self.clone();
-                            Libp2pService::global_instance()
-                                .await
-                                .expect("Failed to get Libp2pService global instance")
-                                .register_signal_callback(neighbourhood.data.link_language.clone(), move |signal: crate::types::PerspectiveExpression| {
-                                    let self_clone = self_clone.clone();
-                                    tokio::spawn(async move {
-                                        log::info!("Received libp2p signal from neighbourhood");
-                                        self_clone.telepresence_signal_from_link_language(signal.into()).await;
-                                    });
-                                })
-                                .await;
-                        }
                     }
                 }
             }
@@ -1503,17 +1507,13 @@ impl PerspectiveInstance {
     }
 
     pub async fn online_agents(&self) -> Result<Vec<OnlineAgent>, AnyError> {
-        let mut link_language_guard = self.link_language.lock().await;
-        if let Some(link_language) = link_language_guard.as_mut() {
-            Ok(link_language
-                .get_online_agents()
-                .await?
-                .into_iter()
-                .map(|mut a| {
-                    a.status.verify_signatures();
-                    a
-                })
-                .collect())
+        let handle = self.persisted.lock().await.clone();
+        if let Some(neighbourhood) = &handle.neighbourhood {
+            Ok(Libp2pService::global_instance()
+                .await
+                .expect("Failed to get Libp2pService")
+                .get_online_agents(neighbourhood.data.link_language.clone())
+                .await?)
         } else {
             Err(self.no_link_language_error().await)
         }
@@ -1523,9 +1523,10 @@ impl PerspectiveInstance {
         let handle = self.persisted.lock().await.clone();
         if let Some(neighbourhood) = &handle.neighbourhood {
             Libp2pService::global_instance()
-                .await?
+                .await
+                .expect("Failed to get Libp2pService")
                 .set_online_status(neighbourhood.data.link_language.clone(), status.into())
-                .await?;
+                .await;
             Ok(())
         } else {
             Err(anyhow!("Perspective is not part of a neighbourhood"))
