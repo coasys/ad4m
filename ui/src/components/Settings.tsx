@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { join } from '@tauri-apps/api/path';
 import { save as dialogSave, open as dialogOpen, message as dialogMessage, type MessageDialogOptions } from "@tauri-apps/plugin-dialog";
 import { useCallback, useContext, useEffect, useState } from "react";
 import QRCode from "react-qr-code";
@@ -88,7 +89,7 @@ const Profile = (props: Props) => {
 
   async function openLogs() {
     let dataPath = await invoke("get_data_path") as string;
-    revealItemInDir(dataPath+"/ad4m.log")
+    revealItemInDir(await join(dataPath, "ad4m.log"))
   }
 
   const [profile, setProfile] = useState({
