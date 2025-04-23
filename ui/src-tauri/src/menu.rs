@@ -3,7 +3,6 @@ use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Result};
 use tauri_plugin_opener::OpenerExt;
 
-
 pub fn build_menu(app: &AppHandle) -> Result<()> {
     let edit_menu = SubmenuBuilder::new(app, "Edit")
         .cut()
@@ -45,7 +44,10 @@ fn report_issue() {
 }
 
 pub fn reveal_log_file(app: &AppHandle) {
-    if let Err(err) = app.opener().reveal_item_in_dir(data_path().join("ad4m.log")) {
+    if let Err(err) = app
+        .opener()
+        .reveal_item_in_dir(data_path().join("ad4m.log"))
+    {
         log::error!("Error opening logs folder: {}", err);
     }
 }
