@@ -1,6 +1,8 @@
 use crate::config::data_path;
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Result};
+use tauri_plugin_opener::OpenerExt;
+
 
 pub fn build_menu(app: &AppHandle) -> Result<()> {
     let edit_menu = SubmenuBuilder::new(app, "Edit")
@@ -11,7 +13,7 @@ pub fn build_menu(app: &AppHandle) -> Result<()> {
         .build()?;
 
     let help_menu = SubmenuBuilder::new(app, "Help")
-        .text("open_logs", "Open Logs")
+        .text("open_logs", "Reveal Log File")
         .text("report_issue", "Report Issue")
         .build()?;
 
@@ -21,9 +23,10 @@ pub fn build_menu(app: &AppHandle) -> Result<()> {
         .build()?;
 
     app.set_menu(main_menu)?;
+    let app_clone = app.clone();
     app.on_menu_event(move |_app, event| match event.id().0.as_str() {
         "open_logs" => {
-            open_logs_folder();
+            reveal_log_file(&app_clone);
         }
         "report_issue" => {
             report_issue();
@@ -41,8 +44,8 @@ fn report_issue() {
     });
 }
 
-pub fn open_logs_folder() {
-    if let Err(err) = opener::open(data_path()) {
+pub fn reveal_log_file(app: &AppHandle) {
+    if let Err(err) = app.opener().reveal_item_in_dir(data_path().join("ad4m.log")) {
         log::error!("Error opening logs folder: {}", err);
     }
 }

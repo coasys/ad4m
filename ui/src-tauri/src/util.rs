@@ -1,7 +1,7 @@
 use crate::app_url;
 use crate::config::app_tray_message_url;
 use crate::config::executor_port_path;
-use crate::menu::open_logs_folder;
+use crate::menu::reveal_log_file;
 use std::fs::remove_file;
 use std::fs::File;
 use std::io::prelude::*;
@@ -47,14 +47,15 @@ pub fn create_main_window(app: &AppHandle<Wry>) {
     let _ = tray_window.set_always_on_top(true);
     //let _ = tray_window.move_window(Position::TrayCenter);
 
-    let _id = tray_window.listen("copyLogs", |event| {
+    let app_clone = app.clone();
+    let _id = tray_window.listen("revealLogFile", move |event| {
         log::info!(
             "got window event-name with payload {:?} {:?}",
             event,
             event.payload()
         );
 
-        open_logs_folder();
+        reveal_log_file(&app_clone);
     });
 }
 

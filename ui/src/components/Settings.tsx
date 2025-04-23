@@ -367,7 +367,7 @@ const Profile = (props: Props) => {
       <j-box px="500" my="500">
         <j-button onClick={openLogs} full variant="primary">
           <j-icon size="sm" slot="start" name="clipboard"></j-icon>
-          Show logs
+          Reveal Log File
         </j-button>
       </j-box>
 

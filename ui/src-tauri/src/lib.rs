@@ -48,7 +48,7 @@ use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
 use crate::config::log_path;
 
-use crate::menu::open_logs_folder;
+use crate::menu::reveal_log_file;
 use crate::util::find_port;
 use crate::util::{create_main_window, save_executor_port};
 use tauri::Manager;
@@ -248,14 +248,15 @@ pub fn run() {
 
             let splashscreen = app.get_webview_window("splashscreen").unwrap();
 
-            let _id = splashscreen.listen("copyLogs", |event| {
+            let app_handle = app.handle().clone();
+            let _id = splashscreen.listen("revealLogFile", move |event| {
                 info!(
                     "got window event-name with payload {:?} {:?}",
                     event,
                     event.payload()
                 );
 
-                open_logs_folder();
+                reveal_log_file(&app_handle);
             });
 
             build_menu(app.handle())?;
