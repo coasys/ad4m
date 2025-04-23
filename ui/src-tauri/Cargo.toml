@@ -53,6 +53,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2.0.0-alpha.2"
 tauri-plugin-shell = "2"
 dirs = "5"
+tauri-plugin-opener = "2.2.6"
 
 [features]
 # by default Tauri runs in production mode
