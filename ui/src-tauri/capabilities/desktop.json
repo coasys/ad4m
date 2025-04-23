@@ -101,6 +101,8 @@
     "dialog:default",
     "clipboard-manager:default",
     "dialog:default",
+    "opener:allow-reveal-item-in-dir",
+    "opener:allow-default-urls",
     "opener:default"
   ]
 }

@@ -110,6 +110,11 @@ pub fn open_tray_message(app_handle: tauri::AppHandle) {
 }
 
 #[tauri::command]
+pub fn get_data_path() -> String {
+    data_path().to_string_lossy().into_owned()
+}
+
+#[tauri::command]
 pub fn clear_state(app_handle: tauri::AppHandle) {
     let _ = remove_dir_all(data_path());
 
