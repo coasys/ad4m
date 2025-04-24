@@ -71,16 +71,28 @@ impl PrologEngine {
                             while results.len() < MAX_RESULTS {
                                 match std::panic::catch_unwind(AssertUnwindSafe(|| iter.next())) {
                                     Ok(Some(Ok(answer))) => results.push(answer),
-                                    Ok(Some(Err(term))) => return query_result_from_leaf_answer(Err(term)),
+                                    Ok(Some(Err(term))) => {
+                                        return query_result_from_leaf_answer(Err(term))
+                                    }
                                     Ok(None) => break, // Iterator exhausted
                                     Err(e) => {
-                                        let error_string = if let Some(string) = e.downcast_ref::<String>() {
-                                            format!("Scryer panicked in next(): {:?} - query: {}", string, query)
-                                        } else if let Some(&str) = e.downcast_ref::<&str>() {
-                                            format!("Scryer panicked in next(): {:?} - query: {}", str, query)
-                                        } else {
-                                            format!("Scryer panicked in next(): {:?} - query: {}", e, query)
-                                        };
+                                        let error_string =
+                                            if let Some(string) = e.downcast_ref::<String>() {
+                                                format!(
+                                                    "Scryer panicked in next(): {:?} - query: {}",
+                                                    string, query
+                                                )
+                                            } else if let Some(&str) = e.downcast_ref::<&str>() {
+                                                format!(
+                                                    "Scryer panicked in next(): {:?} - query: {}",
+                                                    str, query
+                                                )
+                                            } else {
+                                                format!(
+                                                    "Scryer panicked in next(): {:?} - query: {}",
+                                                    e, query
+                                                )
+                                            };
                                         panic = Some(error_string);
                                         break;
                                     }
@@ -91,9 +103,13 @@ impl PrologEngine {
                                 Err(error)
                             } else {
                                 if results.len() >= MAX_RESULTS {
-                                    log::warn!("Query {} truncated at {} results", query, MAX_RESULTS);
+                                    log::warn!(
+                                        "Query {} truncated at {} results",
+                                        query,
+                                        MAX_RESULTS
+                                    );
                                 }
-                        
+
                                 query_result_from_leaf_answer(Ok(results))
                             }
                         }));
@@ -103,19 +119,27 @@ impl PrologEngine {
                                 let _ = response.send(PrologServiceResponse::QueryResult(result));
                             }
                             Err(e) => {
-                                let error_string =
-                                    if let Some(string) = e.downcast_ref::<String>() {
-                                        format!("Scryer panicked with: {:?} - when running query: {}", string, query)
-                                    } else if let Some(&str) = e.downcast_ref::<&str>() {
-                                        format!("Scryer panicked with: {:?} - when running query: {}", str, query)
-                                    } else {
-                                        format!("Scryer panicked with: {:?} - when running query: {}", e, query)
-                                    };
+                                let error_string = if let Some(string) = e.downcast_ref::<String>()
+                                {
+                                    format!(
+                                        "Scryer panicked with: {:?} - when running query: {}",
+                                        string, query
+                                    )
+                                } else if let Some(&str) = e.downcast_ref::<&str>() {
+                                    format!(
+                                        "Scryer panicked with: {:?} - when running query: {}",
+                                        str, query
+                                    )
+                                } else {
+                                    format!(
+                                        "Scryer panicked with: {:?} - when running query: {}",
+                                        e, query
+                                    )
+                                };
                                 log::error!("{}", error_string);
-                                let _ =
-                                    response.send(PrologServiceResponse::QueryResult(Err(
-                                        format!("Scryer panicked with: {:?}", error_string),
-                                    )));
+                                let _ = response.send(PrologServiceResponse::QueryResult(Err(
+                                    format!("Scryer panicked with: {:?}", error_string),
+                                )));
                             }
                         }
                     }
@@ -130,8 +154,7 @@ impl PrologEngine {
                             .collect::<Vec<String>>()
                             .join("\n");
                         machine.consult_module_string(module_name.as_str(), program);
-                        let _ =
-                            response.send(PrologServiceResponse::LoadModuleResult(Ok(())));
+                        let _ = response.send(PrologServiceResponse::LoadModuleResult(Ok(())));
                     }
                     PrologServiceRequest::Drop => return,
                 }
@@ -141,7 +164,7 @@ impl PrologEngine {
         let response = task::spawn_blocking(move || response_receiver.recv())
             .await
             .map_err(|e| Error::msg(format!("Failed to spawn blocking task: {}", e)))??;
-        
+
         match response {
             PrologServiceResponse::InitComplete(result) => result?,
             _ => unreachable!(),
@@ -154,11 +177,11 @@ impl PrologEngine {
         let (response_sender, response_receiver) = mpsc::channel();
         self.request_sender
             .send(PrologServiceRequest::RunQuery(query, response_sender))?;
-        
+
         let response = task::spawn_blocking(move || response_receiver.recv())
             .await
             .map_err(|e| Error::msg(format!("Failed to spawn blocking task: {}", e)))??;
-            
+
         match response {
             PrologServiceResponse::QueryResult(query_result) => Ok(query_result),
             _ => unreachable!(),
@@ -177,11 +200,11 @@ impl PrologEngine {
                 program_lines,
                 response_sender,
             ))?;
-            
+
         let response = task::spawn_blocking(move || response_receiver.recv())
             .await
             .map_err(|e| Error::msg(format!("Failed to spawn blocking task: {}", e)))??;
-            
+
         match response {
             PrologServiceResponse::LoadModuleResult(result) => result,
             _ => unreachable!(),
