@@ -87,6 +87,14 @@ impl PrologEnginePool {
         join_all(futures).await.into_iter().collect()
     }
 
+    async fn handle_engine_error(&self, engine_idx: usize, error: impl std::fmt::Display, query: &str) -> Result<QueryResult, Error> {
+        log::error!("Prolog engine error: {}", error);
+        log::error!("when running query: {}", query);
+        let mut engines = self.engines.write().await;
+        engines[engine_idx] = None;
+        Err(anyhow!("Engine failed and was invalidated: {}", error))
+    }
+
     pub async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
         let engines = self.engines.read().await;
 
@@ -113,22 +121,8 @@ impl PrologEnginePool {
         let result = engine.run_query(processed_query.clone()).await;
 
         let result = match result {
-            Err(e) => {
-                log::error!("Prolog engine error: {}", e);
-                log::error!("when running query: {}", query);
-                drop(engines);
-                let mut engines = self.engines.write().await;
-                engines[engine_idx] = None;
-                Err(anyhow!("Engine failed and was invalidated: {}", e))
-            }
-            Ok(Err(e)) => {
-                log::error!("Prolog engine error: {}", e);
-                log::error!("when running query: {}", query);
-                drop(engines);
-                let mut engines = self.engines.write().await;
-                engines[engine_idx] = None;
-                Err(anyhow!("Engine failed and was invalidated: {}", e))
-            }
+            Err(e) => self.handle_engine_error(engine_idx, e, &query).await,
+            Ok(Err(e)) => self.handle_engine_error(engine_idx, e, &query).await,
             Ok(Ok(mut result)) => {
                 // Postprocess result to replace small cache IDs with huge vector URLs
                 // In-place and async/parallel processing of all values in all matches
