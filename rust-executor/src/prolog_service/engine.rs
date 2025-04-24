@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use deno_core::anyhow::Error;
-use scryer_prolog::{LeafAnswer, MachineBuilder, Term};
+use scryer_prolog::MachineBuilder;
 use tokio::task;
 
 use super::types::{query_result_from_leaf_answer, QueryResult};
