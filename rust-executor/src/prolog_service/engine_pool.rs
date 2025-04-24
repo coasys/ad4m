@@ -87,7 +87,12 @@ impl PrologEnginePool {
         join_all(futures).await.into_iter().collect()
     }
 
-    async fn handle_engine_error(&self, engine_idx: usize, error: impl std::fmt::Display, query: &str) -> Result<QueryResult, Error> {
+    async fn handle_engine_error(
+        &self,
+        engine_idx: usize,
+        error: impl std::fmt::Display,
+        query: &str,
+    ) -> Result<QueryResult, Error> {
         log::error!("Prolog engine error: {}", error);
         log::error!("when running query: {}", query);
         let mut engines = self.engines.write().await;
