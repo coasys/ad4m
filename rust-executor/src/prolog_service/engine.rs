@@ -26,7 +26,6 @@ pub enum PrologServiceResponse {
 
 struct SendableReceiver<T>(Arc<Mutex<mpsc::Receiver<T>>>);
 
-unsafe impl<T> Send for SendableReceiver<T> {}
 unsafe impl<T> Sync for SendableReceiver<T> {}
 
 pub struct PrologEngine {
