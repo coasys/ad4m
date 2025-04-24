@@ -63,9 +63,39 @@ impl PrologEngine {
                 match message {
                     PrologServiceRequest::RunQuery(query, response) => {
                         let answer_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                            query_result_from_leaf_answer(machine
-                                .run_query(query.clone())
-                                .collect::<Result<Vec<LeafAnswer>, Term>>())
+                            let mut results = Vec::new();
+                            let mut iter = machine.run_query(query.clone());
+                            const MAX_RESULTS: usize = 1_000_000; // Adjust as needed
+
+                            let mut panic = None;
+                            while results.len() < MAX_RESULTS {
+                                match std::panic::catch_unwind(AssertUnwindSafe(|| iter.next())) {
+                                    Ok(Some(Ok(answer))) => results.push(answer),
+                                    Ok(Some(Err(term))) => return query_result_from_leaf_answer(Err(term)),
+                                    Ok(None) => break, // Iterator exhausted
+                                    Err(e) => {
+                                        let error_string = if let Some(string) = e.downcast_ref::<String>() {
+                                            format!("Scryer panicked in next(): {:?} - query: {}", string, query)
+                                        } else if let Some(&str) = e.downcast_ref::<&str>() {
+                                            format!("Scryer panicked in next(): {:?} - query: {}", str, query)
+                                        } else {
+                                            format!("Scryer panicked in next(): {:?} - query: {}", e, query)
+                                        };
+                                        panic = Some(error_string);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if let Some(error) = panic {
+                                Err(error)
+                            } else {
+                                if results.len() >= MAX_RESULTS {
+                                    log::warn!("Query {} truncated at {} results", query, MAX_RESULTS);
+                                }
+                        
+                                query_result_from_leaf_answer(Ok(results))
+                            }
                         }));
 
                         match answer_result {
