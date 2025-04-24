@@ -121,10 +121,18 @@ impl PrologEnginePool {
                 engines[engine_idx] = None;
                 Err(anyhow!("Engine failed and was invalidated: {}", e))
             }
-            Ok(mut result) => {
+            Ok(Err(e)) => {
+                log::error!("Prolog engine error: {}", e);
+                log::error!("when running query: {}", query);
+                drop(engines);
+                let mut engines = self.engines.write().await;
+                engines[engine_idx] = None;
+                Err(anyhow!("Engine failed and was invalidated: {}", e))
+            }
+            Ok(Ok(mut result)) => {
                 // Postprocess result to replace small cache IDs with huge vector URLs
                 // In-place and async/parallel processing of all values in all matches
-                if let Ok(QueryResolution::Matches(ref mut matches)) = result {
+                if let QueryResolution::Matches(ref mut matches) = result {
                     join_all(matches.iter_mut().map(|m| {
                         join_all(m.bindings.iter_mut().map(|(_, value)| {
                             self.replace_embedding_url_in_value_recursively(value)
@@ -132,7 +140,7 @@ impl PrologEnginePool {
                     }))
                     .await;
                 }
-                Ok(result)
+                Ok(Ok(result))
             }
         };
 
