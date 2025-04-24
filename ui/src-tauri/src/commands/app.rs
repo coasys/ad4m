@@ -105,8 +105,13 @@ pub fn open_tray_message(app_handle: tauri::AppHandle) {
 
 #[tauri::command]
 #[cfg(not(feature = "custom-protocol"))]
-pub fn open_tray_message(app_handle: tauri::AppHandle) {
+pub fn open_tray_message(_app_handle: tauri::AppHandle) {
     println!("In debug mode won't open tray message");
+}
+
+#[tauri::command]
+pub fn get_data_path() -> String {
+    data_path().to_string_lossy().into_owned()
 }
 
 #[tauri::command]

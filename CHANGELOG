@@ -30,6 +30,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Install missing language during expression get [PR#594](https://github.com/coasys/ad4m/pull/594)
 - Fix expression content escaping issue that happened with Flux messages with URLs and mentions [PR#597](https://github.com/coasys/ad4m/pull/597)
 - Fix handling of wrong passphrase during unlock (was frozen) [PR#596](https://github.com/coasys/ad4m/pull/596)
+- Fix open buttons not working on Linux by using Tauri's opener plugin [PR#599](https://github.com/coasys/ad4m/pull/599)
 
 ### Added
 - Prolog predicates needed in new Flux mention notification trigger:

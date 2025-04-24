@@ -2,7 +2,8 @@ import { Agent, ImportResult, ImportStats, Literal } from "@coasys/ad4m";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { open } from "@tauri-apps/plugin-shell";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { join } from '@tauri-apps/api/path';
 import { save as dialogSave, open as dialogOpen, message as dialogMessage, type MessageDialogOptions } from "@tauri-apps/plugin-dialog";
 import { useCallback, useContext, useEffect, useState } from "react";
 import QRCode from "react-qr-code";
@@ -86,8 +87,9 @@ const Profile = (props: Props) => {
   const [exportStatus, setExportStatus] = useState("");
   const [importStatus, setImportStatus] = useState("");
 
-  function openLogs() {
-    appWindow.emit("copyLogs");
+  async function openLogs() {
+    let dataPath = await invoke("get_data_path") as string;
+    revealItemInDir(await join(dataPath, "ad4m.log"))
   }
 
   const [profile, setProfile] = useState({
@@ -355,7 +357,7 @@ const Profile = (props: Props) => {
               <ActionButton title="QR Code" onClick={showProxyQRCode} icon="qr-code-scan" />
               <ActionButton
                 title="Open GraphQL"
-                onClick={() => open(proxy.replace("wss", "https").replace("graphql", "playground"))}
+                onClick={() => openUrl(proxy.replace("wss", "https").replace("graphql", "playground"))}
                 icon="box-arrow-up-right"
               />
             </j-flex>
@@ -366,7 +368,7 @@ const Profile = (props: Props) => {
       <j-box px="500" my="500">
         <j-button onClick={openLogs} full variant="primary">
           <j-icon size="sm" slot="start" name="clipboard"></j-icon>
-          Show logs
+          Reveal Log File
         </j-button>
       </j-box>
 
