@@ -2089,7 +2089,6 @@ impl PerspectiveInstance {
         // Send initial result after 3 delays
         let result_string = format!("#init#{}", result_string);
         for delay in [100, 500, 1000, 10000] {
-            log::info!("Sending subscription initialization update");
             self.send_subscription_update(
                 subscription_id.clone(),
                 result_string.clone(),
