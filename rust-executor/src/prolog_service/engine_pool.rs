@@ -129,8 +129,11 @@ impl PrologEnginePool {
         };
 
         let result = match result {
+            // Outer Result is an error -> engine panicked
             Err(e) => self.handle_engine_error(engine_idx, e, &query).await,
-            Ok(Err(e)) => self.handle_engine_error(engine_idx, e, &query).await,
+            // Inner Result is an error -> query failed
+            Ok(Err(e)) => Ok(Err(e)),
+            // Inner Result is a QueryResolution -> query succeeded
             Ok(Ok(mut result)) => {
                 // Postprocess result to replace small cache IDs with huge vector URLs
                 // In-place and async/parallel processing of all values in all matches

@@ -172,6 +172,12 @@ impl PrologEngine {
         Ok(())
     }
 
+
+    // There two levels of error handling here:
+    // 1. The query can fail and Prolog returns an error
+    //    This is represented as a QueryResult with an error string
+    // 2. The Prolog engine can panic and we don't have a result
+    //    This is represented with the outer Result
     pub async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
         let (response_sender, response_receiver) = mpsc::channel();
         self.request_sender
