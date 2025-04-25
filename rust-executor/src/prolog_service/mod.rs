@@ -134,7 +134,7 @@ mod prolog_test {
         let result = service
             .run_query(perspective_id.clone(), query)
             .await
-            .expect("Error running query");
+            .expect("no error running query");
 
         assert_eq!(
             result,
@@ -152,7 +152,7 @@ mod prolog_test {
         let result = service
             .run_query(perspective_id.clone(), query)
             .await
-            .expect("Error running query");
+            .expect("no error running query");
 
         assert_eq!(result, Ok(QueryResolution::True));
 

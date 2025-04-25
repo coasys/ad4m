@@ -87,44 +87,57 @@ impl PrologEnginePool {
         join_all(futures).await.into_iter().collect()
     }
 
+    async fn handle_engine_error(
+        &self,
+        engine_idx: usize,
+        error: impl std::fmt::Display,
+        query: &str,
+    ) -> Result<QueryResult, Error> {
+        log::error!("Prolog engine error: {}", error);
+        log::error!("when running query: {}", query);
+        let mut engines = self.engines.write().await;
+        engines[engine_idx] = None;
+        Err(anyhow!("Engine failed and was invalidated: {}", error))
+    }
+
     pub async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
-        let engines = self.engines.read().await;
+        let (result, engine_idx) = {
+            let engines = self.engines.read().await;
 
-        // Get a vec with all non-None (invalidated) engines
-        let valid_engines: Vec<_> = engines
-            .iter()
-            .enumerate()
-            .filter_map(|(i, e)| e.as_ref().map(|engine| (i, engine)))
-            .collect();
-        if valid_engines.is_empty() {
-            log::error!("No valid Prolog engines available");
-            return Err(anyhow!("No valid Prolog engines available"));
-        }
+            // Get a vec with all non-None (invalidated) engines
+            let valid_engines: Vec<_> = engines
+                .iter()
+                .enumerate()
+                .filter_map(|(i, e)| e.as_ref().map(|engine| (i, engine)))
+                .collect();
+            if valid_engines.is_empty() {
+                log::error!("No valid Prolog engines available");
+                return Err(anyhow!("No valid Prolog engines available"));
+            }
 
-        // Round-robin selection of engine
-        let current = self.next_engine.fetch_add(1, Ordering::SeqCst);
-        let idx = current % valid_engines.len();
-        let (engine_idx, engine) = valid_engines[idx];
+            // Round-robin selection of engine
+            let current = self.next_engine.fetch_add(1, Ordering::SeqCst);
+            let idx = current % valid_engines.len();
+            let (engine_idx, engine) = valid_engines[idx];
 
-        // Preprocess query to replace huge vector URLs with small cache IDs
-        let processed_query = self.replace_embedding_url(query.clone()).await;
+            // Preprocess query to replace huge vector URLs with small cache IDs
+            let processed_query = self.replace_embedding_url(query.clone()).await;
 
-        // Run query
-        let result = engine.run_query(processed_query.clone()).await;
+            // Run query
+            let result = engine.run_query(processed_query.clone()).await;
+            (result, engine_idx)
+        };
 
         let result = match result {
-            Err(e) => {
-                log::error!("Prolog engine error: {}", e);
-                log::error!("when running query: {}", query);
-                drop(engines);
-                let mut engines = self.engines.write().await;
-                engines[engine_idx] = None;
-                Err(anyhow!("Engine failed and was invalidated: {}", e))
-            }
-            Ok(mut result) => {
+            // Outer Result is an error -> engine panicked
+            Err(e) => self.handle_engine_error(engine_idx, e, &query).await,
+            // Inner Result is an error -> query failed
+            Ok(Err(e)) => Ok(Err(e)),
+            // Inner Result is a QueryResolution -> query succeeded
+            Ok(Ok(mut result)) => {
                 // Postprocess result to replace small cache IDs with huge vector URLs
                 // In-place and async/parallel processing of all values in all matches
-                if let Ok(QueryResolution::Matches(ref mut matches)) = result {
+                if let QueryResolution::Matches(ref mut matches) = result {
                     join_all(matches.iter_mut().map(|m| {
                         join_all(m.bindings.iter_mut().map(|(_, value)| {
                             self.replace_embedding_url_in_value_recursively(value)
@@ -132,7 +145,7 @@ impl PrologEnginePool {
                     }))
                     .await;
                 }
-                Ok(result)
+                Ok(Ok(result))
             }
         };
 
