@@ -31,7 +31,8 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Fix expression content escaping issue that happened with Flux messages with URLs and mentions [PR#597](https://github.com/coasys/ad4m/pull/597)
 - Fix handling of wrong passphrase during unlock (was frozen) [PR#596](https://github.com/coasys/ad4m/pull/596)
 - Fix open buttons not working on Linux by using Tauri's opener plugin [PR#599](https://github.com/coasys/ad4m/pull/599)
-
+- Harden setup of query subscriptions with delayed init handshakes in all cases and resubscribing after timeout [PR#601](https://github.com/coasys/ad4m/pull/601)
+  
 ### Added
 - Prolog predicates needed in new Flux mention notification trigger:
  - agent_did/1
