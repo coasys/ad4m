@@ -2095,7 +2095,6 @@ impl PerspectiveInstance {
             )
             .await;
         }
-        
 
         Ok((subscription_id, result_string))
     }
