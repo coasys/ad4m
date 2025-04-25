@@ -2085,13 +2085,17 @@ impl PerspectiveInstance {
             .await
             .insert(subscription_id.clone(), subscribed_query);
 
-        // Send initial result after a short delay
-        self.send_subscription_update(
-            subscription_id.clone(),
-            result_string.clone(),
-            Some(Duration::from_millis(100)),
-        )
-        .await;
+        // Send initial result after 3 delays
+        for delay in [100, 500, 1000, 10000] {
+            log::info!("Sending subscription initialization update");
+            self.send_subscription_update(
+                subscription_id.clone(),
+                result_string.clone(),
+                Some(Duration::from_millis(delay)),
+            )
+            .await;
+        }
+        
 
         Ok((subscription_id, result_string))
     }
