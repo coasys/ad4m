@@ -87,7 +87,8 @@ export class QuerySubscriptionProxy {
         this.#initialized = new Promise<boolean>((resolve, reject) => {
             // Add timeout to prevent hanging promises
             this.#initTimeoutId = setTimeout(() => {
-                reject(new Error('Subscription initialization timed out after 30 seconds'));
+                reject(new Error('Subscription initialization timed out after 30 seconds. Resubscribing...'));
+                this.subscribe();
             }, 30000); // 30 seconds timeout
             
             // Subscribe to query updates
