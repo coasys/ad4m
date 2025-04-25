@@ -101,29 +101,32 @@ impl PrologEnginePool {
     }
 
     pub async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
-        let engines = self.engines.read().await;
+        let (result, engine_idx) = {
+            let engines = self.engines.read().await;
 
-        // Get a vec with all non-None (invalidated) engines
-        let valid_engines: Vec<_> = engines
-            .iter()
-            .enumerate()
-            .filter_map(|(i, e)| e.as_ref().map(|engine| (i, engine)))
-            .collect();
-        if valid_engines.is_empty() {
-            log::error!("No valid Prolog engines available");
-            return Err(anyhow!("No valid Prolog engines available"));
-        }
+            // Get a vec with all non-None (invalidated) engines
+            let valid_engines: Vec<_> = engines
+                .iter()
+                .enumerate()
+                .filter_map(|(i, e)| e.as_ref().map(|engine| (i, engine)))
+                .collect();
+            if valid_engines.is_empty() {
+                log::error!("No valid Prolog engines available");
+                return Err(anyhow!("No valid Prolog engines available"));
+            }
 
-        // Round-robin selection of engine
-        let current = self.next_engine.fetch_add(1, Ordering::SeqCst);
-        let idx = current % valid_engines.len();
-        let (engine_idx, engine) = valid_engines[idx];
+            // Round-robin selection of engine
+            let current = self.next_engine.fetch_add(1, Ordering::SeqCst);
+            let idx = current % valid_engines.len();
+            let (engine_idx, engine) = valid_engines[idx];
 
-        // Preprocess query to replace huge vector URLs with small cache IDs
-        let processed_query = self.replace_embedding_url(query.clone()).await;
+            // Preprocess query to replace huge vector URLs with small cache IDs
+            let processed_query = self.replace_embedding_url(query.clone()).await;
 
-        // Run query
-        let result = engine.run_query(processed_query.clone()).await;
+            // Run query
+            let result = engine.run_query(processed_query.clone()).await;
+            (result, engine_idx)
+        };
 
         let result = match result {
             Err(e) => self.handle_engine_error(engine_idx, e, &query).await,
