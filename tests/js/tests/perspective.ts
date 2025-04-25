@@ -861,9 +861,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(initialResult.length).to.equal(1)
                 expect(initialResult[0].X).to.equal('note-ipfs://Qm123')
 
-                // Wait for initialization results to be sent
-                await sleep(2000)
-
                 // Set up callback for updates
                 const updates: any[] = []
                 const unsubscribe = subscription.onResult((result: any) => {
