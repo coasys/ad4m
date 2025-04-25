@@ -172,7 +172,6 @@ impl PrologEngine {
         Ok(())
     }
 
-
     // There two levels of error handling here:
     // 1. The query can fail and Prolog returns an error
     //    This is represented as a QueryResult with an error string
