@@ -11,6 +11,7 @@ use libc::{rlimit, setrlimit, RLIMIT_NOFILE};
 use log::LevelFilter;
 use log::{debug, error, info};
 use rust_executor::Ad4mConfig;
+use rust_executor::utils::find_port;
 use std::env;
 use std::fs;
 use std::fs::File;
@@ -49,7 +50,6 @@ use crate::commands::state::{get_port, request_credential};
 use crate::config::log_path;
 
 use crate::menu::reveal_log_file;
-use crate::util::find_port;
 use crate::util::{create_main_window, save_executor_port};
 use tauri::Manager;
 

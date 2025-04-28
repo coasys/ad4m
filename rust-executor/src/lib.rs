@@ -9,7 +9,7 @@ mod holochain_service;
 mod js_core;
 mod prolog_service;
 mod runtime_service;
-mod utils;
+pub mod utils;
 mod wallet;
 
 pub mod agent;
