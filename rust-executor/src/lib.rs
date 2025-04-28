@@ -34,12 +34,13 @@ use js_core::JsCore;
 use crate::{
     agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb,
     languages::LanguageController, prolog_service::init_prolog_service,
-    runtime_service::RuntimeService,
+    runtime_service::RuntimeService, utils::find_port,
 };
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
 use libc::{sigaction, sigemptyset, sighandler_t, SA_ONSTACK, SIGURG};
 use std::ptr;
+
 
 extern "C" fn handle_sigurg(_: libc::c_int) {
     //println!("Received SIGURG signal, but ignoring it.");
@@ -123,6 +124,18 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     info!("Initializing Prolog service...");
     init_prolog_service().await;
+
+    if config.gql_port.is_none() {
+        config.gql_port = Some(find_port(4000, 40000));
+    }
+
+    if config.hc_admin_port.is_none() {
+        config.hc_admin_port = Some(find_port(2000, 40000));
+    }
+
+    if config.hc_app_port.is_none() {
+        config.hc_app_port = Some(find_port(1337, 40000));
+    }
 
     info!("Starting js_core...");
     let mut js_core_handle = JsCore::start(config.clone()).await;
