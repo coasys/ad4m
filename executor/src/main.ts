@@ -89,7 +89,7 @@ export async function init(config: OuterConfig): Promise<Ad4mCore> {
     // Moved the port check to Rust
     // BUT: we have weird problem with our JS runtime 
     // (which will be refactored soon, when we move over the last remaining JS code to Rust)
-    // when this function doesn't actually some async I/O operations, the JS event loop doesn't
+    // when this function doesn't actually do some async I/O operations, the JS event loop doesn't
     // seem to work for future JS calls.
     // So this here is a hack that works for now.
     // Putting it in a try/catch block to avoid the process from crashing if the port is already in use.
