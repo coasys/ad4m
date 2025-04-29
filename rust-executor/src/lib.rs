@@ -45,6 +45,19 @@ extern "C" fn handle_sigurg(_: libc::c_int) {
     //println!("Received SIGURG signal, but ignoring it.");
 }
 
+fn find_and_set_port(config_port: &mut Option<u16>, start_port: u16, service_name: &str) {
+    if config_port.is_none() {
+        match find_port(start_port, 40000) {
+            Ok(port) => *config_port = Some(port),
+            Err(e) => {
+                let error_string = format!("Failed to find port for {}: {}", service_name, e);
+                error!("{}", error_string);
+                panic!("{}", error_string);
+            }
+        }
+    }
+}
+
 /// Runs the GraphQL server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     unsafe {
@@ -124,17 +137,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     info!("Initializing Prolog service...");
     init_prolog_service().await;
 
-    if config.gql_port.is_none() {
-        config.gql_port = Some(find_port(4000, 40000));
-    }
-
-    if config.hc_admin_port.is_none() {
-        config.hc_admin_port = Some(find_port(2000, 40000));
-    }
-
-    if config.hc_app_port.is_none() {
-        config.hc_app_port = Some(find_port(1337, 40000));
-    }
+    find_and_set_port(&mut config.gql_port, 4000, "GraphQL");
+    find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");
+    find_and_set_port(&mut config.hc_app_port, 1337, "Holochain app");
 
     info!("Starting js_core...");
     let mut js_core_handle = JsCore::start(config.clone()).await;

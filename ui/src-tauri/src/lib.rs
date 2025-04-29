@@ -187,7 +187,11 @@ pub fn run() {
 
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 
-    let free_port = find_port(12000, 13000);
+    let free_port = find_port(12000, 13000).unwrap_or_else(|e| {
+        let error_string = format!("Failed to find free main executor interface port: {}", e);
+        error!("{}", error_string);
+        panic!("{}", error_string);
+    });
 
     info!("Free port: {:?}", free_port);
 
