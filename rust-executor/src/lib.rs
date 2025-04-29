@@ -9,7 +9,7 @@ mod holochain_service;
 mod js_core;
 mod prolog_service;
 mod runtime_service;
-mod utils;
+pub mod utils;
 mod wallet;
 
 pub mod agent;
@@ -34,7 +34,7 @@ use js_core::JsCore;
 use crate::{
     agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb,
     languages::LanguageController, prolog_service::init_prolog_service,
-    runtime_service::RuntimeService,
+    runtime_service::RuntimeService, utils::find_port,
 };
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
@@ -43,6 +43,19 @@ use std::ptr;
 
 extern "C" fn handle_sigurg(_: libc::c_int) {
     //println!("Received SIGURG signal, but ignoring it.");
+}
+
+fn find_and_set_port(config_port: &mut Option<u16>, start_port: u16, service_name: &str) {
+    if config_port.is_none() {
+        match find_port(start_port, 40000) {
+            Ok(port) => *config_port = Some(port),
+            Err(e) => {
+                let error_string = format!("Failed to find port for {}: {}", service_name, e);
+                error!("{}", error_string);
+                panic!("{}", error_string);
+            }
+        }
+    }
 }
 
 /// Runs the GraphQL server and the deno core runtime
@@ -123,6 +136,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     info!("Initializing Prolog service...");
     init_prolog_service().await;
+
+    find_and_set_port(&mut config.gql_port, 4000, "GraphQL");
+    find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");
+    find_and_set_port(&mut config.hc_app_port, 1337, "Holochain app");
 
     info!("Starting js_core...");
     let mut js_core_handle = JsCore::start(config.clone()).await;

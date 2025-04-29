@@ -12,19 +12,6 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
 use tauri_plugin_positioner::Position;
 use tauri_plugin_positioner::WindowExt;
 
-pub fn find_port(start_port: u16, end_port: u16) -> u16 {
-    for x in start_port..end_port {
-        if portpicker::is_free(x) {
-            return x;
-        }
-    }
-
-    panic!(
-        "No open port found between: [{:?}, {:?}]",
-        start_port, end_port
-    );
-}
-
 pub fn _has_processes_running(name: &str) -> usize {
     let processes = System::new_all();
     let processes_by_name: Vec<&Process> = processes.processes_by_exact_name(name).collect();

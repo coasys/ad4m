@@ -282,7 +282,7 @@ impl JsCore {
                     .execute_async_smart(format!("initCore({})", config.get_json()))
                     .await
                     .expect("to be able to create js execution future")
-                    .await ;
+                    .await;
 
                 match result {
                     Ok(res) => {
