@@ -2059,7 +2059,7 @@ impl PerspectiveInstance {
             let queries = self.subscribed_queries.lock().await;
             if let Some(query) = queries.get(&existing_id) {
                 let result_string = format!("#init#{}", query.last_result);
-                for delay in [100, 500, 1000] {
+                for delay in [100, 500, 1000, 10000, 15000, 20000, 25000] {
                     self.send_subscription_update(
                         existing_id.clone(),
                         result_string.clone(),
@@ -2088,7 +2088,7 @@ impl PerspectiveInstance {
 
         // Send initial result after 3 delays
         let result_string = format!("#init#{}", result_string);
-        for delay in [100, 500, 1000, 10000] {
+        for delay in [100, 500, 1000, 10000, 15000, 20000, 25000] {
             self.send_subscription_update(
                 subscription_id.clone(),
                 result_string.clone(),
