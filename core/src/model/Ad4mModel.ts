@@ -281,6 +281,14 @@ export class Ad4mModel {
   private static classNamesByClass = new WeakMap<typeof Ad4mModel, { [perspectiveId: string]: string }>();
 
   static async getClassName(perspective: PerspectiveProxy) {
+      // Check if this is the Ad4mModel class itself or a subclass
+      const isBaseClass = this === Ad4mModel;
+  
+      // For the base Ad4mModel class, we can't use the cache
+      if (isBaseClass) {
+        return await perspective.stringOrTemplateObjectToSubjectClassName(this);
+      }
+
     // Get or create the cache for this class
     let classCache = this.classNamesByClass.get(this);
     if (!classCache) {
@@ -725,8 +733,19 @@ export class Ad4mModel {
     await this.getData();
   }
 
+  private cleanCopy() {
+    const cleanCopy = {};
+    const props = Object.entries(this);
+    for (const [key, value] of props) {
+      if (value !== undefined && value !== null) {
+        cleanCopy[key] = value;
+      }
+    }
+    return cleanCopy;
+  }
+
   private async innerUpdate(setProperties: boolean = true, batchId?: string) {
-    this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this);
+    this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this.cleanCopy());
 
     const entries = Object.entries(this);
     for (const [key, value] of entries) {
@@ -795,7 +814,7 @@ export class Ad4mModel {
    * ```
    */
   async get() {
-    this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this);
+    this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this.cleanCopy());
 
     return await this.getData();
   }
