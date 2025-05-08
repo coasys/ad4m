@@ -737,7 +737,7 @@ export class Ad4mModel {
     const cleanCopy = {};
     const props = Object.entries(this);
     for (const [key, value] of props) {
-      if (value !== undefined && value !== null) {
+      if (value !== undefined && value !== null && key !== "author" && key !== "timestamp") {
         cleanCopy[key] = value;
       }
     }
