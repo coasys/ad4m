@@ -2,12 +2,17 @@ use ::futures::Future;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use deno_core::{resolve_url_or_path, v8, PollEventLoopOptions};
-use deno_runtime::worker::MainWorker;
-use deno_runtime::{permissions::PermissionsContainer, BootstrapOptions};
+use deno_fs::RealFs;
+use deno_resolver::npm::DenoInNpmPackageChecker;
+use deno_resolver::npm::NpmResolver;
+use deno_runtime::worker::{MainWorker, WorkerServiceOptions};
+use deno_runtime::BootstrapOptions;
+use deno_runtime::deno_permissions::PermissionsContainer;
+use deno_runtime::permissions::RuntimePermissionDescriptorParser;
 use holochain::prelude::{ExternIO, Signal};
 use log::{error, info};
 use once_cell::sync::Lazy;
-use options::{main_module_url, main_worker_options};
+use options::{main_module_url, main_worker_options, module_loader};
 use std::collections::HashSet;
 use std::env::current_dir;
 use std::sync::Arc;
@@ -139,11 +144,34 @@ impl std::fmt::Display for ExternWrapper {
 impl JsCore {
     pub fn new() -> Self {
         deno_core::v8::V8::set_flags_from_string("--no-opt");
+        let fs = Arc::new(RealFs);
+        let permission_desc_parser = Arc::new(
+            RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys),
+          );
         JsCore {
             #[allow(clippy::arc_with_non_send_sync)]
-            worker: Arc::new(TokioMutex::new(MainWorker::from_options(
+            worker: Arc::new(TokioMutex::new(MainWorker::bootstrap_from_options(
                 &main_module_url(),
-                PermissionsContainer::allow_all(),
+                WorkerServiceOptions::<
+                DenoInNpmPackageChecker,
+                NpmResolver<sys_traits::impls::RealSys>,
+                sys_traits::impls::RealSys,
+              > {
+                deno_rt_native_addon_loader: None,
+                module_loader: module_loader(),
+                permissions: PermissionsContainer::allow_all(permission_desc_parser),
+                blob_store: Default::default(),
+                broadcast_channel: Default::default(),
+                feature_checker: Default::default(),
+                node_services: Default::default(),
+                npm_process_state_provider: Default::default(),
+                root_cert_store_provider: Default::default(),
+                fetch_dns_resolver: Default::default(),
+                shared_array_buffer_store: Default::default(),
+                compiled_wasm_module_store: Default::default(),
+                v8_code_cache: Default::default(),
+                fs,
+              },
                 main_worker_options(),
             ))),
             loaded_modules: Arc::new(TokioMutex::new(HashSet::new())),
