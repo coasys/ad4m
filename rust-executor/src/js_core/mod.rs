@@ -21,6 +21,7 @@ use tokio::sync::{
 };
 
 mod agent_extension;
+pub mod error;
 mod futures;
 mod languages_extension;
 mod options;
@@ -141,7 +142,7 @@ impl JsCore {
         JsCore {
             #[allow(clippy::arc_with_non_send_sync)]
             worker: Arc::new(TokioMutex::new(MainWorker::from_options(
-                main_module_url(),
+                &main_module_url(),
                 PermissionsContainer::allow_all(),
                 main_worker_options(),
             ))),

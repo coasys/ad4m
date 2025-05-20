@@ -5,10 +5,10 @@ use multibase::Base;
 use multihash::{Code, MultihashDigest};
 
 use super::JS_CORE_HANDLE;
-
+use crate::js_core::error::AnyhowWrapperError;
 #[op2]
 #[string]
-fn hash(#[string] data: String) -> Result<String, AnyError> {
+fn hash(#[string] data: String) -> Result<String, AnyhowWrapperError> {
     // Compute the SHA-256 multihash
     let multihash = Code::Sha2_256.digest(data.as_bytes());
 
@@ -23,7 +23,7 @@ fn hash(#[string] data: String) -> Result<String, AnyError> {
 
 #[op2]
 #[string]
-fn console_log(#[string] data: String) -> Result<String, AnyError> {
+fn console_log(#[string] data: String) -> Result<String, AnyhowWrapperError> {
     info!("[JSCORE]: {}", data);
 
     Ok(String::from("temp"))
@@ -31,7 +31,7 @@ fn console_log(#[string] data: String) -> Result<String, AnyError> {
 
 #[op2]
 #[string]
-fn console_debug(#[string] data: String) -> Result<String, AnyError> {
+fn console_debug(#[string] data: String) -> Result<String, AnyhowWrapperError> {
     debug!("[JSCORE]: {}", data);
 
     Ok(String::from("temp"))
@@ -39,7 +39,7 @@ fn console_debug(#[string] data: String) -> Result<String, AnyError> {
 
 #[op2]
 #[string]
-fn console_error(#[string] data: String) -> Result<String, AnyError> {
+fn console_error(#[string] data: String) -> Result<String, AnyhowWrapperError> {
     error!("[JSCORE]: {}", data);
 
     Ok(String::from("temp"))
@@ -47,7 +47,7 @@ fn console_error(#[string] data: String) -> Result<String, AnyError> {
 
 #[op2]
 #[string]
-fn console_warn(#[string] data: String) -> Result<String, AnyError> {
+fn console_warn(#[string] data: String) -> Result<String, AnyhowWrapperError> {
     warn!("[JSCORE]: {}", data);
 
     Ok(String::from("temp"))
@@ -55,7 +55,7 @@ fn console_warn(#[string] data: String) -> Result<String, AnyError> {
 
 #[op2(async)]
 #[string]
-async fn load_module(#[string] path: String) -> Result<String, AnyError> {
+async fn load_module(#[string] path: String) -> Result<String, AnyhowWrapperError> {
     info!("Trying to load module: {}", path);
 
     let mut js_core_handle = JS_CORE_HANDLE.lock().await;

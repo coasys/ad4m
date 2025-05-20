@@ -6,25 +6,25 @@ use crate::{
     graphql::graphql_types::{Agent, AgentStatus},
 };
 use coasys_juniper::{FieldError, Value};
-use deno_core::{error::AnyError, op2};
-
+use deno_core::op2;
+use crate::js_core::error::AnyhowWrapperError;
 use super::utils::sort_json_value;
 
 #[op2]
 #[serde]
-fn agent_did_document() -> Result<did_key::Document, AnyError> {
+fn agent_did_document() -> Result<did_key::Document, AnyhowWrapperError> {
     Ok(did_document())
 }
 
 #[op2]
 #[string]
-fn agent_signing_key_id() -> Result<String, AnyError> {
+fn agent_signing_key_id() -> Result<String, AnyhowWrapperError> {
     Ok(signing_key_id())
 }
 
 #[op2]
 #[string]
-fn agent_did() -> Result<String, AnyError> {
+fn agent_did() -> Result<String, AnyhowWrapperError> {
     Ok(did())
 }
 
@@ -32,47 +32,47 @@ fn agent_did() -> Result<String, AnyError> {
 #[serde]
 fn agent_create_signed_expression(
     #[serde] data: serde_json::Value,
-) -> Result<serde_json::Value, AnyError> {
+) -> Result<serde_json::Value, AnyhowWrapperError> {
     let sorted_json = sort_json_value(&data);
-    let signed_expression = create_signed_expression(sorted_json)?;
-    Ok(serde_json::to_value(signed_expression)?)
+    let signed_expression = create_signed_expression(sorted_json).map_err(AnyhowWrapperError::from)?;
+    Ok(serde_json::to_value(signed_expression).map_err(AnyhowWrapperError::from)?)
 }
 
 #[op2]
 #[string]
-fn agent_create_signed_expression_stringified(#[string] data: String) -> Result<String, AnyError> {
+fn agent_create_signed_expression_stringified(#[string] data: String) -> Result<String, AnyhowWrapperError> {
     let data: serde_json::Value = serde_json::from_str(&data)?;
     let sorted_json = sort_json_value(&data);
     let signed_expression = create_signed_expression(sorted_json)?;
-    let stringified = serde_json::to_string(&signed_expression)?;
+    let stringified = serde_json::to_string(&signed_expression).map_err(AnyhowWrapperError::from)?;
     Ok(stringified)
 }
 
 #[op2]
 #[serde]
-fn agent_sign(#[buffer] payload: &[u8]) -> Result<Vec<u8>, AnyError> {
-    sign(payload)
+fn agent_sign(#[buffer] payload: &[u8]) -> Result<Vec<u8>, AnyhowWrapperError> {
+    sign(payload).map_err(AnyhowWrapperError::from)
 }
 
 #[op2]
 #[string]
-fn agent_sign_string_hex(#[string] payload: String) -> Result<String, AnyError> {
-    sign_string_hex(payload)
+fn agent_sign_string_hex(#[string] payload: String) -> Result<String, AnyhowWrapperError> {
+    sign_string_hex(payload).map_err(AnyhowWrapperError::from)
 }
 
 #[op2(fast)]
-fn agent_is_initialized() -> Result<bool, AnyError> {
+fn agent_is_initialized() -> Result<bool, AnyhowWrapperError> {
     AgentService::with_global_instance(|agent_service| Ok(agent_service.is_initialized()))
 }
 
 #[op2(fast)]
-fn agent_is_unlocked() -> Result<bool, AnyError> {
+fn agent_is_unlocked() -> Result<bool, AnyhowWrapperError> {
     AgentService::with_global_instance(|agent_service| Ok(agent_service.is_unlocked()))
 }
 
 #[op2]
 #[serde]
-fn agent() -> Result<Agent, AnyError> {
+fn agent() -> Result<Agent, AnyhowWrapperError> {
     AgentService::with_global_instance(|agent_service| {
         let mut agent = agent_service
             .agent
@@ -90,7 +90,7 @@ fn agent() -> Result<Agent, AnyError> {
 
 #[op2]
 #[serde]
-fn agent_load() -> Result<AgentStatus, AnyError> {
+fn agent_load() -> Result<AgentStatus, AnyhowWrapperError> {
     AgentService::with_mutable_global_instance(|agent_service| {
         agent_service.load();
         Ok(agent_service.dump())
@@ -99,13 +99,13 @@ fn agent_load() -> Result<AgentStatus, AnyError> {
 
 #[op2(async)]
 #[serde]
-async fn agent_unlock(#[string] passphrase: String) -> Result<(), AnyError> {
-    AgentService::with_global_instance(|agent_service| agent_service.unlock(passphrase))
+async fn agent_unlock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError> {
+    AgentService::with_global_instance(|agent_service| agent_service.unlock(passphrase)).map_err(AnyhowWrapperError::from)
 }
 
 #[op2(async)]
 #[serde]
-async fn agent_lock(#[string] passphrase: String) -> Result<(), AnyError> {
+async fn agent_lock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError> {
     AgentService::with_global_instance(|agent_service| {
         agent_service.lock(passphrase);
         Ok(())
@@ -113,7 +113,7 @@ async fn agent_lock(#[string] passphrase: String) -> Result<(), AnyError> {
 }
 
 #[op2]
-fn save_agent_profile(#[serde] agent: Agent) -> Result<(), AnyError> {
+fn save_agent_profile(#[serde] agent: Agent) -> Result<(), AnyhowWrapperError> {
     AgentService::with_mutable_global_instance(|agent_service| {
         agent_service.save_agent_profile(agent);
 

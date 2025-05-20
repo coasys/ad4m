@@ -1,8 +1,9 @@
 use base64::{engine::general_purpose as base64engine, Engine as _};
-use deno_core::{anyhow::anyhow, error::AnyError, op2};
+use deno_core::{anyhow::anyhow, op2};
 use serde::{Deserialize, Serialize};
 
 use crate::wallet::Wallet;
+use crate::js_core::error::AnyhowWrapperError;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -14,7 +15,7 @@ pub struct Key {
 
 #[op2]
 #[serde]
-fn wallet_get_main_key() -> Result<Key, AnyError> {
+fn wallet_get_main_key() -> Result<Key, AnyhowWrapperError> {
     let wallet_instance = Wallet::instance();
     let wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_ref().expect("wallet instance");
@@ -34,19 +35,19 @@ fn wallet_get_main_key() -> Result<Key, AnyError> {
 
 #[op2]
 #[serde]
-fn wallet_get_main_key_document() -> Result<did_key::Document, AnyError> {
+fn wallet_get_main_key_document() -> Result<did_key::Document, AnyhowWrapperError> {
     let wallet_instance = Wallet::instance();
     let wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_ref().expect("wallet instance");
     let name = "main".to_string();
     wallet_ref
         .get_did_document(&name)
-        .ok_or(anyhow!("main key not found. call createMainKey() first"))
+        .ok_or(AnyhowWrapperError::from(anyhow!("main key not found. call createMainKey() first")))
 }
 
 #[op2]
 #[serde]
-fn wallet_create_main_key() -> Result<(), AnyError> {
+fn wallet_create_main_key() -> Result<(), AnyhowWrapperError> {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
@@ -55,7 +56,7 @@ fn wallet_create_main_key() -> Result<(), AnyError> {
 }
 
 #[op2(fast)]
-fn wallet_is_unlocked() -> Result<bool, AnyError> {
+fn wallet_is_unlocked() -> Result<bool, AnyhowWrapperError> {
     let wallet_instance = Wallet::instance();
     let wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_ref().expect("wallet instance");
@@ -64,16 +65,16 @@ fn wallet_is_unlocked() -> Result<bool, AnyError> {
 
 #[op2]
 #[serde]
-fn wallet_unlock(#[string] passphrase: String) -> Result<(), AnyError> {
+fn wallet_unlock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError> {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
-    wallet_ref.unlock(passphrase)
+    wallet_ref.unlock(passphrase).map_err(AnyhowWrapperError::from)
 }
 
 #[op2]
 #[serde]
-fn wallet_lock(#[string] passphrase: String) -> Result<(), AnyError> {
+fn wallet_lock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError> {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
@@ -83,7 +84,7 @@ fn wallet_lock(#[string] passphrase: String) -> Result<(), AnyError> {
 
 #[op2]
 #[string]
-fn wallet_export(#[string] passphrase: String) -> Result<String, AnyError> {
+fn wallet_export(#[string] passphrase: String) -> Result<String, AnyhowWrapperError> {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
@@ -92,7 +93,7 @@ fn wallet_export(#[string] passphrase: String) -> Result<String, AnyError> {
 
 #[op2]
 #[serde]
-fn wallet_load(#[string] data: String) -> Result<(), AnyError> {
+fn wallet_load(#[string] data: String) -> Result<(), AnyhowWrapperError> {
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
@@ -102,8 +103,8 @@ fn wallet_load(#[string] data: String) -> Result<(), AnyError> {
 
 #[op2]
 #[serde]
-fn wallet_sign(#[buffer] payload: &[u8]) -> Result<Vec<u8>, AnyError> {
-    crate::agent::sign(payload)
+fn wallet_sign(#[buffer] payload: &[u8]) -> Result<Vec<u8>, AnyhowWrapperError> {
+    crate::agent::sign(payload).map_err(AnyhowWrapperError::from)
 }
 
 deno_core::extension!(

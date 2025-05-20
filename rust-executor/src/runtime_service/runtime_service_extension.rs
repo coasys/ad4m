@@ -1,17 +1,17 @@
 use crate::graphql::graphql_types::{PerspectiveExpression, SentMessage};
 use deno_core::{error::AnyError, op2};
-
+use crate::js_core::error::AnyhowWrapperError;
 use super::RuntimeService;
 
 #[op2]
 #[serde]
-pub fn friends() -> Result<Vec<String>, AnyError> {
+pub fn friends() -> Result<Vec<String>, AnyhowWrapperError> {
     RuntimeService::with_global_instance(|runtime| Ok(runtime.get_friends()))
 }
 
 #[op2]
 #[serde]
-pub fn get_trusted_agents() -> Result<Vec<String>, AnyError> {
+pub fn get_trusted_agents() -> Result<Vec<String>, AnyhowWrapperError> {
     RuntimeService::with_global_instance(|runtime| Ok(runtime.get_trusted_agents()))
 }
 
@@ -20,7 +20,7 @@ pub fn add_message_outbox(
     #[string] did: String,
     #[serde] message: PerspectiveExpression,
     was_sent: bool,
-) -> Result<bool, AnyError> {
+) -> Result<bool, AnyhowWrapperError> {
     RuntimeService::with_global_instance(|runtime| {
         runtime.add_message_to_outbox(SentMessage {
             recipient: did,

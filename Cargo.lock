@@ -78,6 +78,7 @@ dependencies = [
  "crypto_box",
  "deflate 1.0.0",
  "deno_core",
+ "deno_error",
  "deno_runtime",
  "did-key",
  "dirs 5.0.1",

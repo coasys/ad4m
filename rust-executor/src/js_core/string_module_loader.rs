@@ -1,5 +1,5 @@
 use deno_core::anyhow;
-use deno_core::error::generic_error;
+use deno_core::error::ModuleLoaderError;
 use deno_core::ModuleLoadResponse;
 use deno_core::ModuleLoader;
 use deno_core::ModuleSource;
@@ -8,7 +8,6 @@ use deno_core::ModuleSpecifier;
 use deno_core::ModuleType;
 use deno_core::RequestedModuleType;
 use deno_core::ResolutionKind;
-use deno_runtime::deno_core::error::AnyError;
 use log::info;
 use std::collections::HashMap;
 use url::Url;
@@ -35,7 +34,7 @@ impl ModuleLoader for StringModuleLoader {
         specifier: &str,
         referrer: &str,
         _kind: ResolutionKind,
-    ) -> Result<ModuleSpecifier, AnyError> {
+    ) -> Result<ModuleSpecifier, ModuleLoaderError> {
         let module_specifier = deno_core::resolve_import(specifier, referrer)?;
         Ok(module_specifier)
     }
@@ -47,12 +46,7 @@ impl ModuleLoader for StringModuleLoader {
         _is_dyn_import: bool,
         _request_module_type: RequestedModuleType,
     ) -> ModuleLoadResponse {
-        let path = module_specifier.to_file_path().map_err(|_| {
-            generic_error(format!(
-                "Provided module specifier \"{module_specifier}\" is not a file URL."
-            ))
-        });
-        match path {
+        match module_specifier.to_file_path() {
             Ok(path) => {
                 let module_type = if let Some(extension) = path.extension() {
                     let ext = extension.to_string_lossy().to_lowercase();
@@ -88,7 +82,7 @@ impl ModuleLoader for StringModuleLoader {
                         &module_specifier,
                         None,
                     )),
-                    None => Err(anyhow::anyhow!("Module not found: {}", module_specifier)),
+                    None => Err(ModuleLoaderError::NotFound)
                 })
             }
         }
