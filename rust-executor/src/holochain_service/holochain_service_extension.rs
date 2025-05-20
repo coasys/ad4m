@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 use crate::holochain_service::{HolochainService, LocalConductorConfig};
-
+use crate::js_core::error::AnyhowWrapperError;
 use super::get_holochain_service;
 
 // The duration to use for timeouts
@@ -20,13 +20,13 @@ const TIMEOUT_DURATION: Duration = Duration::from_secs(10);
 const APP_INSTALL_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
 
 #[op2(async)]
-async fn start_holochain_conductor(#[serde] config: LocalConductorConfig) -> Result<(), AnyError> {
+async fn start_holochain_conductor(#[serde] config: LocalConductorConfig) -> Result<(), AnyhowWrapperError> {
     HolochainService::init(config).await?;
     Ok(())
 }
 
 #[op2(async)]
-async fn log_dht_status() -> Result<(), AnyError> {
+async fn log_dht_status() -> Result<(), AnyhowWrapperError> {
     let res = timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
         interface.log_network_metrics().await
@@ -43,24 +43,26 @@ async fn log_dht_status() -> Result<(), AnyError> {
 
 #[op2(async)]
 #[serde]
-async fn install_app(#[serde] install_app_payload: InstallAppPayload) -> Result<AppInfo, AnyError> {
+async fn install_app(#[serde] install_app_payload: InstallAppPayload) -> Result<AppInfo, AnyhowWrapperError> {
     timeout(APP_INSTALL_TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
         interface.install_app(install_app_payload).await
     })
     .await
-    .map_err(|_| anyhow!("Timeout error"))?
+    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
+    .map_err(AnyhowWrapperError::from)
 }
 
 #[op2(async)]
 #[serde]
-async fn get_app_info(#[string] app_id: String) -> Result<Option<AppInfo>, AnyError> {
+async fn get_app_info(#[string] app_id: String) -> Result<Option<AppInfo>, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
         interface.get_app_info(app_id).await
     })
     .await
-    .map_err(|_| anyhow!("Timeout error"))?
+    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
+    .map_err(AnyhowWrapperError::from)
 }
 
 //TODO
@@ -73,7 +75,7 @@ async fn call_zome_function(
     #[string] zome_name: String,
     #[string] fn_name: String,
     #[serde] payload: Option<ExternIO>,
-) -> Result<ZomeCallResponse, AnyError> {
+) -> Result<ZomeCallResponse, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
         interface
@@ -81,94 +83,103 @@ async fn call_zome_function(
             .await
     })
     .await
-    .map_err(|_| anyhow!("Timeout error"))?
+    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
+    .map_err(AnyhowWrapperError::from)
 }
 
 #[op2(async)]
 #[serde]
-async fn agent_infos() -> Result<Vec<AgentInfoSigned>, AnyError> {
+async fn agent_infos() -> Result<Vec<AgentInfoSigned>, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
         interface.agent_infos().await
     })
     .await
-    .map_err(|_| anyhow!("Timeout error"))?
+    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
+    .map_err(AnyhowWrapperError::from)
 }
 
 #[op2(async)]
 async fn add_agent_infos(
     #[serde] agent_infos_payload: Vec<AgentInfoSigned>,
-) -> Result<(), AnyError> {
+) -> Result<(), AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
         interface.add_agent_infos(agent_infos_payload).await
     })
     .await
-    .map_err(|_| anyhow!("Timeout error"))?
+    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
+    .map_err(AnyhowWrapperError::from)
 }
 
 #[op2(async)]
-async fn remove_app(#[string] app_id: String) -> Result<(), AnyError> {
+async fn remove_app(#[string] app_id: String) -> Result<(), AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
         interface.remove_app(app_id).await
     })
     .await
-    .map_err(|_| anyhow!("Timeout error"))?
+    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
+    .map_err(AnyhowWrapperError::from)
 }
 
 #[op2(async)]
 #[serde]
-async fn sign_string(#[string] data: String) -> Result<Signature, AnyError> {
+async fn sign_string(#[string] data: String) -> Result<Signature, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
         interface.sign(data).await
     })
     .await
-    .map_err(|_| anyhow!("Timeout error"))?
+    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
+    .map_err(AnyhowWrapperError::from)
 }
 
 #[op2(async)]
-async fn shutdown() -> Result<(), AnyError> {
+async fn shutdown() -> Result<(), AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
         interface.shutdown().await
     })
     .await
-    .map_err(|_| anyhow!("Timeout error"))?
+    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
+    .map_err(AnyhowWrapperError::from)
 }
 
 #[op2(async)]
 #[serde]
-async fn get_agent_key() -> Result<HoloHash<Agent>, AnyError> {
+async fn get_agent_key() -> Result<HoloHash<Agent>, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
         interface.get_agent_key().await
     })
     .await
-    .map_err(|_| anyhow!("Timeout error"))?
+    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
+    .map_err(AnyhowWrapperError::from)
 }
 
 #[op2(async)]
 #[string]
-async fn pack_dna(#[string] path: String) -> Result<String, AnyError> {
+async fn pack_dna(#[string] path: String) -> Result<String, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
         interface.pack_dna(path).await
     })
     .await
-    .map_err(|_| anyhow!("Timeout error"))?
+    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
+    .map_err(AnyhowWrapperError::from)
 }
 
 #[op2(async)]
 #[string]
-async fn unpack_dna(#[string] path: String) -> Result<String, AnyError> {
+async fn unpack_dna(#[string] path: String) -> Result<String, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
         interface.unpack_dna(path).await
     })
     .await
-    .map_err(|_| anyhow!("Timeout error"))?
+    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
+    .map_err(AnyhowWrapperError::from)
 }
 
 //Implement signal callbacks from dna/holochain to js
