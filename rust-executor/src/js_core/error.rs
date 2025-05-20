@@ -2,7 +2,11 @@ use deno_error::JsErrorClass;
 use anyhow::Error as AnyhowError;
 //use deno_error::js_error;
 
-#[derive(Debug, deno_error::JsError)]
+
+#[derive(Debug, thiserror::Error, deno_error::JsError)]
+//#[property("code" = 10)]
+#[class(generic)]
+#[error(transparent)]
 //#[js_error(name = "AnyhowWrapperError")]
 pub struct AnyhowWrapperError {
     inner: AnyhowError,
@@ -20,14 +24,14 @@ impl From<serde_json::Error> for AnyhowWrapperError {
     }
 }
 
-impl std::fmt::Display for AnyhowWrapperError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.inner)
-    }
-}
+// impl std::fmt::Display for AnyhowWrapperError {
+//     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+//         write!(f, "{}", self.inner)
+//     }
+// }
 
-impl std::error::Error for AnyhowWrapperError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&*self.inner)
-    }
-}
+// impl std::error::Error for AnyhowWrapperError {
+//     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+//         Some(&*self.inner)
+//     }
+// }
