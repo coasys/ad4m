@@ -2,7 +2,7 @@ use deno_core::{anyhow::anyhow, error::AnyError, op2};
 use holochain::{
     conductor::api::AppInfo,
     prelude::{
-        agent_store::AgentInfoSigned, hash_type::Agent, ExternIO, HoloHash, InstallAppPayload,
+        hash_type::Agent, ExternIO, HoloHash, InstallAppPayload,
         Signature, ZomeCallResponse,
     },
 };
@@ -89,7 +89,7 @@ async fn call_zome_function(
 
 #[op2(async)]
 #[serde]
-async fn agent_infos() -> Result<Vec<AgentInfoSigned>, AnyhowWrapperError> {
+async fn agent_infos() -> Result<Vec<String>, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
         interface.agent_infos().await
@@ -101,7 +101,7 @@ async fn agent_infos() -> Result<Vec<AgentInfoSigned>, AnyhowWrapperError> {
 
 #[op2(async)]
 async fn add_agent_infos(
-    #[serde] agent_infos_payload: Vec<AgentInfoSigned>,
+    #[serde] agent_infos_payload: Vec<String>,
 ) -> Result<(), AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;

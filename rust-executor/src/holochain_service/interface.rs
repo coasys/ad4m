@@ -1,10 +1,10 @@
 use deno_core::error::AnyError;
 use holochain::conductor::api::AppInfo;
-use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
 use holochain::prelude::{
     ExternIO, HoloHash, InstallAppPayload, Signal, Signature, ZomeCallResponse,
 };
+use kitsune2_api::AgentInfo;
 use lazy_static::lazy_static;
 use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -30,7 +30,7 @@ pub enum HolochainServiceRequest {
     RemoveApp(String, oneshot::Sender<HolochainServiceResponse>),
     AgentInfos(oneshot::Sender<HolochainServiceResponse>),
     AddAgentInfos(
-        Vec<AgentInfoSigned>,
+        Vec<String>,
         oneshot::Sender<HolochainServiceResponse>,
     ),
     Sign(String, oneshot::Sender<HolochainServiceResponse>),
@@ -47,7 +47,7 @@ pub enum HolochainServiceResponse {
     InstallApp(Result<AppInfo, AnyError>),
     CallZomeFunction(Result<ZomeCallResponse, AnyError>),
     RemoveApp(Result<(), AnyError>),
-    AgentInfos(Result<Vec<AgentInfoSigned>, AnyError>),
+    AgentInfos(Result<Vec<String>, AnyError>),
     AddAgentInfos(Result<(), AnyError>),
     Sign(Result<Signature, AnyError>),
     Shutdown(Result<(), AnyError>),
@@ -106,7 +106,7 @@ impl HolochainServiceInterface {
         }
     }
 
-    pub async fn agent_infos(&self) -> Result<Vec<AgentInfoSigned>, AnyError> {
+    pub async fn agent_infos(&self) -> Result<Vec<String>, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.sender
             .send(HolochainServiceRequest::AgentInfos(response_tx))?;
@@ -116,7 +116,7 @@ impl HolochainServiceInterface {
         }
     }
 
-    pub async fn add_agent_infos(&self, agent_infos: Vec<AgentInfoSigned>) -> Result<(), AnyError> {
+    pub async fn add_agent_infos(&self, agent_infos: Vec<String>) -> Result<(), AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.sender.send(HolochainServiceRequest::AddAgentInfos(
             agent_infos,

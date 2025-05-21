@@ -10,19 +10,14 @@ use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo};
 use holochain::conductor::config::{ConductorConfig, NetworkConfig};
 use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
-use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
 use holochain::prelude::{
     ExternIO, HoloHash, InstallAppPayload, Signal, Signature, Timestamp, ZomeCallResponse,
-    ZomeCallUnsigned,
 };
 use holochain::test_utils::itertools::Either;
 
 use holochain_types::dna::ValidatedDnaManifest;
 use holochain_types::websocket::AllowedOrigins;
-use kitsune_p2p_types::config::{
-    KitsuneP2pConfig, KitsuneP2pTuningParams, NetworkType, TransportConfig,
-};
 use kitsune_p2p_types::dependencies::url2::Url2;
 use log::{error, info};
 use rand::Rng;
@@ -45,22 +40,6 @@ pub(crate) use interface::{
 use self::interface::set_holochain_service;
 
 const COASYS_BOOTSTRAP_AGENT_INFO: &str = r#" ["g6VhZ2VudMQkeWyy+u7ziOZEejqRGCHVSjWuNDGCkHSFWpkp/DsXJFVDyWYdqXNpZ25hdHVyZcRAlYaUoegA0DB+U8F2cONLcoORjqz7WqW4dBSfvWyQ4AixLLB3h0jsvqGUo0UfowjUP1ntBhMjA8xo/oQateooDaphZ2VudF9pbmZvxPuGpXNwYWNlxCReuo1fprVD9jjsQWRglwEzVlWFiYB+4BEA7BQIwOpYgUgezPGlYWdlbnTEJHlssvru84jmRHo6kRgh1Uo1rjQxgpB0hVqZKfw7FyRVQ8lmHaR1cmxzkdlJd3NzOi8vc2lnbmFsLmhvbG8uaG9zdC90eDUtd3MvNEFNaGNWNHhpdFdPMHI2YUR1NjFwcW5jMW5LNjBmdkRfYTRyZUJmUFdTMKxzaWduZWRfYXRfbXPPAAABk/NOnPewZXhwaXJlc19hZnRlcl9tc84AEk+AqW1ldGFfaW5mb8QZgahhcnFfc2l6ZYKlcG93ZXIRpWNvdW50CA=="]"#;
-
-pub fn agent_infos_from_str(agent_infos: &str) -> Result<Vec<AgentInfoSigned>, AnyError> {
-    let agent_infos: Vec<String> = serde_json::from_str(agent_infos)?;
-    let agent_infos: Vec<AgentInfoSigned> = agent_infos
-        .into_iter()
-        .map(|encoded_info| {
-            let info_bytes = BASE64_STANDARD
-                .decode(encoded_info)
-                .expect("Failed to decode base64 AgentInfoSigned");
-            AgentInfoSigned::decode(&info_bytes).expect("Failed to decode AgentInfoSigned")
-        })
-        .collect();
-
-    Ok(agent_infos)
-}
-
 #[derive(Clone)]
 pub struct HolochainService {
     pub conductor: ConductorHandle,
@@ -328,11 +307,9 @@ impl HolochainService {
             _ => unreachable!(),
         };
 
+        let agent_infos: Vec<String> = serde_json::from_str(COASYS_BOOTSTRAP_AGENT_INFO)?;
         inteface
-            .add_agent_infos(
-                agent_infos_from_str(COASYS_BOOTSTRAP_AGENT_INFO)
-                    .expect("Couldn't deserialize hard-wired AgentInfo"),
-            )
+            .add_agent_infos(agent_infos)
             .await?;
 
         set_holochain_service(inteface).await;
@@ -544,11 +521,11 @@ impl HolochainService {
         Ok(())
     }
 
-    pub async fn agent_infos(&self) -> Result<Vec<AgentInfoSigned>, AnyError> {
-        Ok(self.conductor.get_agent_infos(None).await?)
+    pub async fn agent_infos(&self) -> Result<Vec<String>, AnyError> {
+        Ok(self.conductor.get_agent_infos(None).await?.into_iter().map(|arc| (*arc).encode()).collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub async fn add_agent_infos(&self, agent_infos: Vec<AgentInfoSigned>) -> Result<(), AnyError> {
+    pub async fn add_agent_infos(&self, agent_infos: Vec<String>) -> Result<(), AnyError> {
         Ok(self.conductor.add_agent_infos(agent_infos).await?)
     }
 
