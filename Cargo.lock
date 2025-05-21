@@ -21,7 +21,6 @@ dependencies = [
  "ctrlc",
  "dirs 4.0.0",
  "futures",
- "kitsune_p2p_types 0.3.6",
  "rand 0.8.5",
  "regex",
  "rustyline 10.1.1",
@@ -102,7 +101,7 @@ dependencies = [
  "jsonwebtoken",
  "kalosm",
  "kitsune2_api",
- "kitsune_p2p_types 0.5.0-dev.9",
+ "kitsune_p2p_types",
  "lair_keystore_api 0.6.1",
  "lazy_static",
  "libc",
@@ -5995,7 +5994,7 @@ name = "fixt"
 version = "0.5.2"
 source = "git+https://github.com/coasys/holochain.git?branch=0.5.2-coasys#3bd25fa4183f9ace9b26580bf8c68a08de95bd44"
 dependencies = [
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "lazy_static",
  "parking_lot",
  "paste",
@@ -7330,7 +7329,7 @@ source = "git+https://github.com/coasys/holochain.git?branch=0.5.2-coasys#3bd25f
 dependencies = [
  "hc_deepkey_types",
  "hdk",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "serde",
  "serde_bytes",
 ]
@@ -7343,7 +7342,7 @@ dependencies = [
  "hdi",
  "holo_hash",
  "holochain_integrity_types",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "rmpv",
  "serde",
 ]
@@ -7356,20 +7355,6 @@ dependencies = [
  "r2d2",
  "rusqlite",
  "uuid 1.10.0",
-]
-
-[[package]]
-name = "hc_seed_bundle"
-version = "0.2.4"
-source = "git+https://github.com/coasys/lair.git?branch=0.4.7-coasys#7d2879390e82a86713810783c7a0a1605352329d"
-dependencies = [
- "futures",
- "one_err",
- "rmp-serde",
- "rmpv",
- "serde",
- "serde_bytes",
- "sodoken 0.0.11",
 ]
 
 [[package]]
@@ -7411,7 +7396,7 @@ dependencies = [
  "hdk_derive",
  "holo_hash",
  "holochain_integrity_types",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_wasmer_guest",
  "paste",
  "serde",
@@ -7783,7 +7768,7 @@ dependencies = [
  "derive_more 0.99.18",
  "fixt",
  "futures",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_util 0.5.2 (git+https://github.com/coasys/holochain.git?branch=0.5.2-coasys)",
  "holochain_wasmer_common",
  "kitsune2_api",
@@ -7833,7 +7818,7 @@ dependencies = [
  "holochain_nonce",
  "holochain_p2p",
  "holochain_secure_primitive",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_sqlite",
  "holochain_state",
  "holochain_test_wasm_common",
@@ -7911,7 +7896,7 @@ dependencies = [
  "holochain_chc",
  "holochain_nonce",
  "holochain_p2p",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_sqlite",
  "holochain_state",
  "holochain_trace 0.5.2 (git+https://github.com/coasys/holochain.git?branch=0.5.2-coasys)",
@@ -7939,7 +7924,7 @@ dependencies = [
  "holo_hash",
  "holochain_keystore",
  "holochain_nonce",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_types",
  "must_future",
  "one_err",
@@ -7961,7 +7946,7 @@ dependencies = [
  "anyhow",
  "clap 4.5.38",
  "futures",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_types",
  "holochain_util 0.5.2 (git+https://github.com/coasys/holochain.git?branch=0.5.2-coasys)",
  "holochain_wasmer_host",
@@ -7998,7 +7983,7 @@ dependencies = [
  "derive_more 0.99.18",
  "holo_hash",
  "holochain_keystore",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_state_types",
  "holochain_types",
  "holochain_util 0.5.2 (git+https://github.com/coasys/holochain.git?branch=0.5.2-coasys)",
@@ -8044,7 +8029,7 @@ dependencies = [
  "futures",
  "hc_deepkey_sdk",
  "holochain_keystore",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_types",
  "holochain_util 0.5.2 (git+https://github.com/coasys/holochain.git?branch=0.5.2-coasys)",
  "mockall",
@@ -8071,7 +8056,7 @@ dependencies = [
  "derive_builder",
  "holo_hash",
  "holochain_secure_primitive",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_timestamp",
  "holochain_util 0.5.2 (git+https://github.com/coasys/holochain.git?branch=0.5.2-coasys)",
  "proptest",
@@ -8093,7 +8078,7 @@ dependencies = [
  "futures",
  "holo_hash",
  "holochain_secure_primitive",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_util 0.5.2 (git+https://github.com/coasys/holochain.git?branch=0.5.2-coasys)",
  "holochain_zome_types",
  "lair_keystore",
@@ -8147,7 +8132,7 @@ dependencies = [
  "holochain_chc",
  "holochain_keystore",
  "holochain_nonce",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_sqlite",
  "holochain_state",
  "holochain_timestamp",
@@ -8184,25 +8169,11 @@ dependencies = [
 
 [[package]]
 name = "holochain_serialized_bytes"
-version = "0.0.55"
-source = "git+https://github.com/coasys/holochain-serialization.git?rev=f9577913773931ec797261f90968903b1b4e27a8#f9577913773931ec797261f90968903b1b4e27a8"
-dependencies = [
- "holochain_serialized_bytes_derive 0.0.55",
- "rmp-serde",
- "serde",
- "serde-transcode",
- "serde_bytes",
- "serde_json",
- "thiserror 1.0.63",
-]
-
-[[package]]
-name = "holochain_serialized_bytes"
 version = "0.0.56"
 source = "git+https://github.com/holochain/holochain-serialization#f88bdecf8065035021cf9c192167d44bdb906f51"
 dependencies = [
  "arbitrary",
- "holochain_serialized_bytes_derive 0.0.56",
+ "holochain_serialized_bytes_derive",
  "proptest",
  "proptest-derive",
  "rmp-serde",
@@ -8211,15 +8182,6 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "thiserror 2.0.12",
-]
-
-[[package]]
-name = "holochain_serialized_bytes_derive"
-version = "0.0.55"
-source = "git+https://github.com/coasys/holochain-serialization.git?rev=f9577913773931ec797261f90968903b1b4e27a8#f9577913773931ec797261f90968903b1b4e27a8"
-dependencies = [
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -8247,7 +8209,7 @@ dependencies = [
  "hc_r2d2_sqlite",
  "holo_hash",
  "holochain_nonce",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_timestamp",
  "holochain_util 0.5.2 (git+https://github.com/coasys/holochain.git?branch=0.5.2-coasys)",
  "holochain_zome_types",
@@ -8290,7 +8252,7 @@ dependencies = [
  "holochain_chc",
  "holochain_keystore",
  "holochain_nonce",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_sqlite",
  "holochain_state_types",
  "holochain_types",
@@ -8325,7 +8287,7 @@ version = "0.5.2"
 source = "git+https://github.com/coasys/holochain.git?branch=0.5.2-coasys#3bd25fa4183f9ace9b26580bf8c68a08de95bd44"
 dependencies = [
  "hdk",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "serde",
 ]
 
@@ -8337,24 +8299,6 @@ dependencies = [
  "chrono",
  "rusqlite",
  "serde",
-]
-
-[[package]]
-name = "holochain_trace"
-version = "0.3.6"
-source = "git+https://github.com/coasys/holochain.git?branch=0.3.6-coasys#0f99b08f534cc5110b4a669e9dce4ac4237309a1"
-dependencies = [
- "chrono",
- "derive_more 0.99.18",
- "holochain_serialized_bytes 0.0.55",
- "inferno",
- "once_cell",
- "serde_json",
- "thiserror 1.0.63",
- "tracing",
- "tracing-core",
- "tracing-serde",
- "tracing-subscriber 0.3.18",
 ]
 
 [[package]]
@@ -8414,7 +8358,7 @@ dependencies = [
  "holo_hash",
  "holochain_keystore",
  "holochain_nonce",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_sqlite",
  "holochain_timestamp",
  "holochain_trace 0.5.2 (git+https://github.com/coasys/holochain.git?branch=0.5.2-coasys)",
@@ -8447,19 +8391,6 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.63",
  "tokio",
- "tracing",
-]
-
-[[package]]
-name = "holochain_util"
-version = "0.3.6"
-source = "git+https://github.com/coasys/holochain.git?branch=0.3.6-coasys#0f99b08f534cc5110b4a669e9dce4ac4237309a1"
-dependencies = [
- "cfg-if 1.0.0",
- "colored",
- "dunce",
- "futures",
- "once_cell",
  "tracing",
 ]
 
@@ -8512,7 +8443,7 @@ name = "holochain_wasmer_common"
 version = "0.0.99"
 source = "git+https://github.com/coasys/holochain-wasmer.git?branch=0.0.99-coasys#2cf0208e2f78d4e487f9a1cbe1a657ff9668af1d"
 dependencies = [
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "serde",
  "serde_bytes",
  "thiserror 2.0.12",
@@ -8523,7 +8454,7 @@ name = "holochain_wasmer_guest"
 version = "0.0.99"
 source = "git+https://github.com/coasys/holochain-wasmer.git?branch=0.0.99-coasys#2cf0208e2f78d4e487f9a1cbe1a657ff9668af1d"
 dependencies = [
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_wasmer_common",
  "paste",
  "serde",
@@ -8538,7 +8469,7 @@ dependencies = [
  "bimap",
  "bytes",
  "hex",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_wasmer_common",
  "parking_lot",
  "serde",
@@ -8555,7 +8486,7 @@ source = "git+https://github.com/coasys/holochain.git?branch=0.5.2-coasys#3bd25f
 dependencies = [
  "async-trait",
  "futures",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_types",
  "serde",
  "serde_bytes",
@@ -8577,7 +8508,7 @@ dependencies = [
  "holo_hash",
  "holochain_integrity_types",
  "holochain_nonce",
- "holochain_serialized_bytes 0.0.56",
+ "holochain_serialized_bytes",
  "holochain_timestamp",
  "holochain_wasmer_common",
  "nanoid",
@@ -10178,20 +10109,6 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p_bin_data"
-version = "0.3.6"
-source = "git+https://github.com/coasys/holochain.git?branch=0.3.6-coasys#0f99b08f534cc5110b4a669e9dce4ac4237309a1"
-dependencies = [
- "base64 0.22.1",
- "derive_more 0.99.18",
- "holochain_util 0.3.6",
- "kitsune_p2p_dht_arc 0.3.6",
- "serde",
- "serde_bytes",
- "shrinkwraprs",
-]
-
-[[package]]
-name = "kitsune_p2p_bin_data"
 version = "0.5.0-dev.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40e0c0b8c4dc3c988347f87f5a43b62b3867554302cb2e8761adbdbca43ef079"
@@ -10199,7 +10116,7 @@ dependencies = [
  "base64 0.22.1",
  "derive_more 0.99.18",
  "holochain_util 0.5.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "kitsune_p2p_dht_arc 0.5.0-dev.2",
+ "kitsune_p2p_dht_arc",
  "serde",
  "serde_bytes",
  "shrinkwraprs",
@@ -10213,8 +10130,8 @@ checksum = "10c8de58b8cd74dfcfd369acaa494728b300c24cd08a444d2ecf167cbb34176c"
 dependencies = [
  "clap 4.5.38",
  "futures",
- "kitsune_p2p_bin_data 0.5.0-dev.5",
- "kitsune_p2p_types 0.5.0-dev.9",
+ "kitsune_p2p_bin_data",
+ "kitsune_p2p_types",
  "parking_lot",
  "rand 0.8.5",
  "reqwest 0.12.9",
@@ -10227,52 +10144,20 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p_dht"
-version = "0.3.6"
-source = "git+https://github.com/coasys/holochain.git?branch=0.3.6-coasys#0f99b08f534cc5110b4a669e9dce4ac4237309a1"
-dependencies = [
- "derivative",
- "derive_more 0.99.18",
- "futures",
- "kitsune_p2p_dht_arc 0.3.6",
- "kitsune_p2p_timestamp 0.3.6",
- "must_future",
- "num-traits",
- "rand 0.8.5",
- "serde",
- "statrs",
- "thiserror 1.0.63",
- "tracing",
-]
-
-[[package]]
-name = "kitsune_p2p_dht"
 version = "0.5.0-dev.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25d9eb8e9f6a3c3d07560df91468412a2c5d00bee61addd8848633cd791201ee"
 dependencies = [
  "derivative",
  "derive_more 0.99.18",
- "kitsune_p2p_dht_arc 0.5.0-dev.2",
- "kitsune_p2p_timestamp 0.5.0-dev.1",
+ "kitsune_p2p_dht_arc",
+ "kitsune_p2p_timestamp",
  "num-traits",
  "rand 0.8.5",
  "serde",
  "statrs",
  "thiserror 1.0.63",
  "tracing",
-]
-
-[[package]]
-name = "kitsune_p2p_dht_arc"
-version = "0.3.6"
-source = "git+https://github.com/coasys/holochain.git?branch=0.3.6-coasys#0f99b08f534cc5110b4a669e9dce4ac4237309a1"
-dependencies = [
- "derive_more 0.99.18",
- "gcollections",
- "intervallum",
- "kitsune_p2p_timestamp 0.3.6",
- "num-traits",
- "serde",
 ]
 
 [[package]]
@@ -10290,51 +10175,12 @@ dependencies = [
 
 [[package]]
 name = "kitsune_p2p_timestamp"
-version = "0.3.6"
-source = "git+https://github.com/coasys/holochain.git?branch=0.3.6-coasys#0f99b08f534cc5110b4a669e9dce4ac4237309a1"
-dependencies = [
- "chrono",
- "serde",
-]
-
-[[package]]
-name = "kitsune_p2p_timestamp"
 version = "0.5.0-dev.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02e887dcaf663ea2215b174b2668f5543c6a476d168f9892d0574964852c475c"
 dependencies = [
  "chrono",
  "serde",
-]
-
-[[package]]
-name = "kitsune_p2p_types"
-version = "0.3.6"
-source = "git+https://github.com/coasys/holochain.git?branch=0.3.6-coasys#0f99b08f534cc5110b4a669e9dce4ac4237309a1"
-dependencies = [
- "base64 0.22.1",
- "derive_more 0.99.18",
- "futures",
- "ghost_actor",
- "holochain_trace 0.3.6",
- "kitsune_p2p_bin_data 0.3.6",
- "kitsune_p2p_dht 0.3.6",
- "kitsune_p2p_dht_arc 0.3.6",
- "kitsune_p2p_timestamp 0.3.6",
- "lair_keystore_api 0.4.7",
- "once_cell",
- "parking_lot",
- "paste",
- "rmp-serde",
- "rustls 0.20.9",
- "serde",
- "serde_bytes",
- "serde_json",
- "sysinfo 0.32.1",
- "thiserror 1.0.63",
- "tokio",
- "url",
- "url2",
 ]
 
 [[package]]
@@ -10349,10 +10195,10 @@ dependencies = [
  "ghost_actor",
  "holochain_trace 0.5.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "holochain_util 0.5.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "kitsune_p2p_bin_data 0.5.0-dev.5",
- "kitsune_p2p_dht 0.5.0-dev.3",
- "kitsune_p2p_dht_arc 0.5.0-dev.2",
- "kitsune_p2p_timestamp 0.5.0-dev.1",
+ "kitsune_p2p_bin_data",
+ "kitsune_p2p_dht",
+ "kitsune_p2p_dht_arc",
+ "kitsune_p2p_timestamp",
  "lair_keystore_api 0.5.3",
  "once_cell",
  "parking_lot",
@@ -10416,31 +10262,6 @@ dependencies = [
  "structopt",
  "sysinfo 0.34.2",
  "tracing-subscriber 0.3.18",
-]
-
-[[package]]
-name = "lair_keystore_api"
-version = "0.4.7"
-source = "git+https://github.com/coasys/lair.git?branch=0.4.7-coasys#7d2879390e82a86713810783c7a0a1605352329d"
-dependencies = [
- "base64 0.22.1",
- "dunce",
- "hc_seed_bundle 0.2.4",
- "lru 0.12.4",
- "nanoid",
- "once_cell",
- "parking_lot",
- "rcgen",
- "serde",
- "serde_json",
- "serde_yaml",
- "time 0.3.36",
- "tokio",
- "toml 0.8.19",
- "tracing",
- "url",
- "winapi 0.3.9",
- "zeroize",
 ]
 
 [[package]]
@@ -15478,18 +15299,6 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.20.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b80e3dec595989ea8510028f30c408a4630db12c9cbb8de34203b89d6577e99"
-dependencies = [
- "log",
- "ring 0.16.20",
- "sct",
- "webpki",
-]
-
-[[package]]
-name = "rustls"
 version = "0.21.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7fecbfb7b1444f477b345853b1fce097a2c6fb637b2bfb87e6bc5db0f043fae4"
@@ -20238,16 +20047,6 @@ dependencies = [
  "pkg-config",
  "soup3-sys",
  "system-deps",
-]
-
-[[package]]
-name = "webpki"
-version = "0.22.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07ecc0cd7cac091bf682ec5efa18b1cff79d617b84181f38b3951dbe135f607f"
-dependencies = [
- "ring 0.16.20",
- "untrusted 0.7.1",
 ]
 
 [[package]]
