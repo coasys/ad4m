@@ -1,7 +1,4 @@
-use deno_error::JsErrorClass;
 use anyhow::Error as AnyhowError;
-//use deno_error::js_error;
-
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 //#[property("code" = 10)]

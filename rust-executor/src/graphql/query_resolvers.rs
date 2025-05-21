@@ -11,7 +11,6 @@ use crate::{
     runtime_service::RuntimeService,
     types::{DecoratedLinkExpression, Model, Notification},
 };
-use base64::prelude::*;
 use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
 use std::env;
 

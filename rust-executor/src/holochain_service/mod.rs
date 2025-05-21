@@ -1,4 +1,3 @@
-use base64::prelude::*;
 use chrono::Duration;
 use crypto_box::rand_core::OsRng;
 use deno_core::anyhow::anyhow;

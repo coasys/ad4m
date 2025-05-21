@@ -1,4 +1,3 @@
-use deno_core::anyhow;
 use deno_core::error::ModuleLoaderError;
 use deno_core::ModuleLoadResponse;
 use deno_core::ModuleLoader;

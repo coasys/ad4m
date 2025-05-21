@@ -4,7 +4,6 @@ use holochain::prelude::hash_type::Agent;
 use holochain::prelude::{
     ExternIO, HoloHash, InstallAppPayload, Signal, Signature, ZomeCallResponse,
 };
-use kitsune2_api::AgentInfo;
 use lazy_static::lazy_static;
 use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};

@@ -1,5 +1,5 @@
 use cid::Cid;
-use deno_core::{error::AnyError, op2};
+use deno_core::op2;
 use log::{debug, error, info, warn};
 use multibase::Base;
 use multihash::{Code, MultihashDigest};

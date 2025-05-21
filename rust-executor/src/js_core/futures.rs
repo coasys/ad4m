@@ -1,5 +1,5 @@
-use deno_core::error::{AnyError, CoreError};
-use deno_core::{anyhow, v8, PollEventLoopOptions};
+use deno_core::error::CoreError;
+use deno_core::{v8, PollEventLoopOptions};
 use deno_runtime::worker::MainWorker;
 use futures::Future;
 // Import the JsRuntime struct.
