@@ -12,7 +12,7 @@ use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::hash_type::Agent;
 use holochain::prelude::{
-    ExternIO, HoloHash, InstallAppPayload, Signal, Signature, Timestamp, ZomeCallParams, ZomeCallResponse
+    ExternIO, HoloHash, InstallAppPayload, Kitsune2NetworkMetricsRequest, Signal, Signature, Timestamp, ZomeCallParams, ZomeCallResponse
 };
 use holochain::test_utils::itertools::Either;
 
@@ -564,11 +564,14 @@ impl HolochainService {
     }
 
     pub async fn log_network_metrics(&self) -> Result<(), AnyError> {
-        let metrics = self.conductor.dump_network_metrics(None).await?;
-        info!("Network metrics: {}", metrics);
+        let metrics = self.conductor.dump_network_metrics(Kitsune2NetworkMetricsRequest{
+            dna_hash: None,
+            include_dht_summary: true,
+        }).await?;
+        info!("Network metrics: {:?}", metrics);
 
         let stats = self.conductor.dump_network_stats().await?;
-        info!("Network stats: {}", stats);
+        info!("Network stats: {:?}", stats);
 
         Ok(())
     }
