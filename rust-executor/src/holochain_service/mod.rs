@@ -6,8 +6,8 @@ use deno_core::error::AnyError;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo, ZomeCall};
-use holochain::conductor::config::ConductorConfig;
+use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo};
+use holochain::conductor::config::{ConductorConfig, NetworkConfig};
 use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::agent_store::AgentInfoSigned;
@@ -352,58 +352,31 @@ impl HolochainService {
             config.data_root_path = Some(data_root_path);
             config.admin_interfaces = None;
 
-            let mut kitsune_config = KitsuneP2pConfig::default();
-            let tuning_params = KitsuneP2pTuningParams::default().as_ref().clone();
+            let mut network_config = NetworkConfig::default();
 
-            // How long should we hold off talking to a peer
-            // we've previously gotten errors speaking to.
-            // [Default: 5 minute; now updated to 2 minutes]
-            // tuning_params.gossip_peer_on_error_next_gossip_delay_ms = 1000 * 60 * 2;
+            
+            // prod - https://bootstrap.holo.host
+            // staging - https://bootstrap-staging.holo.host
+            // dev - https://bootstrap-dev.holohost.workers.dev
+            // own - http://207.148.16.17:38245
+            network_config.bootstrap_url = Url2::parse(local_config.bootstrap_url);
 
-            // How often should we update and publish our agent info?
-            // [Default: 5 minutes; now updated to 2 minutes]
-            // tuning_params.gossip_agent_info_update_interval_ms = 1000 * 60 * 2;
+            // prod - wss://signal.holo.host
+            // dev - wss://signal.holotest.net
+            // our - ws://207.148.16.17:42697
+            network_config.signal_url = Url2::parse(local_config.proxy_url);
 
-            kitsune_config.tuning_params = Arc::new(tuning_params);
-
-            if local_config.use_bootstrap {
-                // prod - https://bootstrap.holo.host
-                // staging - https://bootstrap-staging.holo.host
-                // dev - https://bootstrap-dev.holohost.workers.dev
-                // own - http://207.148.16.17:38245
-                kitsune_config.bootstrap_service = Some(Url2::parse(local_config.bootstrap_url));
-            } else {
-                kitsune_config.bootstrap_service = None;
-            }
-            if local_config.use_mdns {
-                kitsune_config.network_type = NetworkType::QuicMdns;
-            } else {
-                kitsune_config.network_type = NetworkType::QuicBootstrap;
-            }
-            if local_config.use_proxy {
-                kitsune_config.transport_pool = vec![TransportConfig::WebRTC {
-                    // prod - wss://signal.holo.host
-                    // dev - wss://signal.holotest.net
-                    // our - ws://207.148.16.17:42697
-                    signal_url: local_config.proxy_url,
-                }];
-            } else {
-                kitsune_config.transport_pool = vec![
-                    TransportConfig::Mem {},
-                    TransportConfig::WebRTC {
-                        signal_url: local_config.proxy_url,
-                    },
-                ];
-            }
-            config.network = kitsune_config;
+            config.network = network_config;
 
             config
         };
 
         info!("Starting holochain conductor with config: {:#?}", config);
+        let passphrase_locked_array = sodoken::LockedArray::from(local_config.passphrase.as_bytes().to_vec());
+        let passphrase = Arc::new(std::sync::Mutex::new(passphrase_locked_array));
         let conductor = ConductorBuilder::new()
             .config(config)
-            .passphrase(Some(local_config.passphrase.as_bytes().into()))
+            .passphrase(Some(passphrase))
             .build()
             .await;
 
@@ -563,7 +536,7 @@ impl HolochainService {
 
         self.conductor
             .clone()
-            .uninstall_app(&app_id)
+            .uninstall_app(&app_id, true)
             .await
             .map_err(|e| anyhow!("Could not remove app: {:?}", e))?;
 
