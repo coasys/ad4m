@@ -12,7 +12,7 @@ use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::hash_type::Agent;
 use holochain::prelude::{
-    ExternIO, HoloHash, InstallAppPayload, Signal, Signature, Timestamp, ZomeCallResponse,
+    ExternIO, HoloHash, InstallAppPayload, Signal, Signature, Timestamp, ZomeCallParams, ZomeCallResponse
 };
 use holochain::test_utils::itertools::Either;
 
@@ -480,7 +480,7 @@ impl HolochainService {
             None => ExternIO::encode(()).unwrap(),
         };
 
-        let zome_call_unsigned = ZomeCallUnsigned {
+        let zome_call_params = ZomeCallParams {
             cell_id,
             zome_name: zome_name.into(),
             fn_name: fn_name.into(),
@@ -493,12 +493,12 @@ impl HolochainService {
                 .unwrap(),
         };
 
-        let keystore = self.conductor.keystore();
-        let signed_zome_call = ZomeCall::try_from_unsigned_zome_call(keystore, zome_call_unsigned)
-            .await
-            .map_err(|err| anyhow!("Could not sign zome call: {:?}", err))?;
+        //let keystore = self.conductor.keystore();
+        //let signed_zome_call = ZomeCall::try_from_unsigned_zome_call(keystore, zome_call_unsigned)
+        //    .await
+        //    .map_err(|err| anyhow!("Could not sign zome call: {:?}", err))?;
 
-        let result = self.conductor.call_zome(signed_zome_call).await??;
+        let result = self.conductor.call_zome(zome_call_params).await??;
 
         Ok(result)
     }
