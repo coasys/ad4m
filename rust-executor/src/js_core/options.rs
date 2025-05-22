@@ -55,12 +55,8 @@ pub fn module_loader() -> Rc<StringModuleLoader> {
 }
 
 pub fn main_worker_options() -> WorkerOptions {
-    let mut loader = StringModuleLoader::new();
-    for (specifier, code) in module_map() {
-        loader.add_module(specifier.as_str(), code.as_str());
-    }
-
     WorkerOptions {
+        startup_snapshot: deno_snapshots::CLI_SNAPSHOT,
         extensions: vec![
             wallet_service::init(),
             utils_service::init(),
