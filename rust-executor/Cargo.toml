@@ -34,9 +34,10 @@ cuda = ["kalosm/cuda"]
 
 [dependencies]
 deno_core = {version = "0.347.0", git = "https://github.com/coasys/deno_core.git", branch = "new-v8-dylib"  }
-deno_runtime = {version = "0.212.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib" }
+deno_runtime = {version = "0.212.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib", features=["transpile"] }
 deno_resolver = {version = "0.35.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib" }
 deno_fs = {version = "0.114.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib" }
+deno_lib = {version = "0.20.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib" }
 sys_traits = "=0.1.9"
 # deno_runtime = {version = "0.162.0", path = "../../deno/runtime"}
 tokio = { version = "1.25.0", features = ["full"] }

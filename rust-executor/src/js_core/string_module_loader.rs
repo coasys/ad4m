@@ -1,4 +1,5 @@
 use deno_core::error::ModuleLoaderError;
+use deno_core::error::CoreError;
 use deno_core::ModuleLoadResponse;
 use deno_core::ModuleLoader;
 use deno_core::ModuleSource;
@@ -7,9 +8,53 @@ use deno_core::ModuleSpecifier;
 use deno_core::ModuleType;
 use deno_core::RequestedModuleType;
 use deno_core::ResolutionKind;
+use deno_core::SourceCodeCacheInfo;
+use deno_core::error::JsError;
+use deno_error::JsErrorClass;
+use deno_lib::util::hash::FastInsecureHasher;
+use deno_runtime::transpile::maybe_transpile_source;
 use log::info;
 use std::collections::HashMap;
 use url::Url;
+
+fn maybe_transpile(module_specifier: Url, code: String) -> Result<ModuleSource, ModuleLoaderError> {
+    // Handle TypeScript files
+    match maybe_transpile_source(
+        module_specifier.to_string().into(),
+        code.into(),
+    ) {
+        Ok((js_code, maybe_source_map)) => {
+            let maybe_code_cache = maybe_source_map.map(|code| {
+                let code_hash = FastInsecureHasher::new_deno_versioned()
+                    .write_hashable(code.clone())
+                    .finish();
+                SourceCodeCacheInfo {
+                    hash: code_hash,
+                    data: Some(code),
+                }
+            });
+            Ok(ModuleSource::new(
+                ModuleType::JavaScript,
+                ModuleSourceCode::String(js_code.into()),
+                &module_specifier,
+                maybe_code_cache,
+            ))
+        }
+        Err(e) => {
+            Err(ModuleLoaderError::Core(CoreError::Js(JsError {
+                name: Some(e.get_class().to_string()),
+                message: Some(e.get_message().to_string()),
+                stack: None,
+                cause: None,
+                exception_message: String::new(),
+                frames: Vec::new(),
+                source_line: None,
+                source_line_frame_index: None,
+                aggregated: None,
+            })))
+        }
+    }
+}
 
 pub struct StringModuleLoader {
     modules: HashMap<String, String>,
@@ -48,7 +93,7 @@ impl ModuleLoader for StringModuleLoader {
         match module_specifier.to_file_path() {
             Ok(path) => {
                 let module_type = if let Some(extension) = path.extension() {
-                    let ext = extension.to_string_lossy().to_lowercase();
+                 let ext = extension.to_string_lossy().to_lowercase();
                     if ext == "json" {
                         ModuleType::Json
                     } else {
@@ -62,12 +107,7 @@ impl ModuleLoader for StringModuleLoader {
                     std::fs::read_to_string(path).expect("Could not read file path to string");
                 let module_specifier = module_specifier.clone();
 
-                ModuleLoadResponse::Sync(Ok(ModuleSource::new(
-                    module_type,
-                    ModuleSourceCode::String(code.into()),
-                    &module_specifier,
-                    None,
-                )))
+                ModuleLoadResponse::Sync(maybe_transpile(module_specifier, code))
             }
             Err(_err) => {
                 info!("Module is not a file path, importing as raw module string");
@@ -75,12 +115,19 @@ impl ModuleLoader for StringModuleLoader {
                 let module_specifier = module_specifier.clone();
 
                 ModuleLoadResponse::Sync(match module_code {
-                    Some(code) => Ok(ModuleSource::new(
-                        deno_core::ModuleType::JavaScript,
-                        ModuleSourceCode::String(code.into()),
-                        &module_specifier,
-                        None,
-                    )),
+                    Some(code) => {
+                        // Check if the module specifier ends with .ts or .tsx
+                        if module_specifier.as_str().ends_with(".ts") || module_specifier.as_str().ends_with(".tsx") {
+                            maybe_transpile(module_specifier, code)
+                        } else {
+                            Ok(ModuleSource::new(
+                                deno_core::ModuleType::JavaScript,
+                                ModuleSourceCode::String(code.into()),
+                                &module_specifier,
+                                None,
+                            ))
+                        }
+                    }
                     None => Err(ModuleLoaderError::NotFound)
                 })
             }
