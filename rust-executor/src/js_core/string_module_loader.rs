@@ -17,7 +17,7 @@ use log::info;
 use std::collections::HashMap;
 use url::Url;
 
-fn maybe_transpile(module_specifier: Url, code: String) -> Result<ModuleSource, ModuleLoaderError> {
+fn maybe_transpile(module_specifier: &Url, code: String) -> Result<ModuleSource, ModuleLoaderError> {
     // Handle TypeScript files
     match maybe_transpile_source(
         module_specifier.to_string().into(),
@@ -92,27 +92,17 @@ impl ModuleLoader for StringModuleLoader {
     ) -> ModuleLoadResponse {
         match module_specifier.to_file_path() {
             Ok(path) => {
-                let module_type = if let Some(extension) = path.extension() {
-                 let ext = extension.to_string_lossy().to_lowercase();
-                    if ext == "json" {
-                        ModuleType::Json
-                    } else {
-                        ModuleType::JavaScript
+                match std::fs::read_to_string(path) {
+                    Ok(code) => ModuleLoadResponse::Sync(maybe_transpile(module_specifier, code)),
+                    Err(e) => {
+                        log::error!("Error reading file: {}", e);
+                        ModuleLoadResponse::Sync(Err(ModuleLoaderError::NotFound))
                     }
-                } else {
-                    ModuleType::JavaScript
-                };
-
-                let code =
-                    std::fs::read_to_string(path).expect("Could not read file path to string");
-                let module_specifier = module_specifier.clone();
-
-                ModuleLoadResponse::Sync(maybe_transpile(module_specifier, code))
+                }
             }
             Err(_err) => {
                 info!("Module is not a file path, importing as raw module string");
                 let module_code = self.modules.get(module_specifier.as_str()).cloned();
-                let module_specifier = module_specifier.clone();
 
                 ModuleLoadResponse::Sync(match module_code {
                     Some(code) => {
