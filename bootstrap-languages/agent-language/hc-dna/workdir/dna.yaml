@@ -5,7 +5,6 @@ name: "agent-store"
 integrity:
   network_seed: 00000000-0000-0000-0000-000000000000
   properties: ~
-  origin_time: 2022-02-11T23:05:19.470323Z
   zomes:
     - name: agent_store_integrity
       bundled: ../target/wasm32-unknown-unknown/release/agent_store_integrity.wasm
