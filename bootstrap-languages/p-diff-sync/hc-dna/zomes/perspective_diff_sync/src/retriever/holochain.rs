@@ -193,7 +193,8 @@ pub fn get_active_agents() -> SocialContextResult<Vec<AgentPubKey>> {
     //Dedup the agents
     let mut recent_agents = dedup(&recent_agents);
     //Remove ourself from the agents
-    let me = agent_info()?.agent_latest_pubkey;
+    // TODO: should be agent_latest_pubkey, but that was made unstable behind dpki feature flag
+    let me = agent_info()?.agent_initial_pubkey;
     let index = recent_agents.iter().position(|x| *x == me);
     if let Some(index) = index {
         recent_agents.remove(index);

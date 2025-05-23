@@ -62,7 +62,8 @@ pub fn get_online_status() -> SocialContextResult<OnlineAgentAndAction> {
 
 pub fn create_did_pub_key_link(did: String) -> SocialContextResult<()> {
     debug!("PerspectiveDiffSync.create_did_pub_key_link({:?})", did);
-    let agent_key = agent_info()?.agent_latest_pubkey;
+    // TODO: should be agent_latest_pubkey, but that was made unstable behind dpki feature flag
+    let agent_key = agent_info()?.agent_initial_pubkey;
     debug!("PerspectiveDiffSync.create_did_pub_key_link() agent_key: {:?}", agent_key);
     let input = GetLinksInputBuilder::try_new(agent_key.clone(), LinkTypes::DidLink).unwrap().get_options(GetStrategy::Network).build();
     let did_links = get_links(input)?;
@@ -90,7 +91,8 @@ pub fn create_did_pub_key_link(did: String) -> SocialContextResult<()> {
 
 pub fn get_my_did() -> SocialContextResult<Option<String>> {
     let input = GetLinksInputBuilder::try_new(
-        agent_info()?.agent_latest_pubkey,
+        // TODO: should be agent_latest_pubkey, but that was made unstable behind dpki feature flag
+        agent_info()?.agent_initial_pubkey,
         LinkTypes::DidLink
     )
     .unwrap()
@@ -226,6 +228,10 @@ pub fn get_agents_status(agent: AgentPubKey) -> Option<OnlineAgent> {
             }
             ZomeCallResponse::CountersigningSession(_) => {
                 debug!("Agent {} had countersigning session error", agent);
+                None
+            }
+            ZomeCallResponse::AuthenticationFailed(_, _) => {
+                debug!("Agent {} had authentication failed error", agent);
                 None
             }
         }
