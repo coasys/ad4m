@@ -307,9 +307,12 @@ impl HolochainService {
         };
 
         let agent_infos: Vec<String> = serde_json::from_str(COASYS_BOOTSTRAP_AGENT_INFO)?;
-        inteface
+        info!("Adding agent infos: {:?}", agent_infos);
+        if let Err(e) = inteface
             .add_agent_infos(agent_infos)
-            .await?;
+            .await {
+                error!("Error adding agent infos: {:?}", e);
+            }
 
         set_holochain_service(inteface).await;
 
