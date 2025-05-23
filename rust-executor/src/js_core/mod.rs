@@ -6,7 +6,6 @@ use deno_fs::RealFs;
 use deno_resolver::npm::DenoInNpmPackageChecker;
 use deno_resolver::npm::NpmResolver;
 use deno_runtime::worker::{MainWorker, WorkerServiceOptions};
-use deno_runtime::BootstrapOptions;
 use deno_runtime::deno_permissions::PermissionsContainer;
 use deno_runtime::permissions::RuntimePermissionDescriptorParser;
 use holochain::prelude::{ExternIO, Signal};
@@ -310,8 +309,6 @@ impl JsCore {
             println!("JsCore::new() done");
 
             rt.block_on(async {
-                let ops = js_core.worker.lock().await.js_runtime.op_names();
-                println!("Available ops: {:?}", ops);
                 let result = js_core.init_engine().await;
                 info!("AD4M JS engine init completed, with result: {:?}", result);
 
