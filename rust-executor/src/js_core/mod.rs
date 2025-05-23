@@ -204,7 +204,6 @@ impl JsCore {
 
     async fn init_engine(&self) {
         let mut worker = self.worker.lock().await;
-        worker.bootstrap(BootstrapOptions::default());
         worker
             .execute_main_module(&main_module_url())
             .await
