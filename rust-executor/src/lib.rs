@@ -2,13 +2,13 @@
 extern crate lazy_static;
 
 pub mod config;
-mod entanglement_service;
+pub mod entanglement_service;
 mod globals;
 pub mod graphql;
-mod holochain_service;
-mod js_core;
+pub mod holochain_service;
+pub mod js_core;
 mod prolog_service;
-mod runtime_service;
+pub mod runtime_service;
 pub mod utils;
 mod wallet;
 

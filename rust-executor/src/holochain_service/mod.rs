@@ -28,7 +28,7 @@ use tokio::time::timeout;
 
 use tokio_stream::StreamExt;
 
-pub(crate) mod holochain_service_extension;
+pub mod holochain_service_extension;
 pub(crate) mod interface;
 
 pub(crate) use interface::{

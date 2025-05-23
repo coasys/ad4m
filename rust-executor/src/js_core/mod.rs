@@ -25,17 +25,17 @@ use tokio::sync::{
     oneshot,
 };
 
-mod agent_extension;
+pub mod agent_extension;
 pub mod error;
 mod futures;
-mod languages_extension;
+pub mod languages_extension;
 mod options;
-mod pubsub_extension;
-mod signature_extension;
+pub mod pubsub_extension;
+pub mod signature_extension;
 mod string_module_loader;
 mod utils;
-mod utils_extension;
-mod wallet_extension;
+pub mod utils_extension;
+pub mod wallet_extension;
 
 use self::futures::{EventLoopFuture, SmartGlobalVariableFuture};
 use crate::holochain_service::maybe_get_holochain_service;
@@ -148,32 +148,38 @@ impl JsCore {
         let permission_desc_parser = Arc::new(
             RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys),
           );
+        println!("JsCore::new()");
+
+        let worker = MainWorker::bootstrap_from_options(
+            &main_module_url(),
+            WorkerServiceOptions::<
+            DenoInNpmPackageChecker,
+            NpmResolver<sys_traits::impls::RealSys>,
+            sys_traits::impls::RealSys,
+          > {
+            deno_rt_native_addon_loader: None,
+            module_loader: module_loader(),
+            permissions: PermissionsContainer::allow_all(permission_desc_parser),
+            blob_store: Default::default(),
+            broadcast_channel: Default::default(),
+            feature_checker: Default::default(),
+            node_services: Default::default(),
+            npm_process_state_provider: Default::default(),
+            root_cert_store_provider: Default::default(),
+            fetch_dns_resolver: Default::default(),
+            shared_array_buffer_store: Default::default(),
+            compiled_wasm_module_store: Default::default(),
+            v8_code_cache: Default::default(),
+            fs,
+          },
+            main_worker_options(),
+        );
+
+        println!("Worker created");
+
         JsCore {
             #[allow(clippy::arc_with_non_send_sync)]
-            worker: Arc::new(TokioMutex::new(MainWorker::bootstrap_from_options(
-                &main_module_url(),
-                WorkerServiceOptions::<
-                DenoInNpmPackageChecker,
-                NpmResolver<sys_traits::impls::RealSys>,
-                sys_traits::impls::RealSys,
-              > {
-                deno_rt_native_addon_loader: None,
-                module_loader: module_loader(),
-                permissions: PermissionsContainer::allow_all(permission_desc_parser),
-                blob_store: Default::default(),
-                broadcast_channel: Default::default(),
-                feature_checker: Default::default(),
-                node_services: Default::default(),
-                npm_process_state_provider: Default::default(),
-                root_cert_store_provider: Default::default(),
-                fetch_dns_resolver: Default::default(),
-                shared_array_buffer_store: Default::default(),
-                compiled_wasm_module_store: Default::default(),
-                v8_code_cache: Default::default(),
-                fs,
-              },
-                main_worker_options(),
-            ))),
+            worker: Arc::new(TokioMutex::new(worker)),
             loaded_modules: Arc::new(TokioMutex::new(HashSet::new())),
         }
     }
@@ -302,8 +308,11 @@ impl JsCore {
             let _guard = rt.enter();
 
             let js_core = JsCore::new();
+            println!("JsCore::new() done");
 
             rt.block_on(async {
+                let ops = js_core.worker.lock().await.js_runtime.op_names();
+                println!("Available ops: {:?}", ops);
                 let result = js_core.init_engine().await;
                 info!("AD4M JS engine init completed, with result: {:?}", result);
 
