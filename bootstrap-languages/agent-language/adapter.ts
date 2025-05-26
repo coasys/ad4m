@@ -1,5 +1,5 @@
 import type { Address, Agent, Expression, PublicSharing, LanguageContext, HolochainLanguageDelegate, ExpressionAdapter, AgentService } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
-import { DNA_NICK } from "./build/dna.js";
+import { DNA_ROLE, ZOME_NAME } from "./build/happ.js";
 
 export default class ExpressionAdapterImpl implements ExpressionAdapter {
   #DNA: HolochainLanguageDelegate;
@@ -15,8 +15,8 @@ export default class ExpressionAdapterImpl implements ExpressionAdapter {
   async get(did: Address): Promise<Expression> {
     console.log("Getting expression with did", did);
     const expression = await this.#DNA.call(
-      DNA_NICK,
-      "agent_store",
+      DNA_ROLE,
+      ZOME_NAME,
       "get_agent_expression",
       did
     );
@@ -55,8 +55,8 @@ class Sharing implements PublicSharing {
     const expression = this.#agent.createSignedExpression(agent);
 
     await this.#DNA.call(
-      DNA_NICK,
-      "agent_store",
+      DNA_ROLE,
+      ZOME_NAME,
       "create_agent_expression",
       expression
     );

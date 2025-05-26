@@ -6,18 +6,18 @@ import sveltePreprocess from "svelte-preprocess";
 import postcss from "rollup-plugin-postcss";
 import { string } from "rollup-plugin-string";
 import json from "@rollup/plugin-json";
-import dna from "@perspect3vism/rollup-plugin-dna";
+import { happ } from "@coasys/rollup-plugin-holochain";
 
 const production = !process.env.ROLLUP_WATCH;
 
 export default {
-  input: "dna.js",
+  input: "happ.js",
   external: [],
   output: {
     sourcemap: true,
     format: "esm",
     name: "AgentLanguage",
-    file: "build/dna.js",
+    file: "build/happ.js",
     interop: "esModule",
     globals: {},
   },
@@ -63,7 +63,7 @@ export default {
       ],
     }),
     json(),
-    dna(),
+    happ(),
   ],
   watch: {
     clearScreen: false,
