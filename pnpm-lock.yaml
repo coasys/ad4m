@@ -518,9 +518,9 @@ importers:
       '@coasys/ad4m':
         specifier: '*'
         version: 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
-      '@perspect3vism/rollup-plugin-dna':
-        specifier: ^0.0.2
-        version: 0.0.2
+      '@coasys/rollup-plugin-holochain':
+        specifier: ^0.0.3
+        version: 0.0.3
       '@rollup/plugin-commonjs':
         specifier: ^14.0.0
         version: 14.0.0(rollup@2.79.1)

@@ -1,6 +1,7 @@
 .cargo
 target
 hc-dna/workdir/perspective-diff-sync.dna
+hc-dna/workdir/perspective-diff-sync.happ
 hc-dna/zomes/tests/node_modules
 hc-dna/zomes/tests/out.log
 node_modules

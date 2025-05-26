@@ -1,7 +1,7 @@
 import type { Address, Language, Interaction, HolochainLanguageDelegate, LanguageContext, AgentService } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import { LinkAdapter } from "./linksAdapter.ts";
 import { TelepresenceAdapterImplementation } from "./telepresenceAdapter.ts";
-import { DNA, DNA_NICK, ZOME_NAME } from "./build/dna.js";
+import { BUNDLE, DNA_ROLE, ZOME_NAME } from "./build/happ.js";
 
 function interactions(expression: Address): Interaction[] {
   return [];
@@ -19,7 +19,7 @@ export default async function create(context: LanguageContext): Promise<Language
 
   await Holochain.registerDNAs(
     //@ts-ignore
-    [{ file: DNA, nick: DNA_NICK, zomeCalls: 
+    [{ file: BUNDLE, nick: DNA_ROLE, zomeCalls: 
       [
         [ZOME_NAME, "current_revision"],
         [ZOME_NAME, "sync"],
@@ -44,7 +44,7 @@ export default async function create(context: LanguageContext): Promise<Language
   );
 
   //Setup the link between did and agent pub key
-  await Holochain.call(DNA_NICK, ZOME_NAME, "create_did_pub_key_link", agent.did);
+  await Holochain.call(DNA_ROLE, ZOME_NAME, "create_did_pub_key_link", agent.did);
 
   //@ts-ignore
   return {
