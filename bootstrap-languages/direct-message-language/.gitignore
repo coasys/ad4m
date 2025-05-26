@@ -2,6 +2,7 @@ hc-dna/.cargo
 hc-dna/target
 hc-dna/tests/node_modules
 hc-dna/workdir/direct-message-language.dna
+hc-dna/workdir/ad4m-direct-message-language.happ
 
 build/*
 

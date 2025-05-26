@@ -1,5 +1,5 @@
 import { DirectMessageAdapter, HolochainLanguageDelegate, LanguageContext, MessageCallback, Perspective, PerspectiveExpression } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
-import { DNA, DNA_NICK } from "./build/dna.js";
+import { BUNDLE, DNA_ROLE, ZOME_NAME } from "./build/happ.js";
 
 //!@ad4m-template-variable
 const recipient_did = "<not templated yet>"
@@ -25,16 +25,16 @@ export default class DMAdapter implements DirectMessageAdapter {
     await this.#holochain.registerDNAs(
       [
         { 
-          file: DNA, 
-          nick: DNA_NICK, 
+          file: BUNDLE, 
+          nick: DNA_ROLE, 
           //@ts-ignore
           zomeCalls: [
-            ["direct-message", "send_p2p"],
-            ["direct-message", "send_inbox"],
-            ["direct-message", "set_status"],
-            ["direct-message", "get_status"],
-            ["direct-message", "fetch_inbox"],
-            ["direct-message", "inbox"],
+            [ZOME_NAME, "send_p2p"],
+            [ZOME_NAME, "send_inbox"],
+            [ZOME_NAME, "set_status"],
+            [ZOME_NAME, "get_status"],
+            [ZOME_NAME, "fetch_inbox"],
+            [ZOME_NAME, "inbox"],
           ] 
         }
       ], async (signal) => {
@@ -64,7 +64,7 @@ export default class DMAdapter implements DirectMessageAdapter {
     let status = null
     try {
       //@ts-ignore
-      status = await this.#holochain.call(DNA_NICK, "direct-message", "get_status", null)  
+      status = await this.#holochain.call(DNA_ROLE, ZOME_NAME, "get_status", null)  
     } catch(e) {
       console.debug("DirectMessage Language couldn't get status:", e)
     }
@@ -74,7 +74,7 @@ export default class DMAdapter implements DirectMessageAdapter {
   async sendP2P(message: Perspective): Promise<PerspectiveExpression|void> {
     try {
       const messageExpression = this.#context.agent.createSignedExpression(message)
-      await this.#holochain.call(DNA_NICK, "direct-message", "send_p2p", messageExpression)
+      await this.#holochain.call(DNA_ROLE, ZOME_NAME, "send_p2p", messageExpression)
       return messageExpression
     } catch(e) {
       console.error("Direct Message Language: Error sending p2p to", recipient_did)
@@ -84,7 +84,7 @@ export default class DMAdapter implements DirectMessageAdapter {
   async sendInbox(message: Perspective): Promise<PerspectiveExpression|void> {
     try {
       const messageExpression = this.#context.agent.createSignedExpression(message)
-      await this.#holochain.call(DNA_NICK, "direct-message", "send_inbox", messageExpression)
+      await this.#holochain.call(DNA_ROLE, ZOME_NAME, "send_inbox", messageExpression)
       return messageExpression
     } catch(e) {
       console.error("Direct Message Language: Error sending to inbox of", recipient_did)
@@ -99,15 +99,15 @@ export default class DMAdapter implements DirectMessageAdapter {
   async setStatus(status: PerspectiveExpression) {
     this.onlyRecipient()
     const statusExpression = this.#context.agent.createSignedExpression(status)
-    await this.#holochain.call(DNA_NICK, "direct-message", "set_status", statusExpression)
+    await this.#holochain.call(DNA_ROLE, ZOME_NAME, "set_status", statusExpression)
   }
 
   async inbox(filter?: string): Promise<PerspectiveExpression[]> {
     this.onlyRecipient()
     //@ts-ignore
-    await this.#holochain.call(DNA_NICK, "direct-message", "fetch_inbox", null)
+    await this.#holochain.call(DNA_ROLE, ZOME_NAME, "fetch_inbox", null)
     //@ts-ignore
-    return await this.#holochain.call(DNA_NICK, "direct-message", "inbox", filter)
+    return await this.#holochain.call(DNA_ROLE, ZOME_NAME, "inbox", filter)
   }
 
   addMessageCallback(callback: MessageCallback) {
