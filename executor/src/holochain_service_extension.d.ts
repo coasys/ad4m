@@ -1,5 +1,4 @@
-import { AgentInfoSigned, AgentPubKey, AppInfo, CallZomeResponse, InstallAppRequest, Signature } from "@holochain/client";
-
+import { AgentInfoSigned, AgentPubKey, AppInfo, CallZomeResponse, InstallAppRequest, Signature } from "./holochain_types";
 declare global {
     interface ConductorConfig {
         passphrase: String,
