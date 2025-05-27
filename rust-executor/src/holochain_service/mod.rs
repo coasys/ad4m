@@ -338,12 +338,12 @@ impl HolochainService {
             // staging - https://bootstrap-staging.holo.host
             // dev - https://bootstrap-dev.holohost.workers.dev
             // own - http://207.148.16.17:38245
-            network_config.bootstrap_url = Url2::parse(local_config.bootstrap_url);
+            network_config.bootstrap_url = Url2::parse("https://dev-test-bootstrap2.holochain.org");
 
             // prod - wss://signal.holo.host
             // dev - wss://signal.holotest.net
             // our - ws://207.148.16.17:42697
-            network_config.signal_url = Url2::parse(local_config.proxy_url);
+            network_config.signal_url = Url2::parse("wss://dev-test-bootstrap2.holochain.org");
 
             config.network = network_config;
 
