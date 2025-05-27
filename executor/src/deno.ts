@@ -60,23 +60,23 @@ export const path = internalPath
 export const os = internalOs
 
 console.log = (...args) => {
-  UTILS.consoleLog(`${args.reduce((acc, cur) => acc += `${cur} `, "")}`)
+  UTILS.consoleLog(args.map(arg => typeof arg === 'string' ? arg : JSON.stringify(arg)).join(' '))
 };
 
 console.debug = (...args) => {
-  UTILS.consoleDebug(`${args.reduce((acc, cur) => acc += `${cur} `, "")}`)
+  UTILS.consoleDebug(args.map(arg => typeof arg === 'string' ? arg : JSON.stringify(arg)).join(' '))
 };
 
 console.dir = (...args) => {
-  UTILS.consoleDebug(`${args.reduce((acc, cur) => acc += `${JSON.stringify(cur)} `, "")}`)
+  UTILS.consoleDebug(args.map(arg => JSON.stringify(arg)).join(' '))
 };
 
 console.error = (...args) => {
-  UTILS.consoleError(`${args.reduce((acc, cur) => acc += `${cur} `, "")}`)
+  UTILS.consoleError(args.map(arg => typeof arg === 'string' ? arg : JSON.stringify(arg)).join(' '))
 };
 
 console.warn = (...args) => {
-  UTILS.consoleWarn(`${args.reduce((acc, cur) => acc += `${cur} `, "")}`)
+  UTILS.consoleWarn(args.map(arg => typeof arg === 'string' ? arg : JSON.stringify(arg)).join(' '))
 };
 
 import "https://deno.land/x/xhr@0.3.0/mod.ts";
