@@ -201,7 +201,7 @@ export class PerspectiveClient {
                     }
                     try {
                         finalResult = JSON.parse(finalResult)
-                        if(isInit) {
+                        if(isInit && typeof finalResult === 'object') {
                             finalResult.isInit = true;
                         }
                     } catch (e) {
