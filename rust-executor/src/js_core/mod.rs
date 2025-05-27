@@ -147,7 +147,6 @@ impl JsCore {
         let permission_desc_parser = Arc::new(
             RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys),
           );
-        println!("JsCore::new()");
 
         let worker = MainWorker::bootstrap_from_options(
             &main_module_url(),
@@ -174,7 +173,6 @@ impl JsCore {
             main_worker_options(),
         );
 
-        println!("Worker created");
 
         JsCore {
             #[allow(clippy::arc_with_non_send_sync)]
@@ -306,7 +304,6 @@ impl JsCore {
             let _guard = rt.enter();
 
             let js_core = JsCore::new();
-            println!("JsCore::new() done");
 
             rt.block_on(async {
                 let result = js_core.init_engine().await;
