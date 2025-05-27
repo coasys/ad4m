@@ -441,7 +441,7 @@ impl HolochainService {
 
         let app_info = app_info.unwrap();
 
-        let cell_entry = app_info.cell_info.get(&format!("{}-{}", app_id, cell_name));
+        let cell_entry = app_info.cell_info.get(&cell_name);
 
         if cell_entry.is_none() {
             return Err(anyhow!(
