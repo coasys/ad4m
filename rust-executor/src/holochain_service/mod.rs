@@ -145,7 +145,7 @@ impl HolochainService {
                                     response,
                                 } => {
                                     match timeout(
-                                        std::time::Duration::from_secs(5),
+                                        std::time::Duration::from_secs(90),
                                         service.call_zome_function(app_id, cell_name, zome_name, fn_name, payload)
                                     ).await.map_err(|_| anyhow!("Timeout error; Call Zome Function")) {
                                         Ok(result) => {

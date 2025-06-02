@@ -15,7 +15,7 @@ use crate::js_core::error::AnyhowWrapperError;
 use super::get_holochain_service;
 
 // The duration to use for timeouts
-const TIMEOUT_DURATION: Duration = Duration::from_secs(10);
+const TIMEOUT_DURATION: Duration = Duration::from_secs(90);
 
 const APP_INSTALL_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
 
