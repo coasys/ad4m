@@ -46,6 +46,12 @@ import {
         },
         unPackDna: async (path) => {
             return unpack_dna(path)
+        },
+        packHapp: async (path) => {
+            return pack_happ(path)
+        },
+        unPackHapp: async (path) => {
+            return unpack_happ(path)
         }
     };
   })(globalThis);

@@ -182,10 +182,35 @@ async fn unpack_dna(#[string] path: String) -> Result<String, AnyhowWrapperError
     .map_err(AnyhowWrapperError::from)
 }
 
+#[op2(async)]
+#[string]
+async fn pack_happ(#[string] path: String) -> Result<String, AnyhowWrapperError> {
+    timeout(TIMEOUT_DURATION, async {
+        let interface = get_holochain_service().await;
+        interface.pack_happ(path).await
+    })
+    .await
+    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
+    .map_err(AnyhowWrapperError::from)
+}
+
+#[op2(async)]
+#[string]
+async fn unpack_happ(#[string] path: String) -> Result<String, AnyhowWrapperError> {
+    timeout(TIMEOUT_DURATION, async {
+        let interface = get_holochain_service().await;
+        interface.unpack_happ(path).await
+    })
+    .await
+    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
+    .map_err(AnyhowWrapperError::from)
+}
+
+
 //Implement signal callbacks from dna/holochain to js
 deno_core::extension!(
     holochain_service,
-    ops = [start_holochain_conductor, log_dht_status, install_app, get_app_info, call_zome_function, agent_infos, add_agent_infos, remove_app, sign_string, shutdown, get_agent_key, pack_dna, unpack_dna],
+    ops = [start_holochain_conductor, log_dht_status, install_app, get_app_info, call_zome_function, agent_infos, add_agent_infos, remove_app, sign_string, shutdown, get_agent_key, pack_dna, unpack_dna, pack_happ, unpack_happ],
     esm_entry_point = "ext:holochain_service/holochain_service_extension.js",
     esm = [dir "src/holochain_service", "holochain_service_extension.js"]
 );

@@ -11,7 +11,7 @@ use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::hash_type::Agent;
 use holochain::prelude::{
-    ExternIO, HoloHash, InstallAppPayload, Kitsune2NetworkMetricsRequest, Signal, Signature, Timestamp, ZomeCallParams, ZomeCallResponse
+    AppManifest, ExternIO, HoloHash, InstallAppPayload, Kitsune2NetworkMetricsRequest, Signal, Signature, Timestamp, ZomeCallParams, ZomeCallResponse
 };
 use holochain::test_utils::itertools::Either;
 
@@ -286,6 +286,32 @@ impl HolochainService {
                                         },
                                     }
                                 }
+                                HolochainServiceRequest::PackHapp(path, response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(3),
+                                        HolochainService::pack_happ(path)
+                                    ).await.map_err(|_| anyhow!("Timeout error; PackHapp")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::PackHapp(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::PackHapp(Err(err)));
+                                        },
+                                    }
+                                }
+                                HolochainServiceRequest::UnPackHapp(path, response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(3),
+                                        HolochainService::unpack_happ(path)
+                                    ).await.map_err(|_| anyhow!("Timeout error; UnPackHapp")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::UnPackHapp(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::UnPackHapp(Err(err)));
+                                        },
+                                    }
+                                }   
                             };
                         };
                         error!("Holochain service receiver closed");
@@ -576,6 +602,24 @@ impl HolochainService {
         info!("Network stats: {:?}", stats);
 
         Ok(())
+    }
+
+    pub async fn pack_happ(path: String) -> Result<String, AnyError> {
+        let path = PathBuf::from(path);
+        let name = holochain_cli_bundle::get_app_name(&path).await?;
+        info!("Got hApp name: {:?}", name);
+        let pack =
+            holochain_cli_bundle::pack::<AppManifest>(&path, None, name, false).await?;
+        info!("Packed hApp at path: {:#?}", pack.0);
+        Ok(pack.0.to_str().unwrap().to_string())
+    }
+
+    pub async fn unpack_happ(path: String) -> Result<String, AnyError> {
+        let path = PathBuf::from(path);
+        let pack =
+            holochain_cli_bundle::unpack::<AppManifest>("happ", &path, None, true).await?;
+        info!("UnPacked hApp at path: {:#?}", pack);
+        Ok(pack.to_str().unwrap().to_string())
     }
 
     pub async fn pack_dna(path: String) -> Result<String, AnyError> {

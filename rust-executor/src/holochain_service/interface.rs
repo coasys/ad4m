@@ -39,6 +39,8 @@ pub enum HolochainServiceRequest {
     LogNetworkMetrics(oneshot::Sender<HolochainServiceResponse>),
     PackDna(String, oneshot::Sender<HolochainServiceResponse>),
     UnPackDna(String, oneshot::Sender<HolochainServiceResponse>),
+    PackHapp(String, oneshot::Sender<HolochainServiceResponse>),
+    UnPackHapp(String, oneshot::Sender<HolochainServiceResponse>),
 }
 
 #[derive(Debug)]
@@ -56,6 +58,8 @@ pub enum HolochainServiceResponse {
     LogNetworkMetrics(Result<(), AnyError>),
     PackDna(Result<String, AnyError>),
     UnPackDna(Result<String, AnyError>),
+    PackHapp(Result<String, AnyError>),
+    UnPackHapp(Result<String, AnyError>),
 }
 
 impl HolochainServiceInterface {
@@ -65,8 +69,14 @@ impl HolochainServiceInterface {
             payload,
             response_sender,
         ))?;
+        
         match response_receiver.await.unwrap() {
-            HolochainServiceResponse::InstallApp(result) => result,
+            HolochainServiceResponse::InstallApp(result) => {
+                if let Err(e) = &result {
+                    log::error!("Error installing Holochain app: {:?}", e);
+                }
+                result
+            }
             _ => unreachable!(),
         }
     }
@@ -193,6 +203,26 @@ impl HolochainServiceInterface {
             .send(HolochainServiceRequest::UnPackDna(path, response_tx))?;
         match response_rx.await.unwrap() {
             HolochainServiceResponse::UnPackDna(result) => result,
+            _ => unreachable!(),    
+        }
+    }
+
+    pub async fn pack_happ(&self, path: String) -> Result<String, AnyError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.sender
+            .send(HolochainServiceRequest::PackHapp(path, response_tx))?;
+        match response_rx.await.unwrap() {
+            HolochainServiceResponse::PackHapp(result) => result,
+            _ => unreachable!(),
+        }
+    }
+    
+    pub async fn unpack_happ(&self, path: String) -> Result<String, AnyError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.sender
+            .send(HolochainServiceRequest::UnPackHapp(path, response_tx))?;
+        match response_rx.await.unwrap() {
+            HolochainServiceResponse::UnPackHapp(result) => result,
             _ => unreachable!(),
         }
     }

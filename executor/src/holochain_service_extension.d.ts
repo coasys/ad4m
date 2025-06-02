@@ -27,6 +27,8 @@ declare global {
         async getAgentKey: () => AgentPubKey;
         async packDna: (path: String) => String;
         async unPackDna: (path: String) => String;
+        async packHapp: (path: String) => String;
+        async unPackHapp: (path: String) => String;
     }
 
     const HOLOCHAIN_SERVICE: HolochainService;
