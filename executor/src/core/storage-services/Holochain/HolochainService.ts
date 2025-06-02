@@ -127,7 +127,7 @@ export default class HolochainService {
         await HOLOCHAIN_SERVICE.shutdown();
     }
 
-    async unpackDna(dnaPath: string): Promise<String> {
+    async unPackDna(dnaPath: string): Promise<String> {
         let result = await HOLOCHAIN_SERVICE.unPackDna(dnaPath);
         let splitResult = result.split("Unpacked to directory ");
         if (splitResult.length == 2) {
@@ -139,6 +139,26 @@ export default class HolochainService {
 
     async packDna(workdirPath: string): Promise<String> {
         let result = await HOLOCHAIN_SERVICE.packDna(workdirPath);
+        let splitResult = result.split("Wrote bundle ");
+        if (splitResult.length == 2) {
+            return splitResult[1]
+        } else {
+            return result
+        }
+    }
+    
+    async unPackHapp(happPath: string): Promise<String> {
+        let result = await HOLOCHAIN_SERVICE.unPackHapp(happPath);
+        let splitResult = result.split("Unpacked to directory ");
+        if (splitResult.length == 2) {
+            return splitResult[1]
+        } else {
+            return result
+        }
+    }
+
+    async packHapp(workdirPath: string): Promise<String> {
+        let result = await HOLOCHAIN_SERVICE.packHapp(workdirPath);
         let splitResult = result.split("Wrote bundle ");
         if (splitResult.length == 2) {
             return splitResult[1]
