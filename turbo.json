@@ -54,6 +54,12 @@
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
 
+    "rust-ad4m-executor#build": {
+      "dependsOn": ["@coasys/dapp#build"],
+      "outputs": ["dist/**", "lib/**", "build/**", "CUSTOM_DENO_SNAPSHOT.bin"],
+      "cache": false
+    },
+
     "ad4m-cli#build": {
       "dependsOn": ["@coasys/dapp#build"],
       "outputs": ["dist/**", "lib/**", "build/**"]

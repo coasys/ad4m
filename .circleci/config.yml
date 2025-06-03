@@ -29,6 +29,9 @@ jobs:
           name: Install core dependencies
           command: cd ./core && pnpm install --no-frozen-lockfile
       - run:
+          name: Build deno snapshot
+          command: pnpm run build-deno-snapshot
+      - run:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
           no_output_timeout: 30m

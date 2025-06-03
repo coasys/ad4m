@@ -32,6 +32,7 @@ path = "src/bin/generate_snapshot.rs"
 default = []
 metal = ["kalosm/metal"]
 cuda = ["kalosm/cuda"]
+generate_snapshot = []  # Feature flag for snapshot generation mode
 
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

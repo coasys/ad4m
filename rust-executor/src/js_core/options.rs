@@ -56,7 +56,16 @@ pub fn module_loader() -> Rc<StringModuleLoader> {
 
 pub fn main_worker_options() -> WorkerOptions {
     WorkerOptions {
-        startup_snapshot: Some(include_bytes!("../../CUSTOM_DENO_SNAPSHOT.bin")),
+        startup_snapshot: {
+            #[cfg(feature = "generate_snapshot")]
+            {
+                None
+            }
+            #[cfg(not(feature = "generate_snapshot"))]
+            {
+                Some(include_bytes!("../../CUSTOM_DENO_SNAPSHOT.bin"))
+            }
+        },
         extensions: vec![
             wallet_service::init(),
             utils_service::init(),
