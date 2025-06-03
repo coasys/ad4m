@@ -8,43 +8,10 @@ orbs:
 jobs:
   build-and-test:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:f6499125645a0df59bacf1790d9c68ab3e4872d0ca435bfc96d78bd5d857e114
+      - image: coasys/ad4m-ci-linux:latest@sha256:c0f7fdb44fbfe8fcbe66e1832b9243ca1c5dbe70738ffa76b50e69b8c9fb6a0f
     resource_class: xlarge
     steps:
       - checkout
-      - restore_cache:
-          keys:
-            - hc-0.3.2-rc1
-            - hc-
-            - rust-cache-{{ checksum "Cargo.lock" }}
-            - rust-cache-
-      - run:
-          name: Install HC
-          command: |
-            ls -la $HOME/.cargo/bin
-            if [ ! -f "$HOME/.cargo/bin/hc" ]; then
-              git clone https://github.com/holochain/holochain.git
-              cd holochain
-              git checkout holochain-0.3.2-rc.1
-              cd crates/hc
-              cargo build --release
-              pwd
-              ls -la
-              mkdir -p $HOME/.cargo/bin
-              cd ../../target/release
-              pwd
-              ls -lah
-              cp hc $HOME/.cargo/bin/hc
-              cd $HOME/.cargo/bin
-              pwd
-              ls -lah
-              ./hc --version
-            fi
-            echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> $BASH_ENV
-      - save_cache:
-          key: hc-0.3.2-rc1
-          paths:
-            - /home/circleci/.cargo/bin
       - restore_cache:
           keys:
             - rust-cache-{{ checksum "Cargo.lock" }}-v2
@@ -103,10 +70,6 @@ jobs:
       - checkout
       - attach_workspace:
           at: .
-      - restore_cache:
-          keys:
-            - hc-hc-0.3.2-rc1
-            - hc-
       - restore_cache:
           keys:
             - agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
