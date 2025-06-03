@@ -64,7 +64,7 @@ jobs:
 
   integration-tests-js:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
+      - image: coasys/ad4m-ci-linux:latest@sha256:37bfc739e9bdde495053bd250a31ce8a2cd445336d3efb31a85fa732988170b7
     resource_class: xlarge
     steps:
       - checkout
