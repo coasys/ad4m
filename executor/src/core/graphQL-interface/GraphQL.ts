@@ -20,7 +20,7 @@ export function createResolvers(core: Ad4mCore, config: OuterConfig) {
                         throw Error("Agent language does not have an expression adapter")
                     }
                     const expr = await agentLanguage.get(did);
-                    if (expr != null) {
+                    if (expr != null && expr.data != null) {
                         tagExpressionSignatureStatus(expr);
                         for(const link of expr.data.perspective.links) {
                             tagExpressionSignatureStatus(link)
