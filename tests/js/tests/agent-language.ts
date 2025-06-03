@@ -15,7 +15,13 @@ export default function agentLanguageTests(testContext: TestContext) {
 
             await sleep(5000)
 
-            const bobSeenFromAlice = await alice.agent.byDID(didBob)
+            let bobSeenFromAlice = await alice.agent.byDID(didBob)
+            let attempts = 0;
+            while (!bobSeenFromAlice && attempts < 30) {
+                await sleep(1000)
+                bobSeenFromAlice = await alice.agent.byDID(didBob)
+                attempts++
+            }
             expect(bobSeenFromAlice).not.to.be.undefined
             expect(bobSeenFromAlice).to.be.eql(bobHimself)
 
