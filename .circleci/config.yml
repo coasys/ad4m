@@ -29,6 +29,9 @@ jobs:
           name: Install core dependencies
           command: cd ./core && pnpm install --no-frozen-lockfile
       - run:
+          name: Build core executor
+          command: pnpm run build-core-executor
+      - run:
           name: Build deno snapshot
           command: pnpm run build-deno-snapshot
           no_output_timeout: 30m
