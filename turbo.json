@@ -34,7 +34,7 @@
         "@coasys/language-language#build",
         "@coasys/neighbourhood-language#build",
         "@coasys/file-storage#build",
-        "@coasys/perspective-diff-sync-socket-signaling#build",
+        
         "@coasys/centralized-perspective-diff-sync#build",
         "@coasys/centralized-agent-language#build",
         "@coasys/centralized-file-storage#build",
