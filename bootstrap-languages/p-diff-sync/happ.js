@@ -1,4 +1,4 @@
-import happ from "./hc-dna/workdir/perspective-diff-sync.happ";
+import happ from "./hc-dna/workdir/Perspective-Diff-Sync.happ";
 
 export const BUNDLE = Buffer.from(happ, "base64");
 export const DNA_ROLE = "perspective-diff-sync";
