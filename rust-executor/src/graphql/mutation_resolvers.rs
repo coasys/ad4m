@@ -1142,8 +1142,18 @@ impl Mutation {
             &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY,
         )?;
 
-        log::info!("Adding HC agent infos: {:?}", agent_infos);
         let agent_infos: Vec<String> = serde_json::from_str(&agent_infos)?;
+
+        for agent_info in agent_infos.iter() {
+            match serde_json::from_str::<serde_json::Value>(agent_info) {
+                Ok(json) => {
+                    log::info!("Adding Agent info: {}", serde_json::to_string_pretty(&json).unwrap());
+                }
+                Err(e) => {
+                    log::error!("Failed to parse agent info as JSON: {}", e);
+                }
+            }
+        }
 
         get_holochain_service()
             .await
