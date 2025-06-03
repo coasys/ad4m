@@ -8,7 +8,7 @@ orbs:
 jobs:
   build-and-test:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:c0f7fdb44fbfe8fcbe66e1832b9243ca1c5dbe70738ffa76b50e69b8c9fb6a0f
+      - image: coasys/ad4m-ci-linux:latest@sha256:37bfc739e9bdde495053bd250a31ce8a2cd445336d3efb31a85fa732988170b7
     resource_class: xlarge
     steps:
       - checkout
