@@ -31,14 +31,18 @@ pub fn generate_entanglement_proof(
 
 #[op2]
 #[serde]
-pub fn add_entanglement_proofs(#[serde] proofs: Vec<EntanglementProof>) -> Result<(), AnyhowWrapperError> {
+pub fn add_entanglement_proofs(
+    #[serde] proofs: Vec<EntanglementProof>,
+) -> Result<(), AnyhowWrapperError> {
     add_entanglement_proofs_service(proofs);
     Ok(())
 }
 
 #[op2]
 #[serde]
-pub fn delete_entanglement_proofs(#[serde] proofs: Vec<EntanglementProof>) -> Result<(), AnyhowWrapperError> {
+pub fn delete_entanglement_proofs(
+    #[serde] proofs: Vec<EntanglementProof>,
+) -> Result<(), AnyhowWrapperError> {
     delete_entanglement_proof_service(proofs);
     Ok(())
 }

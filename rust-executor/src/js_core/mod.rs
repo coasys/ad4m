@@ -5,9 +5,9 @@ use deno_core::{resolve_url_or_path, v8, PollEventLoopOptions};
 use deno_fs::RealFs;
 use deno_resolver::npm::DenoInNpmPackageChecker;
 use deno_resolver::npm::NpmResolver;
-use deno_runtime::worker::{MainWorker, WorkerServiceOptions};
 use deno_runtime::deno_permissions::PermissionsContainer;
 use deno_runtime::permissions::RuntimePermissionDescriptorParser;
+use deno_runtime::worker::{MainWorker, WorkerServiceOptions};
 use holochain::prelude::{ExternIO, Signal};
 use log::{error, info};
 use once_cell::sync::Lazy;
@@ -144,35 +144,34 @@ impl JsCore {
     pub fn new() -> Self {
         deno_core::v8::V8::set_flags_from_string("--no-opt");
         let fs = Arc::new(RealFs);
-        let permission_desc_parser = Arc::new(
-            RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys),
-          );
+        let permission_desc_parser = Arc::new(RuntimePermissionDescriptorParser::new(
+            sys_traits::impls::RealSys,
+        ));
 
         let worker = MainWorker::bootstrap_from_options(
             &main_module_url(),
             WorkerServiceOptions::<
-            DenoInNpmPackageChecker,
-            NpmResolver<sys_traits::impls::RealSys>,
-            sys_traits::impls::RealSys,
-          > {
-            deno_rt_native_addon_loader: None,
-            module_loader: module_loader(),
-            permissions: PermissionsContainer::allow_all(permission_desc_parser),
-            blob_store: Default::default(),
-            broadcast_channel: Default::default(),
-            feature_checker: Default::default(),
-            node_services: Default::default(),
-            npm_process_state_provider: Default::default(),
-            root_cert_store_provider: Default::default(),
-            fetch_dns_resolver: Default::default(),
-            shared_array_buffer_store: Default::default(),
-            compiled_wasm_module_store: Default::default(),
-            v8_code_cache: Default::default(),
-            fs,
-          },
+                DenoInNpmPackageChecker,
+                NpmResolver<sys_traits::impls::RealSys>,
+                sys_traits::impls::RealSys,
+            > {
+                deno_rt_native_addon_loader: None,
+                module_loader: module_loader(),
+                permissions: PermissionsContainer::allow_all(permission_desc_parser),
+                blob_store: Default::default(),
+                broadcast_channel: Default::default(),
+                feature_checker: Default::default(),
+                node_services: Default::default(),
+                npm_process_state_provider: Default::default(),
+                root_cert_store_provider: Default::default(),
+                fetch_dns_resolver: Default::default(),
+                shared_array_buffer_store: Default::default(),
+                compiled_wasm_module_store: Default::default(),
+                v8_code_cache: Default::default(),
+                fs,
+            },
             main_worker_options(),
         );
-
 
         JsCore {
             #[allow(clippy::arc_with_non_send_sync)]

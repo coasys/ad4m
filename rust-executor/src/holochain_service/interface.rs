@@ -28,10 +28,7 @@ pub enum HolochainServiceRequest {
     },
     RemoveApp(String, oneshot::Sender<HolochainServiceResponse>),
     AgentInfos(oneshot::Sender<HolochainServiceResponse>),
-    AddAgentInfos(
-        Vec<String>,
-        oneshot::Sender<HolochainServiceResponse>,
-    ),
+    AddAgentInfos(Vec<String>, oneshot::Sender<HolochainServiceResponse>),
     Sign(String, oneshot::Sender<HolochainServiceResponse>),
     Shutdown(oneshot::Sender<HolochainServiceResponse>),
     GetAgentKey(oneshot::Sender<HolochainServiceResponse>),
@@ -69,7 +66,7 @@ impl HolochainServiceInterface {
             payload,
             response_sender,
         ))?;
-        
+
         match response_receiver.await.unwrap() {
             HolochainServiceResponse::InstallApp(result) => {
                 if let Err(e) = &result {
@@ -203,7 +200,7 @@ impl HolochainServiceInterface {
             .send(HolochainServiceRequest::UnPackDna(path, response_tx))?;
         match response_rx.await.unwrap() {
             HolochainServiceResponse::UnPackDna(result) => result,
-            _ => unreachable!(),    
+            _ => unreachable!(),
         }
     }
 
@@ -216,7 +213,7 @@ impl HolochainServiceInterface {
             _ => unreachable!(),
         }
     }
-    
+
     pub async fn unpack_happ(&self, path: String) -> Result<String, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.sender

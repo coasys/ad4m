@@ -2,17 +2,16 @@ use deno_core::{anyhow::anyhow, op2};
 use holochain::{
     conductor::api::AppInfo,
     prelude::{
-        hash_type::Agent, ExternIO, HoloHash, InstallAppPayload,
-        Signature, ZomeCallResponse,
+        hash_type::Agent, ExternIO, HoloHash, InstallAppPayload, Signature, ZomeCallResponse,
     },
 };
 use log::error;
 use std::time::Duration;
 use tokio::time::timeout;
 
+use super::get_holochain_service;
 use crate::holochain_service::{HolochainService, LocalConductorConfig};
 use crate::js_core::error::AnyhowWrapperError;
-use super::get_holochain_service;
 
 // The duration to use for timeouts
 const TIMEOUT_DURATION: Duration = Duration::from_secs(90);
@@ -20,7 +19,9 @@ const TIMEOUT_DURATION: Duration = Duration::from_secs(90);
 const APP_INSTALL_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
 
 #[op2(async)]
-async fn start_holochain_conductor(#[serde] config: LocalConductorConfig) -> Result<(), AnyhowWrapperError> {
+async fn start_holochain_conductor(
+    #[serde] config: LocalConductorConfig,
+) -> Result<(), AnyhowWrapperError> {
     HolochainService::init(config).await?;
     Ok(())
 }
@@ -43,7 +44,9 @@ async fn log_dht_status() -> Result<(), AnyhowWrapperError> {
 
 #[op2(async)]
 #[serde]
-async fn install_app(#[serde] install_app_payload: InstallAppPayload) -> Result<AppInfo, AnyhowWrapperError> {
+async fn install_app(
+    #[serde] install_app_payload: InstallAppPayload,
+) -> Result<AppInfo, AnyhowWrapperError> {
     timeout(APP_INSTALL_TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
         interface.install_app(install_app_payload).await
@@ -205,7 +208,6 @@ async fn unpack_happ(#[string] path: String) -> Result<String, AnyhowWrapperErro
     .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
     .map_err(AnyhowWrapperError::from)
 }
-
 
 //Implement signal callbacks from dna/holochain to js
 deno_core::extension!(

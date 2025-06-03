@@ -11,7 +11,8 @@ use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::hash_type::Agent;
 use holochain::prelude::{
-    AppManifest, ExternIO, HoloHash, InstallAppPayload, Kitsune2NetworkMetricsRequest, Signal, Signature, Timestamp, ZomeCallParams, ZomeCallResponse
+    AppManifest, ExternIO, HoloHash, InstallAppPayload, Kitsune2NetworkMetricsRequest, Signal,
+    Signature, Timestamp, ZomeCallParams, ZomeCallResponse,
 };
 use holochain::test_utils::itertools::Either;
 
@@ -311,7 +312,7 @@ impl HolochainService {
                                             let _ = response_tx.send(HolochainServiceResponse::UnPackHapp(Err(err)));
                                         },
                                     }
-                                }   
+                                }
                             };
                         };
                         error!("Holochain service receiver closed");
@@ -334,11 +335,9 @@ impl HolochainService {
 
         let agent_infos: Vec<String> = serde_json::from_str(COASYS_BOOTSTRAP_AGENT_INFO)?;
         info!("Adding agent infos: {:?}", agent_infos);
-        if let Err(e) = inteface
-            .add_agent_infos(agent_infos)
-            .await {
-                error!("Error adding agent infos: {:?}", e);
-            }
+        if let Err(e) = inteface.add_agent_infos(agent_infos).await {
+            error!("Error adding agent infos: {:?}", e);
+        }
 
         set_holochain_service(inteface).await;
 
@@ -359,7 +358,6 @@ impl HolochainService {
 
             let mut network_config = NetworkConfig::default();
 
-            
             // prod - https://bootstrap.holo.host
             // staging - https://bootstrap-staging.holo.host
             // dev - https://bootstrap-dev.holohost.workers.dev
@@ -377,7 +375,8 @@ impl HolochainService {
         };
 
         info!("Starting holochain conductor with config: {:#?}", config);
-        let passphrase_locked_array = sodoken::LockedArray::from(local_config.passphrase.as_bytes().to_vec());
+        let passphrase_locked_array =
+            sodoken::LockedArray::from(local_config.passphrase.as_bytes().to_vec());
         let passphrase = Arc::new(std::sync::Mutex::new(passphrase_locked_array));
         let conductor = ConductorBuilder::new()
             .config(config)
@@ -550,7 +549,13 @@ impl HolochainService {
     }
 
     pub async fn agent_infos(&self) -> Result<Vec<String>, AnyError> {
-        Ok(self.conductor.get_agent_infos(None).await?.into_iter().map(|arc| (*arc).encode()).collect::<Result<Vec<_>, _>>()?)
+        Ok(self
+            .conductor
+            .get_agent_infos(None)
+            .await?
+            .into_iter()
+            .map(|arc| (*arc).encode())
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     pub async fn add_agent_infos(&self, agent_infos: Vec<String>) -> Result<(), AnyError> {
@@ -592,10 +597,13 @@ impl HolochainService {
     }
 
     pub async fn log_network_metrics(&self) -> Result<(), AnyError> {
-        let metrics = self.conductor.dump_network_metrics(Kitsune2NetworkMetricsRequest{
-            dna_hash: None,
-            include_dht_summary: true,
-        }).await?;
+        let metrics = self
+            .conductor
+            .dump_network_metrics(Kitsune2NetworkMetricsRequest {
+                dna_hash: None,
+                include_dht_summary: true,
+            })
+            .await?;
         info!("Network metrics: {:?}", metrics);
 
         let stats = self.conductor.dump_network_stats().await?;
@@ -608,16 +616,14 @@ impl HolochainService {
         let path = PathBuf::from(path);
         let name = holochain_cli_bundle::get_app_name(&path).await?;
         info!("Got hApp name: {:?}", name);
-        let pack =
-            holochain_cli_bundle::pack::<AppManifest>(&path, None, name, false).await?;
+        let pack = holochain_cli_bundle::pack::<AppManifest>(&path, None, name, false).await?;
         info!("Packed hApp at path: {:#?}", pack.0);
         Ok(pack.0.to_str().unwrap().to_string())
     }
 
     pub async fn unpack_happ(path: String) -> Result<String, AnyError> {
         let path = PathBuf::from(path);
-        let pack =
-            holochain_cli_bundle::unpack::<AppManifest>("happ", &path, None, true).await?;
+        let pack = holochain_cli_bundle::unpack::<AppManifest>("happ", &path, None, true).await?;
         info!("UnPacked hApp at path: {:#?}", pack);
         Ok(pack.to_str().unwrap().to_string())
     }

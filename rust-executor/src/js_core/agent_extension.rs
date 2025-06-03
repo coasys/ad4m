@@ -1,3 +1,5 @@
+use super::utils::sort_json_value;
+use crate::js_core::error::AnyhowWrapperError;
 use crate::{
     agent::{
         create_signed_expression, did, did_document, sign, sign_string_hex, signing_key_id,
@@ -7,8 +9,6 @@ use crate::{
 };
 use coasys_juniper::{FieldError, Value};
 use deno_core::op2;
-use crate::js_core::error::AnyhowWrapperError;
-use super::utils::sort_json_value;
 
 #[op2]
 #[serde]
@@ -34,17 +34,21 @@ fn agent_create_signed_expression(
     #[serde] data: serde_json::Value,
 ) -> Result<serde_json::Value, AnyhowWrapperError> {
     let sorted_json = sort_json_value(&data);
-    let signed_expression = create_signed_expression(sorted_json).map_err(AnyhowWrapperError::from)?;
+    let signed_expression =
+        create_signed_expression(sorted_json).map_err(AnyhowWrapperError::from)?;
     Ok(serde_json::to_value(signed_expression).map_err(AnyhowWrapperError::from)?)
 }
 
 #[op2]
 #[string]
-fn agent_create_signed_expression_stringified(#[string] data: String) -> Result<String, AnyhowWrapperError> {
+fn agent_create_signed_expression_stringified(
+    #[string] data: String,
+) -> Result<String, AnyhowWrapperError> {
     let data: serde_json::Value = serde_json::from_str(&data)?;
     let sorted_json = sort_json_value(&data);
     let signed_expression = create_signed_expression(sorted_json)?;
-    let stringified = serde_json::to_string(&signed_expression).map_err(AnyhowWrapperError::from)?;
+    let stringified =
+        serde_json::to_string(&signed_expression).map_err(AnyhowWrapperError::from)?;
     Ok(stringified)
 }
 
@@ -100,7 +104,8 @@ fn agent_load() -> Result<AgentStatus, AnyhowWrapperError> {
 #[op2(async)]
 #[serde]
 async fn agent_unlock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError> {
-    AgentService::with_global_instance(|agent_service| agent_service.unlock(passphrase)).map_err(AnyhowWrapperError::from)
+    AgentService::with_global_instance(|agent_service| agent_service.unlock(passphrase))
+        .map_err(AnyhowWrapperError::from)
 }
 
 #[op2(async)]

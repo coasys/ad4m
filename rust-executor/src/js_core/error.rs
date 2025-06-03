@@ -17,7 +17,9 @@ impl From<AnyhowError> for AnyhowWrapperError {
 
 impl From<serde_json::Error> for AnyhowWrapperError {
     fn from(error: serde_json::Error) -> Self {
-        AnyhowWrapperError { inner: error.into() }
+        AnyhowWrapperError {
+            inner: error.into(),
+        }
     }
 }
 

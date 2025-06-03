@@ -1,9 +1,9 @@
+use super::utils::sort_json_value;
 use crate::agent::signatures::{verify, verify_string_signed_by_did};
+use crate::js_core::error::AnyhowWrapperError;
 use crate::types::Expression;
 use deno_core::op2;
 use serde::{Deserialize, Serialize};
-use crate::js_core::error::AnyhowWrapperError;
-use super::utils::sort_json_value;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]

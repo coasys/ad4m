@@ -2,8 +2,8 @@ use base64::{engine::general_purpose as base64engine, Engine as _};
 use deno_core::{anyhow::anyhow, op2};
 use serde::{Deserialize, Serialize};
 
-use crate::wallet::Wallet;
 use crate::js_core::error::AnyhowWrapperError;
+use crate::wallet::Wallet;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -42,7 +42,9 @@ fn wallet_get_main_key_document() -> Result<did_key::Document, AnyhowWrapperErro
     let name = "main".to_string();
     wallet_ref
         .get_did_document(&name)
-        .ok_or(AnyhowWrapperError::from(anyhow!("main key not found. call createMainKey() first")))
+        .ok_or(AnyhowWrapperError::from(anyhow!(
+            "main key not found. call createMainKey() first"
+        )))
 }
 
 #[op2]
@@ -69,7 +71,9 @@ fn wallet_unlock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError>
     let wallet_instance = Wallet::instance();
     let mut wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_mut().expect("wallet instance");
-    wallet_ref.unlock(passphrase).map_err(AnyhowWrapperError::from)
+    wallet_ref
+        .unlock(passphrase)
+        .map_err(AnyhowWrapperError::from)
 }
 
 #[op2]
