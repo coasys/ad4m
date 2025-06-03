@@ -89,6 +89,7 @@ where
             .poll_event_loop(cx, deno_core::PollEventLoopOptions::default())
         {
             if let Err(err) = event_loop_result {
+                log::error!("Error in event loop: {:?}", err);
                 return Poll::Ready(Err(CoreError::TLA));
             }
 
