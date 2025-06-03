@@ -31,6 +31,7 @@ jobs:
       - run:
           name: Build deno snapshot
           command: pnpm run build-deno-snapshot
+          no_output_timeout: 30m
       - run:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
