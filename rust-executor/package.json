@@ -6,8 +6,6 @@
   "type": "module",
   "types": "",
   "scripts": {
-    "clean": "rm -f CUSTOM_DENO_SNAPSHOT.bin",
-    "prebuild": "pnpm clean",
     "build": "pnpm build-deno-snapshot && pnpm build-lib",
     "build-lib": "cargo build --release",
     "build-deno-snapshot": "cargo run --release --features generate_snapshot --bin generate_snapshot",
