@@ -21,7 +21,6 @@ export default {
     interop: "esModule",
     globals: {},
   },
-  external: [],
   plugins: [
     string({
       include: "build/*.js",
