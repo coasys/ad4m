@@ -127,43 +127,43 @@ export default class HolochainService {
         await HOLOCHAIN_SERVICE.shutdown();
     }
 
-    async unPackDna(dnaPath: string): Promise<String> {
+    async unPackDna(dnaPath: string): Promise<string> {
         let result = await HOLOCHAIN_SERVICE.unPackDna(dnaPath);
         let splitResult = result.split("Unpacked to directory ");
         if (splitResult.length == 2) {
-            return splitResult[1]
+            return splitResult[1].toString()
         } else {
-            return result
+            return result.toString()
         }
     }
 
-    async packDna(workdirPath: string): Promise<String> {
+    async packDna(workdirPath: string): Promise<string> {
         let result = await HOLOCHAIN_SERVICE.packDna(workdirPath);
         let splitResult = result.split("Wrote bundle ");
         if (splitResult.length == 2) {
-            return splitResult[1]
+            return splitResult[1].toString()
         } else {
-            return result
+            return result.toString()
         }
     }
     
-    async unPackHapp(happPath: string): Promise<String> {
+    async unPackHapp(happPath: string): Promise<string> {
         let result = await HOLOCHAIN_SERVICE.unPackHapp(happPath);
         let splitResult = result.split("Unpacked to directory ");
         if (splitResult.length == 2) {
-            return splitResult[1]
+            return splitResult[1].toString()
         } else {
-            return result
+            return result.toString()
         }
     }
 
-    async packHapp(workdirPath: string): Promise<String> {
+    async packHapp(workdirPath: string): Promise<string> {
         let result = await HOLOCHAIN_SERVICE.packHapp(workdirPath);
         let splitResult = result.split("Wrote bundle ");
         if (splitResult.length == 2) {
-            return splitResult[1]
+            return splitResult[1].toString()
         } else {
-            return result
+            return result.toString()
         }
     }
 
