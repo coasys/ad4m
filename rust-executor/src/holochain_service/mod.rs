@@ -382,7 +382,7 @@ impl HolochainService {
             network_config.webrtc_config = Some(serde_json::json!({
                 "iceServers": [
                     {"urls": ["stun:stun.cloudflare.com:3478"]},
-                    {"urls": ["stun:stun.l.gougle.com:19302"]},
+                    {"urls": ["stun:stun.l.google.com:19302"]},
                     {
                         "urls": [
                             "stun:realy.ad4m.dev:3478",
