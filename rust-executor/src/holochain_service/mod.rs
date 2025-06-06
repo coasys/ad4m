@@ -361,22 +361,23 @@ impl HolochainService {
             if local_config.use_bootstrap {
                 network_config.bootstrap_url = Url2::parse(local_config.bootstrap_url.as_str());
             } else {
-                network_config.bootstrap_url = Url2::parse("http://relay.ad4m.dev:4433");
+                network_config.bootstrap_url =
+                    Url2::parse("https://dev-test-bootstrap2.holochain.org");
             }
 
             if local_config.use_proxy {
                 network_config.signal_url = Url2::parse(local_config.proxy_url.as_str());
             } else {
-                network_config.signal_url = Url2::parse("ws://relay.ad4m.dev:4433");
+                network_config.signal_url = Url2::parse("wss://dev-test-bootstrap2.holochain.org");
             }
 
-            //if local_config.use_local_proxy {
-            network_config.advanced = Some(serde_json::json!({
-                "tx5Transport": {
-                    "signalAllowPlainText": true,
-                }
-            }));
-            //}
+            if local_config.use_local_proxy {
+                network_config.advanced = Some(serde_json::json!({
+                    "tx5Transport": {
+                        "signalAllowPlainText": true,
+                    }
+                }));
+            }
 
             network_config.webrtc_config = Some(serde_json::json!({
                 "iceServers": [
