@@ -34,24 +34,26 @@ export async function isProcessRunning(processName: string): Promise<boolean> {
 }
 
 export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bootstrapUrl: string | null, process: ChildProcess}> {
-    const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
-    let servicesProcess = exec(`${command} run-local-hc-services`);
+    let servicesProcess = exec(`kitsune2-bootstrap-srv`);
 
     let proxyUrl: string | null = null;
     let bootstrapUrl: string | null = null;
 
     let servicesReady = new Promise<void>((resolve, reject) => {
         servicesProcess.stdout!.on('data', (data) => {
-            if (data.includes("HC BOOTSTRAP - ADDR")) {
-                const regex = /(http:\/\/|ws:\/\/)[^\s]+/g;
-                const matches = data.match(regex);
-                bootstrapUrl = matches![0];
-            }
-
-            if (data.includes("HC SIGNAL - ADDR")) {
-                const regex = /(http:\/\/|ws:\/\/)[^\s]+/g;
-                const matches = data.match(regex);
-                proxyUrl = matches![0];
+            if (data.includes("#kitsune2_bootstrap_srv#listening#")) {
+                const lines = data.split("\n")
+                //@ts-ignore
+                const portLine = lines.find(line => line.includes("#kitsune2_bootstrap_srv#listening#"));
+                const parts = portLine!.split('#');
+                const portPart = parts[3]; // "127.0.0.1:36353"
+                const port = portPart.split(':')[1]; // "36353"
+                console.log("Port: ", port);
+                bootstrapUrl = `http://127.0.0.1:${port}`;
+                proxyUrl = `ws://127.0.0.1:${port}`;
+                console.log("Kitsune2 Bootstrap Server Data: ", data);
+                console.log("Bootstrap URL: ", bootstrapUrl);
+                console.log("Proxy URL: ", proxyUrl);
                 resolve();
             }
         });
@@ -68,8 +70,8 @@ export async function startExecutor(dataPath: string,
     hcAppPort: number,
     languageLanguageOnly: boolean = false,
     adminCredential?: string,
-    proxyUrl: string = "wss://signal.holotest.net",
-    bootstrapUrl: string = "https://bootstrap.holo.host",
+    proxyUrl: string = "wss://dev-test-bootstrap2.holochain.org",
+    bootstrapUrl: string = "https://dev-test-bootstrap2.holochain.org",
 ): Promise<ChildProcess> {
     const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
 

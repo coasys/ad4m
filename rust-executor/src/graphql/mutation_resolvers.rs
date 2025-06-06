@@ -26,7 +26,7 @@ use crate::{
         add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs,
         sign_device_key,
     },
-    holochain_service::{agent_infos_from_str, get_holochain_service},
+    holochain_service::get_holochain_service,
     pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC},
 };
 use base64::prelude::*;
@@ -1142,8 +1142,21 @@ impl Mutation {
             &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY,
         )?;
 
-        let agent_infos = agent_infos_from_str(agent_infos.as_str())?;
-        log::info!("Adding HC agent infos: {:?}", agent_infos);
+        let agent_infos: Vec<String> = serde_json::from_str(&agent_infos)?;
+
+        for agent_info in agent_infos.iter() {
+            match serde_json::from_str::<serde_json::Value>(agent_info) {
+                Ok(json) => {
+                    log::info!(
+                        "Adding Agent info: {}",
+                        serde_json::to_string_pretty(&json).unwrap()
+                    );
+                }
+                Err(e) => {
+                    log::error!("Failed to parse agent info as JSON: {}", e);
+                }
+            }
+        }
 
         get_holochain_service()
             .await

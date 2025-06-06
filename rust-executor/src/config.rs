@@ -67,10 +67,10 @@ impl Ad4mConfig {
             self.connect_holochain = Some(false);
         }
         if self.hc_proxy_url.is_none() {
-            self.hc_proxy_url = Some("wss://signal.holo.host".to_string());
+            self.hc_proxy_url = Some("wss://dev-test-bootstrap2.holochain.org".to_string());
         }
         if self.hc_bootstrap_url.is_none() {
-            self.hc_bootstrap_url = Some("https://bootstrap.holo.host/".to_string());
+            self.hc_bootstrap_url = Some("https://dev-test-bootstrap2.holochain.org".to_string());
         }
         if self.hc_use_bootstrap.is_none() {
             self.hc_use_bootstrap = Some(true);

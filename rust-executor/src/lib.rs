@@ -2,13 +2,13 @@
 extern crate lazy_static;
 
 pub mod config;
-mod entanglement_service;
+pub mod entanglement_service;
 mod globals;
 pub mod graphql;
-mod holochain_service;
-mod js_core;
+pub mod holochain_service;
+pub mod js_core;
 mod prolog_service;
-mod runtime_service;
+pub mod runtime_service;
 pub mod utils;
 mod wallet;
 
@@ -21,6 +21,7 @@ pub mod languages;
 mod neighbourhoods;
 pub mod perspectives;
 mod pubsub;
+use rustls::crypto::aws_lc_rs;
 #[cfg(test)]
 mod test_utils;
 pub mod types;
@@ -77,6 +78,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     );
     let _ = env_logger::try_init();
     config.prepare();
+
+    aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install rustls' aws_lc_rs crypto provider");
 
     info!("Initializing Ad4mDb...");
 

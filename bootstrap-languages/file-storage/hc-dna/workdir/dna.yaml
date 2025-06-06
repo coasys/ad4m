@@ -3,7 +3,6 @@ name: file-storage
 integrity:
   network_seed: 00000000-0000-0000-0000-000000000000
   properties: null
-  origin_time: 2023-02-07T14:37:17.497352Z
   zomes:
     - name: integrity
       bundled: ../target/wasm32-unknown-unknown/release/integrity.wasm

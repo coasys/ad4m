@@ -1,0 +1,11 @@
+manifest_version: '1'
+name: Perspective-Diff-Sync
+description: git-like CRDT for collaborative AD4M Perspectives, i.e. back-bone of fully p2p Neighbourhoods
+roles:
+- name: perspective-diff-sync
+  provisioning:
+    strategy: create
+    deferred: false
+  dna:
+    bundled: ./perspective-diff-sync.dna
+    
