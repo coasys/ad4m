@@ -383,14 +383,13 @@ impl HolochainService {
                 "iceServers": [
                     {"urls": ["stun:stun.cloudflare.com:3478"]},
                     {"urls": ["stun:stun.l.google.com:19302"]},
-                    // {
-                    //     "urls": [
-                    //         "stun:realy.ad4m.dev:3478",
-                    //         "turn:relay.ad4m.dev:443"
-                    //     ],
-                    //     "username": "openrelay",
-                    //     "credential": "openrelay",
-                    // }
+                    {
+                        "urls": [
+                            "stun:relay.ad4m.dev:3478",
+                        ],
+                        "username": "openrelay",
+                        "credential": "openrelay",
+                    }
                 ]
             }));
 
