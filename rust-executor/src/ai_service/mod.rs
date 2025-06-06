@@ -954,8 +954,12 @@ impl AIService {
                         Ok(Some(request)) => {
                             let result: Result<Vec<f32>> = rt
                                 .block_on(async { model.embed(request.prompt).await })
-                                .map(|tensor| tensor.to_vec())
-                                .map_err(|bert_error| anyhow!(bert_error));
+                                .map(|tensor| tensor.vector().to_vec())
+                                .map_err(
+                                    |bert_error: <kalosm::language::Bert as Embedder>::Error| {
+                                        anyhow!(bert_error)
+                                    },
+                                );
                             let _ = request.result_sender.send(result);
                         }
                     }
