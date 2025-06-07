@@ -2,17 +2,22 @@ import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
 import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     SmartLiteral, SMART_LITERAL_CONTENT_PREDICATE,
-    InstanceQuery, Subject, SubjectProperty,
-    SubjectCollection, SubjectFlag,
-    SDNAClass,
-    SubjectEntity,
+    InstanceQuery, Subject,
+    Ad4mModel,
+    Flag,
+    Property,
+    ReadOnly,
+    Collection,
+    ModelOptions,
+    Optional,
+    PropertyOptions,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
 import { startExecutor, apolloClient } from "../utils/utils";
 import path from "path";
-import fs from "fs";
 import { fileURLToPath } from 'url';
 import fetch from 'node-fetch'
+import sinon from 'sinon';
 
 //@ts-ignore
 global.fetch = fetch
@@ -64,7 +69,7 @@ describe("Prolog + Literals", () => {
         before(async () => {
             perspective = await ad4m!.perspective.add("test")
             // for test debugging:
-            console.log("UUID: " + perspective.uuid)
+            //console.log("UUID: " + perspective.uuid)
 
             let classes = await perspective.subjectClasses();
             expect(classes.length).to.equal(0)
@@ -191,6 +196,21 @@ describe("Prolog + Literals", () => {
                 //@ts-ignore
                 expect(await todos[1].state).to.exist
             })
+
+            it("should create a subject with initial values", async () => {
+                let root = Literal.from("initial values test").toUrl()
+                const initialValues = {
+                    title: "Initial Title",
+                    state: "todo://done"
+                }
+                await perspective!.createSubject("Todo", root, initialValues)
+                let subject = await perspective!.getSubjectProxy(root, "Todo") as unknown as Subject
+
+                //@ts-ignore
+                expect(await subject.title).to.equal("Initial Title")
+                //@ts-ignore
+                expect(await subject.state).to.equal("todo://done")
+            })
         })
 
         describe("TypeScript compatibility", () => {
@@ -251,40 +271,36 @@ describe("Prolog + Literals", () => {
 
                 // todos is an array of Todo objects
                 // note how we don't need @ts-ignore here:
-                expect(todos.length).to.equal(2)
+                expect(todos.length).to.equal(3)
                 expect(await todos[1].state).to.exist
             })
 
         })
 
         describe("SDNA creation decorators", () => {
-            @SDNAClass({
+            @ModelOptions({
                 name: "Message"
             })
             class Message {
-                //@ts-ignore
-                @SubjectFlag({
+                @Flag({
                     through: "ad4m://type",
                     value: "ad4m://message"
                 })
                 type: string = ""
 
-                //@ts-ignore
                 @InstanceQuery()
                 static async all(perspective: PerspectiveProxy): Promise<Message[]> { return [] }
 
-                //@ts-ignore
-                @SubjectProperty({
+                @Optional({
                     through: "todo://state",
                     initial: "todo://ready",
-                    writable: true,
                 })
                 body: string = ""
             }
 
             // This class matches the SDNA in ./sdna/subject.pl
             // and this test proves the decorators create the exact same SDNA code
-            @SDNAClass({
+            @ModelOptions({
                 name: "Todo"
             })
             class Todo {
@@ -316,45 +332,37 @@ describe("Prolog + Literals", () => {
                 static async allSelf(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
                 //@ts-ignore
-                @SubjectProperty({
+                @Property({
                     through: "todo://state",
-                    initial:"todo://ready",
-                    writable: true,
-                    required: true
+                    initial: "todo://ready",
                 })
                 state: string = ""
 
-                //@ts-ignore
-                @SubjectProperty({
+                @Optional({
                     through: "todo://has_title",
                     writable: true,
                     resolveLanguage: "literal"
                 })
                 title: string = ""
 
-                @SubjectProperty({
+                @ReadOnly({
                     getter: `triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true`
                 })
                 isLiked: boolean = false
 
-                //@ts-ignore
-                @SubjectCollection({ through: "todo://comment" })
-                // @ts-ignore
+                @Collection({ through: "todo://comment" })
                 comments: string[] = []
 
-                //@ts-ignore
-                @SubjectCollection({ through: "flux://entry_type" })
+                @Collection({ through: "flux://entry_type" })
                 entries: string[] = []
 
-                //@ts-ignore
-                @SubjectCollection({
+                @Collection({
                     through: "flux://entry_type",
                     where: { isInstance: Message }
                 })
                 messages: string[] = []
 
-                //@ts-ignore
-                @SubjectCollection({
+                @Collection({
                     through: "flux://entry_type",
                     where: { condition: `triple(Target, "flux://has_reaction", "flux://thumbsup")` }
                 })
@@ -399,7 +407,7 @@ describe("Prolog + Literals", () => {
 
             it("can retrieve all instances through instaceQuery decoratored all()", async () => {
                 let todos = await Todo.all(perspective!)
-                expect(todos.length).to.equal(3)
+                expect(todos.length).to.equal(4)
             })
 
             it("can retrieve all mathching instance through InstanceQuery(where: ..)", async () => {
@@ -408,7 +416,7 @@ describe("Prolog + Literals", () => {
                 expect(await todos[0].state).to.equal("todo://ready")
 
                 todos = await Todo.allDone(perspective!)
-                expect(todos.length).to.equal(1)
+                expect(todos.length).to.equal(2)
                 expect(await todos[0].state).to.equal("todo://done")
             })
 
@@ -444,11 +452,13 @@ describe("Prolog + Literals", () => {
             it("can easily be initialized with PerspectiveProxy.ensureSDNASubjectClass()", async () => {
                 expect(await perspective!.getSdna()).to.have.lengthOf(1)
 
-                @SDNAClass({
+                @ModelOptions({
                     name: "Test"
                 })
                 class Test {
-                    @SubjectProperty({through: "test://test_numer"})
+                    @Property({
+                        through: "test://test_numer"
+                    })
                     number: number = 0
                 }
 
@@ -545,82 +555,62 @@ describe("Prolog + Literals", () => {
             })
 
             describe("Active record implementation", () => {
-                @SDNAClass({
+                @ModelOptions({
                     name: "Recipe"
                 })
-                class Recipe extends SubjectEntity {
-                    //@ts-ignore
-                    @SubjectFlag({
+                class Recipe extends Ad4mModel {
+                    @Flag({
                         through: "ad4m://type",
                         value: "ad4m://recipe"
                     })
                     type: string = ""
 
-                    //@ts-ignore
-                    @SubjectProperty({
+                    @Optional({
                         through: "recipe://plain",
-                        writable: true,
                     })
                     plain: string = ""
 
-                    //@ts-ignore
-                    @SubjectProperty({
+                    @Optional({
                         through: "recipe://name",
-                        writable: true,
                         resolveLanguage: "literal"
                     })
                     name: string = ""
 
-                    // @ts-ignore
-                    @SubjectProperty({
+                    @Optional({
                         through: "recipe://boolean",
-                        writable: true,
                         resolveLanguage: "literal"
                     })
                     booleanTest: boolean = false
 
-                    @SubjectProperty({
+                    @Optional({
                         through: "recipe://number",
-                        writable: true,
                         resolveLanguage: "literal"
                     })
                     number: number = 0
 
-                    //@ts-ignore
-                    @SubjectCollection({ through: "recipe://entries" })
+                    @Collection({ through: "recipe://entries" })
                     entries: string[] = []
 
-                    // @ts-ignore
-                    @SubjectCollection({
+                    @Collection({
                         through: "recipe://entries",
                         where: { condition: `triple(Target, "recipe://has_ingredient", "recipe://test")` }
                     })
-                    // @ts-ignore
-                    ingredients: [];
+                    ingredients: string[] = []
 
-                    //@ts-ignore
-                    @SubjectCollection({ through: "recipe://comment" })
-                    // @ts-ignore
+                    @Collection({ through: "recipe://comment" })
                     comments: string[] = []
 
-                    //@ts-ignore
-                    @SubjectProperty({
+                    @Optional({
                         through: "recipe://local",
-                        writable: true,
                         local: true
                     })
                     local: string = ""
 
-                    @SubjectProperty({
+                    @Optional({
                         through: "recipe://resolve",
-                        writable: true,
                         resolveLanguage: "literal"
                     })
                     resolve: string = ""
-
-                    // static query(perspective: PerspectiveProxy) {
-                    //     return SubjectEntity.query<Recipe>(perspective);
-                    // }
                 }
 
                 before(async () => {
@@ -1217,8 +1207,8 @@ describe("Prolog + Literals", () => {
                     expect(recipes4.length).to.equal(3);
 
                     // 2. Timestamps
-                    const recipe2timestamp = allRecipes[1].timestamp;
-
+                    const recipe2timestamp = parseInt(allRecipes[1].timestamp);
+                    
                     // Test less than (lt) operation on timestamp
                     const recipes5 = await Recipe.findAll(perspective!, { where: { timestamp: { lt: recipe2timestamp } } });
                     expect(recipes5.length).to.equal(1);
@@ -1231,7 +1221,7 @@ describe("Prolog + Literals", () => {
                     const recipes7 = await Recipe.findAll(perspective!, { where: { timestamp: { gt: recipe2timestamp } } });
                     expect(recipes7.length).to.equal(2);
 
-                    // Test greater than (gt) operation on timestamp
+                    // Test greater than or equal to (gte) operation on timestamp
                     const recipes8 = await Recipe.findAll(perspective!, { where: { timestamp: { gte: recipe2timestamp } } });
                     expect(recipes8.length).to.equal(3);
 
@@ -1242,29 +1232,25 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("findAll() works with where query between operations", async () => {
-                    @SDNAClass({
+                    @ModelOptions({
                         name: "Task_due"
                     })
-                    class TaskDue extends SubjectEntity {
-                        @SubjectProperty({
+                    class TaskDue extends Ad4mModel {
+                        @Property({
                             through: "task://title",
-                            writable: true,
-                            required: true,
-                            initial: "task://notitle",
                             resolveLanguage: "literal"
                         })
                         title: string = "";
 
-                        @SubjectProperty({
+                        @Property({
                             through: "task://priority",
                             writable: true,
                             resolveLanguage: "literal"
                         })
                         priority: number = 0;
 
-                        @SubjectProperty({
+                        @Property({
                             through: "task://dueDate",
-                            writable: true,
                             resolveLanguage: "literal"
                         })
                         dueDate: number = 0;
@@ -1389,30 +1375,12 @@ describe("Prolog + Literals", () => {
                     const oldRecipes = await Recipe.findAll(perspective!);
                     for (const recipe of oldRecipes) await recipe.delete();
                     
-                    // Create recipes
-                    const recipe1 = new Recipe(perspective!);
-                    recipe1.name = "Recipe 1";
-                    await recipe1.save();
-                    
-                    const recipe2 = new Recipe(perspective!);
-                    recipe2.name = "Recipe 2";
-                    await recipe2.save();
-                    
-                    const recipe3 = new Recipe(perspective!);
-                    recipe3.name = "Recipe 3";
-                    await recipe3.save();
-                    
-                    const recipe4 = new Recipe(perspective!);
-                    recipe4.name = "Recipe 4";
-                    await recipe4.save();
-
-                    const recipe5 = new Recipe(perspective!);
-                    recipe5.name = "Recipe 5";
-                    await recipe5.save();
-
-                    const recipe6 = new Recipe(perspective!);
-                    recipe6.name = "Recipe 6";
-                    await recipe6.save();
+                    // Create 6 recipe instances with sequential names
+                    for (let i = 1; i <= 6; i++) {
+                        const recipe = new Recipe(perspective!);
+                        recipe.name = `Recipe ${i}`;
+                        await recipe.save();
+                    }
                     
                     // Check all recipes are there
                     const allRecipes = await Recipe.findAll(perspective!);
@@ -1441,10 +1409,8 @@ describe("Prolog + Literals", () => {
                     expect(recipes6.length).to.equal(3);
                     expect(recipes6[0].name).to.equal("Recipe 3");
 
-                    
-                    await recipe1.delete();
-                    await recipe2.delete();
-                    await recipe3.delete();
+                    // Delete recipies
+                    for (const recipe of allRecipes) await recipe.delete();
                 })
 
                 it("findAll() works with a mix of query constraints", async () => {
@@ -1571,30 +1537,270 @@ describe("Prolog + Literals", () => {
                     await recipe3.delete();
                 })
 
+                it("findAllAndCount() returns both the retrived instances and the total count", async () => {
+                    // Clear any old recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+                    
+                    // Create 6 recipe instances with sequential names
+                    for (let i = 1; i <= 6; i++) {
+                        const recipe = new Recipe(perspective!);
+                        recipe.name = `Recipe ${i}`;
+                        recipe.number = 5;
+                        await recipe.save();
+                    }
+                    
+                    // Check all recipes are there
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    expect(allRecipes.length).to.equal(6);
+
+                    // Test count with limit
+                    const { results: recipes1, totalCount: count1 } = await Recipe.findAllAndCount(perspective!, { limit: 2, count: true });
+                    expect(recipes1.length).to.equal(2);
+                    expect(count1).to.equal(6);
+
+                    // Test count with offset & limit
+                    const { results: recipes3, totalCount: count3 } = await Recipe.findAllAndCount(perspective!, { offset: 3, limit: 3, count: true });
+                    expect(recipes3.length).to.equal(3);
+                    expect(count3).to.equal(6);
+
+                    // Test count with where constraints & limit
+                    const { results: recipes2, totalCount: count2 } = await Recipe.findAllAndCount(perspective!, { where: { name: ["Recipe 1", "Recipe 2", "Recipe 3"] }, limit: 2, count: true });
+                    expect(recipes2.length).to.equal(2);
+                    expect(count2).to.equal(3);
+
+                    // Test count with where equality constraint (exists), offset, & limit
+                    const { results: recipes4, totalCount: count4 } = await Recipe.findAllAndCount(perspective!, { where: { number: 5 }, offset: 3, limit: 3, count: true });
+                    expect(recipes4.length).to.equal(3);
+                    expect(count4).to.equal(6);
+
+                    // Test count with where equality constraint (does not exist), offset, & limit
+                    const { results: recipes5, totalCount: count5 } = await Recipe.findAllAndCount(perspective!, { where: { number: 3 }, offset: 3, limit: 3, count: true });
+                    expect(recipes5.length).to.equal(0);
+                    expect(count5).to.equal(0);
+
+                    // Test count with where not constraint & limit
+                    const { results: recipes6, totalCount: count6 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 1" } }, limit: 3, count: true });
+                    expect(recipes6.length).to.equal(3);
+                    expect(count6).to.equal(5);
+
+                    // Test count with where not constraint, offset, & limit
+                    const { results: recipes7, totalCount: count7 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 2" } }, offset: 1, limit: 3, count: true });
+                    expect(recipes7.length).to.equal(3);
+                    expect(count7).to.equal(5);
+
+                    // Test count with where not constraint, offset, & limit greater than remaining results
+                    const { results: recipes8, totalCount: count8 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 4" } }, offset: 3, limit: 3, count: true });
+                    expect(recipes8.length).to.equal(2);
+                    expect(count8).to.equal(5);
+
+                    // Delete recipies
+                    for (const recipe of allRecipes) await recipe.delete();
+                })
+
+                it("paginate() helper function works with pageNumber & pageSize props", async () => {
+                    // Clear any old recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+                    
+                    // Create 6 recipe instances with sequential names
+                    for (let i = 1; i <= 6; i++) {
+                        const recipe = new Recipe(perspective!);
+                        recipe.name = `Recipe ${i}`;
+                        await recipe.save();
+                    }
+                    
+                    // Check all recipes are there
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    expect(allRecipes.length).to.equal(6);
+
+                    // Test basic pagination (pageSize: 2, pageNumber: 1)
+                    const { results: recipes1, totalCount: count1 } = await Recipe.paginate(perspective!, 2, 1);
+                    expect(recipes1.length).to.equal(2);
+                    expect(count1).to.equal(6);
+                    expect(recipes1[0].name).to.equal("Recipe 1");
+                    expect(recipes1[1].name).to.equal("Recipe 2");
+
+                    // Test pagination with where constraints (pageSize: 3, pageNumber: 2)
+                    const { results: recipes2, totalCount: count2 } = await Recipe.paginate(perspective!, 3, 2, { where: { name: { not: "Recipe 4" } } });
+                    expect(recipes2.length).to.equal(2);
+                    expect(count2).to.equal(5);
+                    expect(recipes2[0].name).to.equal("Recipe 5");
+                    expect(recipes2[1].name).to.equal("Recipe 6");
+
+                    // Delete recipies
+                    for (const recipe of allRecipes) await recipe.delete();
+                });
+
+                it("count() returns only the count without retrieving instances", async () => {
+                    // Clear any old recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+                    
+                    // Create 6 recipe instances with sequential names
+                    for (let i = 1; i <= 6; i++) {
+                        const recipe = new Recipe(perspective!);
+                        recipe.name = `Recipe ${i}`;
+                        await recipe.save();
+                    }
+                    
+                    // Test count with no constraints
+                    const count1 = await Recipe.count(perspective!);
+                    expect(count1).to.equal(6);
+
+                    // Test count with where constraints
+                    const count2 = await Recipe.count(perspective!, { where: { name: ["Recipe 1", "Recipe 2", "Recipe 3"] } });
+                    expect(count2).to.equal(3);
+
+                    // Test count with more complex constraints
+                    const count3 = await Recipe.count(perspective!, { where: { name: { not: "Recipe 1" } } });
+                    expect(count3).to.equal(5);
+
+                    // Delete recipes
+                    for (const recipe of await Recipe.findAll(perspective!)) await recipe.delete();
+                });
+
+                it("count() and countSubscribe() work on the query builder", async () => {
+                    // Clear any old recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+                    
+                    // Create recipes
+                    const recipe1 = new Recipe(perspective!);
+                    recipe1.name = "Recipe 1";
+                    await recipe1.save();
+                    
+                    const recipe2 = new Recipe(perspective!);
+                    recipe2.name = "Recipe 2"; 
+                    await recipe2.save();
+                    
+                    const recipe3 = new Recipe(perspective!);
+                    recipe3.name = "Recipe 3";
+                    await recipe3.save();
+
+                    // Test count() on query builder
+                    const query = Recipe.query(perspective!);
+                    const count = await query.count();
+                    expect(count).to.equal(3);
+
+                    // Test count with where clause
+                    const filteredQuery = Recipe.query(perspective!)
+                        .where({ name: ["Recipe 1", "Recipe 2"] });
+                    const filteredCount = await filteredQuery.count();
+                    expect(filteredCount).to.equal(2);
+
+                    // Test countSubscribe
+                    let lastCount = 0;
+                    const subscription = await Recipe.query(perspective!)
+                        .countSubscribe((count) => {
+                            lastCount = count;
+                        });
+                    expect(subscription).to.equal(3);
+
+                    // Add another recipe and verify callback is called
+                    const recipe4 = new Recipe(perspective!);
+                    recipe4.name = "Recipe 4";
+                    await recipe4.save();
+
+                    // Give time for subscription to process
+                    await sleep(1000);
+                    expect(lastCount).to.equal(4);
+
+                    // Clean up
+                    for (const recipe of await Recipe.findAll(perspective!)) {
+                        await recipe.delete();
+                    }
+                })
+
+                it("paginate() and paginateSubscribe() work on the query builder", async () => {
+                    // Clear any existing recipes
+                    const oldRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of oldRecipes) await recipe.delete();
+
+                    // Create test recipes
+                    for (let i = 1; i <= 10; i++) {
+                        const recipe = new Recipe(perspective!);
+                        recipe.name = `Recipe ${i}`;
+                        await recipe.save();
+                    }
+
+                    // Test paginate()
+                    const query = Recipe.query(perspective!);
+                    const page1 = await query.paginate(3, 1);
+                    expect(page1.results.length).to.equal(3);
+                    expect(page1.totalCount).to.equal(10);
+                    expect(page1.results[0].name).to.equal("Recipe 1");
+                    expect(page1.results[2].name).to.equal("Recipe 3");
+
+                    const page2 = await query.paginate(3, 2);
+                    expect(page2.results.length).to.equal(3);
+                    expect(page2.results[0].name).to.equal("Recipe 4");
+
+                    const lastPage = await query.paginate(3, 4);
+                    expect(lastPage.results.length).to.equal(1);
+                    expect(lastPage.results[0].name).to.equal("Recipe 10");
+
+                    // Test paginateSubscribe()
+                    let lastResult: any = null;
+                    const initialResult = await query.paginateSubscribe(3, 1, (result) => {
+                        lastResult = result;
+                    });
+
+                    expect(initialResult.results.length).to.equal(3);
+                    expect(initialResult.totalCount).to.equal(10);
+                    // Reset lastResult to verify we get an update
+                    lastResult = null;
+
+                    // Add a new recipe and verify subscription updates
+                    const newRecipe = new Recipe(perspective!);
+                    newRecipe.name = "Recipe 11";
+                    await newRecipe.save();
+
+                    
+
+                    // Wait for subscription update with a timeout
+                    const maxTries = 50;
+                    const sleepMs = 100;
+                    const timeout = maxTries * sleepMs;
+                    
+                    for (let i = 0; i < maxTries; i++) {
+                        if (lastResult) break;
+                        await sleep(sleepMs);
+                        console.log("Waiting for subscription update - try:", i + 1);
+                    }
+                    
+                    if (!lastResult) {
+                        throw new Error(`Subscription did not update after ${timeout}ms`);
+                    }
+
+                    expect(lastResult.totalCount).to.equal(11);
+
+                    // Clean up
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    for (const recipe of allRecipes) {
+                        await recipe.delete();
+                    }
+                })
+
                 it("query builder works with subscriptions", async () => {
-                    @SDNAClass({
+                    @ModelOptions({
                         name: "Notification"
                     })
-                    class Notification extends SubjectEntity {
-                        @SubjectProperty({
+                    class Notification extends Ad4mModel {
+                        @Property({
                             through: "notification://title",
-                            writable: true,
-                            required: true,
-                            initial: "literal://string:notitle",
                             resolveLanguage: "literal"
                         })
                         title: string = "";
 
-                        @SubjectProperty({
+                        @Property({
                             through: "notification://priority",
-                            writable: true,
                             resolveLanguage: "literal"
                         })
                         priority: number = 0;
 
-                        @SubjectProperty({
+                        @Property({
                             through: "notification://read",
-                            writable: true,
                             resolveLanguage: "literal"
                         })
                         read: boolean = false;
@@ -1609,14 +1815,16 @@ describe("Prolog + Literals", () => {
 
                     // Set up subscription for high-priority unread notifications
                     let updateCount = 0;
-                    const query = Notification.query(perspective!).where({ 
-                        priority: { gt: 5 },
-                        read: false
-                    });
-                    const initialResults = await query.subscribeAndRun((newNotifications: SubjectEntity[]) => {
-                        notifications = newNotifications;
-                        updateCount++;
-                    });
+                    const initialResults = await Notification
+                        .query(perspective!)
+                        .where({ 
+                            priority: { gt: 5 },
+                            read: false
+                        })
+                        .subscribe((newNotifications) => {
+                            notifications = newNotifications;
+                            updateCount++;
+                        });
 
                     // Initially no results
                     expect(initialResults.length).to.equal(0);
@@ -1670,47 +1878,35 @@ describe("Prolog + Literals", () => {
 
                 it("query builder should filter by subject class", async () => {
                     // Define a second subject class
-                    @SDNAClass({
+                    @ModelOptions({
                         name: "Note1"
                     })
-                    class Note1 extends SubjectEntity {
-                        @SubjectProperty({
+                    class Note1 extends Ad4mModel {
+                        @Property({
                             through: "note://name",
-                            writable: true,
-                            required: true,
-                            initial: "note://noname",
                             resolveLanguage: "literal"
                         })
                         name: string = "";
 
-                        @SubjectProperty({
+                        @Property({
                             through: "note1://content",
-                            writable: true,
-                            required: true,
-                            initial: "note1://nocontent",
                             resolveLanguage: "literal"
                         })
                         content1: string = "";
                     }
 
-                    @SDNAClass({
+                    @ModelOptions({
                         name: "Note2"
                     })
-                    class Note2 extends SubjectEntity {
-                        @SubjectProperty({
+                    class Note2 extends Ad4mModel {
+                        @Property({
                             through: "note://name",
-                            writable: true,
-                            required: true,
-                            initial: "note://noname",
                             resolveLanguage: "literal"
                         })
                         name: string = "";
 
-                        @SubjectProperty({
+                        @Property({
                             through: "note2://content",
-                            writable: true,
-                            required: true,
-                            initial: "note2://nocontent",
                             resolveLanguage: "literal"
                         })
                         content2: string = "";
@@ -1730,10 +1926,9 @@ describe("Prolog + Literals", () => {
                     await note2.save();
 
                     // Query for recipes - this should only return the recipe instance
-                    const note1Query = Note1.query(perspective!).where({ name: "Test Item" });
-                    const note1Results = await note1Query.run();
+                    const note1Results = await Note1.query(perspective!).where({ name: "Test Item" }).get()
                     
-                    console.log("note1Results: ", note1Results)
+                    //console.log("note1Results: ", note1Results)
                     // This assertion will fail because the query builder doesn't filter by class
                     expect(note1Results.length).to.equal(1);
                     expect(note1Results[0]).to.be.instanceOf(Note1);
@@ -1744,36 +1939,31 @@ describe("Prolog + Literals", () => {
                 });
 
                 it("query builder works with single query object, complex query and subscriptions", async () => {
-                    @SDNAClass({
+                    @ModelOptions({
                         name: "Task"
                     })
-                    class Task extends SubjectEntity {
-                        @SubjectProperty({
+                    class Task extends Ad4mModel {
+                        @Property({
                             through: "task://description",
-                            writable: true,
-                            required: true,
-                            initial: "task://nodescription",
                             resolveLanguage: "literal"
                         })
                         description: string = "";
 
-                        @SubjectProperty({
+                        @Property({
                             through: "task://dueDate",
-                            writable: true,
                             resolveLanguage: "literal"
                         })
                         dueDate: number = 0;
 
-                        @SubjectProperty({
+
+                        @Property({
                             through: "task://completed",
-                            writable: true,
                             resolveLanguage: "literal"
                         })
                         completed: boolean = false;
 
-                        @SubjectProperty({
+                        @Property({
                             through: "task://assignee",
-                            writable: true,
                             resolveLanguage: "literal"
                         })
                         assignee: string = "";
@@ -1802,7 +1992,7 @@ describe("Prolog + Literals", () => {
                             completed: false,
                             assignee: "alice"
                         }
-                    })).subscribeAndRun((newTasks: SubjectEntity[]) => {
+                    })).subscribe((newTasks) => {
                         tasks = newTasks;
                         updateCount++;
                     });
@@ -1863,6 +2053,340 @@ describe("Prolog + Literals", () => {
                     await task2.delete();
                     await task3.delete();
                 });
+
+                it("transform option in property decorators works", async () => {
+                    @ModelOptions({ name: "ImagePost" })
+                    class ImagePost extends Ad4mModel {
+                        @Property({
+                            through: "image://data",
+                            resolveLanguage: "literal",
+                            transform: (data: any) => data ? `data:image/png;base64,${data}` : undefined,
+                        } as PropertyOptions)
+                        image: string = "";
+                        //TODO: having json objects as properties in our new queries breaks the JSON
+                        // construction of Prolog query results.
+                        // Need to find a way to make this work:
+                        //image: { data_base64: string } = { data_base64: "" };
+                    }
+
+                    // Register the ImagePost class
+                    await perspective!.ensureSDNASubjectClass(ImagePost);
+
+                    // Create a new image post
+                    const post = new ImagePost(perspective!);
+                    const imageData = "abc123";
+                    //const imageData = { data_base64: "abc123" };
+                    
+                    post.image = imageData;
+                    await post.save();
+
+                    // Retrieve the post and check transformed values
+                    const [retrieved] = await ImagePost.findAll(perspective!);
+                    expect(retrieved.image).to.equal("data:image/png;base64,abc123");
+                });
+
+                it("should support batch operations with multiple models", async () => {
+                    let perspective = await ad4m!.perspective.add("batch test")
+                    @ModelOptions({
+                        name: "BatchRecipe"
+                    })
+                    class BatchRecipe extends Ad4mModel {
+                        @Property({
+                            through: "recipe://name",
+                            resolveLanguage: "literal"
+                        })
+                        name: string = "";
+
+                        @Collection({ through: "recipe://ingredients" })
+                        ingredients: string[] = [];
+                    }
+
+                    @ModelOptions({
+                        name: "BatchNote"
+                    })
+                    class BatchNote extends Ad4mModel {
+                        @Property({
+                            through: "note://title",
+                            resolveLanguage: "literal"
+                        })
+                        title: string = "";
+
+                        @Property({
+                            through: "note://content",
+                            resolveLanguage: "literal"
+                        })
+                        content: string = "";
+                    }
+
+                    // Register the classes
+                    await perspective!.ensureSDNASubjectClass(BatchRecipe);
+                    await perspective!.ensureSDNASubjectClass(BatchNote);
+
+                    // Create batch
+                    const batchId = await perspective!.createBatch();
+
+                    // Create and save multiple models in batch
+                    const recipe = new BatchRecipe(perspective!);
+                    recipe.name = "Pasta";
+                    recipe.ingredients = ["pasta", "sauce", "cheese"];
+                    await recipe.save(batchId);
+                    
+
+                    const note = new BatchNote(perspective!);
+                    note.title = "Recipe Notes";
+                    note.content = "Make sure to use fresh ingredients";
+                    await note.save(batchId);
+
+                    // Verify models are not visible before commit
+                    const recipesBeforeCommit = await BatchRecipe.findAll(perspective!);
+                    expect(recipesBeforeCommit.length).to.equal(0);
+
+                    const notesBeforeCommit = await BatchNote.findAll(perspective!);
+                    expect(notesBeforeCommit.length).to.equal(0);
+
+                    // Commit batch
+                    const result = await perspective!.commitBatch(batchId);
+                    expect(result.additions.length).to.be.greaterThan(0);
+                    expect(result.removals.length).to.equal(0);
+                    
+                    // Verify models are now visible
+                    const recipesAfterCommit = await BatchRecipe.findAll(perspective!);
+                    expect(recipesAfterCommit.length).to.equal(1);
+                    expect(recipesAfterCommit[0].name).to.equal("Pasta");
+                    expect(recipesAfterCommit[0].ingredients).to.deep.equal(["pasta", "sauce", "cheese"]);
+
+                    const notesAfterCommit = await BatchNote.findAll(perspective!);
+                    expect(notesAfterCommit.length).to.equal(1);
+                    expect(notesAfterCommit[0].title).to.equal("Recipe Notes");
+                    expect(notesAfterCommit[0].content).to.equal("Make sure to use fresh ingredients");
+
+                    // Test updating models in batch
+                    const updateBatchId = await perspective!.createBatch();
+                    recipe.ingredients.push("garlic");
+                    await recipe.update(updateBatchId);
+
+                    note.content = "Updated: Use fresh ingredients and add garlic";
+                    await note.update(updateBatchId);
+
+                    // Verify models haven't changed before commit
+                    const recipesBeforeUpdate = await BatchRecipe.findAll(perspective!);
+                    expect(recipesBeforeUpdate[0].ingredients).to.deep.equal(["pasta", "sauce", "cheese"]);
+
+                    const notesBeforeUpdate = await BatchNote.findAll(perspective!);
+                    expect(notesBeforeUpdate[0].content).to.equal("Make sure to use fresh ingredients");
+
+                    // Commit update batch
+                    const updateResult = await perspective!.commitBatch(updateBatchId);
+                    expect(updateResult.additions.length).to.be.greaterThan(0);
+
+                    // Verify models are updated
+                    const recipesAfterUpdate = await BatchRecipe.findAll(perspective!);
+                    expect(recipesAfterUpdate[0].ingredients).to.deep.equal(["pasta", "sauce", "cheese", "garlic"]);
+
+                    const notesAfterUpdate = await BatchNote.findAll(perspective!);
+                    expect(notesAfterUpdate[0].content).to.equal("Updated: Use fresh ingredients and add garlic");
+
+                    // Test deleting models in batch
+                    const deleteBatchId = await perspective!.createBatch();
+
+                    await recipesAfterUpdate[0].delete(deleteBatchId);
+                    await notesAfterUpdate[0].delete(deleteBatchId);
+
+                    // Verify models still exist before commit
+                    const recipesBeforeDelete = await BatchRecipe.findAll(perspective!);
+                    expect(recipesBeforeDelete.length).to.equal(1);
+
+                    const notesBeforeDelete = await BatchNote.findAll(perspective!);
+                    expect(notesBeforeDelete.length).to.equal(1);
+
+                    // Commit delete batch
+                    const deleteResult = await perspective!.commitBatch(deleteBatchId);
+                    expect(deleteResult.removals.length).to.be.greaterThan(0);
+
+                    // Verify models are deleted
+                    const recipesAfterDelete = await BatchRecipe.findAll(perspective!);
+                    expect(recipesAfterDelete.length).to.equal(0);
+
+                    const notesAfterDelete = await BatchNote.findAll(perspective!);
+                    expect(notesAfterDelete.length).to.equal(0);
+                });
+
+                describe('ModelQueryBuilder', () => {
+                    let perspective: PerspectiveProxy;
+
+                    // Define a simple test model
+                    @ModelOptions({ name: "TestModel" })
+                    class TestModel extends Ad4mModel {
+                        @Property({
+                            through: "test://name",
+                            resolveLanguage: "literal"
+                        })
+                        name: string = "";
+
+                        @Property({
+                            through: "test://status",
+                            resolveLanguage: "literal"
+                        })
+                        status: string = "";
+                    }
+
+                    beforeEach(async () => {
+                        perspective = await ad4m!.perspective.add("query-builder-test");
+                        await perspective!.ensureSDNASubjectClass(TestModel);
+                    });
+
+                    it('handles subscriptions and disposal correctly', async () => {
+                        // Create a query builder
+                        const builder = TestModel.query(perspective)
+                            .where({ status: "active" });
+
+                        // Set up callback spies
+                        const callback1 = sinon.fake();
+                        const callback2 = sinon.fake();
+
+                        // Create first subscription
+                        const initialResults1 = await builder.subscribe(callback1);
+                        expect(initialResults1).to.be.an('array');
+                        expect(initialResults1.length).to.equal(0);
+
+                        // Add a matching model
+                        const model1 = new TestModel(perspective);
+                        model1.name = "Test 1";
+                        model1.status = "active";
+                        await model1.save();
+
+                        // Wait for subscription update
+                        await sleep(1000);
+
+                        // Verify callback was called
+                        expect(callback1.called).to.be.true;
+                        expect(callback1.lastCall.args[0]).to.be.an('array');
+                        expect(callback1.lastCall.args[0].length).to.equal(1);
+                        expect(callback1.lastCall.args[0][0].name).to.equal("Test 1");
+
+                        // Create second subscription (should dispose first one)
+                        const initialResults2 = await builder.subscribe(callback2);
+                        expect(initialResults2).to.be.an('array');
+                        expect(initialResults2.length).to.equal(1);
+
+                        // Add another matching model
+                        const model2 = new TestModel(perspective);
+                        model2.name = "Test 2";
+                        model2.status = "active";
+                        await model2.save();
+
+                        // Wait for subscription update
+                        await sleep(1000);
+
+                        // Verify only second callback was called
+                        expect(callback1.callCount).to.equal(1); // No new calls
+                        expect(callback2.called).to.be.true;
+                        expect(callback2.lastCall.args[0]).to.be.an('array');
+                        expect(callback2.lastCall.args[0].length).to.equal(2);
+
+                        // Dispose subscription
+                        builder.dispose();
+
+                        // Add another model - should not trigger callback
+                        const model3 = new TestModel(perspective);
+                        model3.name = "Test 3";
+                        model3.status = "active";
+                        await model3.save();
+
+                        // Wait to ensure no callbacks
+                        await sleep(1000);
+
+                        // Verify no new callbacks
+                        expect(callback1.callCount).to.equal(1);
+                        expect(callback2.callCount).to.equal(1);
+                    });
+
+                    it('handles count subscriptions and disposal', async () => {
+                        const builder = TestModel.query(perspective)
+                            .where({ status: "active" });
+
+                        const countCallback = sinon.fake();
+                        const initialCount = await builder.countSubscribe(countCallback);
+                        expect(initialCount).to.equal(0);
+
+                        // Add a matching model
+                        const model = new TestModel(perspective);
+                        model.name = "Test";
+                        model.status = "active";
+                        await model.save();
+
+                        // Wait for subscription update
+                        await sleep(1000);
+
+                        // Verify callback was called with new count
+                        expect(countCallback.called).to.be.true;
+                        expect(countCallback.lastCall.args[0]).to.equal(1);
+                        console.log("countCallback", countCallback.lastCall.args[0])
+                        let count = countCallback.callCount
+
+                        // Dispose subscription
+                        builder.dispose();
+
+                        // Add another model - should not trigger callback
+                        const model2 = new TestModel(perspective);
+                        model2.name = "Test 2";
+                        model2.status = "active";
+                        await model2.save();
+
+                        // Wait to ensure no callback
+                        await sleep(1000);
+
+                        // Verify no new callbacks
+                        expect(countCallback.callCount).to.equal(count);
+                    });
+
+                    it('handles paginated subscriptions and disposal', async () => {
+                        const builder = TestModel.query(perspective)
+                            .where({ status: "active" });
+
+                        const pageCallback = sinon.fake();
+                        const initialPage = await builder.paginateSubscribe(2, 1, pageCallback);
+                        expect(initialPage.results.length).to.equal(0);
+                        expect(initialPage.totalCount).to.equal(0);
+
+                        // Add models
+                        const model1 = new TestModel(perspective);
+                        model1.name = "Test 1";
+                        model1.status = "active";
+                        await model1.save();
+
+                        const model2 = new TestModel(perspective);
+                        model2.name = "Test 2";
+                        model2.status = "active";
+                        await model2.save();
+
+                        // Wait for subscription update
+                        await sleep(1000);
+
+                        // Verify callback was called with updated page
+                        expect(pageCallback.called).to.be.true;
+                        expect(pageCallback.lastCall.args[0].results.length).to.equal(2);
+                        expect(pageCallback.lastCall.args[0].totalCount).to.equal(2);
+
+                        console.log("countCallback", pageCallback.lastCall.args[0])
+                        let count = pageCallback.callCount
+
+                        // Dispose subscription
+                        builder.dispose();
+
+                        // Add another model - should not trigger callback
+                        const model3 = new TestModel(perspective);
+                        model3.name = "Test 3";
+                        model3.status = "active";
+                        await model3.save();
+
+                        // Wait to ensure no callback
+                        await sleep(1000);
+
+                        // Verify no new callbacks
+                        expect(pageCallback.callCount).to.equal(count);
+                    });
+                });
             })
         })
     })
@@ -1874,7 +2398,7 @@ describe("Prolog + Literals", () => {
         before(async () => {
             perspective = await ad4m!.perspective.add("smart literal test")
             // for test debugging:
-            console.log("UUID: " + perspective.uuid)
+            //console.log("UUID: " + perspective.uuid)
         })
 
         it("can create and use a new smart literal", async () => {
@@ -1918,6 +2442,88 @@ describe("Prolog + Literals", () => {
         })
 
     })
+
+    describe('Embedding cache', () => {
+        let perspective: PerspectiveProxy | null = null;
+        const EMBEDDING_LANG = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
+
+        before(async () => {
+            perspective = await ad4m!.perspective.add("embedding-cache-test");
+        });
+
+        it('correctly post-processes nested query results containing embedding URLs', async () => {
+            // Create some links with embedding URLs
+            const embeddingUrl1 = `${EMBEDDING_LANG}://vector1/1.2,3.4,5.6`;
+            const embeddingUrl2 = `${EMBEDDING_LANG}://vector2/7.8,9.0,1.2`;
+            const embeddingUrl3 = `${EMBEDDING_LANG}://vector3/2.3,4.5,6.7`;
+
+            // Create a link structure that will produce nested results
+            await perspective!.add({
+                source: "test://root",
+                predicate: "test://has-vector",
+                target: embeddingUrl1
+            });
+
+            await perspective!.add({
+                source: embeddingUrl1,
+                predicate: "test://related-to",
+                target: embeddingUrl2
+            });
+
+            await perspective!.add({
+                source: embeddingUrl2,
+                predicate: "test://points-to",
+                target: embeddingUrl3
+            });
+
+            // Query that will produce nested results with embedding URLs at different levels
+            const result = await perspective!.infer(`
+                % Find all vectors connected to root
+                findall(
+                    [FirstVector, RelatedVectors],
+                    (
+                        % Get first vector from root
+                        triple("test://root", "test://has-vector", FirstVector),
+                        % Find all vectors related to the first one
+                        findall(
+                            [SecondVector, ThirdVector],
+                            (
+                                triple(FirstVector, "test://related-to", SecondVector),
+                                triple(SecondVector, "test://points-to", ThirdVector)
+                            ),
+                            RelatedVectors
+                        )
+                    ),
+                    Results
+                ).
+            `);
+
+            // The query should return a deeply nested structure:
+            // Results = [
+            //   [embeddingUrl1, [
+            //     [embeddingUrl2, embeddingUrl3]
+            //   ]]
+            // ]
+            console.log("result", result)
+            expect(result).to.be.an('array')
+            expect(result.length).to.be.greaterThan(0)
+
+            let binding = result[0]
+            expect(binding.Results).to.be.an('array');
+            expect(binding.Results).to.have.lengthOf(1);
+            
+            const [firstLevel] = binding.Results;
+            expect(firstLevel).to.be.an('array');
+            expect(firstLevel[0]).to.equal(embeddingUrl1);
+            expect(firstLevel[1]).to.be.an('array');
+            
+            const relatedVectors = firstLevel[1];
+            expect(relatedVectors).to.have.lengthOf(1);
+            expect(relatedVectors[0]).to.be.an('array');
+            expect(relatedVectors[0][0]).to.equal(embeddingUrl2);
+            expect(relatedVectors[0][1]).to.equal(embeddingUrl3);
+        });
+    });
 
 })
 

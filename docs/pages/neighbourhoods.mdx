@@ -1,80 +1,310 @@
-# Neighbourhoods
+# Neighbourhoods: Collaborative Knowledge Spaces
 
-Neighbourhoods are essentially just [Perspectives](/perspectives) (graph databases) that are
-shared and synced between Agents.
+## Understanding Neighbourhoods
 
-Every Neighborhood needs to use a **Link Language** to decide what technology it uses to store
-the associations (links) between the Expressions.
+Neighbourhoods transform private [Perspectives](/perspectives) into shared semantic spaces where multiple agents can collaborate. They represent AD4M's vision of group collaboration: decentralized, storage-agnostic, and centered around shared meaning rather than applications.
 
-Currently, there is one Link Language implemented called [Perspective Diff Sync](https://github.com/perspect3vism/perspective-diff-sync)
-based on Holochain:
+### From Personal to Shared Knowledge
 
-```js
-const langs = await client.runtime.knownLinkLanguageTemplates();
-console.log(langs[0]); // The uuid of the default Link Language
+While Perspectives are personal knowledge graphs, Neighbourhoods enable:
+- Real-time synchronization of semantic links between agents
+- App-independent group collaboration
+- Shared context through a common knowledge graph
+- Integration with existing group spaces and infrastructure
+
+For example, the same Neighbourhood could be viewed through:
+- A chat application showing messages and threads
+- A task management tool showing assignments and deadlines
+- A document editor showing collaborative documents
+- A social network showing relationships and posts
+
+All these views operate on the same underlying semantic graph, just interpreting the links differently.
+
+## LinkLanguages: The Sync Layer
+
+Neighbourhoods achieve their magic through LinkLanguages – specialized Languages that define how links are stored and synchronized between agents. A LinkLanguage implements the `LinkSyncAdapter` interface:
+
+```typescript
+interface LinkSyncAdapter {
+    // Is this link space writable?
+    writable(): boolean;
+    
+    // Is this link space public?
+    public(): boolean;
+    
+    // Get list of other agents in the space
+    others(): Promise<DID[]>;
+
+    // Get current revision (like git commit hash)
+    currentRevision(): Promise<string>;
+
+    // Sync with other agents, returns changes
+    sync(): Promise<PerspectiveDiff>;
+
+    // Get full state at current revision
+    render(): Promise<Perspective>;
+
+    // Publish local changes
+    commit(diff: PerspectiveDiff): Promise<string>;
+
+    // Subscribe to remote changes
+    addCallback(callback: (diff: PerspectiveDiff) => void);
+
+    // Subscribe to sync state changes
+    addSyncStateChangeCallback(callback: (state: PerspectiveState) => void);
+}
 ```
 
-## Creating a Neighborhood
+This git-like interface enables Neighbourhoods to:
+1. Track revisions of the shared space
+2. Sync changes between agents efficiently
+3. Maintain consistency through CRDT-like mechanisms
+4. Support different backend implementations
 
-As mentioned before, the Link Language is responsible for storing and synchronizing
-the links in a Neighborhood. If we want to avoid storing the links in the same
-location as everyone else following this guide, we should create a duplicate of
-the language. By giving it a unique ID, we can ensure that the links are saved
-in a new and private network:
+## The Neighbourhood Bootstrap Language
 
-```js
-const uniqueLinkLanguage = await ad4m.languages.applyTemplateAndPublish(
-  langs[0],
-  JSON.stringify({
-    uuid: "84a329-77384c-1510fb",
-    name: "Perspective Diff Sync clone",
-  })
+AD4M includes a built-in "Neighbourhood Language" that serves as a public registry for Neighbourhoods. When you create a Neighbourhood, an Expression in this language is published containing:
+1. The address of the LinkLanguage used for sync
+2. Meta information about the Neighbourhood (name, description, etc.)
+3. Access control information
+
+```typescript
+// Example Neighbourhood Expression
+{
+    data: {
+        linkLanguage: "QmLinkLang123...",  // Address of the sync language
+        meta: {  // Optional metadata
+            name: "My Team Space",
+            description: "Collaboration space for our team"
+        }
+    }
+}
+```
+
+### Joining Process
+
+When an agent joins a Neighbourhood using its URL:
+1. The Neighbourhood Expression is retrieved
+2. The specified LinkLanguage is downloaded and installed
+3. The agent connects to the shared space using that language
+
+```typescript
+// Join flow under the hood [PSEUDO-CODE]
+const join = async (url) => {
+    // 1. Get Neighbourhood Expression
+    const hood = await ad4m.expression.get(url);
+    
+    // 2. Install LinkLanguage if needed
+    const linkLang = hood.data.linkLanguage;
+    if (!await ad4m.languages.isInstalled(linkLang)) {
+        await ad4m.languages.install(linkLang);
+    }
+    
+    // 3. Connect using the LinkLanguage
+    return await ad4m.perspective.join(linkLang);
+}
+```
+
+## Language Templates and Trust
+
+AD4M provides a powerful templating mechanism for Languages, particularly useful for LinkLanguages. This enables:
+1. Creating unique P2P networks for each Neighbourhood
+2. Verifiable code provenance
+3. Trust-based language installation
+
+### The Default Template
+
+AD4M comes with a default LinkLanguage template called "Perspective Diff Sync" (P-Diff-Sync), authored by Coasys. This implementation:
+- Uses Holochain as the P2P backend
+- Implements a CRDT algorithm for consistency
+- Creates isolated DHT networks per instance
+
+### Trust and Templates
+
+The templating system works with AD4M's trust mechanism:
+
+1. **Initial Trust**:
+   - New AD4M installations trust Coasys by default
+   - This means they trust the P-Diff-Sync template
+   - The template's code hash is verified against Coasys's signature
+
+2. **Template Usage**:
+```typescript
+// Create a unique LinkLanguage instance
+const linkLanguage = await ad4m.languages.applyTemplateAndPublish(
+    templateAddress,
+    {
+        uuid: "unique-network-id",  // Creates isolated DHT
+        name: "Team Space Sync"
+    }
 );
 ```
 
-With that new Link Language, actually creating the Neighbourhood is simple.
-We just have to provide the ID of the perspective we want to upgrade to a
-Neighbourhood and the address of the Link Language:
+3. **Trust Verification**:
+   - When installing a templated Language, AD4M verifies:
+     - The template source is trusted
+     - The templating only modified allowed parameters
+     - The resulting code matches the expected hash
 
-```js
+This means agents can safely install Languages created from trusted templates, even if they don't trust the Neighbourhood creator directly.
+
+### Holochain Integration
+
+For the P-Diff-Sync template:
+- Each templated instance creates its own Holochain DNA
+- The `uuid` parameter ensures a unique network ID
+- Agents joining the Neighbourhood join this specific DHT
+- The network is isolated from other Neighbourhoods
+
+```typescript
+// Example of full Neighbourhood creation with templating
+const createNeighbourhood = async () => {
+    // 1. Create unique LinkLanguage from template
+    const template = (await ad4m.runtime.knownLinkLanguageTemplates())[0];
+    const linkLang = await ad4m.languages.applyTemplateAndPublish(
+        template,
+        {
+            uuid: crypto.randomUUID(),
+            name: "My Space Sync"
+        }
+    );
+    
+    // 2. Create and publish Neighbourhood
+    const meta = new Perspective();
+    meta.add({
+        source: "self",
+        predicate: "name",
+        target: "My Collaborative Space"
+    });
+    
+    return await ad4m.neighbourhood.publishFromPerspective(
+        perspective.uuid,
+        linkLang.address,
+        meta
+    );
+};
+```
+
+## Creating Collaborative Spaces
+
+### Setting Up a Neighbourhood
+
+First, choose or create a LinkLanguage for your sync needs:
+
+```typescript
+// List available LinkLanguage templates
+const templates = await ad4m.runtime.knownLinkLanguageTemplates();
+
+// Create a unique instance of a LinkLanguage
+const linkLanguage = await ad4m.languages.applyTemplateAndPublish(
+    templates[0],  // e.g., Perspective Diff Sync
+    JSON.stringify({
+        uuid: "unique-id-123",  // Unique network identifier
+        name: "My Team Sync"
+    })
+);
+```
+
+Then create the Neighbourhood:
+
+```typescript
+// Optional: Create metadata about the Neighbourhood
 const meta = new Perspective();
+await meta.add({
+    source: "neighbourhood://self",
+    predicate: "name",
+    target: "literal://My Team Space"
+});
 
-const neighbourhoodUrl = await ad4m.neighbourhood.publishFromPerspective(
-  myNotes.uuid,
-  uniqueLinkLanguage.address,
-  meta
+// Create the Neighbourhood from a Perspective
+const url = await ad4m.neighbourhood.publishFromPerspective(
+    perspective.uuid,
+    linkLanguage.address,
+    meta
 );
-
-console.log(neighbourhoodUrl); // => neighbourhood://Qm123456789abcdef
+// Returns: neighbourhood://Qm123456789abcdef
 ```
 
-The `meta` field is a Perspective that is immutably stored with
-the Neighbourhood. It can hold arbitrary meta information about the
-Neighbourhood but can technically stay empty, just like we did here.
+### Joining a Neighbourhood
 
-## Joining a Neighborhood
+Other agents can join using the Neighbourhood URL:
 
-Assume everything above happened on Alice's agent. Alice now shares the Neighbourhood's URL with Bob.
-This is what Bob does to join the Neigbourhood:
+```typescript
+// Join the Neighbourhood
+const { uuid } = await ad4m.neighbourhood.joinFromUrl(url);
 
-```js
-const { uuid } = await ad4m.neighbourhood.joinFromUrl(neighbourhoodUrl);
+// Get the shared Perspective
+const shared = await ad4m.perspective.byUUID(uuid);
 
-const sharedNotes = await ad4m.perspective.byUUID(uuid);
-```
-
-Now Bob can read what used to be Alice's private notes:
-
-```js
-const links = await sharedNotes.get(
-  new LinkQuery({
-    predicate: "sioc://likes",
-  })
-);
-
-links.forEach(async (link) => {
-  const { data: who } = await ad4m.expression.get(link.source);
-  const { data: what } = await ad4m.expression.get(link.target);
-  console.log(who, "likes", what);
+// Listen for changes
+shared.addListener((links) => {
+    console.log("New links:", links);
 });
 ```
+
+## Building on Neighbourhoods
+
+### App-Independent Collaboration
+
+Neighbourhoods enable collaboration without locking data into specific apps:
+
+```typescript
+// Chat app might add message links
+await shared.add({
+    source: "did:key:alice",
+    predicate: "chat://posted",
+    target: "QmMsg123://Hello!"
+});
+
+// Task app might add assignment links
+await shared.add({
+    source: "did:key:bob",
+    predicate: "task://assigned-to",
+    target: "did:key:carol"
+});
+```
+
+### Integration Examples
+
+The power of LinkLanguages lies in their ability to bridge AD4M with existing infrastructure. Here are some practical integration scenarios:
+
+1. **Company Intranet Integration**:
+   - Wrap your existing database or document management system in a LinkLanguage
+   - Leverage existing user permissions and access control
+   - Make company data available to AD4M apps while maintaining security
+   - Enable semantic overlays on traditional hierarchical storage
+   
+   For example, your company's SharePoint or document management system could become a LinkLanguage, allowing AD4M apps to collaborate on documents while respecting existing access controls and security policies.
+
+2. **Legacy System Integration**:
+   - Connect to existing groupware or collaboration tools
+   - Map traditional data structures to semantic links
+   - Maintain existing workflows while enabling new capabilities
+   - Gradually transition to more semantic approaches
+
+   This allows teams to keep using their familiar tools while gaining the benefits of AD4M's semantic capabilities. For instance, a team's JIRA instance could be wrapped as a LinkLanguage, making tickets and workflows available in the semantic web.
+
+3. **Federated Systems**:
+   - Bridge ActivityPub, Matrix, or other federated protocols
+   - Enable cross-platform semantic connections
+   - Maintain federation while adding semantic capabilities
+   - Integrate with existing social networks
+
+The beauty of this approach is that AD4M apps don't need to know about the underlying infrastructure. Whether links are stored in a corporate database, a blockchain, or a p2p network, the apps just work with the semantic layer provided by the LinkLanguage.
+
+## Best Practices
+
+1. **Choose the Right LinkLanguage**:
+   - Consider privacy requirements
+   - Evaluate scalability needs
+   - Think about integration points
+
+2. **Design Semantic Structure**:
+   - Plan your predicate vocabulary
+   - Consider multiple app use cases
+   - Document link patterns
+
+3. **Handle Updates**:
+   - Listen for changes
+   - Update UI in real-time
+   - Handle conflicts gracefully

@@ -1,0 +1,11 @@
+manifest_version: '1'
+name: ad4m-direct-message-language
+description: Personal direct message network for ad4m agents
+roles:
+- name: direct-message-language
+  provisioning:
+    strategy: create
+    deferred: false
+  dna:
+    bundled: ./direct-message-language.dna
+    

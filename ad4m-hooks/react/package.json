@@ -14,7 +14,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@coasys/ad4m": "*",
+    "@coasys/ad4m": "workspace:0.10.1-release-candidate-3-test-2",
     "@coasys/ad4m-connect": "*",
     "@coasys/hooks-helpers": "*",
     "@types/react": "^18.2.55",
@@ -24,5 +24,10 @@
     "preact": "*",
     "react": "*"
   },
-  "version": "0.10.1-release-candidate-1"
+  "publishConfig": {
+    "dependencies": {
+      "@coasys/ad4m": "*"
+    }
+  },
+  "version": "0.10.1-release-candidate-3-test-2"
 }

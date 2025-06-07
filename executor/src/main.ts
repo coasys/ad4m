@@ -83,14 +83,23 @@ export interface SeedFileSchema {
 export async function init(config: OuterConfig): Promise<Ad4mCore> {
     let { 
       appDataPath, networkBootstrapSeed, appLangAliases, bootstrapFixtures, languageLanguageOnly,
-      mocks, gqlPort, adminCredential, runDappServer,
-      dAppPort, logHolochainMetrics
+      adminCredential, logHolochainMetrics
     } = config
-    if(!gqlPort) gqlPort = 4000
-    // Check to see if PORT 2000 & 1337 are available if not returns a random PORT
-    if(!config.hcPortAdmin) config.hcPortAdmin = await getPort({ port: 2000 });
-    if(!config.hcPortApp) config.hcPortApp = await getPort({ port: 1337 });
-    if(!dAppPort) dAppPort = await getPort({port: 4200})
+
+    // Moved the port check to Rust
+    // BUT: we have weird problem with our JS runtime 
+    // (which will be refactored soon, when we move over the last remaining JS code to Rust)
+    // when this function doesn't actually do some async I/O operations, the JS event loop doesn't
+    // seem to work for future JS calls.
+    // So this here is a hack that works for now.
+    // Putting it in a try/catch block to avoid the process from crashing if the port is already in use.
+    try {
+      await getPort({ port: 50000 })
+    } catch (error) {
+      //ignore
+    }
+    
+    //await new Promise(resolve => setTimeout(resolve, 1000));
     if(config.hcUseMdns === undefined) config.hcUseMdns = false
     if(config.hcUseProxy === undefined) config.hcUseProxy = true
     if(config.hcUseBootstrap === undefined) config.hcUseBootstrap = true

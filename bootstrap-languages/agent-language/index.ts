@@ -3,7 +3,8 @@ import ExpressionAdapter from "./adapter.ts";
 import Icon from "./build/Icon.js";
 import ConstructorIcon from "./build/ConstructorIcon.js";
 import { UI } from "./build/expressionUI.js";
-import { DNA, DNA_NICK } from "./build/dna.js";
+import { BUNDLE, DNA_ROLE, ZOME_NAME } from "./build/happ.js";
+
 
 function iconFor(expression: Address): string {
   return Icon as unknown as string;
@@ -24,10 +25,10 @@ export default async function create(context: LanguageContext): Promise<Language
   const Holochain = context.Holochain as HolochainLanguageDelegate;
   await Holochain.registerDNAs(
     //@ts-ignore
-    [{ file: DNA, nick: DNA_NICK, zomeCalls:
+    [{ file: BUNDLE, nick: DNA_ROLE, zomeCalls:
       [
-        ["agent_store", "create_agent_expression"],
-        ["agent_store", "get_agent_expression"]
+        [ZOME_NAME, "create_agent_expression"],
+        [ZOME_NAME, "get_agent_expression"]
       ] 
     }], 
   );

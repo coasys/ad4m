@@ -13,11 +13,16 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@coasys/ad4m": "*",
+    "@coasys/ad4m": "workspace:0.10.1-release-candidate-3-test-2",
     "@coasys/hooks-helpers": "*"
   },
   "peerDependencies": {
     "vue": "^3.2.47"
   },
-  "version": "0.10.1-release-candidate-1"
+  "publishConfig": {
+    "dependencies": {
+      "@coasys/ad4m": "*"
+    }
+  },
+  "version": "0.10.1-release-candidate-3-test-2"
 }

@@ -10,6 +10,7 @@ use colored::Colorize;
 use libc::{rlimit, setrlimit, RLIMIT_NOFILE};
 use log::LevelFilter;
 use log::{debug, error, info};
+use rust_executor::utils::find_port;
 use rust_executor::Ad4mConfig;
 use std::env;
 use std::fs;
@@ -41,15 +42,14 @@ mod util;
 use crate::app_state::LauncherState;
 use crate::commands::app::{
     add_app_agent_state, clear_state, close_application, close_main_window, get_app_agent_list,
-    open_dapp, open_tray, open_tray_message, remove_app_agent_state, set_selected_agent,
-    show_main_window,
+    get_data_path, open_dapp, open_tray, open_tray_message, remove_app_agent_state,
+    set_selected_agent, show_main_window,
 };
 use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
 use crate::config::log_path;
 
-use crate::menu::open_logs_folder;
-use crate::util::find_port;
+use crate::menu::reveal_log_file;
 use crate::util::{create_main_window, save_executor_port};
 use tauri::Manager;
 
@@ -187,7 +187,11 @@ pub fn run() {
 
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 
-    let free_port = find_port(12000, 13000);
+    let free_port = find_port(12000, 13000).unwrap_or_else(|e| {
+        let error_string = format!("Failed to find free main executor interface port: {}", e);
+        error!("{}", error_string);
+        panic!("{}", error_string);
+    });
 
     info!("Free port: {:?}", free_port);
 
@@ -214,6 +218,7 @@ pub fn run() {
     };
 
     let builder_result = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_positioner::init())
@@ -237,7 +242,8 @@ pub fn run() {
             add_app_agent_state,
             get_app_agent_list,
             set_selected_agent,
-            remove_app_agent_state
+            remove_app_agent_state,
+            get_data_path
         ])
         .setup(move |app| {
             // Hides the dock icon
@@ -246,14 +252,15 @@ pub fn run() {
 
             let splashscreen = app.get_webview_window("splashscreen").unwrap();
 
-            let _id = splashscreen.listen("copyLogs", |event| {
+            let app_handle = app.handle().clone();
+            let _id = splashscreen.listen("revealLogFile", move |event| {
                 info!(
                     "got window event-name with payload {:?} {:?}",
                     event,
                     event.payload()
                 );
 
-                open_logs_folder();
+                reveal_log_file(&app_handle);
             });
 
             build_menu(app.handle())?;

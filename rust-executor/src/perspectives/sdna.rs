@@ -201,7 +201,8 @@ NextN is N - 1,
 skipN(Rest, NextN, SkippedData).
 
 :- discontiguous(takeN/3).
-takeN(_, 0, []).
+takeN([], _, []).  % Base case: If the list is empty, return an empty list.
+takeN(_, 0, []).   % Base case: If N is 0, return an empty list.
 takeN([Item|Rest], N, [Item|PageRest]) :-
 N > 0,
 NextN is N - 1,

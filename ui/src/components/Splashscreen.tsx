@@ -9,8 +9,8 @@ export default function Splashscreen() {
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState(false);
 
-  function copyFile() {
-    appWindow.emit("copyLogs");
+  function revealLogFile() {
+    appWindow.emit("revealLogFile");
 
     setTimeout(() => {
       setCopied(true);
@@ -42,7 +42,7 @@ export default function Splashscreen() {
             </j-text>
             <j-button
               variant="primary"
-              onClick={copyFile}
+              onClick={revealLogFile}
               style={{ marginTop: 20 }}
             >
               {copied ? "Opened" : "Open Logs"}

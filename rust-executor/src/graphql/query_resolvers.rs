@@ -11,7 +11,6 @@ use crate::{
     runtime_service::RuntimeService,
     types::{DecoratedLinkExpression, Model, Notification},
 };
-use base64::prelude::*;
 use coasys_juniper::{graphql_object, FieldError, FieldResult, Value};
 use std::env;
 
@@ -447,14 +446,7 @@ impl Query {
         let interface = get_holochain_service().await;
         let infos = interface.agent_infos().await?;
 
-        let encoded_infos: Vec<String> = infos
-            .iter()
-            .map(|info| {
-                BASE64_STANDARD.encode(info.encode().expect("Failed to encode AgentInfoSigned"))
-            })
-            .collect();
-
-        Ok(serde_json::to_string(&encoded_infos)?)
+        Ok(serde_json::to_string(&infos)?)
     }
 
     async fn runtime_info(&self, _context: &RequestContext) -> FieldResult<RuntimeInfo> {

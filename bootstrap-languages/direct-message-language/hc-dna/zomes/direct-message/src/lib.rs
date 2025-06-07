@@ -43,13 +43,7 @@ fn recipient() -> ExternResult<Recipient> {
             )))
         })?;
         //debug!("RECIPIENT hex decoded");
-        Ok(Recipient(AgentPubKey::from_raw_39(bytes).or_else(
-            |_| {
-                Err(wasm_error!(WasmErrorInner::Host(
-                    "Could not decode property as AgentPubKey".to_string()
-                )))
-            },
-        )?))
+        Ok(Recipient(AgentPubKey::from_raw_39(bytes)))
     }
 }
 
@@ -59,7 +53,8 @@ fn recipient() -> ExternResult<Recipient> {
 
 #[hdk_extern]
 pub fn set_status(new_status: PerspectiveExpression) -> ExternResult<()> {
-    if Recipient(agent_info()?.agent_latest_pubkey) == recipient()? {
+    // TODO: should be agent_latest_pubkey, but that was made unstable behind dpki feature flag
+    if Recipient(agent_info()?.agent_initial_pubkey) == recipient()? {
         create_entry(EntryTypes::StatusUpdate(StatusUpdate(new_status)))?;
         Ok(())
     } else {
@@ -72,7 +67,8 @@ pub fn set_status(new_status: PerspectiveExpression) -> ExternResult<()> {
 #[hdk_extern]
 pub fn get_status(_: ()) -> ExternResult<Option<PerspectiveExpression>> {
     //debug!("GET STATUS");
-    if Recipient(agent_info()?.agent_latest_pubkey) == recipient()? {
+    // TODO: should be agent_latest_pubkey, but that was made unstable behind dpki feature flag
+    if Recipient(agent_info()?.agent_initial_pubkey) == recipient()? {
         // If called on the recipient node
         // (either from local ad4m-executor or via remote_call)
         // we retrieve the latest status entry from source chain
@@ -101,13 +97,16 @@ pub fn get_status(_: ()) -> ExternResult<Option<PerspectiveExpression>> {
             ZomeCallResponse::Ok(extern_io) => Ok(extern_io
                 .decode()
                 .map_err(|err| wasm_error!(WasmErrorInner::Host(err.to_string())))?),
-            ZomeCallResponse::Unauthorized(_, _, _, _, _) => Err(wasm_error!(
+            ZomeCallResponse::Unauthorized(_, _, _, _) => Err(wasm_error!(
                 WasmErrorInner::Host("Unauthorized error".to_string())
             )),
             ZomeCallResponse::NetworkError(error) => Err(wasm_error!(WasmErrorInner::Host(error))),
             ZomeCallResponse::CountersigningSession(session) => {
                 Err(wasm_error!(WasmErrorInner::Host(session)))
             }
+            ZomeCallResponse::AuthenticationFailed(_, _) => Err(wasm_error!(
+                WasmErrorInner::Host("Authentication failed".to_string())
+            )),
         }
     }
 }
@@ -206,7 +205,8 @@ pub fn send_inbox(message: PerspectiveExpression) -> ExternResult<()> {
 pub fn fetch_inbox(_: ()) -> ExternResult<()> {
     let agent_address: EntryHash = hash_entry(recipient()?)?;
     //debug!("fetch_inbox");
-    if Recipient(agent_info()?.agent_latest_pubkey) == recipient()? {
+    // TODO: should be agent_latest_pubkey, but that was made unstable behind dpki feature flag
+    if Recipient(agent_info()?.agent_initial_pubkey) == recipient()? {
         //debug!("fetch_inbox agent");
         //debug!("agent_address: {}", agent_address);
         let input = GetLinksInputBuilder::try_new(

@@ -2,7 +2,7 @@ subject_class("Todo", c).
 constructor(c, '[{action: "addLink", source: "this", predicate: "todo://state", target: "todo://ready"}]').
 instance(c, Base) :- triple(Base, "todo://state", _).
 
-destructor(c, '[{action: "removeLink", source: "this", predicate: "todo://state", target: "todo://ready"}]').
+destructor(c, '[{action: "removeLink", source: "this", predicate: "todo://state", target: "*"}]').
 
 property(c, "state").
 property_getter(c, Base, "state", Value) :- triple(Base, "todo://state", Value).

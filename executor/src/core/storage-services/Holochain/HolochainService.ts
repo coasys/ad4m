@@ -1,13 +1,10 @@
-import { AppSignalCb, AppSignal, CellId, CellType, AgentInfoResponse, InstallAppRequest, EncodedAppSignal } from '@holochain/client'
-import path from 'node:path'
-import fs from 'node:fs'
+import { AppSignalCb, AppSignal, CellId, AgentInfoResponse, EncodedAppSignal } from '@holochain/client'
+import { InstallAppRequest, CellInfo } from '../../holochain_types'
 import HolochainLanguageDelegate from "./HolochainLanguageDelegate"
 import type { Dna } from '@coasys/ad4m'
 import { AsyncQueue } from './Queue'
 import { decode, encode } from "@msgpack/msgpack"
-
 import { HolochainUnlockConfiguration } from '../../Ad4mCore'
-import AgentService from '../../agent/AgentService'
 
 export interface HolochainConfiguration {
     conductorPath?: string,
@@ -130,23 +127,43 @@ export default class HolochainService {
         await HOLOCHAIN_SERVICE.shutdown();
     }
 
-    async unpackDna(dnaPath: string): Promise<String> {
+    async unPackDna(dnaPath: string): Promise<string> {
         let result = await HOLOCHAIN_SERVICE.unPackDna(dnaPath);
         let splitResult = result.split("Unpacked to directory ");
         if (splitResult.length == 2) {
-            return splitResult[1]
+            return splitResult[1].toString()
         } else {
-            return result
+            return result.toString()
         }
     }
 
-    async packDna(workdirPath: string): Promise<String> {
+    async packDna(workdirPath: string): Promise<string> {
         let result = await HOLOCHAIN_SERVICE.packDna(workdirPath);
         let splitResult = result.split("Wrote bundle ");
         if (splitResult.length == 2) {
-            return splitResult[1]
+            return splitResult[1].toString()
         } else {
-            return result
+            return result.toString()
+        }
+    }
+    
+    async unPackHapp(happPath: string): Promise<string> {
+        let result = await HOLOCHAIN_SERVICE.unPackHapp(happPath);
+        let splitResult = result.split("Unpacked to directory ");
+        if (splitResult.length == 2) {
+            return splitResult[1].toString()
+        } else {
+            return result.toString()
+        }
+    }
+
+    async packHapp(workdirPath: string): Promise<string> {
+        let result = await HOLOCHAIN_SERVICE.packHapp(workdirPath);
+        let splitResult = result.split("Wrote bundle ");
+        if (splitResult.length == 2) {
+            return splitResult[1].toString()
+        } else {
+            return result.toString()
         }
     }
 
@@ -157,22 +174,9 @@ export default class HolochainService {
         let appInfo = await HOLOCHAIN_SERVICE.getAppInfo(lang);
 
         if (!appInfo) {
-            // 1. install app
+            let hApp = dnas[0]!;
             try {
-                console.debug("HolochainService: Installing DNAs for language", lang);
-                const roles = dnas.map(dna => {
-                    const p = path.join(this.#dataPath, `${lang}-${dna.nick}.dna`);
-                    fs.writeFileSync(p, dna.file);
-                    return {
-                        //note; this name value might have to be unique per role across different apps
-                        //in which case we should use naming of dna file above
-                        name: `${lang}-${dna.nick}`,
-                        dna: {
-                            //@ts-ignore
-                            path: p
-                        }
-                    }
-                });
+                console.debug("HolochainService: Installing hApp for language", lang);
 
                 const did = AGENT.did();
                 //Did should only ever be undefined when the system DNA's get init'd before agent create occurs
@@ -188,20 +192,18 @@ export default class HolochainService {
                 }
 
                 const installAppResult = await HOLOCHAIN_SERVICE.installApp({
-                    installed_app_id: lang, agent_key: agentKey, membrane_proofs: membraneProof, bundle: {
-                        manifest: {
-                            manifest_version: "1",
-                            name: lang,
-                            //@ts-ignore
-                            roles
-                        },
-                        resources: {}
-                    }
+                    source: {
+                        type: "bytes",
+                        value: new Uint8Array(hApp.file)
+                    },
+                    installed_app_id: lang, 
+                    agent_key: agentKey, 
+                    membrane_proofs: membraneProof, 
                 } as InstallAppRequest)
 
                 appInfo = installAppResult
 
-                console.log("HolochainService: Installed DNA's:", roles)
+                console.log("HolochainService: Installed hApp:", hApp.nick)
                 console.log(" with result:");
                 console.dir(installAppResult);
             } catch(e) {
@@ -212,18 +214,15 @@ export default class HolochainService {
 
         const hashes: Uint8Array[] = [];
         Object.keys(appInfo.cell_info).forEach(async roleName => {
-            const cellData = appInfo!.cell_info[roleName];
-
-            for (const cellInfo of cellData) {
-                const cellId = (CellType.Provisioned in cellInfo) ? cellInfo[CellType.Provisioned].cell_id : null
+            const cellInfos: CellInfo[] = appInfo!.cell_info[roleName];
+            for (const cellInfo of cellInfos) {
+                const cellId = cellInfo.value.cell_id; 
                 if (!cellId) {
-                    throw new Error(`HolochainService: ERROR: Could not get cellId from cell_info: ${cellInfo}`);
+                    throw new Error(`HolochainService: ERROR: Could not get cellId from cell_info: ${JSON.stringify(cellInfo)}`);
                 }
                 cellIds.push(cellId);
-
                 let hash = cellId[0];
                 if (hash) hashes.push(hash);
-
                 //Register the callback to the cell internally
                 if (callback != undefined) {
                     //Check for apps matching this language address and register the signal callbacks
@@ -262,7 +261,7 @@ export default class HolochainService {
         //4. Call the zome function
         try {
             if (fnName != "sync" && fnName != "current_revision") {
-                console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, JSON.stringify(payload).substring(0, 50), "\nFor language with address", lang, "\x1b[0m");
+                //console.debug("\x1b[34m", new Date().toISOString(), "HolochainService calling zome function:", dnaNick, zomeName, fnName, JSON.stringify(payload).substring(0, 50), "\nFor language with address", lang, "\x1b[0m");
             }
 
             let result = await HOLOCHAIN_SERVICE.callZomeFunction(installed_app_id, dnaNick, zomeName, fnName, encode(payload));
@@ -274,13 +273,13 @@ export default class HolochainService {
 
             if (fnName != "sync" && fnName != "current_revision") {
                 if (typeof result === "string") {
-                    console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (string):", result.substring(0, 50), "... \x1b[0m")
+                    //console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (string):", result.substring(0, 50), "... \x1b[0m")
                 } else if (typeof result === "object") {
                     let resultString = JSON.stringify(result);
                     let endingLog = resultString.length > 50 ? "... \x1b[0m" : "\x1b[0m";
-                    console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (object):", resultString.substring(0, 50), endingLog)
+                    //console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (object):", resultString.substring(0, 50), endingLog)
                 } else {
-                    console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (other):", result, "\x1b[0m")
+                    //console.debug("\x1b[32m", new Date().toISOString(),"HolochainService zome function result (other):", result, "\x1b[0m")
                 }
             }
             return result

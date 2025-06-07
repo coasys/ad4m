@@ -23,6 +23,7 @@
     "build-libs": "turbo run build-libs",
     "build-core-executor": "turbo run build-core-executor",
     "build-npm-packages": "turbo run build-npm-packages",
+    "build-deno-snapshot": "cd rust-executor && pnpm build-deno-snapshot",
     "dev": "turbo run dev --parallel",
     "serve": "turbo run serve",
     "lint": "turbo run lint",
@@ -94,5 +95,5 @@
       "safer-buffer@2.1.2": "patches/safer-buffer@2.1.2.patch"
     }
   },
-  "version": "0.10.1-release-candidate-1"
+  "version": "0.10.1-release-candidate-3"
 }

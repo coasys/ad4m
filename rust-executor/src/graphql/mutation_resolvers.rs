@@ -26,7 +26,7 @@ use crate::{
         add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs,
         sign_device_key,
     },
-    holochain_service::{agent_infos_from_str, get_holochain_service},
+    holochain_service::get_holochain_service,
     pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC},
 };
 use base64::prelude::*;
@@ -718,6 +718,7 @@ impl Mutation {
         link: LinkInput,
         uuid: String,
         status: Option<String>,
+        batch_id: Option<String>,
     ) -> FieldResult<DecoratedLinkExpression> {
         check_capability(
             &context.capabilities,
@@ -726,7 +727,7 @@ impl Mutation {
 
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         Ok(perspective
-            .add_link(link.into(), link_status_from_input(status)?)
+            .add_link(link.into(), link_status_from_input(status)?, batch_id)
             .await?)
     }
 
@@ -736,6 +737,7 @@ impl Mutation {
         link: LinkExpressionInput,
         uuid: String,
         status: Option<String>,
+        batch_id: Option<String>,
     ) -> FieldResult<DecoratedLinkExpression> {
         check_capability(
             &context.capabilities,
@@ -744,7 +746,7 @@ impl Mutation {
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         let link = crate::types::LinkExpression::try_from(link)?;
         Ok(perspective
-            .add_link_expression(link, link_status_from_input(status)?)
+            .add_link_expression(link, link_status_from_input(status)?, batch_id)
             .await?)
     }
 
@@ -754,6 +756,7 @@ impl Mutation {
         links: Vec<LinkInput>,
         uuid: String,
         status: Option<String>,
+        batch_id: Option<String>,
     ) -> FieldResult<Vec<DecoratedLinkExpression>> {
         check_capability(
             &context.capabilities,
@@ -764,6 +767,7 @@ impl Mutation {
             .add_links(
                 links.into_iter().map(|l| l.into()).collect(),
                 link_status_from_input(status)?,
+                batch_id,
             )
             .await?)
     }
@@ -814,6 +818,7 @@ impl Mutation {
         context: &RequestContext,
         link: LinkExpressionInput,
         uuid: String,
+        batch_id: Option<String>,
     ) -> FieldResult<bool> {
         check_capability(
             &context.capabilities,
@@ -821,7 +826,7 @@ impl Mutation {
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         let link = crate::types::LinkExpression::try_from(link)?;
-        perspective.remove_link(link).await?;
+        perspective.remove_link(link, batch_id).await?;
         Ok(true)
     }
 
@@ -830,6 +835,7 @@ impl Mutation {
         context: &RequestContext,
         links: Vec<LinkExpressionInput>,
         uuid: String,
+        batch_id: Option<String>,
     ) -> FieldResult<Vec<DecoratedLinkExpression>> {
         check_capability(
             &context.capabilities,
@@ -840,7 +846,7 @@ impl Mutation {
             .into_iter()
             .map(LinkExpression::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        let removed_links = perspective.remove_links(links).await?;
+        let removed_links = perspective.remove_links(links, batch_id).await?;
         Ok(removed_links)
     }
 
@@ -867,6 +873,7 @@ impl Mutation {
         new_link: LinkInput,
         old_link: LinkExpressionInput,
         uuid: String,
+        batch_id: Option<String>,
     ) -> FieldResult<DecoratedLinkExpression> {
         check_capability(
             &context.capabilities,
@@ -877,6 +884,7 @@ impl Mutation {
             .update_link(
                 LinkExpression::from_input_without_proof(old_link),
                 new_link.into(),
+                batch_id,
             )
             .await?)
     }
@@ -907,25 +915,26 @@ impl Mutation {
         commands: String,
         expression: String,
         parameters: Option<String>,
+        batch_id: Option<String>,
     ) -> FieldResult<bool> {
         check_capability(
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let commands: Vec<Command> = serde_json::from_str(&commands)
-            .map_err(|e| FieldError::new(e, graphql_value!({ "invalid_commands": commands })))?;
-        let parameters: Vec<Parameter> = if let Some(p) = parameters {
-            serde_json::from_str(&p)
-                .map_err(|e| FieldError::new(e, graphql_value!({ "invalid_parameters": p })))?
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+
+        let commands: Vec<Command> = serde_json::from_str(&commands)?;
+        let parameters: Vec<Parameter> = if let Some(parameters) = parameters {
+            serde_json::from_str(&parameters)?
         } else {
-            Vec::new()
+            vec![]
         };
 
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         perspective
-            .execute_commands(commands, expression, parameters)
+            .execute_commands(commands, expression, parameters, batch_id)
             .await?;
+
         Ok(true)
     }
 
@@ -935,25 +944,27 @@ impl Mutation {
         uuid: String,
         subject_class: String,
         expression_address: String,
+        initial_values: Option<String>,
+        batch_id: Option<String>,
     ) -> FieldResult<bool> {
         check_capability(
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let subject_class: SubjectClassOption =
-            serde_json::from_str(&subject_class).map_err(|e| {
-                FieldError::new(
-                    e,
-                    graphql_value!({ "invalid_subject_class": subject_class }),
-                )
-            })?;
-
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
 
+        let subject_class: SubjectClassOption = serde_json::from_str(&subject_class)?;
+        let initial_values = if let Some(initial_values) = initial_values {
+            Some(serde_json::from_str(&initial_values)?)
+        } else {
+            None
+        };
+
         perspective
-            .create_subject(subject_class, expression_address)
+            .create_subject(subject_class, expression_address, initial_values, batch_id)
             .await?;
+
         Ok(true)
     }
 
@@ -1005,7 +1016,7 @@ impl Mutation {
         })
     }
 
-    async fn perspective_keepalive_query(
+    async fn perspective_keep_alive_query(
         &self,
         context: &RequestContext,
         uuid: String,
@@ -1019,6 +1030,23 @@ impl Mutation {
         let perspective = get_perspective_with_uuid_field_error(&uuid)?;
         perspective.keepalive_query(subscription_id).await?;
         Ok(true)
+    }
+
+    async fn perspective_dispose_query_subscription(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        subscription_id: String,
+    ) -> FieldResult<bool> {
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
+
+        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        Ok(perspective
+            .dispose_query_subscription(subscription_id)
+            .await?)
     }
 
     async fn runtime_add_friends(
@@ -1114,8 +1142,21 @@ impl Mutation {
             &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY,
         )?;
 
-        let agent_infos = agent_infos_from_str(agent_infos.as_str())?;
-        log::info!("Adding HC agent infos: {:?}", agent_infos);
+        let agent_infos: Vec<String> = serde_json::from_str(&agent_infos)?;
+
+        for agent_info in agent_infos.iter() {
+            match serde_json::from_str::<serde_json::Value>(agent_info) {
+                Ok(json) => {
+                    log::info!(
+                        "Adding Agent info: {}",
+                        serde_json::to_string_pretty(&json).unwrap()
+                    );
+                }
+                Err(e) => {
+                    log::error!("Failed to parse agent info as JSON: {}", e);
+                }
+            }
+        }
 
         get_holochain_service()
             .await
@@ -1494,15 +1535,23 @@ impl Mutation {
     async fn ai_feed_transcription_stream(
         &self,
         context: &RequestContext,
-        stream_id: String,
+        stream_ids: Vec<String>,
         audio: Vec<f64>,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)?;
         let audio_f32: Vec<f32> = audio.into_iter().map(|x| x as f32).collect();
-        AIService::global_instance()
-            .await?
-            .feed_transcription_stream(&stream_id, audio_f32)
-            .await?;
+        let service = AIService::global_instance().await?;
+
+        // Feed each stream individually
+        for stream_id in &stream_ids {
+            if let Err(e) = service
+                .feed_transcription_stream(&stream_id, audio_f32.clone())
+                .await
+            {
+                log::warn!("Error feeding stream {}: {}", stream_id, e);
+            }
+        }
+
         Ok(String::from("true"))
     }
 
@@ -1577,5 +1626,32 @@ impl Mutation {
         })?;
 
         Ok(true)
+    }
+
+    async fn perspective_create_batch(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+    ) -> FieldResult<String> {
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
+        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        Ok(perspective.create_batch().await)
+    }
+
+    async fn perspective_commit_batch(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        batch_id: String,
+    ) -> FieldResult<DecoratedPerspectiveDiff> {
+        check_capability(
+            &context.capabilities,
+            &perspective_update_capability(vec![uuid.clone()]),
+        )?;
+        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        Ok(perspective.commit_batch(batch_id).await?)
     }
 }

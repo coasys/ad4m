@@ -404,7 +404,7 @@ mod tests {
         println!("test_link: {:?}", test_link);
 
         perspective
-            .add_link_expression(test_link.clone(), LinkStatus::Local)
+            .add_link_expression(test_link.clone(), LinkStatus::Local, None)
             .await
             .expect("Failed to add link");
 

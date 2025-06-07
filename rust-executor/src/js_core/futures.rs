@@ -1,5 +1,5 @@
-use deno_core::error::AnyError;
-use deno_core::{anyhow, v8, PollEventLoopOptions};
+use deno_core::error::CoreError;
+use deno_core::{v8, PollEventLoopOptions};
 use deno_runtime::worker::MainWorker;
 use futures::Future;
 // Import the JsRuntime struct.
@@ -20,7 +20,7 @@ impl EventLoopFuture {
 }
 
 impl Future for EventLoopFuture {
-    type Output = Result<(), AnyError>; // You can customize the output type.
+    type Output = Result<(), CoreError>; // You can customize the output type.
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         sleep(std::time::Duration::from_millis(1));
@@ -43,7 +43,7 @@ impl Future for EventLoopFuture {
 
 pub struct SmartGlobalVariableFuture<F>
 where
-    F: Future<Output = Result<v8::Global<v8::Value>, AnyError>> + Unpin,
+    F: Future<Output = Result<v8::Global<v8::Value>, CoreError>> + Unpin,
 {
     worker: Arc<TokioMutex<MainWorker>>,
     value: F,
@@ -51,7 +51,7 @@ where
 
 impl<F> SmartGlobalVariableFuture<F>
 where
-    F: Future<Output = Result<v8::Global<v8::Value>, AnyError>> + Unpin,
+    F: Future<Output = Result<v8::Global<v8::Value>, CoreError>> + Unpin,
 {
     pub fn new(worker: Arc<TokioMutex<MainWorker>>, value: F) -> Self {
         SmartGlobalVariableFuture { worker, value }
@@ -60,9 +60,9 @@ where
 
 impl<F> Future for SmartGlobalVariableFuture<F>
 where
-    F: Future<Output = Result<v8::Global<v8::Value>, AnyError>> + Unpin,
+    F: Future<Output = Result<v8::Global<v8::Value>, CoreError>> + Unpin,
 {
-    type Output = Result<String, AnyError>;
+    type Output = Result<String, CoreError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let worker = self.worker.clone();
@@ -89,7 +89,8 @@ where
             .poll_event_loop(cx, deno_core::PollEventLoopOptions::default())
         {
             if let Err(err) = event_loop_result {
-                return Poll::Ready(Err(anyhow::anyhow!("Error polling event loop: {:?}", err)));
+                log::error!("Error in event loop: {:?}", err);
+                return Poll::Ready(Err(CoreError::TLA));
             }
 
             if let Poll::Ready(result) = value_pin.poll(cx) {
@@ -103,9 +104,9 @@ where
                 };
             }
 
-            return Poll::Ready(Err(anyhow::anyhow!(
-                "Promise resolution is still pending but the event loop has already resolved."
-            )));
+            //return Poll::Ready(Err(anyhow::anyhow!(
+            //    "Promise resolution is still pending but the event loop has already resolved."
+            //)));
         }
 
         Poll::Pending

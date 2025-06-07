@@ -10,7 +10,7 @@ import { Perspective } from "./Perspective";
 import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
-import { AllInstancesResult } from "../subject/SubjectEntity";
+import { AllInstancesResult } from "../model/Ad4mModel";
 
 const LINK_EXPRESSION_FIELDS = `
 author
@@ -155,7 +155,7 @@ export class PerspectiveClient {
         return JSON.parse(perspectiveQueryProlog)
     }
 
-    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult }> {
+    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult, isInit?: boolean }> {
         const { perspectiveSubscribeQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveSubscribeQuery($uuid: String!, $query: String!) {
                 perspectiveSubscribeQuery(uuid: $uuid, query: $query) {
@@ -167,12 +167,17 @@ export class PerspectiveClient {
         }))
         const { subscriptionId, result } = perspectiveSubscribeQuery
         let finalResult = result;
+        let isInit = false;
+        if(finalResult.startsWith("#init#")) {
+            finalResult = finalResult.substring(6)
+            isInit = true;
+        }
         try {
-            finalResult = JSON.parse(result)
+            finalResult = JSON.parse(finalResult)
         } catch (e) {
             console.error('Error parsing perspectiveSubscribeQuery result:', e)
         }
-        return { subscriptionId, result: finalResult }
+        return { subscriptionId, result: finalResult, isInit }
     }
 
     subscribeToQueryUpdates(subscriptionId: string, onData: (result: AllInstancesResult) => void): () => void {
@@ -189,8 +194,16 @@ export class PerspectiveClient {
             next: (result) => {
                 if (result.data && result.data.perspectiveQuerySubscription) {
                     let finalResult = result.data.perspectiveQuerySubscription;
+                    let isInit = false;
+                    if(finalResult.startsWith("#init#")) {
+                        finalResult = finalResult.substring(6)
+                        isInit = true;
+                    }
                     try {
-                        finalResult = JSON.parse(result.data.perspectiveQuerySubscription)
+                        finalResult = JSON.parse(finalResult)
+                        if(isInit && typeof finalResult === 'object') {
+                            finalResult.isInit = true;
+                        }
                     } catch (e) {
                         console.error('Error parsing perspectiveQuerySubscription:', e)
                     }
@@ -212,6 +225,17 @@ export class PerspectiveClient {
         }))
 
         return perspectiveKeepAliveQuery
+    }
+
+    async disposeQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
+        const { perspectiveDisposeQuerySubscription } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveDisposeQuerySubscription($uuid: String!, $subscriptionId: String!) {
+                perspectiveDisposeQuerySubscription(uuid: $uuid, subscriptionId: $subscriptionId)
+            }`,
+            variables: { uuid, subscriptionId }
+        }))
+
+        return perspectiveDisposeQuerySubscription
     }
 
     async add(name: string): Promise<PerspectiveProxy> {
@@ -247,38 +271,38 @@ export class PerspectiveClient {
         }))
     }
 
-    async addLink(uuid: string, link: Link, status?: LinkStatus): Promise<LinkExpression> {
+    async addLink(uuid: string, link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
         const { perspectiveAddLink } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveAddLink($uuid: String!, $link: LinkInput!, $status: String){
-                perspectiveAddLink(link: $link, uuid: $uuid, status: $status) {
+            mutation: gql`mutation perspectiveAddLink($uuid: String!, $link: LinkInput!, $status: String!, $batchId: String) {
+                perspectiveAddLink(uuid: $uuid, link: $link, status: $status, batchId: $batchId) {
                     ${LINK_EXPRESSION_FIELDS}
                 }
             }`,
-            variables: { uuid, link, status }
+            variables: { uuid, link, status, batchId }
         }))
         return perspectiveAddLink
     }
 
-    async addLinks(uuid: string, links: Link[], status?: LinkStatus): Promise<LinkExpression[]> {
+    async addLinks(uuid: string, links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
         const { perspectiveAddLinks } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveAddLinks($uuid: String!, $links: [LinkInput!]!, $status: String){
-                perspectiveAddLinks(links: $links, uuid: $uuid, status: $status) {
+            mutation: gql`mutation perspectiveAddLinks($uuid: String!, $links: [LinkInput!]!, $status: String!, $batchId: String) {
+                perspectiveAddLinks(uuid: $uuid, links: $links, status: $status, batchId: $batchId) {
                     ${LINK_EXPRESSION_FIELDS}
                 }
             }`,
-            variables: { uuid, links, status }
+            variables: { uuid, links, status, batchId }
         }))
         return perspectiveAddLinks
     }
 
-    async removeLinks(uuid: string, links: LinkExpressionInput[]): Promise<LinkExpression[]> {
+    async removeLinks(uuid: string, links: LinkExpressionInput[], batchId?: string): Promise<LinkExpression[]> {
         const { perspectiveRemoveLinks } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveRemoveLinks($uuid: String!, $links: [LinkExpressionInput!]!){
-                perspectiveRemoveLinks(links: $links, uuid: $uuid) {
+            mutation: gql`mutation perspectiveRemoveLinks($uuid: String!, $links: [LinkExpressionInput!]!, $batchId: String) {
+                perspectiveRemoveLinks(uuid: $uuid, links: $links, batchId: $batchId) {
                     ${LINK_EXPRESSION_FIELDS}
                 }
             }`,
-            variables: { uuid, links }
+            variables: { uuid, links, batchId }
         }))
         return perspectiveRemoveLinks
     }
@@ -300,83 +324,67 @@ export class PerspectiveClient {
         return perspectiveLinkMutations
     }
 
-    async addLinkExpression(uuid: string, link: LinkExpressionInput, status?: LinkStatus): Promise<LinkExpression> {
+    async addLinkExpression(uuid: string, link: LinkExpression, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
         const { perspectiveAddLinkExpression } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveAddLinkExpression($uuid: String!, $link: LinkExpressionInput!, $status: String){
-                perspectiveAddLinkExpression(link: $link, uuid: $uuid, status: $status) {
+            mutation: gql`mutation perspectiveAddLinkExpression($uuid: String!, $link: LinkExpressionInput!, $status: String!, $batchId: String) {
+                perspectiveAddLinkExpression(uuid: $uuid, link: $link, status: $status, batchId: $batchId) {
                     ${LINK_EXPRESSION_FIELDS}
                 }
             }`,
-            variables: { uuid, link }
+            variables: { uuid, link, status, batchId }
         }))
         return perspectiveAddLinkExpression
     }
 
-    async updateLink(uuid: string, oldLink: LinkExpressionInput, newLink: LinkInput): Promise<LinkExpression> {
-        delete oldLink.__typename
-        delete oldLink.data.__typename
-        delete oldLink.proof.__typename
+    async updateLink(uuid: string, oldLink: LinkExpressionInput, newLink: Link, batchId?: string): Promise<LinkExpression> {
         const { perspectiveUpdateLink } = unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveUpdateLink(
-                $uuid: String!,
-                $newLink: LinkInput!
-                $oldLink: LinkExpressionInput!
-            ){
-                perspectiveUpdateLink(
-                    newLink: $newLink,
-                    oldLink: $oldLink,
-                    uuid: $uuid
-                ) {
+            mutation: gql`mutation perspectiveUpdateLink($uuid: String!, $oldLink: LinkExpressionInput!, $newLink: LinkInput!, $batchId: String) {
+                perspectiveUpdateLink(uuid: $uuid, oldLink: $oldLink, newLink: $newLink, batchId: $batchId) {
                     ${LINK_EXPRESSION_FIELDS}
                 }
             }`,
-            variables: { uuid, oldLink, newLink }
+            variables: { uuid, oldLink, newLink, batchId }
         }))
-
-        if (!perspectiveUpdateLink.status) {
-            delete perspectiveUpdateLink.status
-        }
-
         return perspectiveUpdateLink
     }
 
-    async removeLink(uuid: string, link: LinkExpressionInput): Promise<{perspectiveRemoveLink: boolean}> {
+    async removeLink(uuid: string, link: LinkExpressionInput, batchId?: string): Promise<boolean> {
         delete link.__typename
         delete link.data.__typename
         delete link.proof.__typename
         delete link.status
-        return unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveRemoveLink($link: LinkExpressionInput!, $uuid: String!) {
-                perspectiveRemoveLink(link: $link, uuid: $uuid)
+        const { perspectiveRemoveLink } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveRemoveLink($link: LinkExpressionInput!, $uuid: String!, $batchId: String) {
+                perspectiveRemoveLink(link: $link, uuid: $uuid, batchId: $batchId)
             }`,
-            variables: { uuid, link }
+            variables: { uuid, link, batchId }
         }))
+        return perspectiveRemoveLink
     }
 
     async addSdna(uuid: string,  name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom"): Promise<boolean> {
         return unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveAddSdna($uuid: String!, $name: String!, $sdnaCode: String!, $sdnaType: String!) {
                 perspectiveAddSdna(uuid: $uuid, name: $name, sdnaCode: $sdnaCode, sdnaType: $sdnaType)
-            }`,
-            variables: { uuid, name, sdnaCode, sdnaType }
+            }`,            variables: { uuid, name, sdnaCode, sdnaType }
         })).perspectiveAddSdna
     }
 
-    async executeCommands(uuid: string, commands: string, expression: string, parameters: string): Promise<boolean> {
+    async executeCommands(uuid: string, commands: string, expression: string, parameters: string, batchId?: string): Promise<boolean> {
         return unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveExecuteCommands($uuid: String!, $commands: String!, $expression: String!, $parameters: String) {
-                perspectiveExecuteCommands(uuid: $uuid, commands: $commands, expression: $expression, parameters: $parameters)
+            mutation: gql`mutation perspectiveExecuteCommands($uuid: String!, $commands: String!, $expression: String!, $parameters: String, $batchId: String) {
+                perspectiveExecuteCommands(uuid: $uuid, commands: $commands, expression: $expression, parameters: $parameters, batchId: $batchId)
             }`,
-            variables: { uuid, commands, expression, parameters }
+            variables: { uuid, commands, expression, parameters, batchId }
         })).perspectiveExecuteCommands
     }
 
-    async createSubject(uuid: string, subjectClass: string, expressionAddress: string): Promise<boolean> {
+    async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string, batchId?: string): Promise<boolean> {
         return unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveCreateSubject($uuid: String!, $subjectClass: String!, $expressionAddress: String!) {
-                perspectiveCreateSubject(uuid: $uuid, subjectClass: $subjectClass, expressionAddress: $expressionAddress)
+            mutation: gql`mutation perspectiveCreateSubject($uuid: String!, $subjectClass: String!, $expressionAddress: String!, $initialValues: String, $batchId: String) {
+                perspectiveCreateSubject(uuid: $uuid, subjectClass: $subjectClass, expressionAddress: $expressionAddress, initialValues: $initialValues, batchId: $batchId)
             }`,
-            variables: { uuid, subjectClass, expressionAddress }
+            variables: { uuid, subjectClass, expressionAddress, initialValues, batchId }
         })).perspectiveCreateSubject
     }
 
@@ -546,5 +554,32 @@ export class PerspectiveClient {
 
     getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {
         return new NeighbourhoodProxy(this.#neighbourhoodClient, uuid)
+    }
+
+    async createBatch(uuid: string): Promise<string> {
+        const { perspectiveCreateBatch } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveCreateBatch($uuid: String!) {
+                perspectiveCreateBatch(uuid: $uuid)
+            }`,
+            variables: { uuid }
+        }))
+        return perspectiveCreateBatch
+    }
+
+    async commitBatch(uuid: string, batchId: string): Promise<LinkExpressionMutations> {
+        const { perspectiveCommitBatch } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveCommitBatch($uuid: String!, $batchId: String!) {
+                perspectiveCommitBatch(uuid: $uuid, batchId: $batchId) {
+                    additions {
+                        ${LINK_EXPRESSION_FIELDS}
+                    }
+                    removals {
+                        ${LINK_EXPRESSION_FIELDS}
+                    }
+                }
+            }`,
+            variables: { uuid, batchId }
+        }))
+        return perspectiveCommitBatch
     }
 }

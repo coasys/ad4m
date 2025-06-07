@@ -24,9 +24,16 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Fix for crash when removing .ad4m directory after using multiple agent feature [PR#556](https://github.com/coasys/ad4m/pull/556)
 - Fix error after spawning AI task [PR#559](https://github.com/coasys/ad4m/pull/559)
 - Fix some problems with perspective.removeLinks() with a proper implementation [PR#563](https://github.com/coasys/ad4m/pull/563)
-- Ad4mConnect detects running local ADAM agent on first open - no need to click try again [](https://github.com/coasys/ad4m/pull/570)
+- Ad4mConnect detects running local ADAM agent on first open - no need to click try again [PR#570](https://github.com/coasys/ad4m/pull/570)
 - Fix multiple synchronous addSignalHandler calls losing the first handler - fixing usage of NH.sendSignal() [PR#576](https://github.com/coasys/ad4m/pull/576)
-
+- Fix flaky Prolog subscriptions [PR#589](https://github.com/coasys/ad4m/pull/589)
+- Install missing language during expression get [PR#594](https://github.com/coasys/ad4m/pull/594)
+- Fix expression content escaping issue that happened with Flux messages with URLs and mentions [PR#597](https://github.com/coasys/ad4m/pull/597)
+- Fix handling of wrong passphrase during unlock (was frozen) [PR#596](https://github.com/coasys/ad4m/pull/596)
+- Fix open buttons not working on Linux by using Tauri's opener plugin [PR#599](https://github.com/coasys/ad4m/pull/599)
+- Harden setup of query subscriptions with delayed init handshakes in all cases and resubscribing after timeout [PR#601](https://github.com/coasys/ad4m/pull/601)
+- Fix crash when default ports are used by other processes [PR#602](https://github.com/coasys/ad4m/pull/602)
+  
 ### Added
 - Prolog predicates needed in new Flux mention notification trigger:
  - agent_did/1
@@ -55,7 +62,14 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Neighbourhood p2p signal: optional loopback sending signals to all connected apps/UIs of the sending agent [PR#568](https://github.com/coasys/ad4m/pull/568)
 - DB and Perspective to JSON exports and imports [PR#569](https://github.com/coasys/ad4m/pull/569) 
 - Enhanced SubjectEntity query mechanism with where-queries, that compiles complex queries down to Prolog which can be subscribed to [PR#575](https://github.com/coasys/ad4m/pull/575)
-  
+- Pagination and count for new SubjectEntity queries [PR#578](https://github.com/coasys/ad4m/pull/578)
+- Added `transform` option to Ad4mModel properties [PR#580](https://github.com/coasys/ad4m/pull/580)
+- Enable use of base expression and class name in `where` queries [PR#584](https://github.com/coasys/ad4m/pull/584)
+- `PerspectiveProxe.createSubject()` can take optional initial values to avoid multiple link mutations (used in Ad4mModel.save()) [PR#585](https://github.com/coasys/ad4m/pull/585)
+- Atomic batch processing of perspective mutations (used in all Ad4mModel methods) [PR#587](https://github.com/coasys/ad4m/pull/587)
+- Enable feeding two audio transcription streams at once with same data, and clean-up streams after inactivity [PR#590](https://github.com/coasys/ad4m/pull/590)
+- Cache-Map for large embedding vector URLs regard Prolog to prevent performance degradation of Prolog queries in Perspectives that include a lot of large embedding vectors [PR#595](https://github.com/coasys/ad4m/pull/595)
+
 ### Changed
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
 - Improved performance of SDNA / SubjectClass functions by moving code from client into executor and saving a lot of client <-> executor roundtrips [PR#480](https://github.com/coasys/ad4m/pull/480)
@@ -68,6 +82,10 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Have Ad4mConnect set `authState` to `authenticated` on successful connection [PR#532](https://github.com/coasys/ad4m/pull/532) & [PR#543](https://github.com/coasys/ad4m/pull/543)
 - Holochain upgraded to latest stable v0.3.6 [PR#542](https://github.com/coasys/ad4m/pull/542) 
 - useSubjects improved: New useSubjects hook filter to reduce unnecissary re-renders [PR#522](https://github.com/coasys/ad4m/pull/552)
+- Renamed SubjectEntity to Ad4mModel, and improved naming of decorators [PR#579](https://github.com/coasys/ad4m/pull/579)
+- Documentation at https://docs.ad4m.dev vastly improved [PR#582](https://github.com/coasys/ad4m/pull/582)
+- useSubjects hook changed to useModel hook, using new and faster Ad4mModel query subscriptions under the hood [PR#588](https://github.com/coasys/ad4m/pull/588)
+- Password entry during setup flow improved with reentry and better explanatory text [PR#596](https://github.com/coasys/ad4m/pull/596)
 
 ## [0.9.0] - 23/03/2024
 

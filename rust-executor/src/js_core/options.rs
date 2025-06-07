@@ -11,7 +11,6 @@ use super::utils_extension::utils_service;
 use super::wallet_extension::wallet_service;
 use crate::entanglement_service::entanglement_service_extension::entanglement_service;
 use crate::holochain_service::holochain_service_extension::holochain_service;
-use crate::prolog_service::prolog_service_extension::prolog_service;
 use crate::runtime_service::runtime_service_extension::runtime_service;
 
 pub fn main_module_url() -> Url {
@@ -47,26 +46,37 @@ pub fn module_map() -> HashMap<String, String> {
     map
 }
 
-pub fn main_worker_options() -> WorkerOptions {
+pub fn module_loader() -> Rc<StringModuleLoader> {
     let mut loader = StringModuleLoader::new();
     for (specifier, code) in module_map() {
         loader.add_module(specifier.as_str(), code.as_str());
     }
+    Rc::new(loader)
+}
 
+pub fn main_worker_options() -> WorkerOptions {
     WorkerOptions {
+        startup_snapshot: {
+            #[cfg(feature = "generate_snapshot")]
+            {
+                None
+            }
+            #[cfg(not(feature = "generate_snapshot"))]
+            {
+                Some(include_bytes!("../../CUSTOM_DENO_SNAPSHOT.bin"))
+            }
+        },
         extensions: vec![
-            wallet_service::init_ops_and_esm(),
-            utils_service::init_ops_and_esm(),
-            pubsub_service::init_ops_and_esm(),
-            holochain_service::init_ops_and_esm(),
-            prolog_service::init_ops_and_esm(),
-            signature_service::init_ops_and_esm(),
-            agent_service::init_ops_and_esm(),
-            entanglement_service::init_ops_and_esm(),
-            runtime_service::init_ops_and_esm(),
-            language_service::init_ops_and_esm(),
+            wallet_service::init(),
+            utils_service::init(),
+            pubsub_service::init(),
+            holochain_service::init(),
+            signature_service::init(),
+            agent_service::init(),
+            entanglement_service::init(),
+            runtime_service::init(),
+            language_service::init(),
         ],
-        module_loader: Rc::new(loader),
         ..Default::default()
     }
 }

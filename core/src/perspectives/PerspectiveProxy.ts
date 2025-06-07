@@ -4,15 +4,15 @@ import { LinkQuery } from "./LinkQuery";
 import { PerspectiveHandle, PerspectiveState } from './PerspectiveHandle'
 import { Perspective } from "./Perspective";
 import { Literal } from "../Literal";
-import { Subject } from "../subject/Subject";
+import { Subject } from "../model/Subject";
 import { ExpressionRendered } from "../expression/Expression";
-import { collectionAdderToName, collectionRemoverToName, collectionSetterToName } from "../subject/util";
+import { collectionAdderToName, collectionRemoverToName, collectionSetterToName } from "../model/util";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { NeighbourhoodExpression } from "../neighbourhood/Neighbourhood";
 import { AIClient } from "../ai/AIClient";
 import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
 import { gql } from "@apollo/client/core";
-import { AllInstancesResult } from "../subject/SubjectEntity";
+import { AllInstancesResult } from "../model/Ad4mModel";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
@@ -28,22 +28,29 @@ interface Unsubscribable {
  * - Managing callbacks for result updates
  * - Subscribing to query updates via GraphQL subscriptions
  * - Maintaining the latest query result
+ * - Ensuring subscription is fully initialized before allowing access
+ * - Cleaning up resources when disposed
  * 
  * The subscription will remain active as long as keepalive signals are sent.
  * Make sure to call dispose() when you're done with the subscription to clean up
- * resources and stop keepalive signals.
+ * resources, stop keepalive signals, and notify the backend to remove the subscription.
+ * 
+ * The subscription goes through an initialization process where it waits for the first
+ * result to come through the subscription channel. You can await the `initialized` 
+ * promise to ensure the subscription is ready. The initialization will timeout after
+ * 30 seconds if no result is received.
  * 
  * Example usage:
  * ```typescript
  * const subscription = await perspective.subscribeInfer("my_query(X)");
- * console.log("Initial result:", subscription.result);
+ * // At this point the subscription is already initialized since subscribeInfer waits
  * 
- * // Set up callback for updates
+ * // Set up callback for future updates
  * const removeCallback = subscription.onResult(result => {
  *     console.log("New result:", result);
  * });
  * 
- * // Later: clean up
+ * // Later: clean up subscription and notify backend
  * subscription.dispose();
  * ```
  */
@@ -54,33 +61,60 @@ export class QuerySubscriptionProxy {
     #callbacks: Set<QueryCallback>;
     #keepaliveTimer: number;
     #unsubscribe?: () => void;
-    #latestResult: AllInstancesResult;
+    #latestResult: AllInstancesResult|null;
     #disposed: boolean = false;
+    #initialized: Promise<boolean>;
+    #initTimeoutId?: NodeJS.Timeout;
+    #query: string;
 
     /** Creates a new query subscription
      * @param uuid - The UUID of the perspective
-     * @param subscriptionId - The ID returned by the subscription mutation
-     * @param initialResult - The initial query result
+     * @param query - The Prolog query to subscribe to
      * @param client - The PerspectiveClient instance to use for communication
      */
-    constructor(uuid: string, subscriptionId: string, initialResult: AllInstancesResult, client: PerspectiveClient) {
+    constructor(uuid: string, query: string, client: PerspectiveClient) {
         this.#uuid = uuid;
-        this.#subscriptionId = subscriptionId;
+        this.#query = query;
         this.#client = client;
         this.#callbacks = new Set();
-        this.#latestResult = initialResult;
+        this.#latestResult = null;
+    }
 
-        // Call all callbacks with initial result
-        this.#notifyCallbacks(initialResult);
-
+    async subscribe() {
+        // initialize the query subscription
+        const result = await this.#client.subscribeQuery(this.#uuid, this.#query);
+        this.#subscriptionId = result.subscriptionId;
         // Subscribe to query updates
-        this.#unsubscribe = this.#client.subscribeToQueryUpdates(
-            this.#subscriptionId,
-            (result) => {
-                this.#latestResult = result;
-                this.#notifyCallbacks(result);
-            }
-        );
+        this.#initialized = new Promise<boolean>((resolve, reject) => {
+            // Add timeout to prevent hanging promises
+            this.#initTimeoutId = setTimeout(() => {
+                reject(new Error('Subscription initialization timed out after 30 seconds. Resubscribing...'));
+                this.subscribe();
+            }, 30000); // 30 seconds timeout
+            
+            // Subscribe to query updates
+            this.#unsubscribe = this.#client.subscribeToQueryUpdates(
+                this.#subscriptionId,
+                (result) => {
+                    if (this.#initTimeoutId) {
+                        clearTimeout(this.#initTimeoutId);
+                        this.#initTimeoutId = undefined;
+                    }
+                    resolve(true);
+
+                    // if the result is one of those repeated initialization results
+                    // and we got a result before, we don't notify the callbacks
+                    // so they don't get confused (we could have gotten another 
+                    // more recent result in between)
+                    if(result.isInit && this.#latestResult) {
+                        return
+                    }
+
+                    this.#latestResult = result;
+                    this.#notifyCallbacks(result);
+                }
+            );
+        });
 
         // Start keepalive loop using platform-agnostic setTimeout
         const keepaliveLoop = async () => {
@@ -90,6 +124,10 @@ export class QuerySubscriptionProxy {
                 await this.#client.keepAliveQuery(this.#uuid, this.#subscriptionId);
             } catch (e) {
                 console.error('Error in keepalive:', e);
+                // try to reinitialize the subscription
+                console.log('Reinitializing subscription for query:', this.#query);
+                await this.subscribe();
+                console.log('Subscription reinitialized');
             }
 
             // Schedule next keepalive if not disposed
@@ -100,6 +138,31 @@ export class QuerySubscriptionProxy {
 
         // Start the first keepalive loop
         this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
+    }
+
+    /** Get the subscription ID for this query subscription
+     * 
+     * This is a unique identifier assigned when the subscription was created.
+     * It can be used to reference this specific subscription, for example when
+     * sending keepalive signals.
+     * 
+     * @returns The subscription ID string
+     */
+    get id(): string {
+        return this.#subscriptionId;
+    }
+
+    /** Promise that resolves when the subscription has received its first result
+     * through the subscription channel. This ensures the subscription is fully
+     * set up before allowing access to results or updates.
+     * 
+     * The promise will reject if no result is received within 30 seconds.
+     * 
+     * Note: You typically don't need to await this directly since the subscription
+     * creation methods (like subscribeInfer) already wait for initialization.
+     */
+    get initialized(): Promise<boolean> {
+        return this.#initialized;
     }
 
     /** Get the latest query result
@@ -155,6 +218,7 @@ export class QuerySubscriptionProxy {
      * 1. Stops the keepalive timer
      * 2. Unsubscribes from GraphQL subscription updates
      * 3. Clears all registered callbacks
+     * 4. Cleans up any pending initialization timeout
      * 
      * After calling this method, the subscription is no longer active and
      * will not receive any more updates. The instance should be discarded.
@@ -166,6 +230,16 @@ export class QuerySubscriptionProxy {
             this.#unsubscribe();
         }
         this.#callbacks.clear();
+        if (this.#initTimeoutId) {
+            clearTimeout(this.#initTimeoutId);
+            this.#initTimeoutId = undefined;
+        }
+
+        // Tell the backend to dispose of the subscription
+        if (this.#subscriptionId) {
+            this.#client.disposeQuerySubscription(this.#uuid, this.#subscriptionId)
+                .catch(e => console.error('Error disposing query subscription:', e));
+        }
     }
 }
 
@@ -177,26 +251,59 @@ interface Parameter {
     value: string
 }
 
-/** Perspective UI proxy object
- *
- * Convenience object for UIs to interact with a perspective.
- * It is created by some of the methods in the PerspectiveClient class and includes
- * a reference to the PerspectiveClient object that created it.
+/**
+ * PerspectiveProxy provides a high-level interface for working with AD4M Perspectives - agent-centric semantic graphs
+ * that store and organize links between expressions.
+ * 
+ * A Perspective is fundamentally a collection of links (subject-predicate-object triples) that represent an agent's view
+ * of their digital world. Through PerspectiveProxy, you can:
+ * - Add, remove, and query links
+ * - Work with Social DNA (subject classes and flows)
+ * - Subscribe to real-time updates
+ * - Share perspectives as Neighbourhoods
+ * - Execute Prolog queries for complex graph patterns
+ * 
+ * 
+ * @example
+ * ```typescript
+ * // Create and work with links
+ * const perspective = await ad4m.perspective.add("My Space");
+ * await perspective.add({
+ *   source: "did:key:alice",
+ *   predicate: "knows",
+ *   target: "did:key:bob"
+ * });
+ * 
+ * // Query links
+ * const friends = await perspective.get({
+ *   source: "did:key:alice",
+ *   predicate: "knows"
+ * });
+ * 
+ * // Use Social DNA
+ * await perspective.addSdna(todoClass, "subject_class");
+ * const todo = await perspective.createSubject("Todo", "expression://123");
+ * 
+ * // Subscribe to changes
+ * perspective.addListener("link-added", (link) => {
+ *   console.log("New link added:", link);
+ * });
+ * ```
  */
 export class PerspectiveProxy {
-    /** Unique ID of the perspective */
+    /** Unique identifier of this perspective */
     uuid: string;
 
-    /** Given name of the perspective */
+    /** Human-readable name of this perspective */
     name: string;
 
-    /** If the perspective is shared as a Neighbourhood, this is the Neighbourhood URL */
+    /** If this perspective is shared as a Neighbourhood, this is its URL */
     sharedUrl: string|null;
 
-    /** If the perspective is shared as a Neighbourhood, this is the Neighbourhood Expression */
+    /** If this perspective is shared, this contains the Neighbourhood metadata */
     neighbourhood: NeighbourhoodExpression|null;
 
-    /** Returns the state of the perspective **/
+    /** Current sync state if this perspective is shared */
     state: PerspectiveState|null;
 
     #handle: PerspectiveHandle
@@ -206,6 +313,10 @@ export class PerspectiveProxy {
     #perspectiveLinkUpdatedCallbacks: LinkCallback[]
     #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
 
+    /**
+     * Creates a new PerspectiveProxy instance.
+     * Note: Don't create this directly, use ad4m.perspective.add() instead.
+     */
     constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
         this.#perspectiveLinkAddedCallbacks = []
         this.#perspectiveLinkRemovedCallbacks = []
@@ -224,64 +335,270 @@ export class PerspectiveProxy {
         this.#client.addPerspectiveSyncStateChangeListener(this.#handle.uuid, this.#perspectiveSyncStateChangeCallbacks)
     }
 
-    async executeAction(actions, expression, parameters: Parameter[]) {
-        return await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters))
+    /**
+     * Executes a set of actions on an expression with optional parameters.
+     * Used internally by Social DNA flows and subject class operations.
+     * 
+     * Actions are specified as an array of commands that modify links in the perspective.
+     * Each action is an object with the following format:
+     * ```typescript
+     * {
+     *   action: "addLink" | "removeLink" | "setSingleTarget" | "collectionSetter",
+     *   source: string,    // Usually "this" to reference the current expression
+     *   predicate: string, // The predicate URI
+     *   target: string     // The target value or "value" for parameters
+     * }
+     * ```
+     * 
+     * Available commands:
+     * - `addLink`: Creates a new link
+     * - `removeLink`: Removes an existing link
+     * - `setSingleTarget`: Removes all existing links with the same source/predicate and adds a new one
+     * - `collectionSetter`: Special command for setting collection properties
+     * 
+     * When used with parameters, the special value "value" in the target field will be 
+     * replaced with the actual parameter value.
+     * 
+     * @example
+     * ```typescript
+     * // Add a state link and remove an old one
+     * await perspective.executeAction([
+     *   {
+     *     action: "addLink",
+     *     source: "this",
+     *     predicate: "todo://state", 
+     *     target: "todo://doing"
+     *   },
+     *   {
+     *     action: "removeLink",
+     *     source: "this",
+     *     predicate: "todo://state",
+     *     target: "todo://ready"
+     *   }
+     * ], "expression://123");
+     * 
+     * // Set a property using a parameter
+     * await perspective.executeAction([
+     *   {
+     *     action: "setSingleTarget",
+     *     source: "this",
+     *     predicate: "todo://title",
+     *     target: "value"
+     *   }
+     * ], "expression://123", [
+     *   { name: "title", value: "New Title" }
+     * ]);
+     * ```
+     * 
+     * @param actions - Array of action objects to execute
+     * @param expression - Target expression address (replaces "this" in actions)
+     * @param parameters - Optional parameters that replace "value" in actions
+     * @param batchId - Optional batch ID to group this operation with others
+     */
+    async executeAction(actions, expression, parameters: Parameter[], batchId?: string) {
+        return await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId)
     }
 
-    /** Returns all the links of this perspective that matches the LinkQuery */
+    /**
+     * Retrieves links from the perspective that match the given query.
+     * 
+     * @param query - Query parameters to filter links
+     * @returns Array of matching LinkExpressions
+     * 
+     * @example
+     * ```typescript
+     * // Get all links where Alice knows someone
+     * const links = await perspective.get({
+     *   source: "did:key:alice",
+     *   predicate: "knows"
+     * });
+     * 
+     * // Get all comments on a post
+     * const comments = await perspective.get({
+     *   source: "post://123",
+     *   predicate: "comment"
+     * });
+     * ```
+     */
     async get(query: LinkQuery): Promise<LinkExpression[]> {
         return await this.#client.queryLinks(this.#handle.uuid, query)
     }
 
-    /** Runs a Prolog query on the perspective's Prolog engine */
+    /**
+     * Executes a Prolog query against the perspective's knowledge base.
+     * This is a powerful way to find complex patterns in the graph.
+     * 
+     * @param query - Prolog query string
+     * @returns Query results or false if no results
+     * 
+     * @example
+     * ```typescript
+     * // Find friends of friends
+     * const results = await perspective.infer(`
+     *   triple(A, "knows", B),
+     *   triple(B, "knows", C),
+     *   A \= C
+     * `);
+     * 
+     * // Find all active todos
+     * const todos = await perspective.infer(`
+     *   instance(Todo, "Todo"),
+     *   property_getter("Todo", Todo, "state", "active")
+     * `);
+     * ```
+     */
     async infer(query: string): Promise<any> {
         return await this.#client.queryProlog(this.#handle.uuid, query)
     }
 
-    /** Adds a link to this perspective */
-    async add(link: Link, status: LinkStatus = 'shared'): Promise<LinkExpression> {
-        return await this.#client.addLink(this.#handle.uuid, link, status)
+    /**
+     * Adds a new link to the perspective.
+     * 
+     * @param link - The link to add
+     * @param status - Whether the link should be shared in a Neighbourhood
+     * @param batchId - Optional batch ID to group this operation with others
+     * @returns The created LinkExpression
+     * 
+     * @example
+     * ```typescript
+     * // Add a simple relationship
+     * await perspective.add({
+     *   source: "did:key:alice",
+     *   predicate: "follows",
+     *   target: "did:key:bob"
+     * });
+     * 
+     * // Add a local-only link
+     * await perspective.add({
+     *   source: "note://123",
+     *   predicate: "tag",
+     *   target: "private"
+     * }, "local");
+     * ```
+     */
+    async add(link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
+        return await this.#client.addLink(this.#handle.uuid, link, status, batchId)
     }
 
-    /** Adds multiple links to this perspective **/
-    async addLinks(links: Link[], status: LinkStatus = 'shared'): Promise<LinkExpression[]> {
-        return await this.#client.addLinks(this.#handle.uuid, links, status)
+    /**
+     * Adds multiple links to the perspective in a single operation.
+     * More efficient than adding links one by one.
+     * 
+     * @param links - Array of links to add
+     * @param status - Whether the links should be shared
+     * @param batchId - Optional batch ID to group this operation with others
+     * @returns Array of created LinkExpressions
+     */
+    async addLinks(links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
+        return await this.#client.addLinks(this.#handle.uuid, links, status, batchId)
     }
 
-    /** Removes multiple links from this perspective **/
-    async removeLinks(links: LinkExpressionInput[]): Promise<LinkExpression[]> {
-        return await this.#client.removeLinks(this.#handle.uuid, links)
+    /**
+     * Removes multiple links from the perspective.
+     * 
+     * @param links - Array of links to remove
+     * @param batchId - Optional batch ID to group this operation with others
+     * @returns Array of removed LinkExpressions
+     */
+    async removeLinks(links: LinkExpressionInput[], batchId?: string): Promise<LinkExpression[]> {
+        return await this.#client.removeLinks(this.#handle.uuid, links, batchId)
     }
 
-    /** Adds and removes multiple links from this perspective **/
+    /**
+     * Applies a set of link mutations (adds and removes) in a single operation.
+     * Useful for atomic updates to the perspective.
+     * 
+     * @param mutations - Object containing links to add and remove
+     * @param status - Whether new links should be shared
+     * @returns Object containing results of the mutations
+     */
     async linkMutations(mutations: LinkMutations, status: LinkStatus = 'shared'): Promise<LinkExpressionMutations> {
         return await this.#client.linkMutations(this.#handle.uuid, mutations, status)
     }
 
-    /** Adds a linkExpression to this perspective */
-    async addLinkExpression(link: LinkExpression, status: LinkStatus = 'shared'): Promise<LinkExpression> {
-        return await this.#client.addLinkExpression(this.#handle.uuid, link, status)
+        /**
+     * Adds a pre-signed LinkExpression to the perspective.
+     * 
+     * @param link - The signed LinkExpression to add
+     * @param status - Whether the link should be shared
+     * @param batchId - Optional batch ID to group this operation with others
+     * @returns The added LinkExpression
+     */
+    async addLinkExpression(link: LinkExpression, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
+        return await this.#client.addLinkExpression(this.#handle.uuid, link, status, batchId)
     }
 
-    async update(oldLink: LinkExpressionInput, newLink: Link) {
-        return await this.#client.updateLink(this.#handle.uuid, oldLink, newLink)
+        /**
+     * Updates an existing link with new data.
+     * 
+     * @param oldLink - The existing link to update
+     * @param newLink - The new link data
+     * @param batchId - Optional batch ID to group this operation with others
+     */
+    async update(oldLink: LinkExpressionInput, newLink: Link, batchId?: string): Promise<LinkExpression> {
+        return await this.#client.updateLink(this.#handle.uuid, oldLink, newLink, batchId)
     }
 
-    async remove(link: LinkExpressionInput) {
-        return await this.#client.removeLink(this.#handle.uuid, link)
+    /**
+     * Removes a link from the perspective.
+     * 
+     * @param link - The link to remove
+     * @param batchId - Optional batch ID to group this operation with others
+     */
+    async remove(link: LinkExpressionInput, batchId?: string): Promise<boolean> {
+        return await this.#client.removeLink(this.#handle.uuid, link, batchId)
     }
 
+    /** Creates a new batch for grouping operations */
+    async createBatch(): Promise<string> {
+        return await this.#client.createBatch(this.#handle.uuid)
+    }
+
+    /** Commits a batch of operations */
+    async commitBatch(batchId: string): Promise<LinkExpressionMutations> {
+        return await this.#client.commitBatch(this.#handle.uuid, batchId)
+
+        
+    }
+    /**
+     * Retrieves and renders an Expression referenced in this perspective.
+     * 
+     * @param expressionURI - URI of the Expression to retrieve
+     * @returns The rendered Expression
+     */
     async getExpression(expressionURI: string): Promise<ExpressionRendered> {
         return await this.#client.getExpression(expressionURI)
     }
 
+    /**
+     * Creates a new Expression in the specified Language.
+     * 
+     * @param content - Content for the new Expression
+     * @param languageAddress - Address of the Language to use
+     * @returns URI of the created Expression
+     */
     async createExpression(content: any, languageAddress: string): Promise<string> {
         return await this.#client.createExpression(content, languageAddress)
     }
 
-    /** Adds a link listener
-     * @param type Can be 'link-added' or 'link-removed'
-     * @param cb Callback function that is called when a link is added to the perspective
+    /**
+     * Subscribes to link changes in the perspective.
+     * 
+     * @param type - Type of change to listen for
+     * @param cb - Callback function
+     * 
+     * @example
+     * ```typescript
+     * // Listen for new links
+     * perspective.addListener("link-added", (link) => {
+     *   console.log("New link:", link);
+     * });
+     * 
+     * // Listen for removed links
+     * perspective.addListener("link-removed", (link) => {
+     *   console.log("Link removed:", link);
+     * });
+     * ```
      */
     async addListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
         if (type === 'link-added') {
@@ -293,17 +610,27 @@ export class PerspectiveProxy {
         }
     }
 
-    /** Adds a sync state listener
-     * @param cb Callback function that is called when the sync state of the perspective changes
-     * @returns A function that can be called to remove the listener
+    /**
+     * Subscribes to sync state changes if this perspective is shared.
+     * 
+     * @param cb - Callback function
+     * 
+     * @example
+     * ```typescript
+     * perspective.addSyncStateChangeListener((state) => {
+     *   console.log("Sync state:", state);
+     * });
+     * ```
      */
     async addSyncStateChangeListener(cb: SyncStateChangeCallback) {
         this.#perspectiveSyncStateChangeCallbacks.push(cb)
     }
 
-    /** Removes a previously added link listener
-     * @param type Can be 'link-added' or 'link-removed'
-     * @param cb Callback function that is called when a link is added to the perspective
+    /**
+     * Unsubscribes from link changes.
+     * 
+     * @param type - Type of change to stop listening for
+     * @param cb - The callback function to remove
      */
     async removeListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
         if (type === 'link-added') {
@@ -321,15 +648,21 @@ export class PerspectiveProxy {
         }
     }
 
-
-    /** Create and return a snapshot of this perspective
-     * A snapshot is a rendered Perspectie object that contains all the links of the perspective.
+    /**
+     * Creates a snapshot of the current perspective state.
+     * Useful for backup or sharing.
+     * 
+     * @returns Perspective object containing all links
      */
     async snapshot(): Promise<Perspective> {
         return this.#client.snapshotByUUID(this.#handle.uuid)
     }
 
-    /** Take and load all the links from the given snapshot */
+    /**
+     * Loads a perspective snapshot, replacing current content.
+     * 
+     * @param snapshot - Perspective snapshot to load
+     */
     async loadSnapshot(snapshot: Perspective) {
         //Clean the input data from __typename
         const cleanedSnapshot = JSON.parse(JSON.stringify(snapshot));
@@ -343,11 +676,21 @@ export class PerspectiveProxy {
         }
     }
 
-    /** Convenience function to get the target of the first link that matches the given query
-     * This makes sense when the query is expected to return only one link
-     * and the target of that link is what you are looking for.
-     *
-     * Works best together with @member setSingelTarget()
+    /**
+     * Gets a single target value matching a query.
+     * Useful when you expect only one result.
+     * 
+     * @param query - Query to find the target
+     * @returns Target value or void if not found
+     * 
+     * @example
+     * ```typescript
+     * // Get a user's name
+     * const name = await perspective.getSingleTarget({
+     *   source: "did:key:alice",
+     *   predicate: "name"
+     * });
+     * ```
      */
     async getSingleTarget(query: LinkQuery): Promise<string|void> {
         delete query.target
@@ -358,12 +701,21 @@ export class PerspectiveProxy {
             return null
     }
 
-    /** Convenience function to ensure there is only one link with given source and predicate
-     * This function will remove all links with the same source and predicate as the given link,
-     * and then add the given link.
-     * This ensures there is only one target for the given source and predicate.
-     *
-     * Works best together with @member getSingleTarget()
+    /**
+     * Sets a single target value, removing any existing targets.
+     * 
+     * @param link - Link defining the new target
+     * @param status - Whether the link should be shared
+     * 
+     * @example
+     * ```typescript
+     * // Set a user's status
+     * await perspective.setSingleTarget({
+     *   source: "did:key:alice",
+     *   predicate: "status",
+     *   target: "online"
+     * });
+     * ```
      */
     async setSingleTarget(link: Link, status: LinkStatus = 'shared') {
         const query = new LinkQuery({source: link.source, predicate: link.predicate})
@@ -465,28 +817,58 @@ export class PerspectiveProxy {
         }
     }
 
-    /** Creates a new subject instance by running its (SDNA defined) constructor,
-     * which means adding links around the given expression address so that it
-     * conforms to the given subject class.
-     *
+    /**
+     * Creates a new subject instance of the given subject class
+     * 
      * @param subjectClass Either a string with the name of the subject class, or an object
-     * with the properties of the subject class. In the latter case, the first subject class
-     * that matches the given properties will be used.
+     * with the properties of the subject class.
      * @param exprAddr The address of the expression to be turned into a subject instance
+     * @param initialValues Optional initial values for properties. If provided, these will be
+     * merged with constructor actions for better performance.
+     * @param batchId Optional batch ID for grouping operations. If provided, returns the expression address
+     * instead of the subject proxy since the subject won't exist until the batch is committed.
+     * @returns A proxy object for the created subject, or just the expression address if in batch mode
      */
-    async createSubject<T>(subjectClass: T, exprAddr: string): Promise<T> {
+    async createSubject<T, B extends string | undefined = undefined>(
+        subjectClass: T, 
+        exprAddr: string,
+        initialValues?: Record<string, any>,
+        batchId?: B
+    ): Promise<B extends undefined ? T : string> {
         let className: string;
 
         if(typeof subjectClass === "string") {
-            className = subjectClass
-
-            await this.#client.createSubject(this.#handle.uuid, JSON.stringify({className}), exprAddr);
+            className = subjectClass;
+            await this.#client.createSubject(
+                this.#handle.uuid, 
+                JSON.stringify({
+                    className,
+                    initialValues
+                }), 
+                exprAddr,
+                initialValues ? JSON.stringify(initialValues) : undefined,
+                batchId
+            );
         } else {
-            let query = this.buildQueryFromTemplate(subjectClass as object)
-            await this.#client.createSubject(this.#handle.uuid, JSON.stringify({query}), exprAddr);
+            let query = this.buildQueryFromTemplate(subjectClass as object);
+            await this.#client.createSubject(
+                this.#handle.uuid, 
+                JSON.stringify({
+                    query,
+                    initialValues
+                }), 
+                exprAddr,
+                initialValues ? JSON.stringify(initialValues) : undefined,
+                batchId
+            );
         }
 
-        return this.getSubjectProxy(exprAddr, subjectClass)
+        // Skip subject proxy creation when in batch mode since the subject won't exist until batch is committed
+        if (batchId) {
+            return exprAddr as B extends undefined ? T : string;
+        }
+
+        return this.getSubjectProxy(exprAddr, subjectClass) as Promise<B extends undefined ? T : string>;
     }
 
     async getSubjectData<T>(subjectClass: T, exprAddr: string): Promise<T> {
@@ -504,16 +886,18 @@ export class PerspectiveProxy {
      * with the properties of the subject class. In the latter case, the first subject class
      * that matches the given properties will be used.
      * @param exprAddr The address of the expression to be turned into a subject instance
+     * @param batchId Optional batch ID for grouping operations. If provided, the removal will be part of the batch
+     * and won't be executed until the batch is committed.
      */
-    async removeSubject<T>(subjectClass: T, exprAddr: string) {
+    async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
         let result = await this.infer(`subject_class("${className}", C), destructor(C, Actions)`)
         if(!result.length) {
-            throw "No constructor found for given subject class: " + className
+            throw "No destructor found for given subject class: " + className
         }
 
         let actions = result.map(x => eval(x.Actions))
-        await this.executeAction(actions[0], exprAddr, undefined)
+        await this.executeAction(actions[0], exprAddr, undefined, batchId)
     }
 
     /** Checks if the given expression is a subject instance of the given subject class
@@ -730,24 +1114,77 @@ export class PerspectiveProxy {
         return this.#client.getNeighbourhoodProxy(this.#handle.uuid)
     }
 
+    /**
+     * Returns a proxy object for working with AI capabilities.
+     * 
+     * @returns AIClient instance
+     * 
+     * @example
+     * ```typescript
+     * // Use AI to analyze perspective content
+     * const summary = await perspective.ai.summarize();
+     * 
+     * // Generate new content
+     * const suggestion = await perspective.ai.suggest("next action");
+     * ```
+     */
     get ai(): AIClient {
         return this.#client.aiClient
     }
 
-    /** Subscribe to a Prolog query and get updates when the results change.
-     * Returns a QuerySubscriptionProxy that handles keepalive and allows registering callbacks.
-     * The initial and subsequent results can be accessed via the result property.
+    /**
+     * Creates a subscription for a Prolog query that updates in real-time.
      * 
-     * Make sure to call dispose() on the subscription when you're done with it
+     * This method:
+     * 1. Creates the subscription on the Rust side
+     * 2. Sets up the subscription callback
+     * 3. Waits for the initial result to come through the subscription channel
+     * 4. Returns a fully initialized QuerySubscriptionProxy
+     * 
+     * The returned subscription is guaranteed to be ready to receive updates,
+     * as this method waits for the initialization process to complete.
+     * 
+     * The subscription will be automatically cleaned up on both frontend and backend
+     * when dispose() is called. Make sure to call dispose() when you're done to
+     * prevent memory leaks and ensure proper cleanup of resources.
+     * 
+     * @param query - Prolog query string
+     * @returns Initialized QuerySubscriptionProxy instance
+     * 
+     * @example
+     * ```typescript
+     * // Subscribe to active todos
+     * const subscription = await perspective.subscribeInfer(`
+     *   instance(Todo, "Todo"),
+     *   property_getter("Todo", Todo, "state", "active")
+     * `);
+     * 
+     * // Subscription is already initialized here
+     * console.log("Initial result:", subscription.result);
+     * 
+     * // Set up callback for future updates
+     * subscription.onResult((todos) => {
+     *   console.log("Active todos:", todos);
+     * });
+     * 
+     * // Clean up subscription when done
+     * subscription.dispose();
+     * ```
      */
     async subscribeInfer(query: string): Promise<QuerySubscriptionProxy> {
-        const result = await this.#client.subscribeQuery(this.uuid, query);
-        return new QuerySubscriptionProxy(
+        const subscriptionProxy = new QuerySubscriptionProxy(
             this.uuid,
-            result.subscriptionId,
-            result.result,
+            query,
             this.#client
         );
+
+        // Start the subscription on the Rust side first to get the real subscription ID
+        await subscriptionProxy.subscribe();
+
+        // Wait for the initial result
+        await subscriptionProxy.initialized;
+
+        return subscriptionProxy;
     }
 
 }

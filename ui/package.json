@@ -14,6 +14,7 @@
     "@tauri-apps/plugin-global-shortcut": "~2",
     "@tauri-apps/plugin-http": "~2",
     "@tauri-apps/plugin-notification": "~2",
+    "@tauri-apps/plugin-opener": "~2.2.6",
     "@tauri-apps/plugin-os": "~2",
     "@tauri-apps/plugin-process": "~2",
     "@tauri-apps/plugin-shell": "~2",
@@ -82,5 +83,5 @@
   "resolutions": {
     "react-error-overlay": "6.0.9"
   },
-  "version": "0.10.1-release-candidate-1"
+  "version": "0.10.1-release-candidate-3"
 }

@@ -268,13 +268,13 @@ export default class LanguageController {
 
         if(language.linksAdapter) {
             language.linksAdapter.addCallback((diff: PerspectiveDiff) => {
-                console.log("LINKS CALLBACK", diff)
+                //console.log("LINKS CALLBACK", diff)
                 this.callLinkObservers(diff, {address: hash, name: language.name} as LanguageRef);
             })
 
             if (language.linksAdapter.addSyncStateChangeCallback) {
                 language.linksAdapter.addSyncStateChangeCallback((state: PerspectiveState) => {
-                    console.log("LanguageController.loadLanguage: sync state change", state);
+                    //console.log("LanguageController.loadLanguage: sync state change", state);
                     this.callSyncStateChangeObservers(state, {address: hash, name: language.name} as LanguageRef);
                 })
             }
@@ -601,34 +601,54 @@ export default class LanguageController {
         }
     }
 
-    async readAndTemplateHolochainDNA(sourceLanguageLines: string[], templateData: object, sourceLanguageHash?: string): Promise<{dnaCode: string | null}> {
+    async readAndTemplateHolochainDNA(sourceLanguageLines: string[], templateData: object, sourceLanguageHash?: string): Promise<{happCode: string | null}> {
         //Look for var dna in languageSource which would tell us its a holochain language and then apply templating to the holochain language also
-        const dnaIndex = sourceLanguageLines.findIndex(element => element.includes(`var dna = `));
-        let dnaCodeRes: null | string = null;
-        if (dnaIndex != -1) {
+        const happIndex = sourceLanguageLines.findIndex(element => element.includes(`var happ = `));
+        let happCodeRes: null | string = null;
+        if (happIndex != -1) {
             if (!sourceLanguageHash) {
                 sourceLanguageHash = uuidv4();
             }
             //Create a directory for all of our DNA templating operations
             const tempTemplatingPath = path.join(this.#config.tempLangPath, sourceLanguageHash);
+            if(fs.existsSync(tempTemplatingPath)) {
+                fs.rmdirSync(tempTemplatingPath, {recursive: true});
+            }
             fs.mkdirSync(tempTemplatingPath);
-            //The place where we will put the .dna from the b64
-            const tempDnaPath = path.join(tempTemplatingPath, `${sourceLanguageHash}.dna`);
-            const wasmPath = path.join(tempTemplatingPath, "target/wasm32-unknown-unknown/release/")
-
-            //Write the DNA code to a file
-            let dnaCode = sourceLanguageLines[dnaIndex].split("var dna = ")[1]
+            //The place where we will put the .happ bundle from the b64
+            const tempHappPath = path.join(tempTemplatingPath, `happ.happ`);
+            //Write the hApp bundle to a file
+            let happCode = sourceLanguageLines[happIndex].split("var happ = ")[1]
+            let happHash = await this.ipfsHash(happCode)
+            //console.log("happHash before:", happHash)
             //TODO: here was are assuming that the first character is " and the last two "; we should check for this and not assume
-            dnaCode = dnaCode.substring(1, dnaCode.length-2);
-            fs.writeFileSync(tempDnaPath, Buffer.from(dnaCode, "base64"));
-
-            //Unpack the DNA
+            happCode = happCode.substring(1, happCode.length-2);
+            fs.writeFileSync(tempHappPath, Buffer.from(happCode, "base64"));
+            //fs.writeFileSync(tempHappPath+"-original", Buffer.from(happCode, "base64"));
+            //Unpack hApp bundle
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result
+            console.log("LanguageController.readAndTemplateHolochainDNA: unpacking hApp bundle");
+            let unpackHappPath = (await this.#holochainService?.unPackHapp(tempHappPath)).replace(/(\r\n|\n|\r)/gm, "");
+            //console.log("unpackHappPath:", unpackHappPath)
+            fs.unlinkSync(tempHappPath);
+
+            const happYamlPath = path.join(unpackHappPath, "happ.yaml");
+            if (!fs.existsSync(happYamlPath)) {
+                throw new Error("Expected to find happ.yaml of source language at path: " + happYamlPath + " after unpacking but could not find at given path");
+            }
+
+            let happYaml = yaml.load(fs.readFileSync(happYamlPath, 'utf8'));
+            //console.log("happ.yaml", happYaml)
+            //@ts-ignore
+            let dnaBundlePath = path.join(unpackHappPath, happYaml.roles[0].dna.bundled)
+
             console.log("LanguageController.readAndTemplateHolochainDNA: unpacking DNA");
-            let unpackPath = (await this.#holochainService?.unpackDna(tempDnaPath)).replace(/(\r\n|\n|\r)/gm, "");
-            fs.unlinkSync(tempDnaPath);
-            //TODO: are all dna's using the same dna.yaml?
-            const dnaYamlPath = path.join(unpackPath, "dna.yaml");
+            let unpackDnaPath = (await this.#holochainService?.unPackDna(dnaBundlePath)).replace(/(\r\n|\n|\r)/gm, "");
+            //console.log("unpackDnaPath:", unpackDnaPath)
+
+            const dnaYamlPath = path.join(unpackDnaPath, "dna.yaml");
+            const wasmPath = path.join(unpackHappPath, "target/wasm32-unknown-unknown/release/")
+
             if (!fs.existsSync(dnaYamlPath)) {
                 throw new Error("Expected to find DNA of source language at path: " + dnaYamlPath + " after unpacking but could not find at given path");
             }
@@ -641,6 +661,7 @@ export default class LanguageController {
 
             //Read the yaml file
             let dnaYaml = yaml.load(fs.readFileSync(dnaYamlPath, 'utf8'));
+            //console.log("dnaYaml before changes:", dnaYaml)
             //@ts-ignore
             if (templateData.uid) {
                 //@ts-ignore
@@ -651,25 +672,40 @@ export default class LanguageController {
                 //@ts-ignore
                 dnaYaml.integrity.properties[templateKey] = templateValue;
             }
-
+            //console.log("dnaYaml after changes:", dnaYaml)
             let dnaYamlDump = yaml.dump(dnaYaml, {
                 'styles': {
                   '!!null': 'canonical' // dump null as ~
                 }
             });
+            //console.log("dnaYamlDump:", dnaYamlDump)
+            //console.log("writing to dnaYamlPath:", dnaYamlPath)
             fs.writeFileSync(dnaYamlPath, dnaYamlDump);
 
             //TODO: we need to be able to check for errors in this fn call, currently we just crudly split the result
             console.log("LanguageController.readAndTemplateHolochainDNA: packing DNA");
-            let packPath = (await this.#holochainService?.packDna(unpackPath)).replace(/(\r\n|\n|\r)/gm, "");
-            const base64 = fs.readFileSync(packPath, "base64").replace(/[\r\n]+/gm, '');
+            let packDnaPath = (await this.#holochainService?.packDna(unpackDnaPath)).replace(/(\r\n|\n|\r)/gm, "");
+            //console.log("packDnaPath:", packDnaPath)
+
+            const packDnaFilename = path.basename(packDnaPath);
+            const target = path.join(unpackHappPath, packDnaFilename)
+            console.log("LanguageController.readAndTemplateHolochainDNA: copying packed dna back to to happ directory:", target)
+            fs.copyFileSync(packDnaPath, target);
+
+            console.log("LanguageController.readAndTemplateHolochainDNA: packing hApp bundle");
+            let packHappPath = (await this.#holochainService?.packHapp(unpackHappPath)).replace(/(\r\n|\n|\r)/gm, "");
+            //console.log("packHappPath:", packHappPath)
+
+            const base64 = fs.readFileSync(packHappPath, "base64").replace(/[\r\n]+/gm, '');
+            //happHash = await this.ipfsHash(base64)
+            //console.log("happHash after:", happHash)
 
             //Cleanup temp directory
             fs.rmdirSync(tempTemplatingPath, {recursive: true});
-            dnaCodeRes = base64;
+            happCodeRes = base64;
         }
         return {
-            dnaCode: dnaCodeRes
+            happCode: happCodeRes
         }
     }
 
@@ -744,17 +780,19 @@ export default class LanguageController {
         }
 
         //Add custom case for inserting templated dna data
-        const dnaPattern = new RegExp(/var (dna{1,})/g);
+        const happPattern = new RegExp(/var (happ{1,})/g);
         //@ts-ignore
-        if (templateData["dna"]) {
-            let dnaIndex = 0;
+        if (templateData["happ"]) {
+            console.log("applying happ template data...")
+            let happIndex = 0;
             for(let i = 0; i < sourceLanguageLines.length; i++) {
-                if (sourceLanguageLines[i].match(dnaPattern)) {
-                    dnaIndex = i;
+                if (sourceLanguageLines[i].match(happPattern)) {
+                    happIndex = i;
                 }
             }
+            console.log("happIndex:", happIndex)
             //@ts-ignore
-            sourceLanguageLines[dnaIndex] = `var dna = "${templateData["dna"]}"`;
+            sourceLanguageLines[happIndex] = `var happ = "${templateData["happ"]}"`;
         }
     }
 
@@ -788,19 +826,20 @@ export default class LanguageController {
         }
         const sourceLanguageLines = sourceLanguage!.split("\n");
         templateData = this.orderObject(templateData);
-        const { dnaCode } = await this.readAndTemplateHolochainDNA(sourceLanguageLines, templateData, sourceLanguageHash);
+        const { happCode } = await this.readAndTemplateHolochainDNA(sourceLanguageLines, templateData, sourceLanguageHash);
 
         //If there was some dna code in the source language then lets also add that to the language bundle (but not to the templateData as we dont want that on the meta)
-        if (dnaCode) {
+        if (happCode) {
+            console.log("setting happCode in templateData")
             //@ts-ignore
-            templateData["dna"] = dnaCode;
+            templateData["happ"] = happCode;
         }
         templateData = this.orderObject(templateData);
         //console.debug("LangugeFactory.languageApplyTemplate: Templating language with template data", templateData);
         this.applyTemplateData(sourceLanguageLines, templateData);
 
         //@ts-ignore
-        delete templateData["dna"];
+        delete templateData["happ"];
 
         const meta = sourceLanguageExpr.data
 
@@ -1055,7 +1094,12 @@ export default class LanguageController {
                     }
                 }
             } else {
-                const lang = this.languageForExpression(ref);
+                let lang
+                try {
+                    lang = this.languageForExpression(ref);
+                }catch(e) {
+                    lang = await this.languageByRef(ref.language);
+                }
                 if (!lang.expressionAdapter) {
                     throw Error("Language does not have an expresionAdapter!")
                 };

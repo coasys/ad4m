@@ -35,8 +35,8 @@ async function convertAudioToPCM(audioFilePath: string): Promise<Float32Array> {
 // Helper function to stream audio data in chunks
 async function streamAudioData(
     audioData: Float32Array,
-    streamId: string,
-    feedTranscriptionStream: (streamId: string, audio: number[]) => Promise<void>,
+    streamIds: string | string[],
+    feedTranscriptionStream: (streamIds: string | string[], audio: number[]) => Promise<void>,
     chunkSize: number = 8000
 ): Promise<void> {
     for (let i = 0; i < audioData.length; i += chunkSize) {
@@ -47,7 +47,7 @@ async function streamAudioData(
         console.log(`Sending chunk: ${i} - ${end}`);
         const chunk = audioData.slice(i, end);
         const numberArray = Array.from(chunk);  // Convert Float32Array to number[]
-        await feedTranscriptionStream(streamId, numberArray);
+        await feedTranscriptionStream(streamIds, numberArray);
         // Simulate real-time processing by adding a small delay
         await new Promise(resolve => setTimeout(resolve, 500));
     }
@@ -548,7 +548,7 @@ export default function aiTests(testContext: TestContext) {
                 }, customParams);
 
                 // Type assertion for the feedTranscriptionStream function with unknown intermediate
-                const feedStream = (ad4mClient.ai.feedTranscriptionStream.bind(ad4mClient.ai) as unknown) as (streamId: string, audio: number[]) => Promise<void>;
+                const feedStream = (ad4mClient.ai.feedTranscriptionStream.bind(ad4mClient.ai) as unknown) as (streamIds: string | string[], audio: number[]) => Promise<void>;
                 await streamAudioData(audioData, streamId, feedStream);
 
                 try {
@@ -589,7 +589,7 @@ export default function aiTests(testContext: TestContext) {
                 }, wordByWordParams);
 
                 // Type assertion for the feedTranscriptionStream function with unknown intermediate
-                const feedStream = (ad4mClient.ai.feedTranscriptionStream.bind(ad4mClient.ai) as unknown) as (streamId: string, audio: number[]) => Promise<void>;
+                const feedStream = (ad4mClient.ai.feedTranscriptionStream.bind(ad4mClient.ai) as unknown) as (streamIds: string | string[], audio: number[]) => Promise<void>;
                 await streamAudioData(audioData, streamId, feedStream);
 
                 try {
@@ -606,6 +606,65 @@ export default function aiTests(testContext: TestContext) {
                 expect(transcribedWords.join(' ')).to.include("If you can read this, transcription is working");
 
                 console.log("Transcribed words:", transcribedWords);
+            });
+
+            it.skip('can do fast and accurate transcription simultaneously', async() => {
+                const ad4mClient = testContext.ad4mClient!;
+                const audioData = await convertAudioToPCM('../transcription_test.m4a');
+                let fastTranscription = '';
+                let accurateTranscription = '';
+
+                // Configure parameters for word-by-word detection (fast)
+                const fastParams = {
+                    startThreshold: 0.25,
+                    startWindow: 100,
+                    endThreshold: 0.15,
+                    endWindow: 100,
+                    timeBeforeSpeech: 20
+                };
+
+                // Configure parameters for accurate transcription
+                const accurateParams = {
+                    startThreshold: 0.3,
+                    startWindow: 150,
+                    endThreshold: 0.2,
+                    endWindow: 500,
+                    timeBeforeSpeech: 100
+                };
+
+                // Open two streams with different parameters
+                const fastStreamId = await ad4mClient.ai.openTranscriptionStream("whisper_tiny", (text) => {
+                    console.log("Received fast transcription:", text);
+                    fastTranscription += text;
+                }, fastParams);
+
+                const accurateStreamId = await ad4mClient.ai.openTranscriptionStream("whisper_small", (text) => {
+                    console.log("Received accurate transcription:", text);
+                    accurateTranscription += text;
+                }, accurateParams);
+
+                // Feed audio to both streams simultaneously
+                const feedStream = (ad4mClient.ai.feedTranscriptionStream.bind(ad4mClient.ai) as unknown) as (streamIds: string | string[], audio: number[]) => Promise<void>;
+                await streamAudioData(audioData, [fastStreamId, accurateStreamId], feedStream);
+
+                try {
+                    await ad4mClient.ai.closeTranscriptionStream(fastStreamId);
+                    await ad4mClient.ai.closeTranscriptionStream(accurateStreamId);
+                } catch(e) {
+                    console.log("Error trying to close TranscriptionStream:", e);
+                }
+
+                await waitForTranscription(() => fastTranscription.length > 0 && accurateTranscription.length > 0);
+                
+                // Assertions
+                expect(fastTranscription).to.be.a('string');
+                expect(accurateTranscription).to.be.a('string');
+                expect(fastTranscription.length).to.be.greaterThan(0);
+                expect(accurateTranscription.length).to.be.greaterThan(0);
+                expect(fastTranscription).to.include("If you can read this");
+                expect(accurateTranscription).to.include("If you can read this, transcription is working");
+                console.log("Fast transcription:", fastTranscription);
+                console.log("Accurate transcription:", accurateTranscription);
             });
         })
     }

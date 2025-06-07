@@ -10,10 +10,10 @@ name = "perspective_diff_sync"
 
 [dependencies]
 derive_more = "0"
-serde = "1.0.198"
+serde = "1"
 lazy_static = "*"
 chrono = { version = "0.4.38", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
-thiserror = "1.0.20"
+thiserror = "1"
 petgraph = "0.6.2"
 maplit = "1.0.2"
 graphviz-rust = "0.2.1"
@@ -21,8 +21,10 @@ dot-structures = "0.1.0"
 itertools = "0.10.3"
 perspective_diff_sync_integrity = { path = "../perspective_diff_sync_integrity" }
 sha2 = "0.10.5"
-hdk = { version = "0.3.6", git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
-holo_hash =  { version = "0.3.6", git = "https://github.com/coasys/holochain.git", branch = "0.3.6-coasys" }
+
+hdi = { version = "0.6.2", git = "https://github.com/coasys/holochain.git", branch = "0.5.2-coasys" }
+hdk = { version = "0.5.2", git = "https://github.com/coasys/holochain.git", branch = "0.5.2-coasys" }
+holochain_serialized_bytes = { version = "=0.0.56", git = "https://github.com/holochain/holochain-serialization"}
 
 [features]
 test = []

@@ -202,11 +202,20 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'bob', target: 'test://bob/2'}) 
                 await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'bob', target: 'test://bob/3'})
 
-                // Wait for sync
-                await sleep(5000)
+                // Wait for sync with retry loop
+                let aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'bob'}))
+                tries = 1
+                const maxTriesAlice = 20 // 2 minutes with 1 second sleep
+
+                while(aliceLinks.length < 3 && tries < maxTriesAlice) {
+                    console.log(`Alice retrying getting links... Got ${aliceLinks.length}/3`);
+                    await sleep(2000)
+                    aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'bob'}))
+                    tries++
+                }
 
                 // Verify Alice received Bob's links
-                let aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'bob'}))
+                //let aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'bob'}))
                 expect(aliceLinks.length).to.equal(3)
                 expect(aliceLinks.some(link => link.data.target === 'test://bob/1')).to.be.true
                 expect(aliceLinks.some(link => link.data.target === 'test://bob/2')).to.be.true

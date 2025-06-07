@@ -1,16 +1,169 @@
 import { Callout } from "nextra-theme-docs";
 
-# Perspectives
+# Perspectives: Agent-Centric Knowledge Graphs
 
-A Perspective is essentially a **local graph database** that
-contain the associations between [Expressions](/expressions).
+## Understanding Perspectives
 
-While Expressions contain "objective data", Perspectives can associate meaning between Expressions
-by linking them together.
+Perspectives are semantic knowledge graphs inspired by the Semantic Web and Linked Data principles, but reimagined through an agent-centric lens. While traditional RDF graphs and Solid PODs are designed around data ownership, Perspectives emphasize that all knowledge is inherently subjective and tied to the agent who claims it.
 
-## Creating a Perspective
+### Objective vs. Subjective Data
 
-Creating a new Perspective is easy:
+In AD4M, we distinguish between two types of data:
+
+1. **Objective Data** (Expressions):
+   - Stored in Languages
+   - Same content for any agent requesting a given URL
+   - Cryptographically signed by their author
+   - Example: A post stored at `QmSocial123://post789`
+
+2. **Subjective Data** (Perspectives):
+   - Personal associations between Expressions
+   - Owned by a specific agent
+   - Represent that agent's view of relationships
+   - Example: Agent Alice linking a post as "important" or "related-to" another post
+
+### Links: Agent-Centric Triples
+
+Perspectives consist of Links – our agent-centric version of RDF triples. Each Link connects three URIs:
+```typescript
+interface Link {
+    source: string;      // Subject Expression URL
+    predicate: string;   // Predicate Expression URL
+    target: string;      // Object Expression URL
+}
+```
+
+These Links are stored as LinkExpressions – special Expressions where the `data` field contains a Link:
+```typescript
+{
+    author: "did:key:z6Mk...",  // Who made this association
+    timestamp: "2023-06-21...",
+    data: {
+        source: "QmSocial123://post789",
+        predicate: "sioc://likes",
+        target: "did:key:z6Mk..."
+    },
+    proof: { ... }  // Cryptographic proof of the claim
+}
+```
+
+### Subjective Overlays
+
+Perspectives act as subjective overlays on the objective Expression layer:
+- Every node in the graph must be a URI pointing to an Expression
+- The same Expressions can appear in many Perspectives with different relationships
+- Each agent can maintain multiple Perspectives for different contexts
+- Links in a Perspective represent an agent's claims about relationships
+
+For example:
+```
+Agent Alice's Perspective:
+Post1 --likes--> Post2
+Post2 --related-to--> Post3
+
+Agent Bob's Perspective:
+Post1 --disagrees-with--> Post2
+Post2 --authored-by--> Carol
+```
+
+## Storage and Sharing
+
+Perspectives are stored locally in your AD4M instance's database, but can be shared in several ways:
+
+1. **Snapshots**: 
+   - Export a Perspective as an Expression
+   - Contains a JSON rendering of all Links
+   - Useful for point-in-time sharing
+
+2. **Neighbourhoods**:
+   - Collaborative spaces where multiple agents share and sync Perspectives
+   - Real-time updates and p2p synchronization
+   - See [Neighbourhoods](/neighbourhoods) for more details
+
+### Future Standards Integration
+
+While AD4M currently uses its own formats to accommodate agent-centric features, we plan to implement W3C, RDF, and Solid compatibility:
+- Every Perspective will be accessible as a Solid POD
+- Links will be expressible as RDF triples
+- Standard SPARQL queries will be supported
+
+## Working with Perspectives
+
+The `PerspectiveProxy` class provides a rich interface for working with Perspectives:
+
+```typescript
+// Create a new Perspective
+const perspective = await ad4m.perspective.add("My Knowledge Graph");
+
+// Add a Link
+await perspective.add({
+    source: "QmSocial123://post789",
+    predicate: "sioc://likes",
+    target: "did:key:z6Mk..."
+});
+
+// Query Links
+const links = await perspective.get({
+    source: "QmSocial123://post789"
+});
+```
+
+### Prolog Integration
+
+Every Perspective is automatically enhanced with a Prolog engine, which:
+- Initializes with all Links as Prolog facts
+- Enables powerful semantic querying
+- Supports complex reasoning about graph structures
+- Provides real-time query subscriptions with automatic cleanup
+
+```typescript
+// Basic Prolog query
+const results = await perspective.queryProlog(`
+    triple(Post, "sioc://likes", Agent),
+    triple(Agent, "foaf://knows", "did:key:z6Mk...")
+`);
+// Finds posts liked by agents who know a specific person
+
+// Real-time query subscription
+const subscription = await perspective.subscribeInfer(`
+    triple(Post, "sioc://status", "active"),
+    triple(Post, "sioc://author", Author)
+`);
+
+// Set up callback for updates
+subscription.onResult(results => {
+    console.log("Active posts and their authors:", results);
+});
+
+// Important: Clean up subscription when done
+subscription.dispose();
+```
+
+Query subscriptions provide real-time updates but require proper cleanup:
+
+1. **Initialization**: When you create a subscription, it waits for the first result before becoming active
+2. **Keepalive**: The subscription stays active through periodic keepalive signals
+3. **Updates**: Receive real-time updates through your callback as the data changes
+4. **Cleanup**: Call `dispose()` when done to:
+   - Stop keepalive signals
+   - Unsubscribe from updates
+   - Notify the backend to clean up resources
+   - Prevent memory leaks
+
+Always remember to call `dispose()` when you're done with a subscription.
+
+### Advanced Data Modeling
+
+AD4M provides a sophisticated data modeling system built on top of the Prolog integration. This allows you to:
+- Define TypeScript classes that map to semantic structures
+- Use decorators to specify relationships
+- Query with type safety and IDE support
+
+For details on this powerful feature, see our guide on [Model Classes](/developer-guides/model-classes).
+
+## Basic Usage Examples
+
+Creating a Perspective:
 
 ```ts
 const myNotes = ad4m.perspective.add("My private notes");
@@ -19,14 +172,7 @@ const myNotes = ad4m.perspective.add("My private notes");
 The returning object will be an instance of [PerspectiveProxy](/jsdoc/classes/PerspectiveProxy/)
 – which essentially will work as your database instance.
 
-## Adding a Link
-
-Perspectives only consist of a collection of **links**, which connect
-three Expression URLs:
-
-- **Subject**: The Expression that you want to store or retrieve information about.
-- **Predicate**: Describes the relationship between the subject and the target.
-- **Target**: The Expression that is connected to the subject.
+Adding a Link:
 
 ```ts
 const link = {
@@ -38,11 +184,7 @@ const link = {
 myNotes.add(link);
 ```
 
-[Perspective class definition](/jsdoc/classes/Agent)
-
-## Query Links
-
-We can query all links on a [PerspectiveProxy](/jsdoc/classes/PerspectiveProxy/) using the `get` function:
+Query Links:
 
 ```js
 const allLinks = await myNotes.get(

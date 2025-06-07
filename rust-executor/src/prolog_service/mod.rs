@@ -1,71 +1,85 @@
 use deno_core::anyhow::Error;
 use lazy_static::lazy_static;
-use scryer_prolog::QueryResult;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+mod embedding_cache;
 pub(crate) mod engine;
-pub(crate) mod prolog_service_extension;
+pub(crate) mod engine_pool;
+pub mod types;
 
-use self::engine::PrologEngine;
+use self::engine_pool::PrologEnginePool;
+use self::types::QueryResult;
+
+const DEFAULT_POOL_SIZE: usize = 10;
 
 #[derive(Clone)]
 pub struct PrologService {
-    engines: Arc<RwLock<HashMap<String, PrologEngine>>>,
+    engine_pools: Arc<RwLock<HashMap<String, PrologEnginePool>>>,
 }
 
 impl PrologService {
     pub fn new() -> Self {
         PrologService {
-            engines: Arc::new(RwLock::new(HashMap::new())),
+            engine_pools: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    pub async fn spawn_engine(&mut self, engine_name: String) -> Result<(), Error> {
-        if self.engines.read().await.contains_key(&engine_name) {
-            return Err(Error::msg("Engine already exists"));
+    pub async fn ensure_perspective_pool(&self, perspective_id: String) -> Result<(), Error> {
+        let mut pools = self.engine_pools.write().await;
+        if !pools.contains_key(&perspective_id) {
+            let pool = PrologEnginePool::new(DEFAULT_POOL_SIZE);
+            pool.initialize(DEFAULT_POOL_SIZE).await?;
+            pools.insert(perspective_id, pool);
         }
-
-        let mut engine = PrologEngine::new();
-        engine.spawn().await?;
-
-        self.engines.write().await.insert(engine_name, engine);
         Ok(())
     }
 
-    pub async fn remove_engine(&mut self, engine_name: String) -> Result<(), Error> {
-        let mut engines = self.engines.write().await;
-        engines
-            .remove(&engine_name)
-            .ok_or_else(|| Error::msg("Engine not found"))?;
+    pub async fn _remove_perspective_pool(&self, perspective_id: String) -> Result<(), Error> {
+        let mut pools = self.engine_pools.write().await;
+        if let Some(pool) = pools.remove(&perspective_id) {
+            pool._drop_all().await?;
+        }
         Ok(())
     }
 
     pub async fn run_query(
         &self,
-        engine_name: String,
+        perspective_id: String,
         query: String,
     ) -> Result<QueryResult, Error> {
-        let engines = self.engines.read().await;
-        let engine = engines
-            .get(&engine_name)
-            .ok_or_else(|| Error::msg("Engine not found"))?;
-        let result = engine.run_query(query).await?;
-        Ok(result)
+        let pools = self.engine_pools.read().await;
+        let pool = pools
+            .get(&perspective_id)
+            .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?;
+        pool.run_query(query).await
     }
 
-    pub async fn load_module_string(
+    pub async fn run_query_all(&self, perspective_id: String, query: String) -> Result<(), Error> {
+        let pools = self.engine_pools.read().await;
+        let pool = pools
+            .get(&perspective_id)
+            .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?;
+        pool.run_query_all(query).await
+    }
+
+    pub async fn update_perspective_facts(
         &self,
-        engine_name: String,
+        perspective_id: String,
         module_name: String,
         program_lines: Vec<String>,
     ) -> Result<(), Error> {
-        let engines = self.engines.read().await;
-        let engine = engines
-            .get(&engine_name)
-            .ok_or_else(|| Error::msg("Engine not found"))?;
-        engine.load_module_string(module_name, program_lines).await
+        let pools = self.engine_pools.read().await;
+        let pool = pools
+            .get(&perspective_id)
+            .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?;
+        pool.update_all_engines(module_name, program_lines).await
+    }
+
+    pub async fn has_perspective_pool(&self, perspective_id: String) -> bool {
+        let pools = self.engine_pools.read().await;
+        pools.contains_key(&perspective_id)
     }
 }
 
@@ -85,19 +99,23 @@ pub async fn get_prolog_service() -> PrologService {
 
 #[cfg(test)]
 mod prolog_test {
-    use maplit::btreemap;
-    use scryer_prolog::{QueryMatch, QueryResolution, Value};
-
     use super::*;
+    use crate::prolog_service::types::{QueryMatch, QueryResolution};
+    use maplit::btreemap;
+    use scryer_prolog::Term;
 
     #[tokio::test]
-    async fn test_init_prolog_engine() {
+    async fn test_init_prolog_service() {
         init_prolog_service().await;
-        let mut service = get_prolog_service().await;
+        let service = get_prolog_service().await;
 
-        let engine_name = "test".to_string();
+        let perspective_id = "test".to_string();
 
-        assert!(service.spawn_engine(engine_name.clone()).await.is_ok());
+        // Ensure pool is created
+        assert!(service
+            .ensure_perspective_pool(perspective_id.clone())
+            .await
+            .is_ok());
 
         let facts = String::from(
             r#"
@@ -106,48 +124,54 @@ mod prolog_test {
         "#,
         );
 
+        // Load facts into the pool
         let load_facts = service
-            .load_module_string(engine_name.clone(), "facts".to_string(), vec![facts])
+            .update_perspective_facts(perspective_id.clone(), "facts".to_string(), vec![facts])
             .await;
         assert!(load_facts.is_ok());
 
         let query = String::from("triple(\"a\",P,\"b\").");
         let result = service
-            .run_query(engine_name.clone(), query)
+            .run_query(perspective_id.clone(), query)
             .await
-            .expect("Error running query");
+            .expect("no error running query");
 
         assert_eq!(
             result,
             Ok(QueryResolution::Matches(vec![
                 QueryMatch::from(btreemap! {
-                    "P" => Value::from("p1"),
+                    "P" => Term::string("p1"),
                 }),
                 QueryMatch::from(btreemap! {
-                    "P" => Value::from("p2"),
+                    "P" => Term::string("p2"),
                 }),
             ]))
         );
 
         let query = String::from("triple(\"a\",\"p1\",\"b\").");
-
         let result = service
-            .run_query(engine_name.clone(), query)
+            .run_query(perspective_id.clone(), query)
             .await
-            .expect("Error running query");
+            .expect("no error running query");
 
         assert_eq!(result, Ok(QueryResolution::True));
 
         let query = String::from("non_existant_predicate(\"a\",\"p1\",\"b\").");
-
         let result = service
-            .run_query(engine_name.clone(), query)
+            .run_query(perspective_id.clone(), query)
             .await
             .expect("Error running query");
 
         assert_eq!(
             result,
-            Err(String::from("error existence_error procedure / non_existant_predicate 3 / non_existant_predicate 3"))
+            Err(String::from("{ 'error': [{ 'existence_error': ['procedure', { '/': ['non_existant_predicate', 3] }] }, { '/': ['non_existant_predicate', 3] }] }"))
         );
+
+        // Test pool removal
+        assert!(service
+            ._remove_perspective_pool(perspective_id.clone())
+            .await
+            .is_ok());
+        assert!(!service.has_perspective_pool(perspective_id.clone()).await);
     }
 }

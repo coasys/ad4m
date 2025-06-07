@@ -29,9 +29,13 @@ RUN echo 'export PATH="/usr/local/bin:$PATH"' >> $HOME/.bashrc
 # Install Rust
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 RUN echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> /home/circleci/.bashrc
-RUN ~/.cargo/bin/rustup install 1.84
-RUN ~/.cargo/bin/rustup default 1.84
+RUN ~/.cargo/bin/rustup install 1.86
+RUN ~/.cargo/bin/rustup default 1.86
 RUN ~/.cargo/bin/rustup target add wasm32-unknown-unknown
+
+# Install hc
+RUN ~/.cargo/bin/cargo install holochain_cli@0.5.2
+RUN ~/.cargo/bin/cargo install kitsune2_bootstrap_srv@0.2.7
 
 # Install Deno
 RUN curl -fsSL https://deno.land/install.sh | sh
