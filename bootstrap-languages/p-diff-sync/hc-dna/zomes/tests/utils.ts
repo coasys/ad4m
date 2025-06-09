@@ -1,6 +1,6 @@
 import { AgentApp, CallableCell, Conductor, enableAndGetAgentApp, runLocalServices } from "@holochain/tryorama";
 import faker from "faker";
-import { dnas } from './common.ts';
+import { dnas, happ_path } from './common.ts';
 import { createConductor } from "@holochain/tryorama";
 import { resolve } from "node:path";
 
@@ -44,24 +44,19 @@ export async function createConductors(num: number): Promise<{agent_happ: AgentA
     for (let n of Array(num).keys()) {
         let conductor = await createConductor(localServices.signalingServerUrl, {bootstrapServerUrl: localServices.bootstrapServerUrl});
         let port = await conductor.attachAppInterface();
-        let appWs = await conductor.connectAppWs(port);
+        let adminWs = conductor.adminWs();
         try {
             let app = await conductor.installApp({
-                bundle: {
-                    manifest: {
-                        manifest_version: "1",
-                        name: "perspective-diff-sync",
-                        roles: [{
-                            name: "main",
-                            dna: {
-                                //@ts-ignore
-                                path: resolve(dnas[0].source.path)
-                            }
-                        }]
-                    },
-                    resources: {}
-                }
+                appBundleSource: {
+                    type: "path",
+                    value: happ_path
+                },
             });
+            
+            const issued = await adminWs.issueAppAuthenticationToken({
+                installed_app_id: app.installed_app_id,
+              });
+            let appWs = await conductor.connectAppWs(issued.token, port);
             const agentApp = await enableAndGetAgentApp(conductor.adminWs(), appWs, app);
             out.push({
                 agent_happ: agentApp,
