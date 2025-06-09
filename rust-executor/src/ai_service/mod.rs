@@ -340,19 +340,19 @@ impl AIService {
     // -------------------------------------
 
     fn new_candle_device() -> Device {
-        let non_accelerated_message = "Could not get accelerated Candle device. Defaulting to CPU.";
         if cfg!(feature = "cuda") {
             log::info!("Using CUDA device");
+            let non_accelerated_message =
+                "Could not get accelerated CUDA device. Defaulting to CPU.";
             Device::new_cuda(0).unwrap_or_else(|e| {
                 println!("{} {:?}", non_accelerated_message, e);
-                error!(
-                    "Couldn't get accellerated CUDA device:{} {:?}",
-                    non_accelerated_message, e
-                );
+                error!("{} {:?}", non_accelerated_message, e);
                 Device::Cpu
             })
         } else if cfg!(feature = "metal") {
             Device::new_metal(0).unwrap_or_else(|e| {
+                let non_accelerated_message =
+                    "Could not get accelerated Metal device. Defaulting to CPU.";
                 println!("{} {:?}", non_accelerated_message, e);
                 error!("{} {:?}", non_accelerated_message, e);
                 Device::Cpu
