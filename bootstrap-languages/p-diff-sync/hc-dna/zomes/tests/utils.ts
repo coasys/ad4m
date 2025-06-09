@@ -1,8 +1,8 @@
-import { AgentApp, CallableCell, Conductor, NetworkType, enableAndGetAgentApp, runLocalServices } from "@holochain/tryorama";
+import { AgentApp, CallableCell, Conductor, enableAndGetAgentApp, runLocalServices } from "@holochain/tryorama";
 import faker from "faker";
-import { dnas } from './common';
+import { dnas } from './common.ts';
 import { createConductor } from "@holochain/tryorama";
-import { resolve } from "path";
+import { resolve } from "node:path";
 
 export async function call(happ: AgentApp, fn_name: string, payload?: any) {
     return await happ.cells[0].callZome({
@@ -42,7 +42,7 @@ export async function createConductors(num: number): Promise<{agent_happ: AgentA
     const localServices = await runLocalServices();
 
     for (let n of Array(num).keys()) {
-        let conductor = await createConductor(localServices.signalingServerUrl, {networkType: NetworkType.WebRtc, bootstrapServerUrl: localServices.bootstrapServerUrl});
+        let conductor = await createConductor(localServices.signalingServerUrl, {bootstrapServerUrl: localServices.bootstrapServerUrl});
         let port = await conductor.attachAppInterface();
         let appWs = await conductor.connectAppWs(port);
         try {

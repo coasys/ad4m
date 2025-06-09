@@ -1,5 +1,5 @@
 import { addAllAgentsToAllConductors, cleanAllConductors } from "@holochain/tryorama";
-import { call, sleep, generate_link_expression, createConductors} from "./utils";
+import { call, sleep, generate_link_expression, createConductors} from "./utils.ts";
 import test from "tape-promise/tape.js";
 
 //NOTE; these tests are dependant on the SNAPSHOT_INTERVAL in lib.rs being set to 2

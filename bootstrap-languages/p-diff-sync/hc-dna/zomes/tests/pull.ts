@@ -1,5 +1,5 @@
 import { addAllAgentsToAllConductors, cleanAllConductors } from "@holochain/tryorama";
-import { call, sleep, generate_link_expression, createConductors, create_link_expression} from "./utils";
+import { call, sleep, generate_link_expression, createConductors, create_link_expression} from "./utils.ts";
 import test from "tape-promise/tape.js";
 
 // //@ts-ignore

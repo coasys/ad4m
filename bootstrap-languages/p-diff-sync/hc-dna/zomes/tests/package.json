@@ -18,9 +18,9 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@holochain/client": "0.16.1",
-    "@holochain/tryorama": "0.15.0",
-    "@perspect3vism/ad4m": "^0.2.12",
+    "@holochain/client": "0.19",
+    "@holochain/tryorama": "0.18",
+    "@coasys/ad4m": "^0.10.1-release-candidate-3-test-2",
     "@types/lodash": "^4.14.158",
     "@types/node": "^18.0.0",
     "blake2b": "^2.1.3",
