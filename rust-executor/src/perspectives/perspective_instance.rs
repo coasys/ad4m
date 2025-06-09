@@ -600,8 +600,6 @@ impl PerspectiveInstance {
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
         self.pubsub_publish_diff(decorated_diff).await;
-        *(self.trigger_notification_check.lock().await) = true;
-        *(self.trigger_prolog_subscription_check.lock().await) = true;
     }
 
     pub async fn telepresence_signal_from_link_language(&self, mut signal: PerspectiveExpression) {
@@ -667,8 +665,6 @@ impl PerspectiveInstance {
                     self.spawn_commit_and_handle_error(&diff);
                 }
 
-                *(self.trigger_notification_check.lock().await) = true;
-                *(self.trigger_prolog_subscription_check.lock().await) = true;
                 Ok(decorated_link)
             } else {
                 Err(anyhow!("Link not found"))
@@ -745,8 +741,6 @@ impl PerspectiveInstance {
         }
 
         self.pubsub_publish_diff(decorated_perspective_diff).await;
-        *(self.trigger_notification_check.lock().await) = true;
-        *(self.trigger_prolog_subscription_check.lock().await) = true;
         Ok(decorated_link_expression)
     }
 
@@ -795,11 +789,11 @@ impl PerspectiveInstance {
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
             self.pubsub_publish_diff(decorated_perspective_diff).await;
+
             if status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&perspective_diff);
             }
-            *(self.trigger_notification_check.lock().await) = true;
-            *(self.trigger_prolog_subscription_check.lock().await) = true;
+
             Ok(decorated_link_expressions)
         }
     }
@@ -850,8 +844,6 @@ impl PerspectiveInstance {
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
         }
-        *(self.trigger_notification_check.lock().await) = true;
-        *(self.trigger_prolog_subscription_check.lock().await) = true;
         Ok(decorated_diff)
     }
 
@@ -928,8 +920,6 @@ impl PerspectiveInstance {
             if link_status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&diff);
             }
-            *(self.trigger_notification_check.lock().await) = true;
-            *(self.trigger_prolog_subscription_check.lock().await) = true;
             Ok(decorated_new_link_expression)
         }
     }
@@ -1010,8 +1000,6 @@ impl PerspectiveInstance {
                 self.spawn_commit_and_handle_error(&shared_diff);
             }
 
-            *(self.trigger_notification_check.lock().await) = true;
-            *(self.trigger_prolog_subscription_check.lock().await) = true;
             Ok(decorated_links)
         }
     }
@@ -1316,6 +1304,10 @@ impl PerspectiveInstance {
 
             if did_update {
                 self_clone.pubsub_publish_diff(diff).await;
+                
+                // Trigger notification and subscription checks after prolog facts are updated
+                *(self_clone.trigger_notification_check.lock().await) = true;
+                *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
             }
 
             // Signal completion through the oneshot channel if provided
