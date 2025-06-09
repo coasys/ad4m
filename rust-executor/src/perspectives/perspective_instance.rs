@@ -1304,7 +1304,7 @@ impl PerspectiveInstance {
 
             if did_update {
                 self_clone.pubsub_publish_diff(diff).await;
-                
+
                 // Trigger notification and subscription checks after prolog facts are updated
                 *(self_clone.trigger_notification_check.lock().await) = true;
                 *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
