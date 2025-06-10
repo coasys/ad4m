@@ -378,8 +378,8 @@ impl PerspectiveInstance {
         let mut before = self.notification_trigger_snapshot().await;
         while !*self.is_teardown.lock().await {
             interval.tick().await;
-            let mut changed = self.trigger_notification_check.lock().await;
-            if *changed {
+            let changed = *(self.trigger_notification_check.lock().await);
+            if changed {
                 let after = self.notification_trigger_snapshot().await;
                 let new_matches = Self::subtract_before_notification_matches(&before, &after);
                 tokio::spawn(Self::publish_notification_matches(
@@ -387,7 +387,7 @@ impl PerspectiveInstance {
                     new_matches,
                 ));
                 before = after;
-                *changed = false;
+                *(self.trigger_notification_check.lock().await) = false;
             }
         }
     }
