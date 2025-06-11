@@ -153,23 +153,26 @@ impl Workspace {
                 } else {
                     let mut snapshot = snapshot.unwrap();
 
+                    // Process chunked diffs from snapshot
                     let mut last_diff = None;
                     for i in 0..snapshot.diff_chunks.len() {
-                        let diff_chunk = &snapshot.diff_chunks[i];
+                        let diff_chunk_hash = &snapshot.diff_chunks[i];
+                        
+                        // Retrieve the actual chunked diff entry
+                        let chunked_diff_entry = Self::get_p_diff_reference::<Retriever>(diff_chunk_hash.clone())?;
+                        
                         self.entry_map.insert(
-                            diff_chunk.clone(),
-                            PerspectiveDiffEntryReference::new(
-                                PerspectiveDiff::new(), // empty diff for snapshot chunks
-                                last_diff.clone(),
-                            ),
+                            diff_chunk_hash.clone(),
+                            chunked_diff_entry,
                         );
-                        last_diff = Some(vec![diff_chunk.clone()]);
+                        last_diff = Some(vec![diff_chunk_hash.clone()]);
                     }
 
+                    // Insert the current snapshot reference entry with empty diff and link to last chunk
                     self.entry_map.insert(
                         current_hash.clone(),
                         PerspectiveDiffEntryReference::new(
-                            PerspectiveDiff::new(), // empty diff for snapshot reference
+                            PerspectiveDiff::new(), // empty diff for snapshot reference itself
                             last_diff.clone(),
                         ),
                     );
