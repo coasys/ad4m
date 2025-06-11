@@ -326,27 +326,16 @@ impl MockPerspectiveGraph {
                         removals: vec![],
                     };
 
-                    //Create a mock hash for the fake diff
-                    let ref_sb = SerializedBytes::try_from(diff.clone())?;
-                    let mut hasher = Sha256::new();
-                    hasher.update(ref_sb.bytes());
-                    let mut result = hasher.finalize().as_slice().to_owned();
-                    result.append(&mut vec![0xdb, 0xdb, 0xdb, 0xdb]);
-                    let diff_hash = ActionHash::from_raw_36(result);
-
-                    //Create the diff reference
+                    //Create the diff reference with embedded diff data
                     let diff_ref = PerspectiveDiffEntryReference::new(
-                        diff.clone(),
+                        diff,
                         parents.get(ref_hash).as_ref().cloned().cloned(),
                     );
-                    //Insert the diff reference into the map
+                    //Insert only the diff reference into the map at the node hash
                     let diff_ref_sb = diff_ref
                         .try_into()
                         .expect("Could not create serialized bytes for mocked_diff");
                     graph.graph_map.insert(ref_hash.clone(), diff_ref_sb);
-
-                    //Insert the diff into the map
-                    graph.graph_map.insert(diff_hash, ref_sb);
                 }
 
                 Ok(graph)
@@ -428,8 +417,8 @@ fn can_create_graph_from_dot() {
     }";
 
     let graph = MockPerspectiveGraph::from_dot(dot).expect("from_dot not to return error");
-    //26 since there is a diffref & diff for each node
-    assert_eq!(graph.graph_map.keys().len(), 26);
+    //13 since we only create PerspectiveDiffEntryReference entries, not separate PerspectiveDiff entries
+    assert_eq!(graph.graph_map.keys().len(), 13);
 
     let node_12 = node_id_hash(&dot_structures::Id::Plain(String::from("12")));
     let node_11 = node_id_hash(&dot_structures::Id::Plain(String::from("11")));
@@ -534,6 +523,6 @@ fn can_get_and_create_mocked_holochain_objects() {
     )));
     assert!(commit.is_ok());
 
-    let get_commit = MockPerspectiveGraph::get::<PerspectiveDiff>(commit.unwrap());
+    let get_commit = MockPerspectiveGraph::get::<PerspectiveDiffEntryReference>(commit.unwrap());
     assert!(get_commit.is_ok());
 }
