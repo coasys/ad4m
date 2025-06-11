@@ -698,6 +698,13 @@ export class Ad4mModel {
     // We use createSubject's initialValues to set properties (but not collections)
     // We then later use innerUpdate to set collections
 
+    let batchCreatedHere = false;
+    if(!batchId) {
+      batchId = await this.perspective.createBatch()
+      batchCreatedHere = true;
+    }
+    
+
     // First filter out the properties that are not collections (arrays)
     const initialValues = {};
     for (const [key, value] of Object.entries(this)) {
@@ -724,13 +731,13 @@ export class Ad4mModel {
     // Set collections
     await this.innerUpdate(false, batchId)
 
-    // If we're in batch mode, we don't need to do anything else 
-    // since the instance won't exist until batch commit
-    if (batchId) {
-      return;
+    // If we got a batchId passed in, we let the caller decide when to commit.
+    // But then we can call getData() since the instance won't exist in the perspective
+    // until the bacht is committedl
+    if (batchCreatedHere) {
+      await this.perspective.commitBatch(batchId)
+      await this.getData();
     }
-
-    await this.getData();
   }
 
   private cleanCopy() {
