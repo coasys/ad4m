@@ -361,13 +361,13 @@ impl HolochainService {
             if local_config.use_bootstrap {
                 network_config.bootstrap_url = Url2::parse(local_config.bootstrap_url.as_str());
             } else {
-                network_config.bootstrap_url = Url2::parse("http://relay.ad4m.dev:4433");
+                network_config.bootstrap_url = Url2::parse("https://relay.ad4m.dev:4433");
             }
 
             if local_config.use_proxy {
                 network_config.signal_url = Url2::parse(local_config.proxy_url.as_str());
             } else {
-                network_config.signal_url = Url2::parse("ws://relay.ad4m.dev:4433");
+                network_config.signal_url = Url2::parse("wss://relay.ad4m.dev:4433");
             }
 
             //if local_config.use_local_proxy {
