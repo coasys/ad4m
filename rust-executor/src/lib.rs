@@ -74,7 +74,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     env::set_var(
         "RUST_LOG",
-        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=debug,warp::server",
+        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=debug,warp::server,kitsune2_transport_tx5=debug,tx5=debug,tx5_core=debug,tx5_signal=debug,kitsune2_core=debug",
     );
     let _ = env_logger::try_init();
     config.prepare();

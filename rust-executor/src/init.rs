@@ -14,7 +14,7 @@ pub fn init(
 ) -> Result<(), Box<dyn Error>> {
     std::env::set_var(
         "RUST_LOG",
-        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server",
+        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp::server,kitsune2_transport_tx5=debug,tx5=debug,tx5_core=debug,tx5_signal=debug,kitsune2_core=debug",
     );
     let _ = env_logger::try_init();
 
