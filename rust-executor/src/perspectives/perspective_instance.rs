@@ -378,8 +378,8 @@ impl PerspectiveInstance {
         let mut before = self.notification_trigger_snapshot().await;
         while !*self.is_teardown.lock().await {
             interval.tick().await;
-            let mut changed = self.trigger_notification_check.lock().await;
-            if *changed {
+            let changed = *(self.trigger_notification_check.lock().await);
+            if changed {
                 let after = self.notification_trigger_snapshot().await;
                 let new_matches = Self::subtract_before_notification_matches(&before, &after);
                 tokio::spawn(Self::publish_notification_matches(
@@ -387,7 +387,7 @@ impl PerspectiveInstance {
                     new_matches,
                 ));
                 before = after;
-                *changed = false;
+                *(self.trigger_notification_check.lock().await) = false;
             }
         }
     }
@@ -600,8 +600,6 @@ impl PerspectiveInstance {
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
         self.pubsub_publish_diff(decorated_diff).await;
-        *(self.trigger_notification_check.lock().await) = true;
-        *(self.trigger_prolog_subscription_check.lock().await) = true;
     }
 
     pub async fn telepresence_signal_from_link_language(&self, mut signal: PerspectiveExpression) {
@@ -667,8 +665,6 @@ impl PerspectiveInstance {
                     self.spawn_commit_and_handle_error(&diff);
                 }
 
-                *(self.trigger_notification_check.lock().await) = true;
-                *(self.trigger_prolog_subscription_check.lock().await) = true;
                 Ok(decorated_link)
             } else {
                 Err(anyhow!("Link not found"))
@@ -677,7 +673,11 @@ impl PerspectiveInstance {
     }
 
     async fn pubsub_publish_diff(&self, decorated_diff: DecoratedPerspectiveDiff) {
-        let handle = self.persisted.lock().await.clone();
+        // Get handle without holding lock during pubsub operations
+        let handle = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.clone()
+        };
 
         for link in &decorated_diff.additions {
             get_global_pubsub()
@@ -745,8 +745,6 @@ impl PerspectiveInstance {
         }
 
         self.pubsub_publish_diff(decorated_perspective_diff).await;
-        *(self.trigger_notification_check.lock().await) = true;
-        *(self.trigger_prolog_subscription_check.lock().await) = true;
         Ok(decorated_link_expression)
     }
 
@@ -795,11 +793,11 @@ impl PerspectiveInstance {
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
             self.pubsub_publish_diff(decorated_perspective_diff).await;
+
             if status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&perspective_diff);
             }
-            *(self.trigger_notification_check.lock().await) = true;
-            *(self.trigger_prolog_subscription_check.lock().await) = true;
+
             Ok(decorated_link_expressions)
         }
     }
@@ -850,8 +848,6 @@ impl PerspectiveInstance {
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
         }
-        *(self.trigger_notification_check.lock().await) = true;
-        *(self.trigger_prolog_subscription_check.lock().await) = true;
         Ok(decorated_diff)
     }
 
@@ -928,8 +924,6 @@ impl PerspectiveInstance {
             if link_status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&diff);
             }
-            *(self.trigger_notification_check.lock().await) = true;
-            *(self.trigger_prolog_subscription_check.lock().await) = true;
             Ok(decorated_new_link_expression)
         }
     }
@@ -1010,8 +1004,6 @@ impl PerspectiveInstance {
                 self.spawn_commit_and_handle_error(&shared_diff);
             }
 
-            *(self.trigger_notification_check.lock().await) = true;
-            *(self.trigger_prolog_subscription_check.lock().await) = true;
             Ok(decorated_links)
         }
     }
@@ -1277,23 +1269,26 @@ impl PerspectiveInstance {
                 return;
             }
 
-            // Take write lock for the entire facts update operation
-            let _write_guard = self_clone.prolog_update_mutex.write().await;
+            // Get UUID before acquiring write lock
+            let uuid = {
+                let persisted_guard = self_clone.persisted.lock().await;
+                persisted_guard.uuid.clone()
+            };
 
             let fact_rebuild_needed = !diff.removals.is_empty()
                 || diff.additions.iter().any(|link| is_sdna_link(&link.data));
 
             let did_update = if !fact_rebuild_needed {
-                // For additions only, use assertions
+                // For additions only, use assertions - acquire lock only during prolog operations
                 let mut assertions: Vec<String> = Vec::new();
                 for addition in &diff.additions {
                     assertions.push(generic_link_fact("assert_link_and_triple", addition));
                 }
 
                 let service = get_prolog_service().await;
-                let uuid = self_clone.persisted.lock().await.uuid.clone();
 
-                // Join all assertions into a single query and run on all engines
+                // Acquire write lock only for the prolog operation
+                let _write_guard = self_clone.prolog_update_mutex.write().await;
                 let query = format!("{}.", assertions.join(","));
                 match service.run_query_all(uuid, query).await {
                     Ok(()) => true,
@@ -1305,6 +1300,8 @@ impl PerspectiveInstance {
                     }
                 }
             } else {
+                // For fact rebuild, acquire write lock for the entire operation
+                let _write_guard = self_clone.prolog_update_mutex.write().await;
                 match self_clone.update_prolog_engine_facts().await {
                     Ok(()) => true,
                     Err(e) => {
@@ -1316,6 +1313,10 @@ impl PerspectiveInstance {
 
             if did_update {
                 self_clone.pubsub_publish_diff(diff).await;
+
+                // Trigger notification and subscription checks after prolog facts are updated
+                *(self_clone.trigger_notification_check.lock().await) = true;
+                *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
             }
 
             // Signal completion through the oneshot channel if provided
@@ -1335,7 +1336,12 @@ impl PerspectiveInstance {
     async fn calc_notification_trigger_matches(
         &self,
     ) -> Result<BTreeMap<Notification, Vec<QueryMatch>>, AnyError> {
-        let uuid = self.persisted.lock().await.uuid.clone();
+        // Get UUID without holding lock during operations
+        let uuid = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
+
         let notifications = Self::all_notifications_for_perspective_id(uuid)?;
         let mut result_map = BTreeMap::new();
         for n in notifications {
@@ -1418,21 +1424,25 @@ impl PerspectiveInstance {
     }
 
     async fn update_prolog_engine_facts(&self) -> Result<(), AnyError> {
-        let service = get_prolog_service().await;
-        let uuid = self.persisted.lock().await.uuid.clone();
+        // Get all required data before making service calls
+        let uuid = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
 
         let all_links = self.get_links(&LinkQuery::default()).await?;
-        let facts = init_engine_facts(
-            all_links,
-            self.persisted
-                .lock()
-                .await
+
+        let neighbourhood_author = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard
                 .neighbourhood
                 .as_ref()
-                .map(|n| n.author.clone()),
-        )
-        .await?;
+                .map(|n| n.author.clone())
+        };
 
+        let facts = init_engine_facts(all_links, neighbourhood_author).await?;
+
+        let service = get_prolog_service().await;
         service
             .update_perspective_facts(uuid, "facts".to_string(), facts)
             .await?;
@@ -1440,11 +1450,14 @@ impl PerspectiveInstance {
     }
 
     async fn no_link_language_error(&self) -> AnyError {
-        let handle = self.persisted.lock().await.clone();
+        let (uuid, state) = {
+            let handle = self.persisted.lock().await;
+            (handle.uuid.clone(), handle.state.clone())
+        };
         anyhow!(
             "Perspective {} has no link language installed. State is: {:?}",
-            handle.uuid,
-            handle.state
+            uuid,
+            state
         )
     }
 
@@ -2056,9 +2069,13 @@ impl PerspectiveInstance {
 
         // Return existing subscription if found
         if let Some(existing_id) = existing_subscription {
-            let queries = self.subscribed_queries.lock().await;
-            if let Some(query) = queries.get(&existing_id) {
-                let result_string = format!("#init#{}", query.last_result);
+            let existing_result = {
+                let queries = self.subscribed_queries.lock().await;
+                queries.get(&existing_id).map(|q| q.last_result.clone())
+            };
+
+            if let Some(last_result) = existing_result {
+                let result_string = format!("#init#{}", last_result);
                 for delay in [100, 500, 1000, 10000, 15000, 20000, 25000] {
                     self.send_subscription_update(
                         existing_id.clone(),
@@ -2067,11 +2084,13 @@ impl PerspectiveInstance {
                     )
                     .await;
                 }
-                return Ok((existing_id, query.last_result.clone()));
+                return Ok((existing_id, last_result));
             }
         }
 
         let subscription_id = uuid::Uuid::new_v4().to_string();
+
+        // Execute prolog query without holding any locks
         let initial_result = self.prolog_query(query.clone()).await?;
         let result_string = prolog_resolution_to_string(initial_result);
 
@@ -2081,6 +2100,7 @@ impl PerspectiveInstance {
             last_keepalive: Instant::now(),
         };
 
+        // Now insert the subscription
         self.subscribed_queries
             .lock()
             .await
@@ -2180,7 +2200,13 @@ impl PerspectiveInstance {
 
     async fn subscribed_queries_loop(&self) {
         while !*self.is_teardown.lock().await {
-            if *self.trigger_prolog_subscription_check.lock().await {
+            // Check trigger without holding lock during the operation
+            let should_check = {
+                let trigger_check = *self.trigger_prolog_subscription_check.lock().await;
+                trigger_check
+            };
+
+            if should_check {
                 self.check_subscribed_queries().await;
                 *self.trigger_prolog_subscription_check.lock().await = false;
             }
@@ -2204,10 +2230,13 @@ impl PerspectiveInstance {
         &mut self,
         batch_uuid: String,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
-        let mut batch_store = self.batch_store.write().await;
-        let diff = match batch_store.remove(&batch_uuid) {
-            Some(diff) => diff,
-            None => return Err(anyhow!("No batch found with given UUID")),
+        // Get the diff without holding lock during the entire operation
+        let diff = {
+            let mut batch_store = self.batch_store.write().await;
+            match batch_store.remove(&batch_uuid) {
+                Some(diff) => diff,
+                None => return Err(anyhow!("No batch found with given UUID")),
+            }
         };
 
         let mut shared_diff = DecoratedPerspectiveDiff {
@@ -2242,9 +2271,11 @@ impl PerspectiveInstance {
             }
         }
 
-        let handle = self.persisted.lock().await;
-        let uuid = handle.uuid.clone();
-        drop(handle);
+        // Get UUID without holding lock during DB operations
+        let uuid = {
+            let handle = self.persisted.lock().await;
+            handle.uuid.clone()
+        };
 
         // Apply shared changes
         if !shared_diff.additions.is_empty() || !shared_diff.removals.is_empty() {
