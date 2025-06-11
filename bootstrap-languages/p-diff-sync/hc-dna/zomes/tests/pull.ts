@@ -1,5 +1,5 @@
 import { addAllAgentsToAllConductors, cleanAllConductors } from "@holochain/tryorama";
-import { call, sleep, generate_link_expression, createConductors, create_link_expression} from "./utils.ts";
+import { call, sleep, generate_link_expression, createConductors, create_link_expression, retryUntilSuccess} from "./utils.ts";
 import test from "tape-promise/tape.js";
 
 // //@ts-ignore
@@ -218,14 +218,19 @@ export async function mergeFetch(t) {
     //Connect nodes togther
     await addAllAgentsToAllConductors([aliceConductor, bobConductor]);
     //note; running this test on some machines may require more than 200ms wait
-    await sleep(1000)
+    await sleep(10000)
     
     //Alice tries to merge
-    let merge_alice = await aliceHapps.cells[0].callZome({
-        zome_name: "perspective_diff_sync", 
-        fn_name: "pull",
-        payload: { hash: commit_bob, is_scribe: true }
-    });
+    let merge_alice = await retryUntilSuccess(
+        () => aliceHapps.cells[0].callZome({
+            zome_name: "perspective_diff_sync", 
+            fn_name: "pull",
+            payload: { hash: commit_bob, is_scribe: true }
+        }),
+        5, // max retries  
+        2000, // 2 second delay
+        (result: any) => result && result.diff && result.diff.additions && result.diff.additions.length === 1
+    );
     //@ts-ignore
     t.isEqual(merge_alice.diff.additions.length, 1);
     //@ts-ignore
@@ -239,11 +244,17 @@ export async function mergeFetch(t) {
     //note; running this test on some machines may require more than 200ms wait
     await sleep(2000)
     
-    let pull_bob3 = await bobHapps.cells[0].callZome({
-        zome_name: "perspective_diff_sync", 
-        fn_name: "pull",
-        payload: { hash: alice_merge_commit, is_scribe: false }
-    });
+    // Use retry logic for pull operation to handle DHT synchronization delays
+    let pull_bob3 = await retryUntilSuccess(
+        () => bobHapps.cells[0].callZome({
+            zome_name: "perspective_diff_sync", 
+            fn_name: "pull",
+            payload: { hash: alice_merge_commit, is_scribe: false }
+        }),
+        5, // max retries
+        2000, // 2 second delay between retries
+        (result: any) => result && result.diff && result.diff.additions && result.diff.additions.length === 1
+    );
     console.warn("bob pull3", pull_bob3);
     //@ts-ignore
     t.isEqual(pull_bob3.diff.additions.length, 1);

@@ -36,6 +36,39 @@ export function sleep(ms: number) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Retry utility for DHT synchronization - simulates AD4M's sync cycle approach
+export async function retryUntilSuccess<T>(
+    operation: () => Promise<T>,
+    maxRetries: number = 5,
+    delayMs: number = 1000,
+    validateResult?: (result: T) => boolean
+): Promise<T> {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const result = await operation();
+            
+            // If validation function provided, check if result is valid
+            if (validateResult && !validateResult(result)) {
+                if (attempt === maxRetries) {
+                    throw new Error(`Validation failed after ${maxRetries} attempts`);
+                }
+                console.log(`Attempt ${attempt}: Result validation failed, retrying in ${delayMs}ms...`);
+                await sleep(delayMs);
+                continue;
+            }
+            
+            return result;
+        } catch (error) {
+            if (attempt === maxRetries) {
+                throw error;
+            }
+            console.log(`Attempt ${attempt}: Operation failed, retrying in ${delayMs}ms...`, error);
+            await sleep(delayMs);
+        }
+    }
+    throw new Error(`Failed after ${maxRetries} attempts`);
+}
+
 export async function createConductors(num: number): Promise<{agent_happ: AgentApp, conductor: Conductor}[]> {
     let out = [] as {agent_happ: AgentApp, conductor: Conductor}[];
 
