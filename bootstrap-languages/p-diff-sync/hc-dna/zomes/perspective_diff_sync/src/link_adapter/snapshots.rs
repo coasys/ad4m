@@ -1,6 +1,6 @@
 use hdk::prelude::*;
 use perspective_diff_sync_integrity::{
-    LinkExpression, LinkTypes, PerspectiveDiff, PerspectiveDiffEntryReference, Snapshot,
+    LinkExpression, LinkTypes, PerspectiveDiffEntryReference, Snapshot,
 };
 
 use crate::errors::{SocialContextError, SocialContextResult};
@@ -147,20 +147,14 @@ fn handle_parents(
     //Check if entry is already in graph
     if !seen.contains(&search_position.hash) {
         seen.insert(search_position.hash.clone());
-        let diff_entry = get(diff.diff.clone(), GetOptions::network())?
-            .ok_or(SocialContextError::InternalError(
-                "Could not find diff entry for given diff entry reference",
-            ))?
-            .entry()
-            .to_app_option::<PerspectiveDiff>()?
-            .ok_or(SocialContextError::InternalError(
-                "Expected element to contain app entry data",
-            ))?;
-
-        for addition in diff_entry.additions.iter() {
+        let _diff_entry = get(search_position.hash.clone(), GetOptions::network())?
+            .ok_or(SocialContextError::InternalError("Could not get diff entry"))?;
+        
+        // Access diff data directly from the entry
+        for addition in diff.diff.additions.iter() {
             all_additions.insert(addition.clone());
         }
-        for removal in diff_entry.removals.iter() {
+        for removal in diff.diff.removals.iter() {
             all_removals.insert(removal.clone());
         }
 

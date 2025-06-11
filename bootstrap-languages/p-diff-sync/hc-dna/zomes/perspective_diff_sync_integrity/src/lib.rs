@@ -1,8 +1,6 @@
 use chrono::{DateTime, Utc};
 use hdi::prelude::*;
 
-pub mod impls;
-
 #[derive(
     Serialize, Deserialize, Clone, SerializedBytes, Debug, PartialEq, Eq, Hash, Ord, PartialOrd,
 )]
@@ -28,7 +26,7 @@ pub struct LinkExpression {
     pub proof: ExpressionProof,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes, Default, PartialEq, Eq, Hash)]
 pub struct PerspectiveDiff {
     pub additions: Vec<LinkExpression>,
     pub removals: Vec<LinkExpression>,
@@ -39,7 +37,6 @@ pub struct PerspectiveDiff {
 pub struct HashBroadcast {
     pub reference_hash: HoloHash<holo_hash::hash_type::Action>,
     pub reference: PerspectiveDiffEntryReference,
-    pub diff: PerspectiveDiff,
     pub broadcast_author: String,
 }
 
@@ -53,9 +50,12 @@ impl PerspectiveDiff {
     pub fn total_diff_number(&self) -> usize {
         self.additions.len() + self.removals.len()
     }
+    
+    pub fn get_sb(self) -> ExternResult<SerializedBytes> {
+        self.try_into()
+            .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))
+    }
 }
-
-app_entry!(PerspectiveDiff);
 
 #[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes)]
 pub struct Snapshot {
@@ -67,7 +67,7 @@ app_entry!(Snapshot);
 
 #[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes, PartialEq, Eq, Hash)]
 pub struct PerspectiveDiffEntryReference {
-    pub diff: HoloHash<holo_hash::hash_type::Action>,
+    pub diff: PerspectiveDiff,
     pub parents: Option<Vec<HoloHash<holo_hash::hash_type::Action>>>,
     pub diffs_since_snapshot: usize,
 }
@@ -141,8 +141,6 @@ pub struct PullResult {
 #[unit_enum(UnitEntryTypes)]
 pub enum EntryTypes {
     #[entry_type(visibility = "public")]
-    PerspectiveDiff(PerspectiveDiff),
-    #[entry_type(visibility = "public")]
     Snapshot(Snapshot),
     #[entry_type(visibility = "public")]
     HashReference(HashReference),
@@ -166,4 +164,74 @@ pub enum LinkTypes {
     TimePath,
     Index,
     DidLink,
+}
+
+impl Anchor {
+    pub fn get_sb(self) -> ExternResult<SerializedBytes> {
+        self.try_into()
+            .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))
+    }
+}
+
+impl PerspectiveExpression {
+    pub fn get_sb(self) -> ExternResult<SerializedBytes> {
+        self.try_into()
+            .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))
+    }
+}
+
+impl HashBroadcast {
+    pub fn get_sb(self) -> ExternResult<SerializedBytes> {
+        self.try_into()
+            .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))
+    }
+}
+
+impl PerspectiveDiffEntryReference {
+    pub fn new(
+        diff: PerspectiveDiff,
+        parents: Option<Vec<HoloHash<holo_hash::hash_type::Action>>>,
+    ) -> Self {
+        Self {
+            diff: diff,
+            parents: parents,
+            diffs_since_snapshot: 0,
+        }
+    }
+
+    /// Backward compatibility method to extract the diff data
+    pub fn to_perspective_diff(&self) -> PerspectiveDiff {
+        self.diff.clone()
+    }
+}
+
+impl PartialOrd for PerspectiveDiffEntryReference {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // Compare based on parents if available, otherwise compare diff content
+        if let (Some(self_parents), Some(other_parents)) = (&self.parents, &other.parents) {
+            if let (Some(self_first), Some(other_first)) = (self_parents.first(), other_parents.first()) {
+                return self_first.partial_cmp(other_first);
+            }
+        }
+        self.diff.total_diff_number().partial_cmp(&other.diff.total_diff_number())
+    }
+}
+
+impl Ord for PerspectiveDiffEntryReference {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Compare based on parents if available, otherwise compare diff content
+        if let (Some(self_parents), Some(other_parents)) = (&self.parents, &other.parents) {
+            if let (Some(self_first), Some(other_first)) = (self_parents.first(), other_parents.first()) {
+                return self_first.cmp(other_first);
+            }
+        }
+        self.diff.total_diff_number().cmp(&other.diff.total_diff_number())
+    }
+}
+
+impl OnlineAgent {
+    pub fn get_sb(self) -> ExternResult<SerializedBytes> {
+        self.try_into()
+            .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))
+    }
 }

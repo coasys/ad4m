@@ -1,5 +1,4 @@
 use hdk::prelude::*;
-use perspective_diff_sync_integrity::PerspectiveDiff;
 
 use crate::errors::{SocialContextError, SocialContextResult};
 use crate::link_adapter::revisions::current_revision;
@@ -23,12 +22,10 @@ pub fn render<Retriever: PerspectiveDiffRetreiver>() -> SocialContextResult<Pers
 
     let mut perspective = Perspective { links: vec![] };
     for diff_node in workspace.entry_map {
-        let diff_entry = Retriever::get::<PerspectiveDiff>(diff_node.1.diff.clone())?;
-
-        for addition in diff_entry.additions {
+        for addition in diff_node.1.diff.additions {
             perspective.links.push(addition);
         }
-        for removal in diff_entry.removals {
+        for removal in diff_node.1.diff.removals {
             perspective.links.retain(|l| l != &removal);
         }
     }

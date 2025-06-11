@@ -159,7 +159,7 @@ impl Workspace {
                         self.entry_map.insert(
                             diff_chunk.clone(),
                             PerspectiveDiffEntryReference::new(
-                                diff_chunk.clone(),
+                                PerspectiveDiff::new(), // empty diff for snapshot chunks
                                 last_diff.clone(),
                             ),
                         );
@@ -168,7 +168,10 @@ impl Workspace {
 
                     self.entry_map.insert(
                         current_hash.clone(),
-                        PerspectiveDiffEntryReference::new(current_diff.diff, last_diff.clone()),
+                        PerspectiveDiffEntryReference::new(
+                            PerspectiveDiff::new(), // empty diff for snapshot reference
+                            last_diff.clone(),
+                        ),
                     );
 
                     snapshot_seen.append(&mut snapshot.included_diffs);
@@ -373,8 +376,11 @@ impl Workspace {
             other_mut.found_ancestors.get_mut().push(NULL_NODE());
         };
         if self.diffs.get(&NULL_NODE()).is_none() {
-            let current_diff = PerspectiveDiffEntryReference::new(NULL_NODE(), None);
-            self.diffs.insert(NULL_NODE(), current_diff.clone());
+            let current_diff = PerspectiveDiffEntryReference::new(
+                PerspectiveDiff::new(), // Empty diff for NULL_NODE
+                None
+            );
+            self.diffs.insert(NULL_NODE(), current_diff);
         };
 
         let mut set = if let Some(nodes_back_links) = self.back_links.get(&NULL_NODE()) {
@@ -767,12 +773,12 @@ impl Workspace {
             removals: vec![],
         };
         for (_key, value) in self.entry_map.iter() {
-            if value.diff == NULL_NODE() {
+            if _key == &NULL_NODE() {
                 continue;
             }
-            let diff_entry = Retriever::get::<PerspectiveDiff>(value.diff.clone())?;
-            out.additions.append(&mut diff_entry.additions.clone());
-            out.removals.append(&mut diff_entry.removals.clone());
+            // Access diff data directly from the embedded field
+            out.additions.append(&mut value.diff.additions.clone());
+            out.removals.append(&mut value.diff.removals.clone());
         }
 
         //let fn_end = get_now()?.time();
