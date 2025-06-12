@@ -32,7 +32,6 @@ export default async function create(context: LanguageContext): Promise<Language
       ]
     }],
     async (signal) => { 
-      console.log("PerspectiveDiffSync.index.ts: signal", signal);
       //@ts-ignore
       if (signal.payload.reference || (signal.payload.additions && signal.payload.removals)) {
         await linksAdapter.handleHolochainSignal(signal)
