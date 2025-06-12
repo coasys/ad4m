@@ -147,8 +147,6 @@ fn handle_parents(
     //Check if entry is already in graph
     if !seen.contains(&search_position.hash) {
         seen.insert(search_position.hash.clone());
-        let _diff_entry = get(search_position.hash.clone(), GetOptions::network())?
-            .ok_or(SocialContextError::InternalError("Could not get diff entry"))?;
         
         // Access diff data directly from the entry
         for addition in diff.diff.additions.iter() {
