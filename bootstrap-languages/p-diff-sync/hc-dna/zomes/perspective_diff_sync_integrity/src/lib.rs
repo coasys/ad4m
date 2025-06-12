@@ -207,25 +207,59 @@ impl PerspectiveDiffEntryReference {
 
 impl PartialOrd for PerspectiveDiffEntryReference {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        // Compare based on parents if available, otherwise compare diff content
-        if let (Some(self_parents), Some(other_parents)) = (&self.parents, &other.parents) {
-            if let (Some(self_first), Some(other_first)) = (self_parents.first(), other_parents.first()) {
-                return self_first.partial_cmp(other_first);
+        // Explicit handling of all four cases for consistent ordering:
+        // 1. Entries with parents are ordered before entries without parents
+        // 2. Among entries with parents, compare by first parent hash
+        // 3. Among entries without parents, compare by diff content size
+        // 4. Mixed cases: entries with parents < entries without parents
+        
+        match (&self.parents, &other.parents) {
+            // Case 1: Both have parents - compare by first parent hash
+            (Some(self_parents), Some(other_parents)) => {
+                match (self_parents.first(), other_parents.first()) {
+                    (Some(self_first), Some(other_first)) => self_first.partial_cmp(other_first),
+                    // If one has empty parents vec, treat as None case
+                    (Some(_), None) => Some(std::cmp::Ordering::Less),    // self has parent, other doesn't
+                    (None, Some(_)) => Some(std::cmp::Ordering::Greater), // other has parent, self doesn't
+                    (None, None) => Some(std::cmp::Ordering::Equal),      // both have empty parent vecs
+                }
             }
+            // Case 2: Only self has parents - self comes first
+            (Some(_), None) => Some(std::cmp::Ordering::Less),
+            // Case 3: Only other has parents - other comes first
+            (None, Some(_)) => Some(std::cmp::Ordering::Greater),
+            // Case 4: Neither has parents - compare by diff content size
+            (None, None) => self.diff.total_diff_number().partial_cmp(&other.diff.total_diff_number()),
         }
-        self.diff.total_diff_number().partial_cmp(&other.diff.total_diff_number())
     }
 }
 
 impl Ord for PerspectiveDiffEntryReference {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Compare based on parents if available, otherwise compare diff content
-        if let (Some(self_parents), Some(other_parents)) = (&self.parents, &other.parents) {
-            if let (Some(self_first), Some(other_first)) = (self_parents.first(), other_parents.first()) {
-                return self_first.cmp(other_first);
+        // Explicit handling of all four cases for consistent ordering:
+        // 1. Entries with parents are ordered before entries without parents
+        // 2. Among entries with parents, compare by first parent hash
+        // 3. Among entries without parents, compare by diff content size
+        // 4. Mixed cases: entries with parents < entries without parents
+        
+        match (&self.parents, &other.parents) {
+            // Case 1: Both have parents - compare by first parent hash
+            (Some(self_parents), Some(other_parents)) => {
+                match (self_parents.first(), other_parents.first()) {
+                    (Some(self_first), Some(other_first)) => self_first.cmp(other_first),
+                    // If one has empty parents vec, treat as None case
+                    (Some(_), None) => std::cmp::Ordering::Less,    // self has parent, other doesn't
+                    (None, Some(_)) => std::cmp::Ordering::Greater, // other has parent, self doesn't
+                    (None, None) => std::cmp::Ordering::Equal,      // both have empty parent vecs
+                }
             }
+            // Case 2: Only self has parents - self comes first
+            (Some(_), None) => std::cmp::Ordering::Less,
+            // Case 3: Only other has parents - other comes first
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            // Case 4: Neither has parents - compare by diff content size
+            (None, None) => self.diff.total_diff_number().cmp(&other.diff.total_diff_number()),
         }
-        self.diff.total_diff_number().cmp(&other.diff.total_diff_number())
     }
 }
 
