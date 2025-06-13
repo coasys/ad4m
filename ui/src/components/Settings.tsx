@@ -91,6 +91,9 @@ const Profile = (props: Props) => {
   const [networkMetrics, setNetworkMetrics] = useState("");
   const [showNetworkMetrics, setShowNetworkMetrics] = useState(false);
 
+  const [agentInfos, setAgentInfos] = useState("");
+  const [showAgentInfos, setShowAgentInfos] = useState(false);
+
   async function openLogs() {
     let dataPath = await invoke("get_data_path") as string;
     revealItemInDir(await join(dataPath, "ad4m.log"))
@@ -149,7 +152,11 @@ const Profile = (props: Props) => {
 
   const getAgentInfo = async () => {
     const info = await client?.runtime.hcAgentInfos();
-    alert(info);
+    if (info) {
+      const formattedInfo = JSON.stringify(JSON.parse(info), null, 2);
+      setAgentInfos(formattedInfo);
+      setShowAgentInfos(true);
+    }
   };
 
   const addAgentInfo = async (info: string) => {
@@ -400,6 +407,20 @@ const Profile = (props: Props) => {
             </j-button>
           </j-box>
           <j-box px="500" my="500">
+            <j-button onClick={() => settrustedAgentModalOpen(true)} full variant="ghost">
+              <j-icon size="sm" slot="start" name="shield-check"></j-icon>
+              Show trusted agents
+            </j-button>
+          </j-box>
+
+          {/* Holochain Section */}
+          <j-box px="500" my="500">
+            <j-text size="600" weight="600" color="black">
+              Holochain
+            </j-text>
+          </j-box>
+          
+          <j-box px="500" my="500">
             <j-button
               onClick={() => {
                 getAgentInfo();
@@ -422,12 +443,6 @@ const Profile = (props: Props) => {
             >
               <j-icon size="sm" slot="start" name="shield-check"></j-icon>
               Add Holochain Agent Info(s)
-            </j-button>
-          </j-box>
-          <j-box px="500" my="500">
-            <j-button onClick={() => settrustedAgentModalOpen(true)} full variant="ghost">
-              <j-icon size="sm" slot="start" name="shield-check"></j-icon>
-              Show trusted agents
             </j-button>
           </j-box>
           <j-box px="500" my="500">
@@ -692,6 +707,39 @@ const Profile = (props: Props) => {
             <j-box style={{ height: '70vh', overflow: 'auto', border: '1px solid #ccc', padding: '10px', backgroundColor: '#f5f5f5' }}>
               <pre style={{ margin: 0, fontSize: '12px', fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
                 {networkMetrics}
+              </pre>
+            </j-box>
+          </j-box>
+        </j-modal>
+      )}
+
+      {showAgentInfos && (
+        <j-modal
+          size="fullscreen"
+          open={showAgentInfos}
+          onToggle={(e: any) => setShowAgentInfos(e.target.open)}
+        >
+          <j-box px="400" py="600">
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Holochain Agent Infos
+              </j-text>
+            </j-box>
+            <j-box pb="500">
+              <j-button 
+                onClick={() => {
+                  navigator.clipboard.writeText(agentInfos);
+                  alert('Agent infos copied to clipboard!');
+                }}
+                variant="primary"
+              >
+                <j-icon size="sm" slot="start" name="clipboard"></j-icon>
+                Copy to Clipboard
+              </j-button>
+            </j-box>
+            <j-box style={{ height: '70vh', overflow: 'auto', border: '1px solid #ccc', padding: '10px', backgroundColor: '#f5f5f5' }}>
+              <pre style={{ margin: 0, fontSize: '12px', fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
+                {agentInfos}
               </pre>
             </j-box>
           </j-box>
