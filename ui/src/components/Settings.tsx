@@ -448,6 +448,24 @@ const Profile = (props: Props) => {
               Get Network Metrics
             </j-button>
           </j-box>
+          <j-box px="500" my="500">
+            <j-button onClick={async () => {
+              if (client) {
+                try {
+                  if (confirm('Are you sure you want to restart Holochain? This will temporarily disconnect you from the network and restart the Holochain conductor.')) {
+                    await (client.runtime as any).restartHolochain();
+                    alert('Holochain has been restarted successfully!');
+                  }
+                } catch (error) {
+                  console.error('Failed to restart Holochain:', error);
+                  alert('Failed to restart Holochain. Check console for details.');
+                }
+              }
+            }} full variant="ghost">
+              <j-icon size="sm" slot="start" name="arrow-clockwise"></j-icon>
+              Restart Holochain
+            </j-button>
+          </j-box>
         </div>
       )}
 

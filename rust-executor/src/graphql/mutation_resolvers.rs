@@ -1654,4 +1654,23 @@ impl Mutation {
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         Ok(perspective.commit_batch(batch_id).await?)
     }
+
+    async fn runtime_restart_holochain(&self, context: &RequestContext) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &RUNTIME_QUIT_CAPABILITY)?;
+
+        let interface = get_holochain_service().await;
+        
+        // This will shut down the conductor and exit the service thread
+        interface.shutdown().await?;
+        
+        // Wait a moment for the service to shut down completely
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        
+        // Restart the service with the stored config
+        crate::holochain_service::HolochainService::restart_service().await?;
+        
+        log::info!("Holochain service has been restarted successfully.");
+
+        Ok(true)
+    }
 }

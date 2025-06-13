@@ -278,6 +278,11 @@ export default class RuntimeResolver {
     }
 
     @Mutation(returns => Boolean)
+    runtimeRestartHolochain(): Boolean {
+        return true
+    }
+
+    @Mutation(returns => Boolean)
     runtimeHcAddAgentInfos(@Arg("agentInfos", type => String) agentInfos): boolean {
         return true
     }

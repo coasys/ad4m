@@ -201,6 +201,15 @@ export class RuntimeClient {
         return runtimeGetNetworkMetrics
     }
 
+    async restartHolochain(): Promise<Boolean> {
+        const { runtimeRestartHolochain } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeRestartHolochain {
+                runtimeRestartHolochain
+            }`,
+        }))
+        return runtimeRestartHolochain
+    }
+
     async hcAddAgentInfos(agentInfos: String): Promise<void> {
         const { runtimeHcAddAgentInfos } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation runtimeHcAddAgentInfos($agentInfos: String!) {
