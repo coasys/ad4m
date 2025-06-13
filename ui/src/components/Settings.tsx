@@ -4,7 +4,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { join } from '@tauri-apps/api/path';
-import { save as dialogSave, open as dialogOpen, message as dialogMessage, type MessageDialogOptions } from "@tauri-apps/plugin-dialog";
+import { save as dialogSave, open as dialogOpen, message as dialogMessage, ask as dialogAsk, type MessageDialogOptions } from "@tauri-apps/plugin-dialog";
 import { useCallback, useContext, useEffect, useState } from "react";
 import QRCode from "react-qr-code";
 import { PREDICATE_FIRSTNAME, PREDICATE_LASTNAME, PREDICATE_USERNAME } from "../constants/triples";
@@ -452,13 +452,21 @@ const Profile = (props: Props) => {
             <j-button onClick={async () => {
               if (client) {
                 try {
-                  if (confirm('Are you sure you want to restart Holochain? This will temporarily disconnect you from the network and restart the Holochain conductor.')) {
-                    await (client.runtime as any).restartHolochain();
-                    alert('Holochain has been restarted successfully!');
+                  const confirmed = await dialogAsk('Are you sure you want to restart Holochain? This will temporarily disconnect you from the network and restart the Holochain conductor.', {
+                    title: 'Restart Holochain'
+                  });
+                  
+                  if (confirmed) {
+                    await client.runtime.restartHolochain();
+                    await dialogMessage('Holochain has been restarted successfully!', {
+                      title: 'Success'
+                    });
                   }
                 } catch (error) {
                   console.error('Failed to restart Holochain:', error);
-                  alert('Failed to restart Holochain. Check console for details.');
+                  await dialogMessage('Failed to restart Holochain. Check console for details.', {
+                    title: 'Error'
+                  });
                 }
               }
             }} full variant="ghost">
