@@ -145,17 +145,7 @@ const Profile = (props: Props) => {
 
   const getAgentInfo = async () => {
     const info = await client?.runtime.hcAgentInfos();
-
-    console.log("info", info);
-
-    await writeText(info);
-
-    setCopied(true);
-
-    setTimeout(() => {
-      setCopied(false);
-      closeSecretCodeModal();
-    }, 3000);
+    alert(info);
   };
 
   const addAgentInfo = async (info: string) => {
@@ -414,7 +404,7 @@ const Profile = (props: Props) => {
               variant="ghost"
             >
               <j-icon size="sm" slot="start" name={!copied ? "clipboard" : "clipboard-check"}></j-icon>
-              Copy Holochain Agent Info(s)
+              Show Holochain Agent Info(s)
             </j-button>
           </j-box>
 
