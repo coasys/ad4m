@@ -98,7 +98,7 @@ impl HolochainServiceInterface {
                 payload,
                 response: response_sender,
             })?;
-        match response_receiver.await.unwrap() {
+        match response_receiver.await? {
             HolochainServiceResponse::CallZomeFunction(result) => result,
             _ => unreachable!(),
         }
