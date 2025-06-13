@@ -261,6 +261,19 @@ impl HolochainService {
                                         },
                                     }
                                 }
+                                HolochainServiceRequest::GetNetworkMetrics(response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(3),
+                                        service.get_network_metrics()
+                                    ).await.map_err(|_| anyhow!("Timeout error; GetNetworkMetrics")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(Err(err)));
+                                        },
+                                    }
+                                }
                                 HolochainServiceRequest::PackDna(path, response_tx) => {
                                     match timeout(
                                         std::time::Duration::from_secs(3),
@@ -633,6 +646,31 @@ impl HolochainService {
         info!("Network stats: {:?}", stats);
 
         Ok(())
+    }
+
+    pub async fn get_network_metrics(&self) -> Result<String, AnyError> {
+        let metrics = self
+            .conductor
+            .dump_network_metrics(Kitsune2NetworkMetricsRequest {
+                dna_hash: None,
+                include_dht_summary: true,
+            })
+            .await?;
+
+        let stats = self.conductor.dump_network_stats().await?;
+
+        // Convert HoloHash<Dna> keys to strings for JSON serialization
+        let metrics_with_string_keys: std::collections::HashMap<String, _> = metrics
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+
+        let combined_metrics = serde_json::json!({
+            "metrics": metrics_with_string_keys,
+            "stats": stats
+        });
+
+        Ok(serde_json::to_string(&combined_metrics)?)
     }
 
     pub async fn pack_happ(path: String) -> Result<String, AnyError> {

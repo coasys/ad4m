@@ -192,6 +192,15 @@ export class RuntimeClient {
         return runtimeHcAgentInfos
     }
 
+    async getNetworkMetrics(): Promise<String> {
+        const { runtimeGetNetworkMetrics } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeGetNetworkMetrics {
+                runtimeGetNetworkMetrics
+            }`,
+        }))
+        return runtimeGetNetworkMetrics
+    }
+
     async hcAddAgentInfos(agentInfos: String): Promise<void> {
         const { runtimeHcAddAgentInfos } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation runtimeHcAddAgentInfos($agentInfos: String!) {

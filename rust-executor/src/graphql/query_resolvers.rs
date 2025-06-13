@@ -449,6 +449,18 @@ impl Query {
         Ok(serde_json::to_string(&infos)?)
     }
 
+    async fn runtime_get_network_metrics(&self, context: &RequestContext) -> FieldResult<String> {
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY,
+        )?;
+
+        let interface = get_holochain_service().await;
+        let metrics = interface.get_network_metrics().await?;
+
+        Ok(metrics)
+    }
+
     async fn runtime_info(&self, _context: &RequestContext) -> FieldResult<RuntimeInfo> {
         AgentService::with_global_instance(|agent_service| {
             agent_service

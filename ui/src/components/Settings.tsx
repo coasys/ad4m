@@ -13,6 +13,7 @@ import { AgentContext } from "../context/AgentContext";
 import { buildAd4mClient, copyTextToClipboard } from "../util";
 import ActionButton from "./ActionButton";
 import { cardStyle } from "./styles";
+
 const appWindow = getCurrentWebviewWindow();
 
 type Props = {
@@ -86,6 +87,9 @@ const Profile = (props: Props) => {
 
   const [exportStatus, setExportStatus] = useState("");
   const [importStatus, setImportStatus] = useState("");
+
+  const [networkMetrics, setNetworkMetrics] = useState("");
+  const [showNetworkMetrics, setShowNetworkMetrics] = useState(false);
 
   async function openLogs() {
     let dataPath = await invoke("get_data_path") as string;
@@ -427,6 +431,22 @@ const Profile = (props: Props) => {
             </j-button>
           </j-box>
           <j-box px="500" my="500">
+            <j-button onClick={async () => {
+              if (client) {
+                try {
+                  const metrics = await (client.runtime as any).getNetworkMetrics();
+                  const formattedMetrics = JSON.stringify(JSON.parse(metrics), null, 2);
+                  setNetworkMetrics(formattedMetrics);
+                  setShowNetworkMetrics(true);
+                } catch (error) {
+                  console.error('Failed to get network metrics:', error);
+                  alert('Failed to get network metrics. Check console for details.');
+                }
+              }
+            }} full variant="ghost">
+              <j-icon size="sm" slot="start" name="graph-up"></j-icon>
+              Get Network Metrics
+            </j-button>
           </j-box>
         </div>
       )}
@@ -615,6 +635,39 @@ const Profile = (props: Props) => {
                 Delete Agent
               </j-button>
             </j-flex>
+          </j-box>
+        </j-modal>
+      )}
+      
+      {showNetworkMetrics && (
+        <j-modal
+          size="fullscreen"
+          open={showNetworkMetrics}
+          onToggle={(e: any) => setShowNetworkMetrics(e.target.open)}
+        >
+          <j-box px="400" py="600">
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Network Metrics
+              </j-text>
+            </j-box>
+            <j-box pb="500">
+              <j-button 
+                onClick={() => {
+                  navigator.clipboard.writeText(networkMetrics);
+                  alert('Network metrics copied to clipboard!');
+                }}
+                variant="primary"
+              >
+                <j-icon size="sm" slot="start" name="clipboard"></j-icon>
+                Copy to Clipboard
+              </j-button>
+            </j-box>
+            <j-box style={{ height: '70vh', overflow: 'auto', border: '1px solid #ccc', padding: '10px', backgroundColor: '#f5f5f5' }}>
+              <pre style={{ margin: 0, fontSize: '12px', fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
+                {networkMetrics}
+              </pre>
+            </j-box>
           </j-box>
         </j-modal>
       )}
