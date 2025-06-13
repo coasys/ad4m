@@ -1658,6 +1658,8 @@ impl Mutation {
     async fn runtime_restart_holochain(&self, context: &RequestContext) -> FieldResult<bool> {
         check_capability(&context.capabilities, &RUNTIME_QUIT_CAPABILITY)?;
 
+        log::info!("Restarting Holochain service...");
+
         let interface = get_holochain_service().await;
         
         // This will shut down the conductor and exit the service thread
