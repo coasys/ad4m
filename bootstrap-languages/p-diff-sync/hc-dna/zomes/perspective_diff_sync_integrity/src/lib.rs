@@ -209,15 +209,32 @@ impl PartialOrd for PerspectiveDiffEntryReference {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         // Explicit handling of all four cases for consistent ordering:
         // 1. Entries with parents are ordered before entries without parents
-        // 2. Among entries with parents, compare by first parent hash
-        // 3. Among entries without parents, compare by diff content size
+        // 2. Among entries with parents, compare by first parent hash, then diffs_since_snapshot, then diff content
+        // 3. Among entries without parents, compare by diffs_since_snapshot, then diff content
         // 4. Mixed cases: entries with parents < entries without parents
         
         match (&self.parents, &other.parents) {
-            // Case 1: Both have parents - compare by first parent hash
+            // Case 1: Both have parents - compare by first parent hash, then other fields
             (Some(self_parents), Some(other_parents)) => {
                 match (self_parents.first(), other_parents.first()) {
-                    (Some(self_first), Some(other_first)) => self_first.partial_cmp(other_first),
+                    (Some(self_first), Some(other_first)) => {
+                        // Compare first parent hash
+                        match self_first.partial_cmp(other_first)? {
+                            // If parent hashes are equal, compare diffs_since_snapshot
+                            std::cmp::Ordering::Equal => {
+                                match self.diffs_since_snapshot.partial_cmp(&other.diffs_since_snapshot)? {
+                                    // If diffs_since_snapshot are equal, compare total diff numbers
+                                    std::cmp::Ordering::Equal => {
+                                        self.diff.total_diff_number().partial_cmp(&other.diff.total_diff_number())
+                                    }
+                                    // Otherwise return the diffs_since_snapshot ordering
+                                    other_ordering => Some(other_ordering),
+                                }
+                            }
+                            // Otherwise return the parent hash ordering
+                            parent_ordering => Some(parent_ordering),
+                        }
+                    }
                     // If one has empty parents vec, treat as None case
                     (Some(_), None) => Some(std::cmp::Ordering::Less),    // self has parent, other doesn't
                     (None, Some(_)) => Some(std::cmp::Ordering::Greater), // other has parent, self doesn't
@@ -228,8 +245,18 @@ impl PartialOrd for PerspectiveDiffEntryReference {
             (Some(_), None) => Some(std::cmp::Ordering::Less),
             // Case 3: Only other has parents - other comes first
             (None, Some(_)) => Some(std::cmp::Ordering::Greater),
-            // Case 4: Neither has parents - compare by diff content size
-            (None, None) => self.diff.total_diff_number().partial_cmp(&other.diff.total_diff_number()),
+            // Case 4: Neither has parents - compare by diffs_since_snapshot, then diff content
+            (None, None) => {
+                // First compare diffs_since_snapshot
+                match self.diffs_since_snapshot.partial_cmp(&other.diffs_since_snapshot)? {
+                    // If diffs_since_snapshot are equal, compare total diff numbers
+                    std::cmp::Ordering::Equal => {
+                        self.diff.total_diff_number().partial_cmp(&other.diff.total_diff_number())
+                    }
+                    // Otherwise return the diffs_since_snapshot ordering
+                    other_ordering => Some(other_ordering),
+                }
+            }
         }
     }
 }
@@ -238,15 +265,32 @@ impl Ord for PerspectiveDiffEntryReference {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Explicit handling of all four cases for consistent ordering:
         // 1. Entries with parents are ordered before entries without parents
-        // 2. Among entries with parents, compare by first parent hash
-        // 3. Among entries without parents, compare by diff content size
+        // 2. Among entries with parents, compare by first parent hash, then diffs_since_snapshot, then diff content
+        // 3. Among entries without parents, compare by diffs_since_snapshot, then diff content
         // 4. Mixed cases: entries with parents < entries without parents
         
         match (&self.parents, &other.parents) {
-            // Case 1: Both have parents - compare by first parent hash
+            // Case 1: Both have parents - compare by first parent hash, then other fields
             (Some(self_parents), Some(other_parents)) => {
                 match (self_parents.first(), other_parents.first()) {
-                    (Some(self_first), Some(other_first)) => self_first.cmp(other_first),
+                    (Some(self_first), Some(other_first)) => {
+                        // Compare first parent hash
+                        match self_first.cmp(other_first) {
+                            // If parent hashes are equal, compare diffs_since_snapshot
+                            std::cmp::Ordering::Equal => {
+                                match self.diffs_since_snapshot.cmp(&other.diffs_since_snapshot) {
+                                    // If diffs_since_snapshot are equal, compare total diff numbers
+                                    std::cmp::Ordering::Equal => {
+                                        self.diff.total_diff_number().cmp(&other.diff.total_diff_number())
+                                    }
+                                    // Otherwise return the diffs_since_snapshot ordering
+                                    other_ordering => other_ordering,
+                                }
+                            }
+                            // Otherwise return the parent hash ordering
+                            parent_ordering => parent_ordering,
+                        }
+                    }
                     // If one has empty parents vec, treat as None case
                     (Some(_), None) => std::cmp::Ordering::Less,    // self has parent, other doesn't
                     (None, Some(_)) => std::cmp::Ordering::Greater, // other has parent, self doesn't
@@ -257,8 +301,18 @@ impl Ord for PerspectiveDiffEntryReference {
             (Some(_), None) => std::cmp::Ordering::Less,
             // Case 3: Only other has parents - other comes first
             (None, Some(_)) => std::cmp::Ordering::Greater,
-            // Case 4: Neither has parents - compare by diff content size
-            (None, None) => self.diff.total_diff_number().cmp(&other.diff.total_diff_number()),
+            // Case 4: Neither has parents - compare by diffs_since_snapshot, then diff content
+            (None, None) => {
+                // First compare diffs_since_snapshot
+                match self.diffs_since_snapshot.cmp(&other.diffs_since_snapshot) {
+                    // If diffs_since_snapshot are equal, compare total diff numbers
+                    std::cmp::Ordering::Equal => {
+                        self.diff.total_diff_number().cmp(&other.diff.total_diff_number())
+                    }
+                    // Otherwise return the diffs_since_snapshot ordering
+                    other_ordering => other_ordering,
+                }
+            }
         }
     }
 }
