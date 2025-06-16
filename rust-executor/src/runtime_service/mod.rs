@@ -2,6 +2,16 @@ use std::io::Read;
 use std::{fs::File, sync::Mutex};
 pub mod runtime_service_extension;
 use std::sync::Arc;
+use std::collections::VecDeque;
+use chrono::{DateTime, Utc};
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DebugStringEntry {
+    pub language_address: String,
+    pub debug_string: String,
+    pub operation: String,
+    pub timestamp: DateTime<Utc>,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BootstrapSeed {
@@ -29,7 +39,10 @@ use crate::{agent::did, db::Ad4mDb, graphql::graphql_types::SentMessage};
 
 lazy_static! {
     static ref RUNTIME_INSTANCE: Arc<Mutex<Option<RuntimeService>>> = Arc::new(Mutex::new(None));
+    static ref DEBUG_STRINGS: Arc<Mutex<VecDeque<DebugStringEntry>>> = Arc::new(Mutex::new(VecDeque::new()));
 }
+
+const MAX_DEBUG_STRINGS: usize = 100; // Keep last 100 debug strings
 
 pub struct RuntimeService {
     seed: BootstrapSeed,
@@ -170,5 +183,35 @@ impl RuntimeService {
             .await;
 
         Ok(notification_id)
+    }
+
+    pub fn add_debug_string(language_address: String, debug_string: String, operation: String) {
+        let entry = DebugStringEntry {
+            language_address,
+            debug_string,
+            operation,
+            timestamp: Utc::now(),
+        };
+
+        let mut debug_strings = DEBUG_STRINGS.lock().unwrap();
+        debug_strings.push_back(entry);
+        
+        // Keep only the last MAX_DEBUG_STRINGS entries
+        while debug_strings.len() > MAX_DEBUG_STRINGS {
+            debug_strings.pop_front();
+        }
+    }
+
+    pub fn get_debug_strings(language_address: Option<String>) -> Vec<DebugStringEntry> {
+        let debug_strings = DEBUG_STRINGS.lock().unwrap();
+        
+        match language_address {
+            Some(address) => debug_strings
+                .iter()
+                .filter(|entry| entry.language_address == address)
+                .cloned()
+                .collect(),
+            None => debug_strings.iter().cloned().collect(),
+        }
     }
 }

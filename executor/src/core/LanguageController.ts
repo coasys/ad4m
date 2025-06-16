@@ -278,6 +278,14 @@ export default class LanguageController {
                     this.callSyncStateChangeObservers(state, {address: hash, name: language.name} as LanguageRef);
                 })
             }
+
+            if (language.linksAdapter.addDebugStringCallback) {
+                language.linksAdapter.addDebugStringCallback((debugString: string, operation: string) => {
+                    // Store debug string via runtime service using the language hash
+                    //@ts-ignore
+                    RUNTIME_SERVICE.addDebugString(hash, debugString, operation);
+                })
+            }
         }
 
         if(language.telepresenceAdapter) {
