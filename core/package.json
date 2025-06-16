@@ -69,5 +69,5 @@
       "graphql@15.7.2": "patches/graphql@15.7.2.patch"
     }
   },
-  "version": "0.10.1-release-candidate-4"
+  "version": "0.10.1-release-candidate-4-debug-strings"
 }

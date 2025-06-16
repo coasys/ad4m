@@ -95,6 +95,18 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
 
     workspace.build_diffs::<Retriever>(theirs.clone(), current.hash.clone())?;
 
+    // Generate and emit debug graph for visualization
+    let debug_graph = workspace.generate_debug_graph();
+    debug!("Debug graph for merge operation: {}", debug_graph);
+    
+    // Emit debug signal to JS layer
+    emit_signal(serde_json::json!({
+        "type": "debug_string",
+        "operation": "merge",
+        "debug_string": debug_graph,
+        "timestamp": get_now()?.time().to_string(),
+    }))?;
+
     // First check if we are actually ahead of them -> we don't have to do anything
     // they will have to merge with / or fast-forward to our current
     if workspace.all_ancestors(&current.hash)?.contains(&theirs) {

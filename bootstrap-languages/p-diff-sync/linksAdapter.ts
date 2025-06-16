@@ -1,6 +1,6 @@
 import { LinkSyncAdapter, PerspectiveDiffObserver, HolochainLanguageDelegate, LanguageContext, PerspectiveDiff, 
-  LinkExpression, DID, Perspective, PerspectiveState } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
-import type { SyncStateChangeObserver } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+  LinkExpression, DID, Perspective, PerspectiveState, DebugGraphObserver, DebugStringObserver } from "https://esm.sh/@coasys/ad4m@0.10.1-release-candidate-4-debug-strings";
+import type { SyncStateChangeObserver } from "https://esm.sh/@coasys/ad4m@0.10.1-release-candidate-4-debug-strings";
 import { Mutex, withTimeout } from "https://esm.sh/async-mutex@0.4.0";
 import { DNA_ROLE, ZOME_NAME } from "./build/happ.js";
 import { encodeBase64 } from "https://deno.land/std@0.220.1/encoding/base64.ts";
@@ -16,6 +16,7 @@ export class LinkAdapter implements LinkSyncAdapter {
   hcDna: HolochainLanguageDelegate;
   linkCallback?: PerspectiveDiffObserver
   syncStateChangeCallback?: SyncStateChangeObserver
+  debugStringCallback?: DebugStringObserver
   peers: Map<DID, PeerInfo> = new Map();
   generalMutex: Mutex = withTimeout(new Mutex(), 10000, new Error('PerspectiveDiffSync: generalMutex timeout'));
   me: DID
@@ -250,7 +251,23 @@ export class LinkAdapter implements LinkSyncAdapter {
     return 1;
   }
 
+  addDebugStringCallback(callback: DebugStringObserver): number {
+    this.debugStringCallback = callback;
+    return 1;
+  }
+
   async handleHolochainSignal(signal: any): Promise<void> {
+    // Check if this is a debug signal
+    if (signal.payload && signal.payload.type === "debug_string") {
+      if (this.debugStringCallback) {
+        this.debugStringCallback(
+          signal.payload.debug_string,
+          signal.payload.operation
+        );
+      }
+      return;
+    }
+
     const { diff, reference_hash, reference, broadcast_author } = signal.payload;
     //Check if this signal came from another agent & contains a diff and reference_hash
     if (diff && reference_hash && reference && broadcast_author) {

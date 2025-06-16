@@ -11,6 +11,7 @@ name = "perspective_diff_sync"
 [dependencies]
 derive_more = "0"
 serde = "1"
+serde_json = "1"
 lazy_static = "*"
 chrono = { version = "0.4.38", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
 thiserror = "1"

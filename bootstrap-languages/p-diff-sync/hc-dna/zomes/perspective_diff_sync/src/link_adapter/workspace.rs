@@ -849,6 +849,19 @@ impl Workspace {
         }
     }
 
+    pub fn generate_debug_graph(&self) -> String {
+        format!(
+            "{:?}",
+            Dot::with_config(
+                &self.graph.map(
+                    |_node_index, node| { crate::retriever::hash_to_node_id(node.to_owned()) },
+                    |_edge_index, _edge| {}
+                ),
+                &[Config::EdgeNoLabel]
+            )
+        )
+    }
+
     pub fn all_ancestors(&self, child: &Hash) -> SocialContextResult<Vec<Hash>> {
         //debug!("===Workspace.all_ancestors(): Function start");
         //let fn_start = get_now()?.time();
