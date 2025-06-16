@@ -13,6 +13,7 @@ import { AgentContext } from "../context/AgentContext";
 import { buildAd4mClient, copyTextToClipboard } from "../util";
 import ActionButton from "./ActionButton";
 import { cardStyle } from "./styles";
+import { HoloHash } from '@spartan-hc/holo-hash';
 
 const appWindow = getCurrentWebviewWindow();
 
@@ -450,7 +451,23 @@ const Profile = (props: Props) => {
               if (client) {
                 try {
                   const metrics = await (client.runtime as any).getNetworkMetrics();
-                  const formattedMetrics = JSON.stringify(JSON.parse(metrics), null, 2);
+                  const parsedMetrics = JSON.parse(metrics);
+                  const formattedMetrics = JSON.stringify(parsedMetrics, (key, value) => {
+                    // Keep buffer arrays on one line by not formatting them
+                    if (Array.isArray(value) && value.every(item => typeof item === 'number' && item >= 0 && item <= 255)) {
+
+                      if(value.length > 0){
+                        let array = new Uint8Array(value)
+                        try{
+                          const holoHash = new HoloHash(array);
+                          return holoHash.toString();
+                        } catch (error) {
+                          return JSON.stringify(value);
+                        }
+                      }
+                    }
+                    return value;
+                  }, 2);
                   setNetworkMetrics(formattedMetrics);
                   setShowNetworkMetrics(true);
                 } catch (error) {
@@ -686,7 +703,7 @@ const Profile = (props: Props) => {
           open={showNetworkMetrics}
           onToggle={(e: any) => setShowNetworkMetrics(e.target.open)}
         >
-          <j-box px="400" py="600">
+          <j-box px="400" py="600" style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
             <j-box pb="500">
               <j-text nomargin size="600" color="black" weight="600">
                 Network Metrics
@@ -704,11 +721,28 @@ const Profile = (props: Props) => {
                 Copy to Clipboard
               </j-button>
             </j-box>
-            <j-box style={{ height: '70vh', overflow: 'auto', border: '1px solid #ccc', padding: '10px', backgroundColor: '#f5f5f5' }}>
-              <pre style={{ margin: 0, fontSize: '12px', fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
+            <div style={{ 
+              flex: 1, 
+              overflow: 'auto', 
+              border: '1px solid #ccc', 
+              padding: '10px', 
+              backgroundColor: '#1e1e1e',
+              maxHeight: 'calc(100vh - 200px)',
+              scrollbarWidth: 'thin',
+              scrollbarColor: '#888 #f1f1f1'
+            }}>
+              <pre style={{ 
+                margin: 0, 
+                fontSize: '12px', 
+                fontFamily: 'monospace', 
+                whiteSpace: 'pre-wrap',
+                overflowWrap: 'break-word',
+                wordBreak: 'break-all',
+                color: '#e0e0e0'
+              }}>
                 {networkMetrics}
               </pre>
-            </j-box>
+            </div>
           </j-box>
         </j-modal>
       )}
@@ -719,7 +753,7 @@ const Profile = (props: Props) => {
           open={showAgentInfos}
           onToggle={(e: any) => setShowAgentInfos(e.target.open)}
         >
-          <j-box px="400" py="600">
+          <j-box px="400" py="600" style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
             <j-box pb="500">
               <j-text nomargin size="600" color="black" weight="600">
                 Holochain Agent Infos
@@ -737,11 +771,28 @@ const Profile = (props: Props) => {
                 Copy to Clipboard
               </j-button>
             </j-box>
-            <j-box style={{ height: '70vh', overflow: 'auto', border: '1px solid #ccc', padding: '10px', backgroundColor: '#f5f5f5' }}>
-              <pre style={{ margin: 0, fontSize: '12px', fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
+            <div style={{ 
+              flex: 1, 
+              overflow: 'auto', 
+              border: '1px solid #ccc', 
+              padding: '10px', 
+              backgroundColor: '#1e1e1e',
+              maxHeight: 'calc(100vh - 200px)',
+              scrollbarWidth: 'thin',
+              scrollbarColor: '#888 #f1f1f1'
+            }}>
+              <pre style={{ 
+                margin: 0, 
+                fontSize: '12px', 
+                fontFamily: 'monospace', 
+                whiteSpace: 'pre-wrap',
+                overflowWrap: 'break-word',
+                wordBreak: 'break-all',
+                color: '#e0e0e0'
+              }}>
                 {agentInfos}
               </pre>
-            </j-box>
+            </div>
           </j-box>
         </j-modal>
       )}
