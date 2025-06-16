@@ -1074,6 +1074,17 @@ pub struct QuerySubscription {
     pub result: String,
 }
 
+#[derive(GraphQLObject, Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugStringEntry {
+    #[graphql(name = "languageAddress")]
+    pub language_address: String,
+    #[graphql(name = "debugString")]
+    pub debug_string: String,
+    pub operation: String,
+    pub timestamp: String,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct PerspectiveQuerySubscriptionFilter {
     pub uuid: String,

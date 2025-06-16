@@ -201,6 +201,21 @@ export class RuntimeClient {
         return runtimeGetNetworkMetrics
     }
 
+    async debugStrings(languageAddress?: string): Promise<any[]> {
+        const { runtimeDebugStrings } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeDebugStrings($languageAddress: String) {
+                runtimeDebugStrings(languageAddress: $languageAddress) {
+                    languageAddress
+                    debugString
+                    operation
+                    timestamp
+                }
+            }`,
+            variables: { languageAddress }
+        }))
+        return runtimeDebugStrings
+    }
+
     async restartHolochain(): Promise<Boolean> {
         const { runtimeRestartHolochain } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation runtimeRestartHolochain {
