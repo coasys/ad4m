@@ -1661,16 +1661,16 @@ impl Mutation {
         log::info!("Restarting Holochain service...");
 
         let interface = get_holochain_service().await;
-        
+
         // This will shut down the conductor and exit the service thread
         interface.shutdown().await?;
-        
+
         // Wait a moment for the service to shut down completely
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        
+
         // Restart the service with the stored config
         crate::holochain_service::HolochainService::restart_service().await?;
-        
+
         log::info!("Holochain service has been restarted successfully.");
 
         Ok(true)
