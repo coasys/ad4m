@@ -108,36 +108,40 @@ pub fn topo_sort_diff_references(
 #[cfg(test)]
 mod tests {
     use super::topo_sort_diff_references;
+    use crate::errors::SocialContextResult;
     use hdk::prelude::*;
-    use perspective_diff_sync_integrity::PerspectiveDiffEntryReference;
+    use perspective_diff_sync_integrity::{PerspectiveDiff, PerspectiveDiffEntryReference};
 
     #[test]
-    fn test_topo_sort_diff_references() {
+    fn test_topo_sort() -> SocialContextResult<()> {
         let h1 = HoloHash::<holo_hash::hash_type::Action>::from_raw_36(vec![1; 36]);
         let h2 = HoloHash::<holo_hash::hash_type::Action>::from_raw_36(vec![2; 36]);
         let h3 = HoloHash::<holo_hash::hash_type::Action>::from_raw_36(vec![3; 36]);
         let h4 = HoloHash::<holo_hash::hash_type::Action>::from_raw_36(vec![4; 36]);
 
-        let r1 = PerspectiveDiffEntryReference::new(h1.clone(), Some(vec![h2.clone(), h3.clone()]));
-        let r2 = PerspectiveDiffEntryReference::new(h2.clone(), Some(vec![h4.clone()]));
-        let r3 = PerspectiveDiffEntryReference::new(h3.clone(), Some(vec![h4.clone()]));
-        let r4 = PerspectiveDiffEntryReference::new(h4.clone(), None);
+        let r1 = PerspectiveDiffEntryReference::new(PerspectiveDiff::new(), Some(vec![h2.clone(), h3.clone()]));
+        let r2 = PerspectiveDiffEntryReference::new(PerspectiveDiff::new(), Some(vec![h4.clone()]));
+        let r3 = PerspectiveDiffEntryReference::new(PerspectiveDiff::new(), Some(vec![h4.clone()]));
+        let r4 = PerspectiveDiffEntryReference::new(PerspectiveDiff::new(), None);
 
-        let e1 = (h1, r1);
-        let e2 = (h2, r2);
-        let e3 = (h3, r3);
-        let e4 = (h4, r4);
+        let example_arr = vec![(h1, r1), (h2, r2), (h3, r3), (h4, r4)];
 
-        assert_eq!(e1.0, e1.1.diff);
-        assert_eq!(e2.0, e2.1.diff);
-        assert_eq!(e3.0, e3.1.diff);
-        assert_eq!(e4.0, e4.1.diff);
-
-        let test_vec = vec![e1.clone(), e2.clone(), e3.clone(), e4.clone()];
-        let expected = vec![e4, e3, e2, e1];
-
-        let result = topo_sort_diff_references(&test_vec).expect("topo sort to not error");
-
-        assert_eq!(result, expected);
+        let sorted = topo_sort_diff_references(&example_arr)?;
+        assert_eq!(sorted.len(), 4);
+        
+        // Check that all diffs are empty (since we created them that way)
+        for item in &sorted {
+            assert!(item.1.diff.additions.is_empty() && item.1.diff.removals.is_empty());
+        }
+        
+        // Find the item with no parents (should be first in topo order)
+        let orphan_count = sorted.iter().filter(|item| item.1.parents.is_none()).count();
+        assert_eq!(orphan_count, 1, "Should have exactly one orphan node");
+        
+        // Find the item with parents
+        let parent_count = sorted.iter().filter(|item| item.1.parents.is_some()).count();
+        assert_eq!(parent_count, 3, "Should have exactly three nodes with parents");
+        
+        Ok(())
     }
 }

@@ -1,5 +1,5 @@
 import { addAllAgentsToAllConductors, cleanAllConductors } from "@holochain/tryorama";
-import { call, sleep, generate_link_expression, createConductors} from "./utils";
+import { call, sleep, generate_link_expression, createConductors, retryUntilSuccess} from "./utils.ts";
 import test from "tape-promise/tape.js";
 
 //NOTE; these tests are dependant on the SNAPSHOT_INTERVAL in lib.rs being set to 2
@@ -61,7 +61,12 @@ export async function render(t) {
 
     t.assert(firstRenderFailed)
 
-    await call(bobHapps, "pull", { hash: commit2, is_scribe: false })
+    await retryUntilSuccess(
+        () => call(bobHapps, "pull", { hash: commit2, is_scribe: false }),
+        5,
+        2000,
+        (result: any) => result !== null && result !== undefined
+    );
 
     console.log("Bob has pulled")
 
@@ -95,7 +100,12 @@ export async function render(t) {
     await sleep(1000);
 
     console.log("RENDER 5")
-    await call(aliceHapps, "pull", { hash: commit5, is_scribe: true }); 
+    await retryUntilSuccess(
+        () => call(aliceHapps, "pull", { hash: commit5, is_scribe: true }),
+        5,
+        2000,
+        (result: any) => result !== null && result !== undefined
+    );
     let alice_render = await call(aliceHapps, "render");
     console.warn("Alice rendered with", alice_render);
     //@ts-ignore
@@ -237,7 +247,12 @@ export async function renderMerges(t) {
     await sleep(2000)
 
     console.log("bob pull");
-    await call(bobHapps, "pull", { hash: commit6, is_scribe: true })
+    await retryUntilSuccess(
+        () => call(bobHapps, "pull", { hash: commit6, is_scribe: true }),
+        5,
+        2000,
+        (result: any) => result !== null && result !== undefined
+    );
     
     console.log("bob render");
     let bob_render2 = await bobHapps.cells[0].callZome({

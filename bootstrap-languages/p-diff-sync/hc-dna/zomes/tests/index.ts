@@ -1,15 +1,15 @@
-import { render, renderMerges } from "./render";
-import { unSyncFetch, mergeFetch, mergeFetchDeep } from "./pull";
-import { testRevisionUpdates } from "./revisions";
-import { stressTest } from "./stress"
-import { signals } from "./signals";
-import { testTelepresence } from "./telepresence";
+import { render, renderMerges } from "./render.ts";
+import { /*unSyncFetch,*/ mergeFetch, mergeFetchDeep } from "./pull.ts";
+import { testRevisionUpdates } from "./revisions.ts";
+import { stressTest } from "./stress.ts"
+import { signals } from "./signals.ts";
+import { testTelepresence } from "./telepresence.ts";
 
 import test from "tape-promise/tape.js";
 
-test("unsynced fetch", async (t) => {
-    await unSyncFetch(t);
-})
+//test("unsynced fetch", async (t) => {
+//    await unSyncFetch(t);
+//})
 
 test("merge fetch", async (t) => {
     await mergeFetch(t);

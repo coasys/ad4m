@@ -24,13 +24,11 @@ fn merge<Retriever: PerspectiveDiffRetreiver>(
         additions: vec![],
         removals: vec![],
     };
-    let merge_entry_hash =
-        Retriever::create_entry(EntryTypes::PerspectiveDiff(merge_diff.clone()))?;
 
     //Create the merge entry reference
     let merge_entry_reference = PerspectiveDiffEntryReference {
         parents: Some(vec![latest, current]),
-        diff: merge_entry_hash.clone(),
+        diff: merge_diff.clone(),
         diffs_since_snapshot: latest_diff.diffs_since_snapshot
             + current_diff.diffs_since_snapshot
             + 1,
@@ -171,9 +169,8 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
             removals: vec![],
         };
         for diff in unseen_diffs {
-            let diff_entry = Retriever::get::<PerspectiveDiff>(diff.1.diff.clone())?;
-            out.additions.append(&mut diff_entry.additions.clone());
-            out.removals.append(&mut diff_entry.removals.clone());
+            out.additions.append(&mut diff.1.diff.additions.clone());
+            out.removals.append(&mut diff.1.diff.removals.clone());
         }
         update_current_revision::<Retriever>(theirs.clone(), get_now()?)?;
         let fn_end = get_now()?.time();
@@ -190,9 +187,8 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
             removals: vec![],
         };
         for diff in unseen_diffs {
-            let diff_entry = Retriever::get::<PerspectiveDiff>(diff.1.diff.clone())?;
-            out.additions.append(&mut diff_entry.additions.clone());
-            out.removals.append(&mut diff_entry.removals.clone());
+            out.additions.append(&mut diff.1.diff.additions.clone());
+            out.removals.append(&mut diff.1.diff.removals.clone());
         }
 
         let merge_hash = merge::<Retriever>(theirs, current.hash)?;
@@ -242,7 +238,7 @@ pub fn handle_broadcast<Retriever: PerspectiveDiffRetreiver>(
         if diff_reference.parents == Some(vec![current_revision.hash]) {
             // debug!("===PerspectiveDiffSync.fast_forward_signal(): Revisions parent is the same as current, we can fast forward our current");
             update_current_revision::<Retriever>(revision, get_now()?)?;
-            emit_signal(broadcast.diff.clone())?;
+            emit_signal(broadcast.reference.diff.clone())?;
         };
     };
     emit_signal(broadcast)?;

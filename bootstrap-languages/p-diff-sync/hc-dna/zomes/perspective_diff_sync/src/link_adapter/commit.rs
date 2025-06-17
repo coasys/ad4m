@@ -42,9 +42,8 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     };
 
     let now = get_now()?.time();
-    let diff_entry_create = Retriever::create_entry(EntryTypes::PerspectiveDiff(diff.clone()))?;
     let diff_entry_ref_entry = PerspectiveDiffEntryReference {
-        diff: diff_entry_create.clone(),
+        diff: diff.clone(),
         parents: initial_current_revision.clone().map(|val| vec![val.hash]),
         diffs_since_snapshot: entries_since_snapshot,
     };
@@ -57,7 +56,7 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     //     diff_entry_reference
     // );
     debug!(
-        "===PerspectiveDiffSync.commit() - Profiling: Took {} to create a PerspectiveDiff",
+        "===PerspectiveDiffSync.commit() - Profiling: Took {} to create a PerspectiveDiffEntryReference",
         (after - now).num_milliseconds()
     );
 
@@ -144,12 +143,10 @@ pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>() -> SocialContext
         let current_revision = current.clone().unwrap();
         let entry_ref =
             Retriever::get::<PerspectiveDiffEntryReference>(current_revision.hash.clone())?;
-        let diff = Retriever::get::<PerspectiveDiff>(entry_ref.diff.clone())?;
 
         let signal_data = HashBroadcast {
             reference: entry_ref,
             reference_hash: current_revision.hash.clone(),
-            diff,
             broadcast_author: get_my_did()?.unwrap(),
         };
 

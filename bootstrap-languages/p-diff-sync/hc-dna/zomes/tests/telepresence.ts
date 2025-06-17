@@ -1,9 +1,9 @@
 import { addAllAgentsToAllConductors, Scenario } from "@holochain/tryorama";
-import { sleep, generate_link_expression, sortedObject } from "./utils";
+import { sleep, generate_link_expression, sortedObject } from "./utils.ts";
 import test from "tape-promise/tape.js";
-import { resolve } from "path";
-import { dnas } from "./common";
-import { PerspectiveExpression } from "@perspect3vism/ad4m";
+import { resolve } from "node:path";
+import { dnas } from "./common.ts";
+import { PerspectiveExpression } from "@coasys/ad4m";
 
 function generate_perspective_expression(author: string, linkContent: string): PerspectiveExpression {
     return {

@@ -259,18 +259,17 @@ export class LinkAdapter implements LinkSyncAdapter {
   async handleHolochainSignal(signal: any): Promise<void> {
     // Check if this is a debug signal
     if (signal.payload && signal.payload.type === "debug_string") {
-      if (this.debugStringCallback) {
         this.debugStringCallback(
+      if (this.debugStringCallback) {
           signal.payload.debug_string,
-          signal.payload.operation
         );
+          signal.payload.operation
       }
       return;
     }
 
-    const { diff, reference_hash, reference, broadcast_author } = signal.payload;
-    //Check if this signal came from another agent & contains a diff and reference_hash
-    if (diff && reference_hash && reference && broadcast_author) {
+    const { reference_hash, reference, broadcast_author } = signal.payload;
+    //Check if this signal came from another agent & contains a reference and reference_hash
       // console.log(`PerspectiveDiffSync.handleHolochainSignal: 
       //       diff: ${JSON.stringify(diff)}
       //       reference_hash: ${reference_hash.toString('base64')}
