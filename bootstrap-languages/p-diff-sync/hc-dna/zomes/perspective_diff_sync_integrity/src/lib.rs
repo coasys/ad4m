@@ -209,8 +209,8 @@ impl PerspectiveDiffEntryReference {
     // then by parent hashes, then by diffs_since_snapshot, 
     // then by total diff count, then by diff contents
     fn comparison_key(&self) -> (bool, &Option<Vec<HoloHash<holo_hash::hash_type::Action>>>, usize, usize, &PerspectiveDiff) {
-        let has_parents = self.parents.is_none();
-        (has_parents, &self.parents, self.diffs_since_snapshot, self.diff.total_diff_number(), &self.diff)
+        let has_parents = self.parents.is_some();
+        (!has_parents, &self.parents, self.diffs_since_snapshot, self.diff.total_diff_number(), &self.diff)
     }
 }
 
