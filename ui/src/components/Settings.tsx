@@ -154,9 +154,14 @@ const Profile = (props: Props) => {
   const getAgentInfo = async () => {
     const info = await client?.runtime.hcAgentInfos();
     if (info) {
-      const formattedInfo = JSON.stringify(JSON.parse(info), null, 2);
-      setAgentInfos(formattedInfo);
-      setShowAgentInfos(true);
+      try {
+        const formattedInfo = JSON.stringify(JSON.parse(info), null, 2);
+        setAgentInfos(formattedInfo);
+        setShowAgentInfos(true);
+      } catch (error) {
+        console.error("Failed to parse agent info data:", error);
+        alert("Failed to display agent info: The data returned from the backend is malformed. Please check the console for details.");
+      }
     }
   };
 
