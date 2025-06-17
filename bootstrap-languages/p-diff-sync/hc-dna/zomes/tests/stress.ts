@@ -1,13 +1,13 @@
 import { AgentApp, addAllAgentsToAllConductors, cleanAllConductors, Conductor, Scenario } from "@holochain/tryorama";
-import { call, sleep, createConductors, create_link_expression, generate_link_expression} from "./utils";
-import ad4m, { DID, HolochainLanguageDelegate, LinkExpression, Perspective } from "@perspect3vism/ad4m"
+import { call, sleep, createConductors, create_link_expression, generate_link_expression} from "./utils.ts";
+import ad4m, { DID, HolochainLanguageDelegate, LinkExpression, Perspective } from "@coasys/ad4m"
 import test from "tape-promise/tape.js";
 import { hrtime } from 'node:process';
 //@ts-ignore
 import divide from 'divide-bigint'
-import { AsyncQueue } from "./queue";
-import { resolve } from "path";
-import { dnas } from "./common";
+import { AsyncQueue } from "./queue.ts";
+import { resolve } from "node:path";
+import { dnas } from "./common.ts";
 let createdLinks = new Map<string, Array<LinkExpression>>()
 
 class PeerInfo {

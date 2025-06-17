@@ -67,7 +67,7 @@ impl PerspectiveDiffRetreiver for HolochainRetreiver {
         let query = query(
             QueryFilter::new()
                 .entry_type(EntryType::App(AppEntryDef {
-                    entry_index: 4.into(),
+                    entry_index: 3.into(),
                     zome_index: 0.into(),
                     visibility: EntryVisibility::Private,
                 }))
