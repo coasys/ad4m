@@ -205,8 +205,11 @@ impl PerspectiveDiffEntryReference {
     }
 
     /// Helper method to get the comparison key for ordering
+    // Compare using tuple ordering: entries with parents come first,
+    // then by parent hashes, then by diffs_since_snapshot, 
+    // then by total diff count, then by diff contents
     fn comparison_key(&self) -> (bool, &Option<Vec<HoloHash<holo_hash::hash_type::Action>>>, usize, usize, &PerspectiveDiff) {
-        let has_parents = self.parents.is_some();
+        let has_parents = self.parents.is_none();
         (has_parents, &self.parents, self.diffs_since_snapshot, self.diff.total_diff_number(), &self.diff)
     }
 }
@@ -219,9 +222,6 @@ impl PartialOrd for PerspectiveDiffEntryReference {
 
 impl Ord for PerspectiveDiffEntryReference {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Compare using tuple ordering: entries with parents come first,
-        // then by first parent hash, then by diffs_since_snapshot, 
-        // then by total diff count, then by diff contents
         self.comparison_key().cmp(&other.comparison_key())
     }
 }
