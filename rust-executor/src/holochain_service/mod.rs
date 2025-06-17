@@ -5,7 +5,7 @@ use deno_core::error::AnyError;
 use lazy_static::lazy_static;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::RwLock;
+use tokio::sync::RwLock;
 
 use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo};
 use holochain::conductor::config::{ConductorConfig, NetworkConfig};
@@ -72,7 +72,7 @@ impl HolochainService {
     pub async fn init(local_config: LocalConductorConfig) -> Result<(), AnyError> {
         // Store the config for potential restarts
         {
-            let mut config_lock = HOLOCHAIN_CONFIG.write().unwrap();
+            let mut config_lock = HOLOCHAIN_CONFIG.write().await;
             *config_lock = Some(local_config.clone());
         }
 
@@ -377,7 +377,7 @@ impl HolochainService {
 
         // Get the stored config
         let config = {
-            let config_lock = HOLOCHAIN_CONFIG.read().unwrap();
+            let config_lock = HOLOCHAIN_CONFIG.read().await;
             config_lock
                 .clone()
                 .ok_or_else(|| anyhow!("No Holochain config stored for restart"))?
@@ -387,8 +387,8 @@ impl HolochainService {
         Self::init(config).await
     }
 
-    pub fn get_stored_config() -> Option<LocalConductorConfig> {
-        let config_lock = HOLOCHAIN_CONFIG.read().unwrap();
+    pub async fn get_stored_config() -> Option<LocalConductorConfig> {
+        let config_lock = HOLOCHAIN_CONFIG.read().await;
         config_lock.clone()
     }
 
