@@ -450,7 +450,7 @@ const Profile = (props: Props) => {
             <j-button onClick={async () => {
               if (client) {
                 try {
-                  const metrics = await (client.runtime as any).getNetworkMetrics();
+                  const metrics = await client.runtime.getNetworkMetrics();
                   const parsedMetrics = JSON.parse(metrics);
                   const formattedMetrics = JSON.stringify(parsedMetrics, (key, value) => {
                     // Keep buffer arrays on one line by not formatting them
