@@ -1,6 +1,6 @@
 use hdk::prelude::*;
 use perspective_diff_sync_integrity::{
-    EntryTypes, LinkExpression, PerspectiveDiff,
+    EntryTypes, LinkExpression, PerspectiveDiff, PerspectiveDiffEntryReference,
 };
 
 use crate::{Hash, CHUNK_SIZE};
@@ -59,7 +59,11 @@ impl ChunkedDiffs {
             .into_iter()
             .map(|chunk_diff| {
                 debug!("ChunkedDiffs writing chunk of size: {}", chunk_diff.total_diff_number());
-                Retreiver::create_entry(EntryTypes::PerspectiveDiff(chunk_diff))
+                let diff_entry = PerspectiveDiffEntryReference::new(
+                    chunk_diff,
+                    None, // No parents for chunk entries
+                );
+                Retreiver::create_entry(EntryTypes::PerspectiveDiffEntryReference(diff_entry))
             })
             .collect() 
     }
@@ -67,7 +71,8 @@ impl ChunkedDiffs {
     pub fn from_entries<Retreiver: PerspectiveDiffRetreiver>(hashes: Vec<Hash>) -> SocialContextResult<Self> {
         let mut diffs = Vec::new();
         for hash in hashes.into_iter() {
-            diffs.push(Retreiver::get::<PerspectiveDiff>(hash)?);
+            let diff_entry = Retreiver::get::<PerspectiveDiffEntryReference>(hash)?;
+            diffs.push(diff_entry.diff);
         }
 
         Ok(ChunkedDiffs {

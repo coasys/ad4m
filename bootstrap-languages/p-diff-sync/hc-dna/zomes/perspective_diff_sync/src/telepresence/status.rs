@@ -21,7 +21,7 @@ pub fn get_online_status() -> SocialContextResult<OnlineAgentAndAction> {
     let query = query(
         QueryFilter::new()
             .entry_type(EntryType::App(AppEntryDef {
-                entry_index: 7.into(),
+                entry_index: 6.into(),
                 zome_index: 0.into(),
                 visibility: EntryVisibility::Private,
             }))
