@@ -871,6 +871,16 @@ impl Workspace {
         )
     }
 
+    pub fn emit_debug_graph(&self, operation: &str) -> SocialContextResult<()> {
+        emit_signal(serde_json::json!({
+            "type": "debug_string",
+            "operation": operation,
+            "debug_string": self.generate_debug_graph(),
+        }))?;
+
+        Ok(())
+    }
+
     pub fn all_ancestors(&self, child: &Hash) -> SocialContextResult<Vec<Hash>> {
         //debug!("===Workspace.all_ancestors(): Function start");
         //let fn_start = get_now()?.time();

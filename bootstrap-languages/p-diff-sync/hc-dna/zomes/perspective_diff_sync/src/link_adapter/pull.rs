@@ -79,6 +79,11 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
     let mut workspace = Workspace::new();
 
     if current.is_none() {
+        emit_signal(serde_json::json!({
+            "type": "debug_string",
+            "operation": "pull-info",
+            "debug_string": "No current revision, collecting from latest",
+        }))?;
         workspace.collect_only_from_latest::<Retriever>(theirs.clone())?;
         let diff = workspace.squashed_diff::<Retriever>()?;
         update_current_revision::<Retriever>(theirs, get_now()?)?;
@@ -94,16 +99,7 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
     workspace.build_diffs::<Retriever>(theirs.clone(), current.hash.clone())?;
 
     // Generate and emit debug graph for visualization
-    let debug_graph = workspace.generate_debug_graph();
-    debug!("Debug graph for merge operation: {}", debug_graph);
-    
-    // Emit debug signal to JS layer
-    emit_signal(serde_json::json!({
-        "type": "debug_string",
-        "operation": "merge",
-        "debug_string": debug_graph,
-        "timestamp": get_now()?.time().to_string(),
-    }))?;
+    workspace.emit_debug_graph("pull")?;
 
     // First check if we are actually ahead of them -> we don't have to do anything
     // they will have to merge with / or fast-forward to our current
@@ -164,6 +160,11 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
 
     let (diffs, current_revision) = if fast_forward_possible {
         debug!("===PerspectiveDiffSync.pull(): There are paths between current and latest, lets fast forward the changes we have missed!");
+        emit_signal(serde_json::json!({
+            "type": "debug_string",
+            "operation": "pull-info",
+            "debug_string": format!("Fast-forwarding from {} to {}", current.hash, theirs),
+        }))?;
         let mut out = PerspectiveDiff {
             additions: vec![],
             removals: vec![],
@@ -181,6 +182,11 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
         (out, theirs)
     } else if is_scribe {
         debug!("===PerspectiveDiffSync.pull():There are no paths between current and latest, we must merge current and latest");
+        emit_signal(serde_json::json!({
+            "type": "debug_string",
+            "operation": "pull-info",
+            "debug_string": format!("Merging their {} into my {}", theirs, current.hash,),
+        }))?;
         //Get the entries we missed from unseen diff
         let mut out = PerspectiveDiff {
             additions: vec![],
