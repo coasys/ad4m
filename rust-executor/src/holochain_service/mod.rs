@@ -2,10 +2,10 @@ use chrono::Duration;
 use crypto_box::rand_core::OsRng;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
+use lazy_static::lazy_static;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::RwLock;
-use lazy_static::lazy_static;
 
 use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo};
 use holochain::conductor::config::{ConductorConfig, NetworkConfig};
@@ -43,7 +43,8 @@ use self::interface::set_holochain_service;
 
 // Store the config globally so we can restart with the same configuration
 lazy_static! {
-    static ref HOLOCHAIN_CONFIG: Arc<RwLock<Option<LocalConductorConfig>>> = Arc::new(RwLock::new(None));
+    static ref HOLOCHAIN_CONFIG: Arc<RwLock<Option<LocalConductorConfig>>> =
+        Arc::new(RwLock::new(None));
 }
 
 const COASYS_BOOTSTRAP_AGENT_INFO: &str = r#" ["g6VhZ2VudMQkeWyy+u7ziOZEejqRGCHVSjWuNDGCkHSFWpkp/DsXJFVDyWYdqXNpZ25hdHVyZcRAlYaUoegA0DB+U8F2cONLcoORjqz7WqW4dBSfvWyQ4AixLLB3h0jsvqGUo0UfowjUP1ntBhMjA8xo/oQateooDaphZ2VudF9pbmZvxPuGpXNwYWNlxCReuo1fprVD9jjsQWRglwEzVlWFiYB+4BEA7BQIwOpYgUgezPGlYWdlbnTEJHlssvru84jmRHo6kRgh1Uo1rjQxgpB0hVqZKfw7FyRVQ8lmHaR1cmxzkdlJd3NzOi8vc2lnbmFsLmhvbG8uaG9zdC90eDUtd3MvNEFNaGNWNHhpdFdPMHI2YUR1NjFwcW5jMW5LNjBmdkRfYTRyZUJmUFdTMKxzaWduZWRfYXRfbXPPAAABk/NOnPewZXhwaXJlc19hZnRlcl9tc84AEk+AqW1ldGFfaW5mb8QZgahhcnFfc2l6ZYKlcG93ZXIRpWNvdW50CA=="]"#;
@@ -74,7 +75,7 @@ impl HolochainService {
             let mut config_lock = HOLOCHAIN_CONFIG.write().unwrap();
             *config_lock = Some(local_config.clone());
         }
-        
+
         let (sender, mut receiver) = mpsc::unbounded_channel::<HolochainServiceRequest>();
         let (stream_sender, stream_receiver) = mpsc::unbounded_channel::<Signal>();
         let (new_app_ids_sender, mut new_app_ids_receiver) = mpsc::unbounded_channel::<AppInfo>();
@@ -373,17 +374,19 @@ impl HolochainService {
 
     pub async fn restart_service() -> Result<(), AnyError> {
         log::info!("Restarting Holochain service...");
-        
+
         // Get the stored config
         let config = {
             let config_lock = HOLOCHAIN_CONFIG.read().unwrap();
-            config_lock.clone().ok_or_else(|| anyhow!("No Holochain config stored for restart"))?
+            config_lock
+                .clone()
+                .ok_or_else(|| anyhow!("No Holochain config stored for restart"))?
         };
-        
+
         // Restart the service with the stored config
         Self::init(config).await
     }
-    
+
     pub fn get_stored_config() -> Option<LocalConductorConfig> {
         let config_lock = HOLOCHAIN_CONFIG.read().unwrap();
         config_lock.clone()
