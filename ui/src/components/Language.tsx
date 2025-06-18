@@ -93,10 +93,6 @@ const Language = (props: Props) => {
         if (p.neighbourhood) {
           if (p.neighbourhood.linkLanguage === lang.address) {
             return true;
-          } else {
-            return p.neighbourhood.meta.links
-              .filter((l) => l.data.predicate === "language")
-              .find((l) => l.data.target === lang.address);
           }
         }
 
