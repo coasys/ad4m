@@ -11,6 +11,7 @@ import { Ad4minContext } from "../context/Ad4minContext";
 import { nanoid } from "nanoid";
 import ActionButton from "./ActionButton";
 import { open, save, confirm } from '@tauri-apps/plugin-dialog';
+import DebugStrings from "./DebugStrings";
 
 type Props = {
   opened: boolean;
@@ -242,6 +243,9 @@ const Perspectives = (props: Props) => {
 
       <div style={listStyle}>
         {perspectives.map((e, i) => {
+          const linkLanguageAddress = e?.neighbourhood?.data.linkLanguage;
+          const [showDebugModal, setShowDebugModal] = useState(false);
+
           return (
             <div
               key={`perspectice-${e?.name}`}
@@ -290,6 +294,28 @@ const Perspectives = (props: Props) => {
                     </j-button>
                   </j-input>
                 </>
+              )}
+
+              {e?.neighbourhood && (
+                <j-box pt="300">
+                  <j-button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setShowDebugModal(true)}
+                    full
+                  >
+                    <j-icon name="bug" size="sm"></j-icon>
+                    Debug Strings
+                  </j-button>
+                </j-box>
+              )}
+
+              {showDebugModal && linkLanguageAddress && (
+                <DebugStrings
+                  languageAddress={linkLanguageAddress}
+                  onClose={() => setShowDebugModal(false)}
+                  open={showDebugModal}
+                />
               )}
 
               <div style={{ position: "absolute", top: 10, right: 10 }}>

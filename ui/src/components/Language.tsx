@@ -4,6 +4,7 @@ import { Ad4minContext } from "../context/Ad4minContext";
 import { isSystemLanguage } from "../util";
 import ActionButton from "./ActionButton";
 import { cardStyle, listStyle } from "./styles";
+import DebugStrings from "./DebugStrings";
 
 type Props = {
   opened: boolean;
@@ -130,6 +131,7 @@ const Language = (props: Props) => {
         {languages.map((e, i) => {
           const { language, perspective } = e;
           const isSystem = isSystemLanguage(language!.name);
+          const [showDebugModal, setShowDebugModal] = useState(false);
 
           return (
             <div
@@ -159,6 +161,26 @@ const Language = (props: Props) => {
                   </j-button>
                 </j-input>
               </j-box>
+
+              <j-box pt="300">
+                <j-button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setShowDebugModal(true)}
+                  full
+                >
+                  <j-icon name="bug" size="sm"></j-icon>
+                  Debug Strings
+                </j-button>
+              </j-box>
+
+              {showDebugModal && language?.address && (
+                <DebugStrings
+                  languageAddress={language.address}
+                  onClose={() => setShowDebugModal(false)}
+                  open={showDebugModal}
+                />
+              )}
             </div>
           );
         })}

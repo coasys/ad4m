@@ -20,6 +20,7 @@
     "@tauri-apps/plugin-process": "~2",
     "@tauri-apps/plugin-shell": "~2",
     "@tauri-apps/plugin-updater": "~2",
+    "@viz-js/viz": "^3.14.0",
     "apollo-boost": "^0.4.9",
     "graphql": "15.7.2",
     "graphql-ws": "5.12.0",
