@@ -95,6 +95,8 @@ const Profile = (props: Props) => {
   const [agentInfos, setAgentInfos] = useState("");
   const [showAgentInfos, setShowAgentInfos] = useState(false);
 
+  const [restartingHolochain, setRestartingHolochain] = useState(false);
+
   async function openLogs() {
     let dataPath = await invoke("get_data_path") as string;
     revealItemInDir(await join(dataPath, "ad4m.log"))
@@ -154,9 +156,14 @@ const Profile = (props: Props) => {
   const getAgentInfo = async () => {
     const info = await client?.runtime.hcAgentInfos();
     if (info) {
-      const formattedInfo = JSON.stringify(JSON.parse(info), null, 2);
-      setAgentInfos(formattedInfo);
-      setShowAgentInfos(true);
+      try {
+        const formattedInfo = JSON.stringify(JSON.parse(info), null, 2);
+        setAgentInfos(formattedInfo);
+        setShowAgentInfos(true);
+      } catch (error) {
+        console.error("Failed to parse agent info data:", error);
+        alert("Failed to display agent info: The data returned from the backend is malformed. Please check the console for details.");
+      }
     }
   };
 
@@ -450,7 +457,7 @@ const Profile = (props: Props) => {
             <j-button onClick={async () => {
               if (client) {
                 try {
-                  const metrics = await (client.runtime as any).getNetworkMetrics();
+                  const metrics = await client.runtime.getNetworkMetrics();
                   const parsedMetrics = JSON.parse(metrics);
                   const formattedMetrics = JSON.stringify(parsedMetrics, (key, value) => {
                     // Keep buffer arrays on one line by not formatting them
@@ -489,19 +496,22 @@ const Profile = (props: Props) => {
                   });
                   
                   if (confirmed) {
+                    setRestartingHolochain(true);
                     await client.runtime.restartHolochain();
                     await dialogMessage('Holochain has been restarted successfully!', {
                       title: 'Success'
                     });
+                    setRestartingHolochain(false);
                   }
                 } catch (error) {
                   console.error('Failed to restart Holochain:', error);
                   await dialogMessage('Failed to restart Holochain. Check console for details.', {
                     title: 'Error'
                   });
+                  setRestartingHolochain(false);
                 }
               }
-            }} full variant="ghost">
+            }} full variant="ghost" loading={restartingHolochain} disabled={restartingHolochain}>
               <j-icon size="sm" slot="start" name="arrow-clockwise"></j-icon>
               Restart Holochain
             </j-button>
