@@ -1,6 +1,6 @@
 import { LinkSyncAdapter, PerspectiveDiffObserver, HolochainLanguageDelegate, LanguageContext, PerspectiveDiff, 
-  LinkExpression, DID, Perspective, PerspectiveState, DebugGraphObserver, DebugStringObserver } from "https://esm.sh/@coasys/ad4m@0.10.1-release-candidate-4-debug-strings";
-import type { SyncStateChangeObserver } from "https://esm.sh/@coasys/ad4m@0.10.1-release-candidate-4-debug-strings";
+  LinkExpression, DID, Perspective, PerspectiveState, DebugGraphObserver, DebugStringObserver } from "https://esm.sh/@coasys/ad4m@0.10.1-release-candidate-4-debug-strings-2";
+import type { SyncStateChangeObserver } from "https://esm.sh/@coasys/ad4m@0.10.1-release-candidate-4-debug-strings-2";
 import { Mutex, withTimeout } from "https://esm.sh/async-mutex@0.4.0";
 import { DNA_ROLE, ZOME_NAME } from "./build/happ.js";
 import { encodeBase64 } from "https://deno.land/std@0.220.1/encoding/base64.ts";
