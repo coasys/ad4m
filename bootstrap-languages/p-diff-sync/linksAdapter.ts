@@ -183,7 +183,7 @@ export class LinkAdapter implements LinkSyncAdapter {
         this.gossipLogCount = 0;
       }
     } catch (e) {
-      console.error("PerspectiveDiffSync.gossip(); got error", e);
+      console.error("PerspectiveDiffSync.gossip(); got error", e, e.stack, JSON.stringify(e));
     } finally {
       release();
     }
