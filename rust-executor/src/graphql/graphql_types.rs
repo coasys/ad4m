@@ -457,6 +457,7 @@ impl PerspectiveExpression {
 }
 
 #[derive(GraphQLEnum, Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[graphql(rename_all = "camelCase")]
 pub enum PerspectiveState {
     #[default]
     Private,
