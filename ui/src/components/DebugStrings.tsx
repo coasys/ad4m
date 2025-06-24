@@ -1,4 +1,4 @@
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useState, useRef } from "react";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { instance } from "@viz-js/viz";
 
@@ -23,6 +23,7 @@ const DebugStrings = ({ languageAddress, onClose, open }: DebugStringsProps) => 
   const [debugStrings, setDebugStrings] = useState<DebugStringEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const modalRef = useRef<any>(null);
 
   const fetchDebugStrings = async () => {
     if (!client) return;
@@ -49,6 +50,37 @@ const DebugStrings = ({ languageAddress, onClose, open }: DebugStringsProps) => 
       fetchDebugStrings();
     }
   }, [languageAddress, client, open]);
+
+  // Watch for modal close via its built-in close button
+  useEffect(() => {
+    const modalElement = modalRef.current;
+    if (!modalElement) return;
+
+    const handleModalChange = () => {
+      // If modal internally set open to false, call our onClose
+      if (open && !modalElement.open) {
+        onClose();
+      }
+    };
+
+    // Listen for changes to the open attribute
+    const observer = new MutationObserver((mutations) => {
+      mutations.forEach((mutation) => {
+        if (mutation.type === 'attributes' && mutation.attributeName === 'open') {
+          handleModalChange();
+        }
+      });
+    });
+
+    observer.observe(modalElement, {
+      attributes: true,
+      attributeFilter: ['open']
+    });
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [open, onClose]);
 
   const formatTimestamp = (timestamp: string) => {
     return new Date(timestamp).toLocaleString();
@@ -117,7 +149,7 @@ const DebugStrings = ({ languageAddress, onClose, open }: DebugStringsProps) => 
   if (!open) return null;
 
   return (
-    <j-modal size="fullscreen" open={open}>
+    <j-modal ref={modalRef} size="fullscreen" open={open}>
       <j-box px="400" py="600">
         <j-box pb="400">
           <j-flex j="between" a="center">
