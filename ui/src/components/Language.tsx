@@ -33,6 +33,7 @@ const Language = (props: Props) => {
   const [languageSourceLink, setLanguageSourceLink] = useState("");
   const [languageBundlePath, setLanguageBundlePath] = useState("");
   const [data, setData] = useState<any[]>([]);
+  const [debugModalsOpen, setDebugModalsOpen] = useState<Set<string>>(new Set());
 
   const publishLanguage = async () => {
     setLoading(true);
@@ -131,7 +132,6 @@ const Language = (props: Props) => {
         {languages.map((e, i) => {
           const { language, perspective } = e;
           const isSystem = isSystemLanguage(language!.name);
-          const [showDebugModal, setShowDebugModal] = useState(false);
 
           return (
             <div
@@ -166,7 +166,7 @@ const Language = (props: Props) => {
                 <j-button
                   size="sm"
                   variant="ghost"
-                  onClick={() => setShowDebugModal(true)}
+                  onClick={() => setDebugModalsOpen(prev => new Set([...prev, language?.address]))}
                   full
                 >
                   <j-icon name="bug" size="sm"></j-icon>
@@ -174,11 +174,15 @@ const Language = (props: Props) => {
                 </j-button>
               </j-box>
 
-              {showDebugModal && language?.address && (
+              {debugModalsOpen.has(language?.address) && language?.address && (
                 <DebugStrings
                   languageAddress={language.address}
-                  onClose={() => setShowDebugModal(false)}
-                  open={showDebugModal}
+                  onClose={() => setDebugModalsOpen(prev => {
+                    const newSet = new Set(prev);
+                    newSet.delete(language?.address);
+                    return newSet;
+                  })}
+                  open={debugModalsOpen.has(language?.address)}
                 />
               )}
             </div>

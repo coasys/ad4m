@@ -97,6 +97,7 @@ const Perspectives = (props: Props) => {
   const [linkLanguage, setLinkLanguage] = useState("");
   const [linkLanguages, setLinkLanguages] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [debugModalsOpen, setDebugModalsOpen] = useState<Set<string>>(new Set());
 
   const fetchPerspective = async () => {
     const perspectives = await client!.perspective.all();
@@ -244,7 +245,6 @@ const Perspectives = (props: Props) => {
       <div style={listStyle}>
         {perspectives.map((e, i) => {
           const linkLanguageAddress = e?.neighbourhood?.data.linkLanguage;
-          const [showDebugModal, setShowDebugModal] = useState(false);
 
           return (
             <div
@@ -301,7 +301,7 @@ const Perspectives = (props: Props) => {
                   <j-button
                     size="sm"
                     variant="ghost"
-                    onClick={() => setShowDebugModal(true)}
+                    onClick={() => setDebugModalsOpen(prev => new Set([...prev, e.uuid]))}
                     full
                   >
                     <j-icon name="bug" size="sm"></j-icon>
@@ -310,11 +310,15 @@ const Perspectives = (props: Props) => {
                 </j-box>
               )}
 
-              {showDebugModal && linkLanguageAddress && (
+              {debugModalsOpen.has(e!.uuid) && linkLanguageAddress && (
                 <DebugStrings
                   languageAddress={linkLanguageAddress}
-                  onClose={() => setShowDebugModal(false)}
-                  open={showDebugModal}
+                  onClose={() => setDebugModalsOpen(prev => {
+                    const newSet = new Set(prev);
+                    newSet.delete(e!.uuid);
+                    return newSet;
+                  })}
+                  open={debugModalsOpen.has(e!.uuid)}
                 />
               )}
 
