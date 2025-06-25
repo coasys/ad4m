@@ -119,6 +119,8 @@ pub fn run() {
         "holochain=debug,wasmer_compiler_cranelift=warn,rust_executor=info,warp=warn,warp::server=warn,warp::filters=warn",
     );
 
+    env::set_var("WASM_LOG","debug");
+
     let state = LauncherState::load().unwrap();
 
     let selected_agent = state.selected_agent.clone().unwrap();
