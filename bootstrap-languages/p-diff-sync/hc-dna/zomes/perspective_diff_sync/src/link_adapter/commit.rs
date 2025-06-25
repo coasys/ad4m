@@ -135,9 +135,9 @@ pub fn add_active_agent_link<Retriever: PerspectiveDiffRetreiver>() -> SocialCon
 
 pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>() -> SocialContextResult<Option<Hash>>
 {
-    //debug!("Running broadcast_current");
+    debug!("Running broadcast_current");
     let current = current_revision::<Retriever>()?;
-    //debug!("Current revision: {:#?}", current);
+    debug!("Current revision: {:#?}", current);
 
     if current.is_some() {
         let current_revision = current.clone().unwrap();
@@ -151,7 +151,7 @@ pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>() -> SocialContext
         };
 
         let recent_agents = get_active_agents()?;
-        //debug!("Recent agents: {:#?}", recent_agents);
+        debug!("Recent agents: {:#?}", recent_agents);
         send_remote_signal(signal_data.get_sb()?, recent_agents.clone())?;
     };
     Ok(current.map(|rev| rev.hash))

@@ -102,9 +102,10 @@ pub fn update_current_revision(_hash: Hash) -> ExternResult<()> {
 #[hdk_extern]
 fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
     //Check if its a normal diff expression signal
+    debug!("recv_remote_signal signal: {:?}", signal);
     match HashBroadcast::try_from(signal.clone()) {
         Ok(broadcast) => {
-            debug!("recv_remote_signal broadcast: {:?} from {}", broadcast.reference_hash, broadcast.broadcast_author);
+            info!("recv_remote_signal broadcast: {:?} from {}", broadcast.reference_hash, broadcast.broadcast_author);
             link_adapter::pull::handle_broadcast::<retriever::HolochainRetreiver>(broadcast)
                 .map_err(|err| utils::err(&format!("{}", err)))?;
         }

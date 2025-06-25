@@ -116,7 +116,7 @@ fn rlim_execute() {
 pub fn run() {
     env::set_var(
         "RUST_LOG",
-        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp=warn,warp::server=warn,warp::filters=warn",
+        "holochain=debug,wasmer_compiler_cranelift=warn,rust_executor=info,warp=warn,warp::server=warn,warp::filters=warn",
     );
 
     let state = LauncherState::load().unwrap();
