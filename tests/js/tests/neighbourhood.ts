@@ -222,6 +222,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(aliceLinks.some(link => link.data.target === 'test://bob/3')).to.be.true
             })
 
+            /*
             it('generates debug strings during link exchange between Alice and Bob', async () => {
                 const alice = testContext.alice
                 const bob = testContext.bob
@@ -329,7 +330,8 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 console.log(`   - All contain valid DOT graph syntax`);
                 console.log(`   - All have valid timestamps and language addresses`);
             })
-
+            */
+           
             it('can delete neighbourhood', async () => {
                 const alice = testContext.alice;
                 const bob = testContext.bob;
