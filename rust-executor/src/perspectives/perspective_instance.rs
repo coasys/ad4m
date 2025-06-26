@@ -1253,6 +1253,34 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Executes a Prolog subscription query with optimized routing to filtered engines
+    pub async fn prolog_query_subscription(&self, query: String) -> Result<QueryResolution, AnyError> {
+        // Get service reference before any locks
+        let service = get_prolog_service().await;
+        let uuid = self.persisted.lock().await.uuid.clone();
+
+        // Ensure pool exists
+        self.ensure_prolog_engine_pool().await?;
+
+        let _read_lock = self.prolog_update_mutex.read().await;
+
+        let query = if !query.ends_with('.') {
+            query + "."
+        } else {
+            query
+        };
+
+        let result = service.run_query_subscription(uuid, query).await?;
+
+        match result {
+            Err(e) => {
+                // Engine error is handled at pool level now
+                Err(anyhow!(e))
+            }
+            Ok(resolution) => Ok(resolution),
+        }
+    }
+
     fn spawn_prolog_facts_update(
         &self,
         diff: DecoratedPerspectiveDiff,
@@ -2091,7 +2119,7 @@ impl PerspectiveInstance {
         let subscription_id = uuid::Uuid::new_v4().to_string();
 
         // Execute prolog query without holding any locks
-        let initial_result = self.prolog_query(query.clone()).await?;
+        let initial_result = self.prolog_query_subscription(query.clone()).await?;
         let result_string = prolog_resolution_to_string(initial_result);
 
         let subscribed_query = SubscribedQuery {
@@ -2164,7 +2192,7 @@ impl PerspectiveInstance {
             let self_clone = self.clone();
             let query_future = async move {
                 //let this_now = Instant::now();
-                if let Ok(result) = self_clone.prolog_query(query.query.clone()).await {
+                if let Ok(result) = self_clone.prolog_query_subscription(query.query.clone()).await {
                     let result_string = prolog_resolution_to_string(result);
                     if result_string != query.last_result {
                         //log::info!("Query {} has changed: {}", id, result_string);

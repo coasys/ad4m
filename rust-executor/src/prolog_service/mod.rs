@@ -56,6 +56,19 @@ impl PrologService {
         pool.run_query(query).await
     }
 
+    /// Run query with subscription optimization - uses filtered pools for subscription queries
+    pub async fn run_query_subscription(
+        &self,
+        perspective_id: String,
+        query: String,
+    ) -> Result<QueryResult, Error> {
+        let pools = self.engine_pools.read().await;
+        let pool = pools
+            .get(&perspective_id)
+            .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?;
+        pool.run_query_smart(query, true).await
+    }
+
     pub async fn run_query_all(&self, perspective_id: String, query: String) -> Result<(), Error> {
         let pools = self.engine_pools.read().await;
         let pool = pools
