@@ -3,6 +3,7 @@ use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use crate::types::DecoratedLinkExpression;
 
 mod embedding_cache;
 pub(crate) mod engine;
@@ -88,6 +89,21 @@ impl PrologService {
             .get(&perspective_id)
             .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?;
         pool.update_all_engines(module_name, program_lines).await
+    }
+
+    /// Update perspective with link data for optimized filtering
+    pub async fn update_perspective_links(
+        &self,
+        perspective_id: String,
+        module_name: String,
+        all_links: Vec<DecoratedLinkExpression>,
+        neighbourhood_author: Option<String>,
+    ) -> Result<(), Error> {
+        let pools = self.engine_pools.read().await;
+        let pool = pools
+            .get(&perspective_id)
+            .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?;
+        pool.update_all_engines_with_links(module_name, all_links, neighbourhood_author).await
     }
 
     pub async fn has_perspective_pool(&self, perspective_id: String) -> bool {

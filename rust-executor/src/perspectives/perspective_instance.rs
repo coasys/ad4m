@@ -1,4 +1,4 @@
-use super::sdna::{generic_link_fact, init_engine_facts, is_sdna_link};
+use super::sdna::{generic_link_fact, is_sdna_link};
 use super::update_perspective;
 use super::utils::{
     prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string,
@@ -1205,20 +1205,17 @@ impl PerspectiveInstance {
             // Create and initialize new pool
             service.ensure_perspective_pool(uuid.clone()).await?;
 
-            // Initialize with facts
+            // Initialize with links for optimized filtering
             let all_links = self.get_links(&LinkQuery::default()).await?;
-            let facts = init_engine_facts(
-                all_links,
-                self.persisted
-                    .lock()
-                    .await
-                    .neighbourhood
-                    .as_ref()
-                    .map(|n| n.author.clone()),
-            )
-            .await?;
+            let neighbourhood_author = self.persisted
+                .lock()
+                .await
+                .neighbourhood
+                .as_ref()
+                .map(|n| n.author.clone());
+                
             service
-                .update_perspective_facts(uuid, "facts".to_string(), facts)
+                .update_perspective_links(uuid, "facts".to_string(), all_links, neighbourhood_author)
                 .await?;
         }
 
@@ -1468,11 +1465,9 @@ impl PerspectiveInstance {
                 .map(|n| n.author.clone())
         };
 
-        let facts = init_engine_facts(all_links, neighbourhood_author).await?;
-
         let service = get_prolog_service().await;
         service
-            .update_perspective_facts(uuid, "facts".to_string(), facts)
+            .update_perspective_links(uuid, "facts".to_string(), all_links, neighbourhood_author)
             .await?;
         Ok(())
     }
