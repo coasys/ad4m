@@ -491,7 +491,7 @@ impl PrologEnginePool {
         engine.load_module_string("temp_filter_facts".to_string(), processed_temp_facts).await?;
         
         // Query for all nodes reachable from the source
-        let reachable_query = format!(r#"reachable("{}", Target)"#, source_filter);
+        let reachable_query = format!(r#"reachable("{}", Target)."#, source_filter);
         let result = engine.run_query(reachable_query).await?;
         
         let mut reachable_nodes = vec![source_filter.to_string()]; // Include the source itself
