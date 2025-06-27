@@ -33,6 +33,10 @@ pub struct PrologEnginePool {
     embedding_cache: Arc<RwLock<EmbeddingCache>>,
     pool_type: EnginePoolType,
     filtered_pools: Arc<RwLock<HashMap<String, PrologEnginePool>>>,
+    // Store current facts for reuse in filtered pools
+    current_facts: Arc<RwLock<Option<Vec<String>>>>,
+    current_all_links: Arc<RwLock<Option<Vec<DecoratedLinkExpression>>>>,
+    current_neighbourhood_author: Arc<RwLock<Option<String>>>,
 }
 
 impl PrologEnginePool {
@@ -43,6 +47,9 @@ impl PrologEnginePool {
             embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
             pool_type: EnginePoolType::Complete,
             filtered_pools: Arc::new(RwLock::new(HashMap::new())),
+            current_facts: Arc::new(RwLock::new(None)),
+            current_all_links: Arc::new(RwLock::new(None)),
+            current_neighbourhood_author: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -53,6 +60,9 @@ impl PrologEnginePool {
             embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
             pool_type: EnginePoolType::FilteredBySource(source_filter),
             filtered_pools: Arc::new(RwLock::new(HashMap::new())),
+            current_facts: Arc::new(RwLock::new(None)),
+            current_all_links: Arc::new(RwLock::new(None)),
+            current_neighbourhood_author: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -306,6 +316,13 @@ impl PrologEnginePool {
             }
         };
 
+        // Store current state for reuse in filtered pools (only for complete pools)
+        if matches!(self.pool_type, EnginePoolType::Complete) {
+            *self.current_facts.write().await = Some(facts_to_load.clone());
+            *self.current_all_links.write().await = Some(all_links.clone());
+            *self.current_neighbourhood_author.write().await = neighbourhood_author.clone();
+        }
+
         // Preprocess the facts to handle embeddings
         let processed_facts = self.preprocess_program_lines(facts_to_load.clone()).await;
 
@@ -332,24 +349,21 @@ impl PrologEnginePool {
             
             for (source_filter, pool) in filtered_pools.iter() {
                 log::info!("📊 POOL UPDATE: Updating filtered pool for source: '{}'", source_filter);
-                // Create filtered facts for this source
-                let mut filtered_lines = get_static_infrastructure_facts();
-                filtered_lines.extend(get_sdna_facts(&all_links, neighbourhood_author.clone())?);
                 
-                let filtered_data = self.get_filtered_data_facts(source_filter, &all_links).await?;
-                log::info!("📊 POOL UPDATE: Filtered pool '{}' will have {} infrastructure facts + {} filtered data facts = {} total facts", 
-                    source_filter, 
-                    filtered_lines.len(), 
-                    filtered_data.len(),
-                    filtered_lines.len() + filtered_data.len()
-                );
-                filtered_lines.extend(filtered_data);
-                
-                // Update the filtered pool with its subset of facts
+                // Use stored data to create filtered facts for this source
                 let pool_clone = pool.clone();
                 let module_name_clone = module_name.clone();
+                let all_links_clone = all_links.clone();
+                let neighbourhood_author_clone = neighbourhood_author.clone();
+                let source_filter_clone = source_filter.clone();
+                
                 let update_future = async move {
-                    pool_clone.update_all_engines_with_facts(module_name_clone, filtered_lines).await
+                    pool_clone.update_filtered_pool_from_stored_data(
+                        module_name_clone,
+                        &source_filter_clone,
+                        &all_links_clone,
+                        neighbourhood_author_clone
+                    ).await
                 };
                 update_futures.push(update_future);
             }
@@ -402,6 +416,78 @@ impl PrologEnginePool {
             }
         }
 
+        Ok(())
+    }
+
+    /// Update a filtered pool using stored data from the complete pool
+    async fn update_filtered_pool_from_stored_data(
+        &self,
+        module_name: String,
+        source_filter: &str,
+        all_links: &[DecoratedLinkExpression],
+        neighbourhood_author: Option<String>,
+    ) -> Result<(), Error> {
+        log::info!("📊 FILTERED POOL UPDATE: Updating filtered pool for source: '{}'", source_filter);
+        
+        // Create filtered facts for this source
+        let mut filtered_lines = get_static_infrastructure_facts();
+        filtered_lines.extend(get_sdna_facts(all_links, neighbourhood_author)?);
+        
+        let filtered_data = self.get_filtered_data_facts(source_filter, all_links).await?;
+        log::info!("📊 FILTERED POOL UPDATE: Filtered pool '{}' will have {} infrastructure facts + {} filtered data facts = {} total facts", 
+            source_filter, 
+            filtered_lines.len(), 
+            filtered_data.len(),
+            filtered_lines.len() + filtered_data.len()
+        );
+        filtered_lines.extend(filtered_data);
+        
+        // Update the filtered pool with its subset of facts
+        self.update_all_engines_with_facts(module_name, filtered_lines).await
+    }
+
+    /// Populate a specific filtered pool directly using stored data from the complete pool  
+    pub async fn populate_filtered_pool_direct(
+        &self,
+        source_filter: &str,
+    ) -> Result<(), Error> {
+        // Only complete pools can populate filtered sub-pools
+        if !matches!(self.pool_type, EnginePoolType::Complete) {
+            return Err(anyhow!("Only complete pools can populate filtered sub-pools"));
+        }
+
+        let filtered_pools = self.filtered_pools.read().await;
+        let filtered_pool = filtered_pools.get(source_filter)
+            .ok_or_else(|| anyhow!("Filtered pool for source '{}' not found", source_filter))?;
+
+        log::info!("📊 DIRECT POPULATION: Populating filtered pool for source: '{}'", source_filter);
+
+        // Use stored data to populate the filtered pool
+        let all_links = self.current_all_links.read().await;
+        let neighbourhood_author = self.current_neighbourhood_author.read().await;
+        
+        let all_links = all_links.as_ref()
+            .ok_or_else(|| anyhow!("No stored links data available for filtering"))?;
+        let neighbourhood_author = neighbourhood_author.clone();
+
+        // Create filtered facts for this source
+        let mut filtered_lines = get_static_infrastructure_facts();
+        filtered_lines.extend(get_sdna_facts(all_links, neighbourhood_author)?);
+        
+        let filtered_data = self.get_filtered_data_facts(source_filter, all_links).await?;
+        log::info!("📊 DIRECT POPULATION: Filtered pool '{}' will have {} infrastructure facts + {} filtered data facts = {} total facts", 
+            source_filter, 
+            filtered_lines.len(), 
+            filtered_data.len(),
+            filtered_lines.len() + filtered_data.len()
+        );
+        filtered_lines.extend(filtered_data);
+        
+        // Update the filtered pool with its subset of facts
+        filtered_pool.update_all_engines_with_facts("facts".to_string(), filtered_lines).await?;
+        
+        log::info!("📊 DIRECT POPULATION: Successfully populated filtered pool for source: '{}'", source_filter);
+        
         Ok(())
     }
 
@@ -635,280 +721,7 @@ impl PrologEnginePool {
         self.run_query(query).await
     }
 
-    /// Get all current facts from the complete pool by querying an engine
-    async fn get_all_current_facts(&self) -> Result<(Vec<String>, Vec<String>), Error> {
-        // Only complete pools should call this method
-        if !matches!(self.pool_type, EnginePoolType::Complete) {
-            return Err(anyhow!("get_all_current_facts can only be called on complete pools"));
-        }
-        
-        log::debug!("📊 FACT EXTRACTION: Getting all current facts from complete pool");
-        
-        // Use an existing engine from the complete pool
-        let engines = self.engines.read().await;
-        let engine = engines
-            .iter()
-            .find_map(|e| e.as_ref())
-            .ok_or_else(|| anyhow!("No engines available in complete pool"))?;
-        
-        let mut data_facts = Vec::new();
-        
-        // Query for all triple facts
-        let triple_query = "findall(Fact, (triple(S,P,O), Fact = triple(S,P,O)), TripleFacts).";
-        if let Ok(Ok(result)) = engine.run_query(triple_query.to_string()).await {
-            if let QueryResolution::Matches(matches) = result {
-                for m in matches {
-                    if let Some(Term::List(facts)) = m.bindings.get("TripleFacts") {
-                        for fact in facts {
-                            if let Some(fact_str) = self.term_to_fact_string(fact) {
-                                data_facts.push(format!("{}.", fact_str));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Query for all link facts
-        let link_query = "findall(Fact, (link(S,P,O,T,A), Fact = link(S,P,O,T,A)), LinkFacts).";
-        if let Ok(Ok(result)) = engine.run_query(link_query.to_string()).await {
-            if let QueryResolution::Matches(matches) = result {
-                for m in matches {
-                    if let Some(Term::List(facts)) = m.bindings.get("LinkFacts") {
-                        for fact in facts {
-                            if let Some(fact_str) = self.term_to_fact_string(fact) {
-                                data_facts.push(format!("{}.", fact_str));
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
-        let mut sdna_facts = Vec::new();
-        
-        // Query for SDNA facts (subject_class, property, collection, etc.)
-        let sdna_predicates = [
-            "subject_class", "property", "collection", "constructor", "destructor",
-            "instance", "property_getter", "property_setter", "property_resolve",
-            "collection_getter", "collection_setter", "collection_remover", "collection_adder"
-        ];
-        
-        for predicate in &sdna_predicates {
-            let query = format!("findall(Fact, ({}(A,B), Fact = {}(A,B)), Facts).", predicate, predicate);
-            if let Ok(Ok(result)) = engine.run_query(query).await {
-                if let QueryResolution::Matches(matches) = result {
-                    for m in matches {
-                        if let Some(Term::List(facts)) = m.bindings.get("Facts") {
-                            for fact in facts {
-                                if let Some(fact_str) = self.term_to_fact_string(fact) {
-                                    sdna_facts.push(format!("{}.", fact_str));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        log::info!("📊 FACT EXTRACTION: Extracted {} total facts from complete pool", data_facts.len() + sdna_facts.len());
-        
-        Ok((data_facts, sdna_facts))
-    }
-    
-    /// Convert a Prolog term to a fact string representation
-    fn term_to_fact_string(&self, term: &Term) -> Option<String> {
-        match term {
-            Term::Compound(name, args) => {
-                let arg_strings: Vec<String> = args.iter()
-                    .filter_map(|arg| self.term_to_string(arg))
-                    .collect();
-                Some(format!("{}({})", name, arg_strings.join(",")))
-            }
-            _ => None,
-        }
-    }
-    
-    /// Convert a Prolog term to a string representation  
-    fn term_to_string(&self, term: &Term) -> Option<String> {
-        match term {
-            Term::String(s) => Some(format!("\"{}\"", s)),
-            Term::Atom(a) => Some(a.clone()),
-            Term::Integer(i) => Some(i.to_string()),
-            Term::List(items) => {
-                let item_strings: Vec<String> = items.iter()
-                    .filter_map(|item| self.term_to_string(item))
-                    .collect();
-                Some(format!("[{}]", item_strings.join(",")))
-            }
-            Term::Compound(name, args) => {
-                let arg_strings: Vec<String> = args.iter()
-                    .filter_map(|arg| self.term_to_string(arg))
-                    .collect();
-                Some(format!("{}({})", name, arg_strings.join(",")))
-            }
-            _ => None,
-        }
-    }
-
-    /// Populate a specific filtered pool directly from the complete pool's current facts  
-    pub async fn populate_filtered_pool_direct(
-        &self,
-        source_filter: &str,
-    ) -> Result<(), Error> {
-        // Only complete pools can populate filtered sub-pools
-        if !matches!(self.pool_type, EnginePoolType::Complete) {
-            return Err(anyhow!("Only complete pools can populate filtered sub-pools"));
-        }
-
-        let filtered_pools = self.filtered_pools.read().await;
-        let filtered_pool = filtered_pools.get(source_filter)
-            .ok_or_else(|| anyhow!("Filtered pool for source '{}' not found", source_filter))?;
-
-        log::info!("📊 DIRECT POPULATION: Populating filtered pool for source: '{}'", source_filter);
-
-        // Get all current facts from the complete pool
-        let (data_facts, sdna_facts) = self.get_all_current_facts().await?;
-        log::info!("📊 DIRECT POPULATION: Got {} current data facts from complete pool", data_facts.len());
-        log::info!("📊 DIRECT POPULATION: Got {} current sdna facts from complete pool", sdna_facts.len());
-        
-        // Start with static infrastructure facts
-        let mut filtered_lines = get_static_infrastructure_facts();
-        log::info!("📊 DIRECT POPULATION: Added {} infrastructure facts", filtered_lines.len());
-        filtered_lines.extend(sdna_facts);
-        
-        // Filter the current facts to only include those relevant to the source
-        let filtered_data_facts = self.filter_facts_by_reachability(source_filter, &data_facts).await?;
-        log::info!("📊 DIRECT POPULATION: Filtered to {} relevant facts for source '{}'", 
-            filtered_data_facts.len(), source_filter);
-        
-        filtered_lines.extend(filtered_data_facts);
-        
-        log::info!("📊 DIRECT POPULATION: Filtered pool '{}' will have {} total facts", 
-            source_filter, filtered_lines.len());
-        
-        // Update the filtered pool with its subset of facts
-        filtered_pool.update_all_engines_with_facts("facts".to_string(), filtered_lines).await?;
-        
-        log::info!("📊 DIRECT POPULATION: Successfully populated filtered pool for source: '{}'", source_filter);
-        
-        Ok(())
-    }
-    
-    /// Filter facts to only include those reachable from the source
-    async fn filter_facts_by_reachability(&self, source_filter: &str, all_facts: &[String]) -> Result<Vec<String>, Error> {
-        log::info!("📊 REACHABILITY FILTER: Filtering {} facts for source: '{}'", all_facts.len(), source_filter);
-        
-        // Use an existing engine from the complete pool
-        let engines = self.engines.read().await;
-        let engine = engines
-            .iter()
-            .find_map(|e| e.as_ref())
-            .ok_or_else(|| anyhow!("No engines available in complete pool"))?;
-        
-        // Temporarily load all the facts to run the reachable query
-        let temp_facts = {
-            let mut temp = get_static_infrastructure_facts();
-            temp.extend(all_facts.iter().cloned());
-            temp
-        };
-        
-        let processed_temp_facts = self.preprocess_program_lines(temp_facts).await;
-        engine.load_module_string("temp_reachability_filter".to_string(), processed_temp_facts).await?;
-        
-        // Query for all nodes reachable from the source  
-        let reachable_query = format!(r#"reachable("{}", Target)."#, source_filter);
-        log::info!("📊 REACHABILITY FILTER: Running reachable query: {}", reachable_query);
-        let result = engine.run_query(reachable_query).await?;
-        
-        let mut reachable_nodes = vec![source_filter.to_string()]; // Include the source itself
-        
-        if let Ok(QueryResolution::Matches(matches)) = result {
-            log::info!("📊 REACHABILITY FILTER: Found {} reachable matches", matches.len());
-            for m in matches {
-                if let Some(Term::String(target)) = m.bindings.get("Target") {
-                    reachable_nodes.push(target.clone());
-                } else if let Some(Term::Atom(target)) = m.bindings.get("Target") {
-                    reachable_nodes.push(target.clone());
-                }
-            }
-        } else {
-            log::warn!("📊 REACHABILITY FILTER: Reachable query returned no matches or failed");
-        }
-        
-        log::info!("📊 REACHABILITY FILTER: Total reachable nodes: {}", reachable_nodes.len());
-        log::debug!("📊 REACHABILITY FILTER: Reachable nodes: {:?}", reachable_nodes);
-        
-        // Filter facts to only include those involving reachable nodes or SDNA predicates
-        let filtered_facts = all_facts
-            .iter()
-            .filter(|fact| {
-                // Always include SDNA facts and other infrastructure
-                if self.is_sdna_or_infrastructure_fact(fact) {
-                    log::debug!("📊 REACHABILITY FILTER: KEEPING infrastructure fact: {}", fact);
-                    return true;
-                }
-                
-                // For data facts, check if they involve reachable nodes
-                let matches_any = reachable_nodes.iter().any(|node| {
-                    fact.contains(&format!(r#""{}"#, node))
-                });
-                
-                if matches_any {
-                    //log::debug!("📊 REACHABILITY FILTER: KEEPING data fact: {}", fact);
-                } else {
-                    log::debug!("📊 REACHABILITY FILTER: DROPPING data fact: {}", fact);
-                }
-                
-                matches_any
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        
-        log::info!("📊 REACHABILITY FILTER: Original facts: {}, Filtered facts: {}", 
-            all_facts.len(), filtered_facts.len());
-        log::info!("📊 REACHABILITY FILTER: Reduction: {:.1}%", 
-            (1.0 - (filtered_facts.len() as f64 / all_facts.len() as f64)) * 100.0);
-        
-        Ok(filtered_facts)
-    }
-    
-    /// Check if a fact is SDNA or infrastructure related and should always be included
-    fn is_sdna_or_infrastructure_fact(&self, fact: &str) -> bool {
-        // Infrastructure facts
-        if fact.starts_with(":-") || 
-           fact.contains("use_module") ||
-           fact.contains("agent_did(") ||
-           fact.contains("reachable(") ||
-           fact.contains("paginate(") ||
-           fact.contains("skipN(") ||
-           fact.contains("takeN(") ||
-           fact.contains("decorate(") ||
-           fact.contains("merge_sort(") ||
-           fact.contains("remove_html_tags(") ||
-           fact.contains("literal_from_url(") ||
-           fact.contains("json_property(") ||
-           fact.contains("resolve_property(") ||
-           fact.contains("assert_link(") {
-            return true;
-        }
-        
-        // SDNA predicates
-        let sdna_predicates = [
-            "subject_class(", "property(", "collection(", "constructor(", "destructor(",
-            "instance(", "property_getter(", "property_setter(", "property_resolve(",
-            "collection_getter(", "collection_setter(", "collection_remover(", 
-            "collection_adder(", "flowable(", "flow_state(", "start_action(", "action("
-        ];
-        
-        for predicate in &sdna_predicates {
-            if fact.contains(predicate) {
-                return true;
-            }
-        }
-        
-        false
-    }
 }
 
 #[cfg(test)]
