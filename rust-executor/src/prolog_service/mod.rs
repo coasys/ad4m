@@ -63,12 +63,30 @@ impl PrologService {
         perspective_id: String,
         query: String,
     ) -> Result<QueryResult, Error> {
+        log::info!("🔔 SUBSCRIPTION: Running subscription query for perspective '{}': {}", perspective_id, query);
         let pools = self.engine_pools.read().await;
         let pool = pools
             .get(&perspective_id)
             .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?;
-        pool.run_query_smart(query, true).await
+        
+        // The smart routing and population is now handled entirely within the engine pool
+        // This eliminates circular dependencies and potential deadlocks
+        let result = pool.run_query_smart(query.clone(), true).await;
+        match &result {
+            Ok(Ok(query_result)) => {
+                log::info!("🔔 SUBSCRIPTION: Query succeeded with result: {:?}", query_result);
+            }
+            Ok(Err(error)) => {
+                log::warn!("🔔 SUBSCRIPTION: Query failed with error: {}", error);
+            }
+            Err(error) => {
+                log::error!("🔔 SUBSCRIPTION: Query execution error: {}", error);
+            }
+        }
+        result
     }
+
+
 
     pub async fn run_query_all(&self, perspective_id: String, query: String) -> Result<(), Error> {
         let pools = self.engine_pools.read().await;

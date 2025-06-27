@@ -327,14 +327,22 @@ impl PrologEnginePool {
         // If this is a complete pool, also update any filtered sub-pools
         if matches!(self.pool_type, EnginePoolType::Complete) {
             let filtered_pools = self.filtered_pools.read().await;
+            log::info!("📊 POOL UPDATE: Complete pool has {} filtered sub-pools to update", filtered_pools.len());
             let mut update_futures = Vec::new();
             
             for (source_filter, pool) in filtered_pools.iter() {
+                log::info!("📊 POOL UPDATE: Updating filtered pool for source: '{}'", source_filter);
                 // Create filtered facts for this source
                 let mut filtered_lines = get_static_infrastructure_facts();
                 filtered_lines.extend(get_sdna_facts(&all_links, neighbourhood_author.clone())?);
                 
                 let filtered_data = self.get_filtered_data_facts(source_filter, &all_links).await?;
+                log::info!("📊 POOL UPDATE: Filtered pool '{}' will have {} infrastructure facts + {} filtered data facts = {} total facts", 
+                    source_filter, 
+                    filtered_lines.len(), 
+                    filtered_data.len(),
+                    filtered_lines.len() + filtered_data.len()
+                );
                 filtered_lines.extend(filtered_data);
                 
                 // Update the filtered pool with its subset of facts
@@ -350,6 +358,8 @@ impl PrologEnginePool {
             for (i, result) in results.into_iter().enumerate() {
                 if let Err(e) = result {
                     log::error!("Failed to update filtered Prolog pool {}: {}", i, e);
+                } else {
+                    log::info!("📊 POOL UPDATE: Successfully updated filtered pool {}", i);
                 }
             }
         }
@@ -413,18 +423,22 @@ impl PrologEnginePool {
         let mut filtered_pools = self.filtered_pools.write().await;
         
         if filtered_pools.contains_key(&source_filter) {
-            return Ok(());
+            log::debug!("📊 POOL CREATION: Filtered pool for source '{}' already exists", source_filter);
+            return Ok(false);
         }
+
+        log::info!("📊 POOL CREATION: Creating new filtered pool for source: '{}'", source_filter);
 
         // Create new filtered pool with smaller size (2-3 engines should be enough for subscriptions)
         let filtered_pool = PrologEnginePool::new_filtered(3, source_filter.clone());
         filtered_pool.initialize(3).await?;
         
-        // Don't call update_all_engines on the filtered pool yet - it will get updated
-        // when the complete pool is updated
-        
+        // Insert the pool into the map
         filtered_pools.insert(source_filter.clone(), filtered_pool);
-        Ok(())
+        
+        log::info!("📊 POOL CREATION: New filtered pool created for source: '{}'", source_filter);
+        
+        Ok(true)
     }
 
     /// Extract source filter from a Prolog query if it exists
@@ -465,6 +479,9 @@ impl PrologEnginePool {
 
     /// Get filtered data facts for a specific source using reachable query
     async fn get_filtered_data_facts(&self, source_filter: &str, all_links: &[DecoratedLinkExpression]) -> Result<Vec<String>, Error> {
+        log::info!("🔍 FILTERING: Starting get_filtered_data_facts for source: '{}'", source_filter);
+        log::info!("🔍 FILTERING: Total links provided: {}", all_links.len());
+        
         // Only complete pools should call this method
         if !matches!(self.pool_type, EnginePoolType::Complete) {
             return Err(anyhow!("get_filtered_data_facts can only be called on complete pools"));
@@ -479,6 +496,25 @@ impl PrologEnginePool {
         
         // Get all data facts
         let all_data_facts = get_data_facts(all_links);
+        log::info!("🔍 FILTERING: Total data facts generated: {}", all_data_facts.len());
+        
+        // Log sample of input links
+        log::info!("🔍 FILTERING: Sample of input links (first 5):");
+        for (i, link) in all_links.iter().take(5).enumerate() {
+            log::info!("  {}. {} -> {} -> {} (author: {})", 
+                i + 1, 
+                link.data.source, 
+                link.data.predicate.as_deref().unwrap_or("None"), 
+                link.data.target,
+                link.author
+            );
+        }
+        
+        // Log sample of data facts
+        log::info!("🔍 FILTERING: Sample of generated data facts (first 10):");
+        for (i, fact) in all_data_facts.iter().take(10).enumerate() {
+            log::info!("  {}. {}", i + 1, fact);
+        }
         
         // Temporarily load all the facts to run the reachable query
         let temp_facts = {
@@ -487,16 +523,20 @@ impl PrologEnginePool {
             temp
         };
         
+        log::info!("🔍 FILTERING: Total temp facts for reachable query: {}", temp_facts.len());
+        
         let processed_temp_facts = self.preprocess_program_lines(temp_facts).await;
         engine.load_module_string("temp_filter_facts".to_string(), processed_temp_facts).await?;
         
         // Query for all nodes reachable from the source
         let reachable_query = format!(r#"reachable("{}", Target)."#, source_filter);
+        log::info!("🔍 FILTERING: Running reachable query: {}", reachable_query);
         let result = engine.run_query(reachable_query).await?;
         
         let mut reachable_nodes = vec![source_filter.to_string()]; // Include the source itself
         
         if let Ok(QueryResolution::Matches(matches)) = result {
+            log::info!("🔍 FILTERING: Found {} reachable matches", matches.len());
             for m in matches {
                 if let Some(Term::String(target)) = m.bindings.get("Target") {
                     reachable_nodes.push(target.clone());
@@ -504,43 +544,83 @@ impl PrologEnginePool {
                     reachable_nodes.push(target.clone());
                 }
             }
+        } else {
+            log::warn!("🔍 FILTERING: Reachable query returned no matches or failed");
         }
+        
+        log::info!("🔍 FILTERING: Total reachable nodes: {}", reachable_nodes.len());
+        log::info!("🔍 FILTERING: Reachable nodes: {:?}", reachable_nodes);
+        
+        // Store length before moving all_data_facts
+        let original_facts_count = all_data_facts.len();
         
         // Filter data facts to only include those involving reachable nodes
         let filtered_data_facts = all_data_facts
             .into_iter()
             .filter(|fact| {
-                reachable_nodes.iter().any(|node| {
+                let matches_any = reachable_nodes.iter().any(|node| {
                     fact.contains(&format!(r#""{}"#, node))
-                })
+                });
+                if matches_any {
+                    log::debug!("🔍 FILTERING: KEEPING fact: {}", fact);
+                } else {
+                    log::debug!("🔍 FILTERING: DROPPING fact: {}", fact);
+                }
+                matches_any
             })
-            .collect();
+            .collect::<Vec<_>>();
+        
+        log::info!("🔍 FILTERING: Original data facts: {}, Filtered data facts: {}", 
+            original_facts_count, filtered_data_facts.len());
+        log::info!("🔍 FILTERING: Reduction: {:.1}%", 
+            (1.0 - (filtered_data_facts.len() as f64 / original_facts_count as f64)) * 100.0);
+        
+        // Log sample of filtered facts
+        log::info!("🔍 FILTERING: Sample of filtered facts (first 10):");
+        for (i, fact) in filtered_data_facts.iter().take(10).enumerate() {
+            log::info!("  {}. {}", i + 1, fact);
+        }
         
         Ok(filtered_data_facts)
     }
 
     /// Run a query with smart routing - use filtered pool if it's a subscription query with source filter
     pub async fn run_query_smart(&self, query: String, is_subscription: bool) -> Result<QueryResult, Error> {
+        log::debug!("🚀 QUERY ROUTING: is_subscription={}, query={}", is_subscription, query);
+        
         // If this is a subscription query and we can extract a source filter, try to use a filtered pool
         if is_subscription && matches!(self.pool_type, EnginePoolType::Complete) {
             if let Some(source_filter) = Self::extract_source_filter(&query) {
-                log::debug!("Routing subscription query to filtered pool for source: {}", source_filter);
+                log::info!("🚀 QUERY ROUTING: Routing subscription query to filtered pool for source: '{}'", source_filter);
                 
                 // Ensure filtered pool exists
                 if let Err(e) = self.get_or_create_filtered_pool(source_filter.clone()).await {
                     log::warn!("Failed to create filtered pool, falling back to complete pool: {}", e);
                     return self.run_query(query).await;
+                    Err(e) => {
+                        log::warn!("🚀 QUERY ROUTING: Failed to create filtered pool, falling back to complete pool: {}", e);
+                        return self.run_query(query).await;
+                    }
                 }
                 
                 // Get the filtered pool and run query on it
                 let filtered_pools = self.filtered_pools.read().await;
                 if let Some(filtered_pool) = filtered_pools.get(&source_filter) {
+                    log::info!("🚀 QUERY ROUTING: Successfully routing to filtered pool for source: '{}'", source_filter);
                     return filtered_pool.run_query(query).await;
+                } else {
+                    log::warn!("🚀 QUERY ROUTING: Filtered pool not found after creation attempt, using complete pool");
                 }
+            } else {
+                log::debug!("🚀 QUERY ROUTING: No source filter extracted from subscription query, using complete pool");
             }
+        } else {
+            log::debug!("🚀 QUERY ROUTING: Using complete pool - is_subscription={}, pool_type={:?}", 
+                is_subscription, self.pool_type);
         }
         
         // Default to using this pool directly
+        log::debug!("🚀 QUERY ROUTING: Using complete pool for query");
         self.run_query(query).await
     }
 }
