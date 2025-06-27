@@ -96,18 +96,7 @@ impl PrologService {
         pool.run_query_all(query).await
     }
 
-    pub async fn update_perspective_facts(
-        &self,
-        perspective_id: String,
-        module_name: String,
-        program_lines: Vec<String>,
-    ) -> Result<(), Error> {
-        let pools = self.engine_pools.read().await;
-        let pool = pools
-            .get(&perspective_id)
-            .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?;
-        pool.update_all_engines(module_name, program_lines).await
-    }
+    // Note: update_perspective_facts() removed - use update_perspective_links() for production code
 
     /// Update perspective with link data for optimized filtering
     pub async fn update_perspective_links(
@@ -164,16 +153,46 @@ mod prolog_test {
             .await
             .is_ok());
 
-        let facts = String::from(
-            r#"
-        triple("a", "p1", "b").
-        triple("a", "p2", "b").
-        "#,
-        );
+        // Use production method with structured link data
+        use crate::types::{DecoratedLinkExpression, Link};
+        let test_links = vec![
+            DecoratedLinkExpression {
+                author: "test_author".to_string(),
+                timestamp: "2023-01-01T00:00:00Z".to_string(),
+                data: Link {
+                    source: "a".to_string(),
+                    predicate: Some("p1".to_string()),
+                    target: "b".to_string(),
+                },
+                proof: crate::types::DecoratedExpressionProof {
+                    key: "test_key".to_string(),
+                    signature: "test_signature".to_string(),
+                    valid: Some(true),
+                    invalid: Some(false),
+                },
+                status: None,
+            },
+            DecoratedLinkExpression {
+                author: "test_author".to_string(),
+                timestamp: "2023-01-01T00:00:00Z".to_string(),
+                data: Link {
+                    source: "a".to_string(),
+                    predicate: Some("p2".to_string()),
+                    target: "b".to_string(),
+                },
+                proof: crate::types::DecoratedExpressionProof {
+                    key: "test_key".to_string(),
+                    signature: "test_signature".to_string(),
+                    valid: Some(true),
+                    invalid: Some(false),
+                },
+                status: None,
+            },
+        ];
 
-        // Load facts into the pool
+        // Load facts into the pool using production method
         let load_facts = service
-            .update_perspective_facts(perspective_id.clone(), "facts".to_string(), vec![facts])
+            .update_perspective_links(perspective_id.clone(), "facts".to_string(), test_links, None)
             .await;
         assert!(load_facts.is_ok());
 
