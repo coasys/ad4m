@@ -358,7 +358,7 @@ impl PrologEnginePool {
                 let source_filter_clone = source_filter.clone();
                 
                 let update_future = async move {
-                    pool_clone.update_filtered_pool_from_stored_data(
+                    pool_clone.update_filtered_pool_with_data(
                         module_name_clone,
                         &source_filter_clone,
                         &all_links_clone,
@@ -419,22 +419,21 @@ impl PrologEnginePool {
         Ok(())
     }
 
-    /// Update a filtered pool using stored data from the complete pool
-    async fn update_filtered_pool_from_stored_data(
+    /// Create filtered facts for a given source - shared logic for all filtered pool operations
+    async fn create_filtered_facts(
         &self,
-        module_name: String,
         source_filter: &str,
         all_links: &[DecoratedLinkExpression],
         neighbourhood_author: Option<String>,
-    ) -> Result<(), Error> {
-        log::info!("📊 FILTERED POOL UPDATE: Updating filtered pool for source: '{}'", source_filter);
+    ) -> Result<Vec<String>, Error> {
+        log::info!("📊 FACT CREATION: Creating filtered facts for source: '{}'", source_filter);
         
         // Create filtered facts for this source
         let mut filtered_lines = get_static_infrastructure_facts();
         filtered_lines.extend(get_sdna_facts(all_links, neighbourhood_author)?);
         
         let filtered_data = self.get_filtered_data_facts(source_filter, all_links).await?;
-        log::info!("📊 FILTERED POOL UPDATE: Filtered pool '{}' will have {} infrastructure facts + {} filtered data facts = {} total facts", 
+        log::info!("📊 FACT CREATION: Filtered facts for '{}': {} infrastructure + {} data = {} total", 
             source_filter, 
             filtered_lines.len(), 
             filtered_data.len(),
@@ -442,11 +441,22 @@ impl PrologEnginePool {
         );
         filtered_lines.extend(filtered_data);
         
-        // Update the filtered pool with its subset of facts
-        self.update_all_engines_with_facts(module_name, filtered_lines).await
+        Ok(filtered_lines)
     }
 
-    /// Populate a specific filtered pool directly using stored data from the complete pool  
+    /// Update this filtered pool using provided data  
+    async fn update_filtered_pool_with_data(
+        &self,
+        module_name: String,
+        source_filter: &str,
+        all_links: &[DecoratedLinkExpression],
+        neighbourhood_author: Option<String>,
+    ) -> Result<(), Error> {
+        let filtered_facts = self.create_filtered_facts(source_filter, all_links, neighbourhood_author).await?;
+        self.update_all_engines_with_facts(module_name, filtered_facts).await
+    }
+
+    /// Populate a specific filtered pool using stored data from the complete pool  
     pub async fn populate_filtered_pool_direct(
         &self,
         source_filter: &str,
@@ -470,21 +480,9 @@ impl PrologEnginePool {
             .ok_or_else(|| anyhow!("No stored links data available for filtering"))?;
         let neighbourhood_author = neighbourhood_author.clone();
 
-        // Create filtered facts for this source
-        let mut filtered_lines = get_static_infrastructure_facts();
-        filtered_lines.extend(get_sdna_facts(all_links, neighbourhood_author)?);
-        
-        let filtered_data = self.get_filtered_data_facts(source_filter, all_links).await?;
-        log::info!("📊 DIRECT POPULATION: Filtered pool '{}' will have {} infrastructure facts + {} filtered data facts = {} total facts", 
-            source_filter, 
-            filtered_lines.len(), 
-            filtered_data.len(),
-            filtered_lines.len() + filtered_data.len()
-        );
-        filtered_lines.extend(filtered_data);
-        
-        // Update the filtered pool with its subset of facts
-        filtered_pool.update_all_engines_with_facts("facts".to_string(), filtered_lines).await?;
+        // Create and load filtered facts
+        let filtered_facts = self.create_filtered_facts(source_filter, all_links, neighbourhood_author).await?;
+        filtered_pool.update_all_engines_with_facts("facts".to_string(), filtered_facts).await?;
         
         log::info!("📊 DIRECT POPULATION: Successfully populated filtered pool for source: '{}'", source_filter);
         
