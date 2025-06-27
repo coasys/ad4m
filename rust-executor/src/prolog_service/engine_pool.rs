@@ -405,16 +405,115 @@ impl PrologEnginePool {
     }
 
     /// Filter assert statements to only include those relevant to a specific source
+    /// This implements batch-aware filtering that considers statement dependencies
     fn filter_assert_statements_for_source(&self, statements: &[String], source_filter: &str) -> Vec<String> {
-        statements
-            .iter()
-            .filter(|statement| {
-                // Check if this assertion involves the source filter
-                // For assert_link_and_triple statements, check if they contain the source
-                statement.contains(&format!(r#""{}"#, source_filter))
-            })
-            .cloned()
-            .collect()
+        if statements.is_empty() {
+            return Vec::new();
+        }
+        
+        println!("🔄 BATCH FILTERING: Analyzing {} statements for source filter '{}'", statements.len(), source_filter);
+        
+        // Parse all statements to extract source->target relationships
+        let mut statement_relationships = Vec::new();
+        for (idx, statement) in statements.iter().enumerate() {
+            if let Some((source, target)) = self.extract_source_target_from_statement(statement) {
+                println!("🔄 BATCH FILTERING: Statement {}: {} -> {}", idx, source, target);
+                statement_relationships.push((idx, source, target, statement.clone()));
+            }
+        }
+        
+        // Start with statements that directly involve the filter source
+        let mut reachable_nodes = std::collections::HashSet::new();
+        reachable_nodes.insert(source_filter.to_string());
+        
+        let mut relevant_statements = Vec::new();
+        let mut changed = true;
+        
+        // Iteratively find statements that involve reachable nodes
+        while changed {
+            changed = false;
+            
+            for (idx, source, target, statement) in statement_relationships.iter() {
+                // Skip if we already included this statement
+                if relevant_statements.iter().any(|(existing_idx, _)| existing_idx == idx) {
+                    continue;
+                }
+                
+                // Include if source is reachable or target is reachable or statement directly mentions filter source
+                let source_reachable = reachable_nodes.contains(source);
+                let target_reachable = reachable_nodes.contains(target);
+                let mentions_filter = statement.contains(&format!(r#""{}"#, source_filter));
+                
+                if source_reachable || target_reachable || mentions_filter {
+                    relevant_statements.push((*idx, statement.clone()));
+                    
+                    // Add both source and target to reachable set for next iteration
+                    if reachable_nodes.insert(source.clone()) {
+                        changed = true;
+                        println!("🔄 BATCH FILTERING: Added '{}' to reachable set via statement {}", source, idx);
+                    }
+                    if reachable_nodes.insert(target.clone()) {
+                        changed = true;
+                        println!("🔄 BATCH FILTERING: Added '{}' to reachable set via statement {}", target, idx);
+                    }
+                }
+            }
+        }
+        
+        // Sort by original order and return statements
+        relevant_statements.sort_by_key(|(idx, _)| *idx);
+        let result: Vec<String> = relevant_statements.into_iter().map(|(_, statement)| statement).collect();
+        
+        println!("🔄 BATCH FILTERING: Result: {} out of {} statements are relevant", result.len(), statements.len());
+        for (i, stmt) in result.iter().enumerate() {
+            println!("🔄 BATCH FILTERING: Keeping statement {}: {}", i, stmt);
+        }
+        
+        result
+    }
+    
+    /// Extract source and target from an assert_link_and_triple statement
+    fn extract_source_target_from_statement(&self, statement: &str) -> Option<(String, String)> {
+        // Parse assert_link_and_triple("source", "predicate", "target", timestamp, author)
+        if let Some(start) = statement.find("assert_link_and_triple(") {
+            let args_start = start + "assert_link_and_triple(".len();
+            if let Some(args_end) = statement[args_start..].find(')') {
+                let args = &statement[args_start..args_start + args_end];
+                
+                // Simple parser for the arguments
+                let mut parts = Vec::new();
+                let mut current = String::new();
+                let mut in_quotes = false;
+                let mut escape_next = false;
+                
+                for ch in args.chars() {
+                    if escape_next {
+                        current.push(ch);
+                        escape_next = false;
+                    } else if ch == '\\' {
+                        escape_next = true;
+                        current.push(ch);
+                    } else if ch == '"' {
+                        in_quotes = !in_quotes;
+                        current.push(ch);
+                    } else if ch == ',' && !in_quotes {
+                        parts.push(current.trim().to_string());
+                        current.clear();
+                    } else {
+                        current.push(ch);
+                    }
+                }
+                parts.push(current.trim().to_string());
+                
+                if parts.len() >= 3 {
+                    // Remove quotes from source and target
+                    let source = parts[0].trim_matches('"').to_string();
+                    let target = parts[2].trim_matches('"').to_string();
+                    return Some((source, target));
+                }
+            }
+        }
+        None
     }
 
     pub async fn update_all_engines(
@@ -1816,5 +1915,109 @@ mod tests {
         println!("✅ This test reveals how filtered pools behave in real perspective integration");
         println!("✅ Look at the logs above to see if updates are flowing through properly");
         println!("✅ Any warnings indicate areas where the filtered pool updates may not be working");
+    }
+
+    #[tokio::test]
+    async fn test_batch_aware_filtering_dependencies() {
+        AgentService::init_global_test_instance();
+        // Test that batch filtering considers statement dependencies within a single transaction
+        let pool = PrologEnginePool::new(2);
+        pool.initialize(2).await.unwrap();
+
+        let initial_facts = vec![
+            ":- discontiguous(triple/3).".to_string(),
+            ":- dynamic(triple/3).".to_string(),
+            ":- discontiguous(link/5).".to_string(),
+            ":- dynamic(link/5).".to_string(),
+            "reachable(A,B) :- triple(A,_,B).".to_string(),
+            "agent_did(\"test_agent\").".to_string(),
+            "assert_link_and_triple(Source, Predicate, Target, Timestamp, Author) :- assertz(link(Source, Predicate, Target, Timestamp, Author)), assertz(triple(Source, Predicate, Target)).".to_string(),
+        ];
+        
+        pool.update_all_engines("test_facts".to_string(), initial_facts.clone()).await.unwrap();
+
+        // Create link data for the test 
+        use crate::types::{DecoratedLinkExpression, Link};
+        let test_links = vec![
+            DecoratedLinkExpression {
+                author: "filter_source".to_string(),
+                timestamp: "2023-01-01T00:00:00Z".to_string(),
+                data: Link {
+                    source: "filter_source".to_string(),
+                    predicate: Some("has_child".to_string()),
+                    target: "existing_node".to_string(),
+                },
+                proof: crate::types::DecoratedExpressionProof {
+                    key: "test_key".to_string(),
+                    signature: "test_signature".to_string(),
+                    valid: Some(true),
+                    invalid: Some(false),
+                },
+                status: None,
+            },
+        ];
+
+        *pool.current_all_links.write().await = Some(test_links);
+        *pool.current_neighbourhood_author.write().await = None;
+
+        // Create filtered pool for the source
+        let was_created = pool.get_or_create_filtered_pool("filter_source".to_string()).await.unwrap();
+        assert!(was_created);
+        pool.populate_filtered_pool_direct("filter_source").await.unwrap();
+
+        // Simulate the exact scenario from the user's log:
+        // 3 statements where only the 3rd directly involves the filter source,
+        // but the other 2 should be included because they will become reachable
+        let batch_statements = vec![
+            // Statement 1: new_node -> entry_type (doesn't directly involve filter_source)
+            "assert_link_and_triple(\"new_node\", \"entry_type\", \"message\", 123, \"author1\")".to_string(),
+            // Statement 2: new_node -> body (doesn't directly involve filter_source) 
+            "assert_link_and_triple(\"new_node\", \"body\", \"content\", 123, \"author1\")".to_string(),
+            // Statement 3: filter_source -> has_child -> new_node (directly involves filter_source)
+            "assert_link_and_triple(\"filter_source\", \"has_child\", \"new_node\", 123, \"author1\")".to_string(),
+        ];
+
+        println!("🧪 TEST: Testing batch-aware filtering with interdependent statements");
+        
+        // Test the filtering logic directly
+        let filtered_statements = pool.filter_assert_statements_for_source(&batch_statements, "filter_source");
+        
+        // All 3 statements should be included because:
+        // - Statement 3 directly involves filter_source
+        // - After statement 3, new_node becomes reachable from filter_source  
+        // - Therefore statements 1 & 2 (involving new_node) should also be included
+        assert_eq!(filtered_statements.len(), 3, "All 3 statements should be included due to dependency analysis");
+        
+        // Verify they're in the correct order
+        assert!(filtered_statements[0].contains("new_node") && filtered_statements[0].contains("entry_type"));
+        assert!(filtered_statements[1].contains("new_node") && filtered_statements[1].contains("body"));
+        assert!(filtered_statements[2].contains("filter_source") && filtered_statements[2].contains("new_node"));
+
+        // Test that the statements actually get applied to the filtered pool
+        let multi_assert_query = batch_statements.join(",") + ".";
+        println!("🧪 TEST: Running batch assert query: {}", multi_assert_query);
+        
+        let result = pool.run_query_all(multi_assert_query).await;
+        assert!(result.is_ok(), "Batch assert query should succeed");
+
+        // Verify all data is visible in the filtered pool
+        let filtered_pools = pool.filtered_pools.read().await;
+        let filter_source_pool = filtered_pools.get("filter_source").unwrap();
+        
+        // Should see the connecting link
+        let connection_result = filter_source_pool.run_query("triple(\"filter_source\", \"has_child\", \"new_node\").".to_string()).await.unwrap();
+        assert_eq!(connection_result, Ok(QueryResolution::True), "Connection link should be visible");
+        
+        // Should see the new node's attributes (which are only relevant because new_node is now reachable)
+        let entry_type_result = filter_source_pool.run_query("triple(\"new_node\", \"entry_type\", \"message\").".to_string()).await.unwrap();
+        assert_eq!(entry_type_result, Ok(QueryResolution::True), "Entry type should be visible in filtered pool");
+        
+        let body_result = filter_source_pool.run_query("triple(\"new_node\", \"body\", \"content\").".to_string()).await.unwrap();
+        assert_eq!(body_result, Ok(QueryResolution::True), "Body should be visible in filtered pool");
+
+        println!("✅ Batch-aware filtering test passed!");
+        println!("✅ Statement dependencies are correctly analyzed");
+        println!("✅ All relevant statements are applied to filtered pools");
+        println!("✅ This fixes the flux channel message issue!");
     }
 }
