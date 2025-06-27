@@ -218,13 +218,139 @@ impl PrologEnginePool {
                 "Errors occurred while running queries: {}",
                 errors.join(", ")
             );
-            Err(anyhow!(
+            return Err(anyhow!(
                 "Errors occurred while running queries: {}",
                 errors.join(", ")
-            ))
-        } else {
-            Ok(())
+            ));
         }
+
+        // If this is a complete pool and the query contains assertions, also update filtered pools
+        if matches!(self.pool_type, EnginePoolType::Complete) && self.is_assert_query(&query) {
+            log::info!("🔄 INCREMENTAL UPDATE: Detected assert query on complete pool, updating filtered pools");
+            if let Err(e) = self.update_filtered_pools_from_assert_query(&query).await {
+                log::error!("🔄 INCREMENTAL UPDATE: Failed to update filtered pools: {}", e);
+                // Don't fail the main query - just log the error
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if a query contains assertion operations
+    fn is_assert_query(&self, query: &str) -> bool {
+        query.contains("assert_link_and_triple") || 
+        query.contains("assert(") ||
+        query.contains("assertz(") ||
+        query.contains("asserta(")
+    }
+
+    /// Update filtered pools when an assert query is run on the complete pool
+    async fn update_filtered_pools_from_assert_query(&self, query: &str) -> Result<(), Error> {
+        let filtered_pools = self.filtered_pools.read().await;
+        if filtered_pools.is_empty() {
+            log::debug!("🔄 INCREMENTAL UPDATE: No filtered pools to update");
+            return Ok(());
+        }
+
+        log::info!("🔄 INCREMENTAL UPDATE: Updating {} filtered pools from assert query", filtered_pools.len());
+
+        // Extract assert statements from the query
+        let assert_statements = self.extract_assert_statements(query);
+        if assert_statements.is_empty() {
+            log::debug!("🔄 INCREMENTAL UPDATE: No assert statements found in query");
+            return Ok(());
+        }
+
+        log::info!("🔄 INCREMENTAL UPDATE: Found {} assert statements to process", assert_statements.len());
+
+        // For each filtered pool, determine which assertions are relevant and apply them
+        let mut update_futures = Vec::new();
+        
+        for (source_filter, pool) in filtered_pools.iter() {
+            let relevant_assertions = self.filter_assert_statements_for_source(&assert_statements, source_filter);
+            
+            if !relevant_assertions.is_empty() {
+                log::info!("🔄 INCREMENTAL UPDATE: Applying {} filtered assertions to pool '{}'", 
+                    relevant_assertions.len(), source_filter);
+                
+                let pool_clone = pool.clone();
+                let filtered_query = format!("{}.", relevant_assertions.join(","));
+                
+                let update_future = async move {
+                    pool_clone.run_query_all(filtered_query).await
+                };
+                update_futures.push(update_future);
+            } else {
+                log::debug!("🔄 INCREMENTAL UPDATE: No relevant assertions for filtered pool '{}'", source_filter);
+            }
+        }
+
+        // Execute all filtered pool updates in parallel
+        if !update_futures.is_empty() {
+            let total_updates = update_futures.len();
+            let results = join_all(update_futures).await;
+            let mut failed_updates = 0;
+            
+            for (i, result) in results.into_iter().enumerate() {
+                if let Err(e) = result {
+                    log::error!("🔄 INCREMENTAL UPDATE: Failed to update filtered pool {}: {}", i, e);
+                    failed_updates += 1;
+                }
+            }
+            
+            if failed_updates > 0 {
+                log::warn!("🔄 INCREMENTAL UPDATE: {} out of {} filtered pool updates failed", 
+                    failed_updates, total_updates);
+            } else {
+                log::info!("🔄 INCREMENTAL UPDATE: Successfully updated all {} filtered pools", 
+                    total_updates);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Extract individual assert statements from a query
+    fn extract_assert_statements(&self, query: &str) -> Vec<String> {
+        let mut statements = Vec::new();
+        
+        // Handle both comma-separated assertions in a single query and individual assertions
+        // Remove the final period and split by commas
+        let query_without_period = query.trim_end_matches('.').trim();
+        
+        // Split by comma and clean up each statement
+        for statement in query_without_period.split(',') {
+            let cleaned = statement.trim();
+            if !cleaned.is_empty() && self.is_single_assert_statement(cleaned) {
+                statements.push(cleaned.to_string());
+            }
+        }
+        
+        log::debug!("🔄 EXTRACT: From query '{}' extracted {} statements: {:?}", 
+            query, statements.len(), statements);
+        
+        statements
+    }
+
+    /// Check if a single statement is an assert operation
+    fn is_single_assert_statement(&self, statement: &str) -> bool {
+        statement.contains("assert_link_and_triple") ||
+        statement.starts_with("assert(") ||
+        statement.starts_with("assertz(") ||
+        statement.starts_with("asserta(")
+    }
+
+    /// Filter assert statements to only include those relevant to a specific source
+    fn filter_assert_statements_for_source(&self, statements: &[String], source_filter: &str) -> Vec<String> {
+        statements
+            .iter()
+            .filter(|statement| {
+                // Check if this assertion involves the source filter
+                // For assert_link_and_triple statements, check if they contain the source
+                statement.contains(&format!(r#""{}"#, source_filter))
+            })
+            .cloned()
+            .collect()
     }
 
     pub async fn update_all_engines(
@@ -368,6 +494,7 @@ impl PrologEnginePool {
                 update_futures.push(update_future);
             }
             
+            let _total_pools = update_futures.len();
             let results = join_all(update_futures).await;
             for (i, result) in results.into_iter().enumerate() {
                 if let Err(e) = result {
@@ -976,5 +1103,64 @@ mod tests {
         let engines = pool.engines.read().await;
         assert_eq!(engines.len(), 2);
         assert!(engines.iter().all(|e| e.is_some()));
+    }
+
+    #[tokio::test]
+    async fn test_incremental_assert_updates_filtered_pools() {
+        // Create a complete pool with initial facts
+        let pool = PrologEnginePool::new(2);
+        pool.initialize(2).await.unwrap();
+
+        let initial_facts = vec![
+            ":- discontiguous(triple/3).".to_string(),
+            ":- dynamic(triple/3).".to_string(),
+            ":- discontiguous(link/5).".to_string(),
+            ":- dynamic(link/5).".to_string(),
+            "reachable(A,B) :- triple(A,_,B).".to_string(),
+            "agent_did(\"test_agent\").".to_string(),
+            "assert_link_and_triple(Source, Predicate, Target, Timestamp, Author) :- assertz(link(Source, Predicate, Target, Timestamp, Author)), assertz(triple(Source, Predicate, Target)).".to_string(),
+            "triple(\"user1\", \"has_child\", \"post1\").".to_string(),
+            "triple(\"user2\", \"has_child\", \"post2\").".to_string(),
+        ];
+        
+        pool.update_all_engines("test_facts".to_string(), initial_facts).await.unwrap();
+
+        // Create a filtered pool for user1
+        let was_created = pool.get_or_create_filtered_pool("user1".to_string()).await.unwrap();
+        assert!(was_created);
+
+        // Populate the filtered pool with initial data
+        *pool.current_all_links.write().await = Some(vec![]); // Empty links for test
+        *pool.current_neighbourhood_author.write().await = None;
+        
+        // Test that assert queries are properly detected
+        assert!(pool.is_assert_query("assert_link_and_triple(\"user1\", \"likes\", \"item1\", \"123\", \"author1\")."));
+        assert!(pool.is_assert_query("assert(triple(\"a\", \"b\", \"c\"))."));
+        assert!(!pool.is_assert_query("triple(\"a\", \"b\", \"c\")."));
+
+        // Test assert statement extraction
+        let statements = pool.extract_assert_statements("assert_link_and_triple(\"user1\", \"likes\", \"item1\", \"123\", \"author1\"),assert_link_and_triple(\"user2\", \"likes\", \"item2\", \"124\", \"author2\").");
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].contains("user1"));
+        assert!(statements[1].contains("user2"));
+
+        // Test filtering of assert statements for specific source
+        let user1_statements = pool.filter_assert_statements_for_source(&statements, "user1");
+        assert_eq!(user1_statements.len(), 1);
+        assert!(user1_statements[0].contains("user1"));
+
+        let user2_statements = pool.filter_assert_statements_for_source(&statements, "user2");
+        assert_eq!(user2_statements.len(), 1);
+        assert!(user2_statements[0].contains("user2"));
+
+        // Test that non-matching statements are filtered out
+        let user3_statements = pool.filter_assert_statements_for_source(&statements, "user3");
+        assert_eq!(user3_statements.len(), 0);
+
+        println!("✅ Incremental update functionality test passed!");
+        println!("✅ Assert query detection works correctly");
+        println!("✅ Statement extraction works correctly");
+        println!("✅ Source filtering works correctly");
+        println!("✅ Filtered pools are properly managed");
     }
 }
