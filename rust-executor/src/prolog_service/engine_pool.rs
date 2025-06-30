@@ -2104,7 +2104,7 @@ mod tests {
         all_data.extend(vec![
             // SDNA subject class declaration: ad4m://self -> ad4m://has_subject_class -> literal with class name
             DecoratedLinkExpression {
-                author: "user1".to_string(),
+                author: crate::agent::did(), // Use correct agent DID for SDNA validation
                 timestamp: now.clone(),
                 data: Link {
                     source: "ad4m://self".to_string(),
@@ -2121,7 +2121,7 @@ mod tests {
             },
             // SDNA Prolog code: subject class name -> ad4m://sdna -> literal with actual subject_class rule
             DecoratedLinkExpression {
-                author: "user1".to_string(),
+                author: crate::agent::did(), // Use correct agent DID for SDNA validation
                 timestamp: now.clone(),
                 data: Link {
                     source: class_name_literal,
