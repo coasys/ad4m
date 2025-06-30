@@ -587,25 +587,36 @@ impl PrologEnginePool {
             log::info!("📊 POOL UPDATE: Complete pool has {} filtered sub-pools to update", filtered_pools.len());
             let mut update_futures = Vec::new();
             
+            // Pre-compute filtered facts for all sources to avoid borrowing issues in async closures
+            let mut filtered_facts_map = HashMap::new();
+            for source_filter in filtered_pools.keys() {
+                log::info!("📊 POOL UPDATE: Pre-computing filtered facts for source: '{}'", source_filter);
+                match self.create_filtered_facts(source_filter, &all_links, neighbourhood_author.clone()).await {
+                    Ok(facts) => {
+                        filtered_facts_map.insert(source_filter.clone(), facts);
+                    }
+                    Err(e) => {
+                        log::error!("📊 POOL UPDATE: Failed to create filtered facts for source '{}': {}", source_filter, e);
+                    }
+                }
+            }
+            
             for (source_filter, pool) in filtered_pools.iter() {
                 log::info!("📊 POOL UPDATE: Updating filtered pool for source: '{}'", source_filter);
                 
-                // Use stored data to create filtered facts for this source
-                let pool_clone = pool.clone();
-                let module_name_clone = module_name.clone();
-                let all_links_clone = all_links.clone();
-                let neighbourhood_author_clone = neighbourhood_author.clone();
-                let source_filter_clone = source_filter.clone();
-                
-                let update_future = async move {
-                    pool_clone.update_filtered_pool_with_data(
-                        module_name_clone,
-                        &source_filter_clone,
-                        &all_links_clone,
-                        neighbourhood_author_clone
-                    ).await
-                };
-                update_futures.push(update_future);
+                if let Some(filtered_facts) = filtered_facts_map.get(source_filter) {
+                    let pool_clone = pool.clone();
+                    let module_name_clone = module_name.clone();
+                    let filtered_facts_clone = filtered_facts.clone();
+                    
+                    let update_future = async move {
+                        // Send the pre-filtered facts to the filtered pool
+                        pool_clone.update_all_engines_with_facts(module_name_clone, filtered_facts_clone).await
+                    };
+                    update_futures.push(update_future);
+                } else {
+                    log::error!("📊 POOL UPDATE: No filtered facts available for source: '{}'", source_filter);
+                }
             }
             
             let _total_pools = update_futures.len();
@@ -669,40 +680,55 @@ impl PrologEnginePool {
     ) -> Result<Vec<String>, Error> {
         log::info!("📊 FACT CREATION: Creating filtered facts for source: '{}'", source_filter);
         
-        // Create filtered facts for this source
+        // Always include infrastructure and SDNA facts - these should never be filtered
         let mut filtered_lines = get_static_infrastructure_facts();
-        filtered_lines.extend(get_sdna_facts(all_links, neighbourhood_author)?);
+        let sdna_facts = get_sdna_facts(all_links, neighbourhood_author.clone())?;
         
+        log::info!("📊 FACT CREATION: Infrastructure facts: {}, SDNA facts: {}", 
+            filtered_lines.len(), sdna_facts.len());
+        
+        // Log sample SDNA facts for debugging
+        if !sdna_facts.is_empty() {
+            log::info!("📊 FACT CREATION: Sample SDNA facts (first 5):");
+            for (i, fact) in sdna_facts.iter().take(5).enumerate() {
+                log::info!("  {}. {}", i + 1, fact);
+            }
+        } else {
+            log::warn!("📊 FACT CREATION: No SDNA facts found - this might indicate missing SDNA data");
+        }
+        
+        filtered_lines.extend(sdna_facts);
+        
+        // Get filtered data facts (this applies reachability filtering only to data, not SDNA)
         let filtered_data = self.get_filtered_data_facts(source_filter, all_links).await?;
-        log::info!("📊 FACT CREATION: Filtered facts for '{}': {} infrastructure + {} data = {} total", 
+        log::info!("📊 FACT CREATION: Filtered facts for '{}': {} infrastructure + {} SDNA + {} data = {} total", 
             source_filter, 
-            filtered_lines.len(), 
+            get_static_infrastructure_facts().len(),
+            get_sdna_facts(all_links, neighbourhood_author)?.len(),
             filtered_data.len(),
             filtered_lines.len() + filtered_data.len()
         );
         filtered_lines.extend(filtered_data);
         
+        // Log sample of final facts for debugging
+        if !filtered_lines.is_empty() {
+            log::info!("📊 FACT CREATION: Sample final facts (first 10):");
+            for (i, fact) in filtered_lines.iter().take(10).enumerate() {
+                log::info!("  {}. {}", i + 1, fact);
+            }
+        }
+        
         Ok(filtered_lines)
     }
 
-    /// Update this filtered pool using provided data  
-    async fn update_filtered_pool_with_data(
-        &self,
-        module_name: String,
-        source_filter: &str,
-        all_links: &[DecoratedLinkExpression],
-        neighbourhood_author: Option<String>,
-    ) -> Result<(), Error> {
-        let filtered_facts = self.create_filtered_facts(source_filter, all_links, neighbourhood_author).await?;
-        self.update_all_engines_with_facts(module_name, filtered_facts).await
-    }
+
 
     /// Populate a specific filtered pool using stored data from the complete pool  
     pub async fn populate_filtered_pool_direct(
         &self,
         source_filter: &str,
     ) -> Result<(), Error> {
-        println!("📊 DIRECT POPULATION: populate_filtered_pool_direct called for source: '{}'", source_filter);
+        log::info!("📊 DIRECT POPULATION: populate_filtered_pool_direct called for source: '{}'", source_filter);
         
         // Only complete pools can populate filtered sub-pools
         if !matches!(self.pool_type, EnginePoolType::Complete) {
@@ -713,38 +739,77 @@ impl PrologEnginePool {
         let filtered_pool = filtered_pools.get(source_filter)
             .ok_or_else(|| anyhow!("Filtered pool for source '{}' not found", source_filter))?;
 
-        println!("📊 DIRECT POPULATION: Populating filtered pool for source: '{}'", source_filter);
+        log::info!("📊 DIRECT POPULATION: Populating filtered pool for source: '{}'", source_filter);
 
         // Use stored data to populate the filtered pool if available
         let all_links = self.current_all_links.read().await;
         let neighbourhood_author = self.current_neighbourhood_author.read().await;
         
-        println!("📊 DIRECT POPULATION: Checking stored data - has_links: {}", all_links.is_some());
+        log::info!("📊 DIRECT POPULATION: Checking stored data - has_links: {}", all_links.is_some());
         if let Some(all_links_ref) = all_links.as_ref() {
-            println!("📊 DIRECT POPULATION: Using stored links data ({} links)", all_links_ref.len());
+            log::info!("📊 DIRECT POPULATION: Using stored links data ({} links)", all_links_ref.len());
+            
+            // Log sample links to verify SDNA is present
+            let sdna_links: Vec<_> = all_links_ref.iter()
+                .filter(|link| link.data.predicate == Some("ad4m://sdna".to_string()) || 
+                               link.data.predicate == Some("ad4m://has_subject_class".to_string()))
+                .collect();
+            log::info!("📊 DIRECT POPULATION: Found {} SDNA-related links in data", sdna_links.len());
+            
+            if !sdna_links.is_empty() {
+                log::info!("📊 DIRECT POPULATION: Sample SDNA links:");
+                for (i, link) in sdna_links.iter().take(3).enumerate() {
+                    log::info!("  {}. {} -> {} -> {}", i + 1, link.data.source, 
+                        link.data.predicate.as_deref().unwrap_or("None"), link.data.target);
+                }
+            } else {
+                log::warn!("📊 DIRECT POPULATION: No SDNA links found in current data - this may cause subject_class issues");
+            }
         }
         
         if let Some(all_links) = all_links.as_ref() {
             let neighbourhood_author = neighbourhood_author.clone();
             // Create and load filtered facts
+            log::info!("📊 DIRECT POPULATION: Creating filtered facts for source: '{}'", source_filter);
             let filtered_facts = self.create_filtered_facts(source_filter, all_links, neighbourhood_author).await?;
             let facts_count = filtered_facts.len();
+            
+            // Verify SDNA facts are present in filtered facts
+            let sdna_fact_count = filtered_facts.iter()
+                .filter(|fact| fact.contains("subject_class") || fact.contains("instance") || 
+                              fact.contains("property") || fact.contains("collection"))
+                .count();
+            log::info!("📊 DIRECT POPULATION: Created {} total facts, {} appear to be SDNA-related", 
+                facts_count, sdna_fact_count);
+            
+            if sdna_fact_count == 0 {
+                log::warn!("📊 DIRECT POPULATION: No SDNA facts found in filtered facts - this will cause subject_class errors");
+            }
+            
             filtered_pool.update_all_engines_with_facts("facts".to_string(), filtered_facts).await?;
             log::info!("📊 DIRECT POPULATION: Successfully populated filtered pool for source: '{}' with {} filtered facts", source_filter, facts_count);
         } else {
-            println!("📊 DIRECT POPULATION: No stored links data available for filtering. Using fallback approach.");
+            log::warn!("📊 DIRECT POPULATION: No stored links data available for filtering. Using fallback approach.");
             // FALLBACK: If no stored links data, try to get current facts from complete pool and use them
             let current_facts = self.current_facts.read().await;
             if let Some(facts) = current_facts.as_ref() {
-                println!("📊 DIRECT POPULATION: Using stored facts as fallback for filtered pool");
-                println!("📊 DIRECT POPULATION: Facts to copy: {} facts", facts.len());
-                println!("📊 DIRECT POPULATION: Sample facts: {:?}", facts.iter().take(5).collect::<Vec<_>>());
+                log::info!("📊 DIRECT POPULATION: Using stored facts as fallback for filtered pool");
+                log::info!("📊 DIRECT POPULATION: Facts to copy: {} facts", facts.len());
+                
+                // Check for SDNA facts in the fallback
+                let sdna_fact_count = facts.iter()
+                    .filter(|fact| fact.contains("subject_class") || fact.contains("instance") || 
+                                  fact.contains("property") || fact.contains("collection"))
+                    .count();
+                log::info!("📊 DIRECT POPULATION: Fallback facts contain {} SDNA-related facts", sdna_fact_count);
+                
+                log::info!("📊 DIRECT POPULATION: Sample facts: {:?}", facts.iter().take(5).collect::<Vec<_>>());
                 // For now, just copy all facts to the filtered pool (not ideal, but better than nothing)
                 // TODO: In the future, we could parse the facts and filter them properly
                 filtered_pool.update_all_engines_with_facts("facts".to_string(), facts.clone()).await?;
-                println!("📊 DIRECT POPULATION: Populated filtered pool with {} fallback facts", facts.len());
+                log::info!("📊 DIRECT POPULATION: Populated filtered pool with {} fallback facts", facts.len());
             } else {
-                println!("📊 DIRECT POPULATION: ERROR - No stored facts available!");
+                log::error!("📊 DIRECT POPULATION: ERROR - No stored facts available!");
                 return Err(anyhow!("No stored data (links or facts) available for populating filtered pool"));
             }
         }
@@ -836,50 +901,20 @@ impl PrologEnginePool {
             return Err(anyhow!("get_filtered_data_facts can only be called on complete pools"));
         }
         
-        // Use an existing engine from the complete pool
+        // Use an existing engine from the complete pool - it already has all the data loaded!
         let engines = self.engines.read().await;
         let engine = engines
             .iter()
             .find_map(|e| e.as_ref())
             .ok_or_else(|| anyhow!("No engines available in complete pool"))?;
         
-        // Get all data facts
+        // Get all data facts that we want to filter
         let all_data_facts = get_data_facts(all_links);
-        log::info!("🔍 FILTERING: Total data facts generated: {}", all_data_facts.len());
+        log::info!("🔍 FILTERING: Total data facts to filter: {}", all_data_facts.len());
         
-        // Log sample of input links
-        log::info!("🔍 FILTERING: Sample of input links (first 5):");
-        for (i, link) in all_links.iter().take(5).enumerate() {
-            log::info!("  {}. {} -> {} -> {} (author: {})", 
-                i + 1, 
-                link.data.source, 
-                link.data.predicate.as_deref().unwrap_or("None"), 
-                link.data.target,
-                link.author
-            );
-        }
-        
-        // Log sample of data facts
-        log::info!("🔍 FILTERING: Sample of generated data facts (first 10):");
-        for (i, fact) in all_data_facts.iter().take(10).enumerate() {
-            log::info!("  {}. {}", i + 1, fact);
-        }
-        
-        // Temporarily load all the facts to run the reachable query
-        let temp_facts = {
-            let mut temp = get_static_infrastructure_facts();
-            temp.extend(all_data_facts.clone()); // Fix: clone the facts instead of borrowing
-            temp
-        };
-        
-        log::info!("🔍 FILTERING: Total temp facts for reachable query: {}", temp_facts.len());
-        
-        let processed_temp_facts = self.preprocess_program_lines(temp_facts).await;
-        engine.load_module_string("temp_filter_facts".to_string(), processed_temp_facts).await?;
-        
-        // Query for all nodes reachable from the source
+        // Query the complete engine directly for reachable nodes - no need to load temp data!
         let reachable_query = format!(r#"reachable("{}", Target)."#, source_filter);
-        log::info!("🔍 FILTERING: Running reachable query: {}", reachable_query);
+        log::info!("🔍 FILTERING: Running reachable query on complete engine: {}", reachable_query);
         let result = engine.run_query(reachable_query).await?;
         
         let mut reachable_nodes = vec![source_filter.to_string()]; // Include the source itself
@@ -982,6 +1017,8 @@ impl PrologEnginePool {
         log::debug!("🚀 QUERY ROUTING: Using complete pool for query");
         self.run_query(query).await
     }
+
+
 }
 
 #[cfg(test)]
@@ -2099,6 +2136,42 @@ mod tests {
 
         println!("🔍 Class name literal: {}", class_name_literal);
         println!("🔍 Prolog code literal: {}", prolog_code_literal);
+        
+        // Add connections from "user1" to task instances so they're reachable in filtered pool
+        all_data.extend(vec![
+            DecoratedLinkExpression {
+                author: "user1".to_string(),
+                timestamp: now.clone(),
+                data: Link {
+                    source: "user1".to_string(),
+                    predicate: Some("ad4m://has_child".to_string()),
+                    target: "task_instance_1".to_string(),
+                },
+                proof: crate::types::DecoratedExpressionProof {
+                    key: "test_key".to_string(),
+                    signature: "test_signature".to_string(),
+                    valid: Some(true),
+                    invalid: Some(false),
+                },
+                status: None,
+            },
+            DecoratedLinkExpression {
+                author: "user1".to_string(),
+                timestamp: now.clone(),
+                data: Link {
+                    source: "user1".to_string(),
+                    predicate: Some("ad4m://has_child".to_string()),
+                    target: "task_instance_2".to_string(),
+                },
+                proof: crate::types::DecoratedExpressionProof {
+                    key: "test_key".to_string(),
+                    signature: "test_signature".to_string(),
+                    valid: Some(true),
+                    invalid: Some(false),
+                },
+                status: None,
+            },
+        ]);
         
         // Add SDNA links with properly escaped literals
         all_data.extend(vec![
