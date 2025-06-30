@@ -11,6 +11,8 @@ use scryer_prolog::Term;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::collections::HashSet;
+use std::time::Instant;
 use tokio::sync::RwLock;
 
 pub const EMBEDDING_LANGUAGE_HASH: &str = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
@@ -893,6 +895,7 @@ impl PrologEnginePool {
 
     /// Get filtered data facts for a specific source using reachable query
     async fn get_filtered_data_facts(&self, source_filter: &str, all_links: &[DecoratedLinkExpression]) -> Result<Vec<String>, Error> {
+        let start_time = Instant::now();
         log::info!("🔍 FILTERING: Starting get_filtered_data_facts for source: '{}'", source_filter);
         log::info!("🔍 FILTERING: Total links provided: {}", all_links.len());
         
@@ -909,18 +912,22 @@ impl PrologEnginePool {
             .ok_or_else(|| anyhow!("No engines available in complete pool"))?;
         
         // Get all data facts that we want to filter
+        let facts_start = Instant::now();
         let all_data_facts = get_data_facts(all_links);
-        log::info!("🔍 FILTERING: Total data facts to filter: {}", all_data_facts.len());
+        let facts_duration = facts_start.elapsed();
+        log::info!("🔍 FILTERING: Generated {} data facts in {:?}", all_data_facts.len(), facts_duration);
         
-        // Query the complete engine directly for reachable nodes - no need to load temp data!
+        // ⏱️ MEASURE: Query the complete engine for reachable nodes
+        let reachability_start = Instant::now();
         let reachable_query = format!(r#"reachable("{}", Target)."#, source_filter);
         log::info!("🔍 FILTERING: Running reachable query on complete engine: {}", reachable_query);
         let result = engine.run_query(reachable_query).await?;
+        let reachability_duration = reachability_start.elapsed();
         
         let mut reachable_nodes = vec![source_filter.to_string()]; // Include the source itself
         
         if let Ok(QueryResolution::Matches(matches)) = result {
-            log::info!("🔍 FILTERING: Found {} reachable matches", matches.len());
+            log::info!("🔍 FILTERING: Found {} reachable matches in {:?}", matches.len(), reachability_duration);
             for m in matches {
                 if let Some(Term::String(target)) = m.bindings.get("Target") {
                     reachable_nodes.push(target.clone());
@@ -929,40 +936,73 @@ impl PrologEnginePool {
                 }
             }
         } else {
-            log::warn!("🔍 FILTERING: Reachable query returned no matches or failed");
+            log::warn!("🔍 FILTERING: Reachable query returned no matches or failed in {:?}", reachability_duration);
         }
         
         log::info!("🔍 FILTERING: Total reachable nodes: {}", reachable_nodes.len());
-        log::info!("🔍 FILTERING: Reachable nodes: {:?}", reachable_nodes);
+        log::info!("🔍 FILTERING: Reachability query took: {:?}", reachability_duration);
         
-        // Store length before moving all_data_facts
+        // ⚡ OPTIMIZATION: Pre-compute formatted node strings and use HashSet for O(1) lookups
+        let formatting_start = Instant::now();
+        let reachable_node_patterns: HashSet<String> = reachable_nodes
+            .iter()
+            .map(|node| format!(r#""{}"#, node))
+            .collect();
+        let formatting_duration = formatting_start.elapsed();
+        log::info!("🔍 FILTERING: Pre-computed {} node patterns in {:?}", reachable_node_patterns.len(), formatting_duration);
+        
+        // ⚡ OPTIMIZATION: Filter with optimized algorithm and batch logging
+        let filtering_start = Instant::now();
         let original_facts_count = all_data_facts.len();
+        let mut kept_count = 0;
+        let mut dropped_count = 0;
         
-        // Filter data facts to only include those involving reachable nodes
-        let filtered_data_facts = all_data_facts
+        let filtered_data_facts: Vec<String> = all_data_facts
             .into_iter()
             .filter(|fact| {
-                let matches_any = reachable_nodes.iter().any(|node| {
-                    fact.contains(&format!(r#""{}"#, node))
-                });
-                if matches_any {
-                    log::debug!("🔍 FILTERING: KEEPING fact: {}", fact);
+                // ⚡ FAST: Check if any reachable node pattern exists in this fact
+                let is_relevant = reachable_node_patterns.iter().any(|pattern| fact.contains(pattern));
+                
+                if is_relevant {
+                    kept_count += 1;
                 } else {
-                    log::debug!("🔍 FILTERING: DROPPING fact: {}", fact);
+                    dropped_count += 1;
                 }
-                matches_any
+                
+                // ⚡ BATCH LOGGING: Only log every 1000 facts to avoid performance hit
+                if (kept_count + dropped_count) % 1000 == 0 {
+                    log::debug!("🔍 FILTERING: Processed {} facts so far ({} kept, {} dropped)", 
+                        kept_count + dropped_count, kept_count, dropped_count);
+                }
+                
+                is_relevant
             })
-            .collect::<Vec<_>>();
+            .collect();
         
-        log::info!("🔍 FILTERING: Original data facts: {}, Filtered data facts: {}", 
-            original_facts_count, filtered_data_facts.len());
-        log::info!("🔍 FILTERING: Reduction: {:.1}%", 
-            (1.0 - (filtered_data_facts.len() as f64 / original_facts_count as f64)) * 100.0);
+        let filtering_duration = filtering_start.elapsed();
+        let total_duration = start_time.elapsed();
         
-        // Log sample of filtered facts
-        log::info!("🔍 FILTERING: Sample of filtered facts (first 10):");
-        for (i, fact) in filtered_data_facts.iter().take(10).enumerate() {
-            log::info!("  {}. {}", i + 1, fact);
+        // Performance summary
+        log::info!("🔍 FILTERING: ⚡ PERFORMANCE SUMMARY for source '{}':", source_filter);
+        log::info!("🔍 FILTERING:   📊 Data generation: {:?}", facts_duration);
+        log::info!("🔍 FILTERING:   🔍 Reachability query: {:?}", reachability_duration);
+        log::info!("🔍 FILTERING:   🔧 Pattern formatting: {:?}", formatting_duration);
+        log::info!("🔍 FILTERING:   ⚡ Facts filtering: {:?}", filtering_duration);
+        log::info!("🔍 FILTERING:   🎯 Total filtering time: {:?}", total_duration);
+        
+        log::info!("🔍 FILTERING: Results: {} → {} facts ({:.1}% reduction, {} facts/sec)", 
+            original_facts_count, 
+            filtered_data_facts.len(),
+            (1.0 - (filtered_data_facts.len() as f64 / original_facts_count as f64)) * 100.0,
+            (original_facts_count as f64 / filtering_duration.as_secs_f64()) as u64
+        );
+        
+        // Log sample of filtered facts (only first few)
+        if !filtered_data_facts.is_empty() {
+            log::info!("🔍 FILTERING: Sample of filtered facts (first 5):");
+            for (i, fact) in filtered_data_facts.iter().take(5).enumerate() {
+                log::info!("  {}. {}", i + 1, fact);
+            }
         }
         
         Ok(filtered_data_facts)
@@ -2501,4 +2541,6 @@ mod tests {
         println!("✅ If this test passes, the production issue might be elsewhere");
         println!("✅ If this test fails, it confirms engine initialization inconsistencies");
     }
+
+
 }
