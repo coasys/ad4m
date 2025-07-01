@@ -6,12 +6,12 @@ use crate::types::DecoratedLinkExpression;
 use deno_core::anyhow::{anyhow, Error};
 use futures::future::join_all;
 use lazy_static::lazy_static;
+use rayon::prelude::*;  // For parallel processing
 use regex::Regex;
 use scryer_prolog::Term;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::collections::HashSet;
 use std::time::Instant;
 use tokio::sync::RwLock;
 
@@ -983,42 +983,114 @@ impl PrologEnginePool {
         log::info!("🔍 FILTERING: Total reachable nodes: {}", reachable_nodes.len());
         log::info!("🔍 FILTERING: Reachability query took: {:?}", reachability_duration);
         
-        // ⚡ OPTIMIZATION: Pre-compute formatted node strings and use HashSet for O(1) lookups
+        // ⚡ OPTIMIZATION: Pre-compute formatted node strings and use compiled regex for ultra-fast filtering
         let formatting_start = Instant::now();
-        let reachable_node_patterns: HashSet<String> = reachable_nodes
+        let reachable_node_patterns: Vec<String> = reachable_nodes
             .iter()
-            .map(|node| format!(r#""{}"#, node))
+            .map(|node| regex::escape(&format!(r#""{}"#, node)))
             .collect();
-        let formatting_duration = formatting_start.elapsed();
-        log::info!("🔍 FILTERING: Pre-computed {} node patterns in {:?}", reachable_node_patterns.len(), formatting_duration);
         
-        // ⚡ OPTIMIZATION: Filter with optimized algorithm and batch logging
+        // ⚡ ULTRA-FAST: Compile a single regex that matches any of the patterns in one pass
+        let pattern_regex = if reachable_node_patterns.is_empty() {
+            None
+        } else if reachable_node_patterns.len() == 1 {
+            // Single pattern - no alternation needed
+            Some(regex::Regex::new(&reachable_node_patterns[0]).map_err(|e| {
+                Error::msg(format!("Failed to compile regex pattern: {}", e))
+            })?)
+        } else {
+            // Multiple patterns - use alternation (pattern1|pattern2|...)
+            let alternation_pattern = format!("({})", reachable_node_patterns.join("|"));
+            Some(regex::Regex::new(&alternation_pattern).map_err(|e| {
+                Error::msg(format!("Failed to compile alternation regex: {}", e))
+            })?)
+        };
+        
+        let formatting_duration = formatting_start.elapsed();
+        log::info!("🔍 FILTERING: Compiled regex for {} node patterns in {:?}", reachable_node_patterns.len(), formatting_duration);
+        
+        // ⚡ ULTRA-FAST FILTERING: Single regex pass instead of N×M pattern checks
         let filtering_start = Instant::now();
         let original_facts_count = all_data_facts.len();
-        let mut kept_count = 0;
-        let mut dropped_count = 0;
         
-        let filtered_data_facts: Vec<String> = all_data_facts
-            .into_iter()
-            .filter(|fact| {
-                // ⚡ FAST: Check if any reachable node pattern exists in this fact
-                let is_relevant = reachable_node_patterns.iter().any(|pattern| fact.contains(pattern));
+        let filtered_data_facts: Vec<String> = if let Some(regex) = pattern_regex {
+            // ⚡ PARALLEL PROCESSING: For large datasets, use parallel iteration
+            if original_facts_count > 10000 {
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                let kept_count = AtomicUsize::new(0);
+                let dropped_count = AtomicUsize::new(0);
                 
-                if is_relevant {
-                    kept_count += 1;
-                } else {
-                    dropped_count += 1;
-                }
+                log::info!("🔍 FILTERING: Using parallel processing for {} facts", original_facts_count);
                 
-                // ⚡ BATCH LOGGING: Only log every 1000 facts to avoid performance hit
-                if (kept_count + dropped_count) % 1000 == 0 {
-                    log::debug!("🔍 FILTERING: Processed {} facts so far ({} kept, {} dropped)", 
-                        kept_count + dropped_count, kept_count, dropped_count);
-                }
+                use std::sync::Mutex;
+                let debug_counter = Mutex::new(0usize);
                 
-                is_relevant
-            })
-            .collect();
+                let result: Vec<String> = all_data_facts
+                    .into_par_iter()
+                    .filter(|fact| {
+                        // ⚡ ULTRA-FAST: Single regex check instead of iterating through all patterns
+                        let is_relevant = regex.is_match(fact);
+                        
+                        if is_relevant {
+                            kept_count.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            dropped_count.fetch_add(1, Ordering::Relaxed);
+                        }
+                        
+                        // ⚡ BATCH LOGGING: Only log every 5000 facts to avoid performance hit in parallel
+                        {
+                            let mut counter = debug_counter.lock().unwrap();
+                            *counter += 1;
+                            if *counter % 5000 == 0 {
+                                let kept = kept_count.load(Ordering::Relaxed);
+                                let dropped = dropped_count.load(Ordering::Relaxed);
+                                log::debug!("🔍 FILTERING (parallel): Processed {} facts so far ({} kept, {} dropped)", 
+                                    kept + dropped, kept, dropped);
+                            }
+                        }
+                        
+                        is_relevant
+                    })
+                    .collect();
+                
+                let final_kept = kept_count.load(Ordering::Relaxed);
+                let final_dropped = dropped_count.load(Ordering::Relaxed);
+                log::info!("🔍 FILTERING: Parallel processing completed - {} kept, {} dropped", final_kept, final_dropped);
+                
+                result
+            } else {
+                // ⚡ SEQUENTIAL: For smaller datasets, sequential is fine and avoids overhead
+                log::info!("🔍 FILTERING: Using sequential processing for {} facts", original_facts_count);
+                let mut kept_count = 0;
+                let mut dropped_count = 0;
+                
+                all_data_facts
+                    .into_iter()
+                    .filter(|fact| {
+                        // ⚡ ULTRA-FAST: Single regex check instead of iterating through all patterns
+                        let is_relevant = regex.is_match(fact);
+                        
+                        if is_relevant {
+                            kept_count += 1;
+                        } else {
+                            dropped_count += 1;
+                        }
+                        
+                        // ⚡ BATCH LOGGING: Only log every 1000 facts to avoid performance hit
+                        if (kept_count + dropped_count) % 1000 == 0 {
+                            log::debug!("🔍 FILTERING: Processed {} facts so far ({} kept, {} dropped)", 
+                                kept_count + dropped_count, kept_count, dropped_count);
+                        }
+                        
+                        is_relevant
+                    })
+                    .collect()
+            }
+        } else {
+            // No patterns - return empty result
+            log::info!("🔍 FILTERING: No reachable patterns - returning empty filtered facts");
+            Vec::new()
+        };
         
         let filtering_duration = filtering_start.elapsed();
         let total_duration = start_time.elapsed();
