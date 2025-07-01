@@ -1224,23 +1224,45 @@ impl PerspectiveInstance {
 
     /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
     pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
-        // Get service reference before any locks
-        let service = get_prolog_service().await;
-        let uuid = self.persisted.lock().await.uuid.clone();
-
-        // Ensure pool exists
+        let prolog_start = std::time::Instant::now();
+        log::info!("🔍 PROLOG QUERY: Starting query: {} (chars: {})", 
+            query.chars().take(100).collect::<String>(), query.len());
+        
+        let ensure_start = std::time::Instant::now();
         self.ensure_prolog_engine_pool().await?;
+        log::info!("🔍 PROLOG QUERY: Engine pool ensured in {:?}", ensure_start.elapsed());
 
+        let uuid_start = std::time::Instant::now();
+        let uuid = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
+        log::info!("🔍 PROLOG QUERY: UUID retrieved in {:?}", uuid_start.elapsed());
+
+        let service_start = std::time::Instant::now();
+        let service = get_prolog_service().await;
+        log::info!("🔍 PROLOG QUERY: Service retrieved in {:?}", service_start.elapsed());
+
+        let lock_start = std::time::Instant::now();
+        log::info!("🔍 PROLOG QUERY: Waiting for prolog_update_mutex read lock...");
         let _read_lock = self.prolog_update_mutex.read().await;
+        log::info!("🔍 PROLOG QUERY: Acquired prolog_update_mutex read lock in {:?}", lock_start.elapsed());
 
         let query = if !query.ends_with('.') {
             query + "."
         } else {
             query
         };
-
-        let result = service.run_query(uuid, query).await?;
-
+        
+        // ⚠️ CRITICAL: This might be blocked waiting for prolog_update_mutex!
+        let query_start = std::time::Instant::now();
+        log::info!("🔍 PROLOG QUERY: About to execute query...");
+        
+        let result = service.run_query(uuid, query.clone()).await?;
+        
+        log::info!("🔍 PROLOG QUERY: Query executed in {:?} (total: {:?})", 
+            query_start.elapsed(), prolog_start.elapsed());
+        
         match result {
             Err(e) => {
                 // Engine error is handled at pool level now
@@ -1286,6 +1308,11 @@ impl PerspectiveInstance {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
+            let spawn_start = std::time::Instant::now();
+            log::info!("🔧 PROLOG UPDATE: Starting prolog facts update task - {} add, {} rem", 
+                diff.additions.len(), diff.removals.len());
+            
+            let ensure_pool_start = std::time::Instant::now();
             if let Err(e) = self_clone.ensure_prolog_engine_pool().await {
                 log::error!("Error spawning Prolog engine pool: {:?}", e);
                 if let Some(sender) = completion_sender {
@@ -1293,56 +1320,94 @@ impl PerspectiveInstance {
                 }
                 return;
             }
+            log::info!("🔧 PROLOG UPDATE: Engine pool ensured in {:?}", ensure_pool_start.elapsed());
 
             // Get UUID before acquiring write lock
+            let uuid_start = std::time::Instant::now();
             let uuid = {
                 let persisted_guard = self_clone.persisted.lock().await;
                 persisted_guard.uuid.clone()
             };
+            log::info!("🔧 PROLOG UPDATE: UUID retrieved in {:?}", uuid_start.elapsed());
 
+            let analysis_start = std::time::Instant::now();
             let fact_rebuild_needed = !diff.removals.is_empty()
                 || diff.additions.iter().any(|link| is_sdna_link(&link.data));
+            log::info!("🔧 PROLOG UPDATE: Analysis completed in {:?} - rebuild_needed: {}", 
+                analysis_start.elapsed(), fact_rebuild_needed);
+
+            let mutex_wait_start = std::time::Instant::now();
+            log::info!("🔧 PROLOG UPDATE: Waiting for prolog_update_mutex...");
 
             let did_update = if !fact_rebuild_needed {
+                log::info!("🔧 PROLOG UPDATE: Using FAST ASSERTION path");
                 // For additions only, use assertions - acquire lock only during prolog operations
+                let assertions_start = std::time::Instant::now();
                 let mut assertions: Vec<String> = Vec::new();
                 for addition in &diff.additions {
                     assertions.push(generic_link_fact("assert_link_and_triple", addition));
                 }
+                log::info!("🔧 PROLOG UPDATE: Built {} assertions in {:?}", 
+                    assertions.len(), assertions_start.elapsed());
 
+                let service_start = std::time::Instant::now();
                 let service = get_prolog_service().await;
+                log::info!("🔧 PROLOG UPDATE: Got prolog service in {:?}", service_start.elapsed());
 
                 // Acquire write lock only for the prolog operation
                 let _write_guard = self_clone.prolog_update_mutex.write().await;
+                log::info!("🔧 PROLOG UPDATE: Acquired prolog_update_mutex after {:?}", mutex_wait_start.elapsed());
+                
+                let query_start = std::time::Instant::now();
                 let query = format!("{}.", assertions.join(","));
+                log::info!("🔧 PROLOG UPDATE: Running assertion query: {} chars", query.len());
+                
                 match service.run_query_all(uuid, query).await {
-                    Ok(()) => true,
+                    Ok(()) => {
+                        log::info!("🔧 PROLOG UPDATE: Assertion query completed successfully in {:?}", query_start.elapsed());
+                        true
+                    }
                     Err(e) => {
                         log::error!(
-                            "Error while running assertion query to update Prolog engine facts: {:?}", e
+                            "Error while running assertion query to update Prolog engine facts (took {:?}): {:?}", 
+                            query_start.elapsed(), e
                         );
                         false
                     }
                 }
             } else {
+                log::info!("🔧 PROLOG UPDATE: Using FULL REBUILD path");
                 // For fact rebuild, acquire write lock for the entire operation
                 let _write_guard = self_clone.prolog_update_mutex.write().await;
+                log::info!("🔧 PROLOG UPDATE: Acquired prolog_update_mutex after {:?}", mutex_wait_start.elapsed());
+                
+                let rebuild_start = std::time::Instant::now();
                 match self_clone.update_prolog_engine_facts().await {
-                    Ok(()) => true,
+                    Ok(()) => {
+                        log::info!("🔧 PROLOG UPDATE: Full rebuild completed successfully in {:?}", rebuild_start.elapsed());
+                        true
+                    }
                     Err(e) => {
-                        log::error!("Error while updating Prolog engine facts: {:?}", e);
+                        log::error!("Error while updating Prolog engine facts (took {:?}): {:?}", 
+                            rebuild_start.elapsed(), e);
                         false
                     }
                 }
             };
 
             if did_update {
+                let pubsub_start = std::time::Instant::now();
                 self_clone.pubsub_publish_diff(diff).await;
+                log::info!("🔧 PROLOG UPDATE: Pubsub publish completed in {:?}", pubsub_start.elapsed());
 
                 // Trigger notification and subscription checks after prolog facts are updated
+                let trigger_start = std::time::Instant::now();
                 *(self_clone.trigger_notification_check.lock().await) = true;
                 *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
+                log::info!("🔧 PROLOG UPDATE: Triggers set in {:?}", trigger_start.elapsed());
             }
+
+            log::info!("🔧 PROLOG UPDATE: Total prolog update task took {:?}", spawn_start.elapsed());
 
             // Signal completion through the oneshot channel if provided
             if let Some(sender) = completion_sender {
@@ -1578,6 +1643,10 @@ impl PerspectiveInstance {
         parameters: Vec<Parameter>,
         batch_id: Option<String>,
     ) -> Result<(), AnyError> {
+        let execute_start = std::time::Instant::now();
+        log::info!("⚙️ EXECUTE COMMANDS: Starting execution of {} commands for expression '{}', batch_id: {:?}", 
+            commands.len(), expression, batch_id);
+
         let jsvalue_to_string = |value: &Value| -> String {
             match value {
                 serde_json::Value::String(s) => s.clone(),
@@ -1604,12 +1673,15 @@ impl PerspectiveInstance {
             }
         };
 
-        for command in commands {
-            let source = replace_this(replace_parameters(command.source))
+        for (i, command) in commands.iter().enumerate() {
+            let command_start = std::time::Instant::now();
+            log::info!("⚙️ EXECUTE COMMANDS: Processing command {}/{}: {:?}", i + 1, commands.len(), command.action);
+            
+            let source = replace_this(replace_parameters(command.source.clone()))
                 .ok_or_else(|| anyhow!("Source cannot be None"))?;
-            let predicate = replace_this(replace_parameters(command.predicate));
-            let target = (replace_parameters(command.target))
-                .ok_or_else(|| anyhow!("Source cannot be None"))?;
+            let predicate = replace_this(replace_parameters(command.predicate.clone()));
+            let target = (replace_parameters(command.target.clone()))
+                .ok_or_else(|| anyhow!("Target cannot be None"))?;
             let local = command.local.unwrap_or(false);
             let status = if local {
                 LinkStatus::Local
@@ -1708,8 +1780,11 @@ impl PerspectiveInstance {
                     .await?;
                 }
             }
+            
+            log::info!("⚙️ EXECUTE COMMANDS: Command {} completed in {:?}", i + 1, command_start.elapsed());
         }
 
+        log::info!("⚙️ EXECUTE COMMANDS: All {} commands executed in {:?}", commands.len(), execute_start.elapsed());
         Ok(())
     }
 
@@ -1717,19 +1792,36 @@ impl PerspectiveInstance {
         &mut self,
         subject_class: SubjectClassOption,
     ) -> Result<String, AnyError> {
-        Ok(if subject_class.class_name.is_some() {
-            subject_class.class_name.unwrap()
+        let method_start = std::time::Instant::now();
+        log::info!("🔍 SUBJECT CLASS: Starting class name resolution...");
+        
+        let result = Ok(if subject_class.class_name.is_some() {
+            let class_name = subject_class.class_name.unwrap();
+            log::info!("🔍 SUBJECT CLASS: Using provided class name '{}' in {:?}", class_name, method_start.elapsed());
+            class_name
         } else {
             let query = subject_class.query.ok_or(anyhow!(
                 "SubjectClassOption needs to either have `name` or `query` set"
             ))?;
+            
+            log::info!("🔍 SUBJECT CLASS: Running prolog query to resolve class name: {}", query);
+            let query_start = std::time::Instant::now();
+            
             let result = self.prolog_query(query.to_string()).await.map_err(|e| {
                 log::error!("Error creating subject: {:?}", e);
                 e
             })?;
-            prolog_get_first_string_binding(&result, "Class")
-                .ok_or(anyhow!("No matching subject class found!"))?
-        })
+            
+            log::info!("🔍 SUBJECT CLASS: Prolog query completed in {:?}", query_start.elapsed());
+            
+            let class_name = prolog_get_first_string_binding(&result, "Class")
+                .ok_or(anyhow!("No matching subject class found!"))?;
+            
+            log::info!("🔍 SUBJECT CLASS: Resolved class name '{}' in {:?}", class_name, method_start.elapsed());
+            class_name
+        });
+        
+        result
     }
 
     async fn get_actions_from_prolog(
@@ -1750,13 +1842,25 @@ impl PerspectiveInstance {
     }
 
     async fn get_constructor_actions(&self, class_name: &str) -> Result<Vec<Command>, AnyError> {
+        let method_start = std::time::Instant::now();
+        log::info!("🏗️ CONSTRUCTOR: Getting constructor actions for class '{}'", class_name);
+        
         let query = format!(
             r#"subject_class("{}", C), constructor(C, Actions)"#,
             class_name
         );
-        self.get_actions_from_prolog(query)
+        
+        log::info!("🏗️ CONSTRUCTOR: Running prolog query: {}", query);
+        let query_start = std::time::Instant::now();
+        
+        let result = self.get_actions_from_prolog(query)
             .await?
-            .ok_or(anyhow!("No constructor found for class: {}", class_name))
+            .ok_or(anyhow!("No constructor found for class: {}", class_name));
+        
+        log::info!("🏗️ CONSTRUCTOR: Prolog query completed in {:?} (total: {:?})", 
+            query_start.elapsed(), method_start.elapsed());
+        
+        result
     }
 
     async fn get_property_setter_actions(
@@ -1764,11 +1868,23 @@ impl PerspectiveInstance {
         class_name: &str,
         property: &str,
     ) -> Result<Option<Vec<Command>>, AnyError> {
+        let method_start = std::time::Instant::now();
+        log::info!("🔧 PROPERTY SETTER: Getting setter for class '{}', property '{}'", class_name, property);
+        
         let query = format!(
             r#"subject_class("{}", C), property_setter(C, "{}", Actions)"#,
             class_name, property
         );
-        self.get_actions_from_prolog(query).await
+        
+        log::info!("🔧 PROPERTY SETTER: Running prolog query: {}", query);
+        let query_start = std::time::Instant::now();
+        
+        let result = self.get_actions_from_prolog(query).await;
+        
+        log::info!("🔧 PROPERTY SETTER: Prolog query completed in {:?} (total: {:?})", 
+            query_start.elapsed(), method_start.elapsed());
+        
+        result
     }
 
     async fn resolve_property_value(
@@ -1814,91 +1930,106 @@ impl PerspectiveInstance {
         initial_values: Option<serde_json::Value>,
         batch_id: Option<String>,
     ) -> Result<(), AnyError> {
+        let create_start = std::time::Instant::now();
+        log::info!("🎯 CREATE SUBJECT: Starting create_subject for expression '{}' - batch_id: {:?}", 
+            expression_address, batch_id);
+        
+        let class_name_start = std::time::Instant::now();
         let class_name = self
             .subject_class_option_to_class_name(subject_class)
             .await?;
+        log::info!("🎯 CREATE SUBJECT: Got class name '{}' in {:?}", class_name, class_name_start.elapsed());
 
+        let constructor_start = std::time::Instant::now();
         let mut commands = self.get_constructor_actions(&class_name).await?;
+        log::info!("🎯 CREATE SUBJECT: Got {} constructor actions in {:?}", 
+            commands.len(), constructor_start.elapsed());
 
         // Handle initial values if provided
         if let Some(obj) = initial_values {
+            let initial_values_start = std::time::Instant::now();
+            log::info!("🎯 CREATE SUBJECT: Processing initial values...");
+            
             if let serde_json::Value::Object(obj) = obj {
                 for (prop, value) in obj.iter() {
+                    let prop_start = std::time::Instant::now();
                     if let Some(setter_commands) =
                         self.get_property_setter_actions(&class_name, prop).await?
                     {
                         let target_value = self
                             .resolve_property_value(&class_name, prop, value)
                             .await?;
+                        
+                        log::info!("🎯 CREATE SUBJECT: Property '{}' setter resolved in {:?}", 
+                            prop, prop_start.elapsed());
 
                         // Compare predicates between setter and constructor commands
-                        for setter_cmd in setter_commands.iter() {
-                            let mut overwritten = false;
-                            if let Some(setter_pred) = &setter_cmd.predicate {
-                                for cmd in commands.iter_mut() {
-                                    if let Some(pred) = &cmd.predicate {
-                                        if pred == setter_pred {
-                                            cmd.target = Some(target_value.clone());
-                                            overwritten = true;
-                                            break;
-                                        }
+                        let setter_predicates: std::collections::HashSet<String> = setter_commands
+                            .iter()
+                            .filter_map(|cmd| cmd.predicate.clone())
+                            .collect();
+
+                        let constructor_predicates: std::collections::HashSet<String> = commands
+                            .iter()
+                            .filter_map(|cmd| cmd.predicate.clone())
+                            .collect();
+
+                        let has_overlap = setter_predicates
+                            .intersection(&constructor_predicates)
+                            .next()
+                            .is_some();
+
+                        if has_overlap {
+                            // Merge setter commands with constructor commands
+                            for setter_command in setter_commands {
+                                let mut merged_command = setter_command;
+                                merged_command.source = merged_command.source.map(|s| {
+                                    if s == "this" {
+                                        expression_address.clone()
+                                    } else {
+                                        s
                                     }
+                                });
+                                merged_command.target = merged_command.target.map(|t| {
+                                    if t == "value" {
+                                        target_value.clone()
+                                    } else {
+                                        t
+                                    }
+                                });
+
+                                // Check if we need to replace or append this command
+                                if let Some(existing_index) = commands.iter().position(|cmd| {
+                                    cmd.predicate == merged_command.predicate
+                                        && cmd.source == merged_command.source
+                                }) {
+                                    commands[existing_index] = merged_command;
+                                } else {
+                                    commands.push(merged_command);
                                 }
                             }
-                            if !overwritten {
-                                commands.push(Command {
-                                    target: Some(target_value.clone()),
-                                    ..setter_cmd.clone()
-                                });
-                            }
+                        } else {
+                            // No overlap, just add setter commands
+                            commands.extend(setter_commands);
                         }
+                    } else {
+                        log::info!("🎯 CREATE SUBJECT: No setter found for property '{}' in {:?}", 
+                            prop, prop_start.elapsed());
                     }
                 }
             }
+            
+            log::info!("🎯 CREATE SUBJECT: Initial values processing took {:?}", initial_values_start.elapsed());
         }
 
-        // Execute the merged commands
-        self.execute_commands(
-            commands,
-            expression_address.clone(),
-            vec![],
-            batch_id.clone(),
-        )
-        .await?;
-
-        if batch_id.is_some() {
-            return Ok(());
-        }
-
-        // Verify instance was created successfully
-        let mut tries = 0;
-        let mut instance_check_passed = false;
-        while !instance_check_passed && tries < 50 {
-            match self
-                .prolog_query(format!(
-                    "subject_class(\"{}\", C), instance(C, \"{}\").",
-                    class_name, expression_address
-                ))
-                .await
-            {
-                Ok(QueryResolution::True) => instance_check_passed = true,
-                Ok(QueryResolution::Matches(_)) => instance_check_passed = true,
-                Err(e) => log::warn!("Error trying to check instance after create_subject: {}", e),
-                Ok(_) => {} //log::info!("create_subject instance query returned: {:?}", r),
-            }
-            sleep(Duration::from_millis(10)).await;
-            tries += 1;
-        }
-
-        if instance_check_passed {
-            // log::info!(
-            //     "Subject class \"{}\" successfully instantiated around \"{}\".",
-            //     class_name,
-            //     expression_address
-            // );
-        } else {
-            log::warn!("create_subject: instance check still false after running constructor and waiting 5s. Something seems off with subject class: {}", class_name);
-        }
+        let execute_start = std::time::Instant::now();
+        log::info!("🎯 CREATE SUBJECT: Executing {} commands...", commands.len());
+        
+        self.execute_commands(commands, expression_address, vec![], batch_id)
+            .await?;
+        
+        log::info!("🎯 CREATE SUBJECT: Commands executed in {:?}", execute_start.elapsed());
+        log::info!("🎯 CREATE SUBJECT: Total create_subject took {:?}", create_start.elapsed());
 
         Ok(())
     }
@@ -2253,15 +2384,23 @@ impl PerspectiveInstance {
         &mut self,
         batch_uuid: String,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
+        let commit_start = std::time::Instant::now();
+        log::info!("🔄 BATCH COMMIT: Starting batch commit for batch_uuid: {}", batch_uuid);
+        
         // Get the diff without holding lock during the entire operation
         let diff = {
+            let batch_retrieval_start = std::time::Instant::now();
             let mut batch_store = self.batch_store.write().await;
-            match batch_store.remove(&batch_uuid) {
+            let result = match batch_store.remove(&batch_uuid) {
                 Some(diff) => diff,
                 None => return Err(anyhow!("No batch found with given UUID")),
-            }
+            };
+            log::info!("🔄 BATCH COMMIT: Retrieved batch diff in {:?} - {} additions, {} removals", 
+                batch_retrieval_start.elapsed(), result.additions.len(), result.removals.len());
+            result
         };
 
+        let processing_start = std::time::Instant::now();
         let mut shared_diff = DecoratedPerspectiveDiff {
             additions: Vec::new(),
             removals: Vec::new(),
@@ -2294,6 +2433,11 @@ impl PerspectiveInstance {
             }
         }
 
+        log::info!("🔄 BATCH COMMIT: Link processing took {:?} - shared: {} add/{} rem, local: {} add/{} rem", 
+            processing_start.elapsed(),
+            shared_diff.additions.len(), shared_diff.removals.len(),
+            local_diff.additions.len(), local_diff.removals.len());
+
         // Get UUID without holding lock during DB operations
         let uuid = {
             let handle = self.persisted.lock().await;
@@ -2302,6 +2446,9 @@ impl PerspectiveInstance {
 
         // Apply shared changes
         if !shared_diff.additions.is_empty() || !shared_diff.removals.is_empty() {
+            let db_start = std::time::Instant::now();
+            log::info!("🔄 BATCH COMMIT: Starting DB operations for shared changes");
+            
             // Add shared links to storage
             for link in &shared_diff.additions {
                 Ad4mDb::with_global_instance(|db| {
@@ -2313,9 +2460,14 @@ impl PerspectiveInstance {
             for link in &shared_diff.removals {
                 Ad4mDb::with_global_instance(|db| db.remove_link(&uuid, &link.clone().into()))?;
             }
+            
+            log::info!("🔄 BATCH COMMIT: DB operations for shared changes took {:?}", db_start.elapsed());
 
             // Commit to link language
             if self.has_link_language().await {
+                let link_lang_start = std::time::Instant::now();
+                log::info!("🔄 BATCH COMMIT: Starting link language commit");
+                
                 let perspective_diff = PerspectiveDiff {
                     additions: shared_diff
                         .additions
@@ -2329,11 +2481,16 @@ impl PerspectiveInstance {
                         .collect(),
                 };
                 self.spawn_commit_and_handle_error(&perspective_diff);
+                
+                log::info!("🔄 BATCH COMMIT: Link language commit spawned in {:?}", link_lang_start.elapsed());
             }
         }
 
         // Apply local changes
         if !local_diff.additions.is_empty() || !local_diff.removals.is_empty() {
+            let local_db_start = std::time::Instant::now();
+            log::info!("🔄 BATCH COMMIT: Starting DB operations for local changes");
+            
             // Add local links to storage
             for link in &local_diff.additions {
                 Ad4mDb::with_global_instance(|db| {
@@ -2345,6 +2502,8 @@ impl PerspectiveInstance {
             for link in &local_diff.removals {
                 Ad4mDb::with_global_instance(|db| db.remove_link(&uuid, &link.clone().into()))?;
             }
+            
+            log::info!("🔄 BATCH COMMIT: DB operations for local changes took {:?}", local_db_start.elapsed());
         }
 
         // Create combined diff for prolog update and return value
@@ -2355,15 +2514,22 @@ impl PerspectiveInstance {
 
         // Only spawn prolog facts update if there are changes to update
         if !combined_diff.additions.is_empty() || !combined_diff.removals.is_empty() {
+            let prolog_start = std::time::Instant::now();
+            log::info!("🔄 BATCH COMMIT: Starting prolog facts update - {} add, {} rem", 
+                combined_diff.additions.len(), combined_diff.removals.len());
+            
             // Create oneshot channel for prolog facts update completion
             let (completion_sender, completion_receiver) = tokio::sync::oneshot::channel();
-            //log::info!("spawning prolog facts update");
-            //log::info!("combined diff: {:?}", combined_diff);
+            
             // Update prolog facts once for all changes and wait for completion
             self.spawn_prolog_facts_update(combined_diff.clone(), Some(completion_sender));
             let _ = completion_receiver.await;
-            //log::info!("done spawning prolog facts update");
+            
+            log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
         }
+        
+        log::info!("🔄 BATCH COMMIT: Total batch commit took {:?}", commit_start.elapsed());
+        
         // Return combined diff
         Ok(combined_diff)
     }

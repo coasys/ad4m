@@ -73,8 +73,9 @@ impl PrologService {
         // This eliminates circular dependencies and potential deadlocks
         let result = pool.run_query_smart(query.clone(), true).await;
         match &result {
-            Ok(Ok(query_result)) => {
-                log::info!("🔔 SUBSCRIPTION: Query succeeded with result: {:?}", query_result);
+            Ok(Ok(_query_result)) => {
+                //log::info!("🔔 SUBSCRIPTION: Query succeeded with result: {:?}", query_result);
+                log::info!("🔔 SUBSCRIPTION: Query succeeded [result omitted]");
             }
             Ok(Err(error)) => {
                 log::warn!("🔔 SUBSCRIPTION: Query failed with error: {}", error);
@@ -86,14 +87,33 @@ impl PrologService {
         result
     }
 
-
-
     pub async fn run_query_all(&self, perspective_id: String, query: String) -> Result<(), Error> {
+        let service_start = std::time::Instant::now();
+        log::info!("⚡ PROLOG SERVICE: Starting run_query_all for perspective '{}' - query: {} chars", 
+            perspective_id, query.len());
+        
+        let pool_lookup_start = std::time::Instant::now();
         let pools = self.engine_pools.read().await;
         let pool = pools
             .get(&perspective_id)
             .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?;
-        pool.run_query_all(query).await
+        log::info!("⚡ PROLOG SERVICE: Pool lookup took {:?}", pool_lookup_start.elapsed());
+        
+        let query_execution_start = std::time::Instant::now();
+        let result = pool.run_query_all(query).await;
+        
+        match &result {
+            Ok(()) => {
+                log::info!("⚡ PROLOG SERVICE: run_query_all completed successfully in {:?} (total: {:?})", 
+                    query_execution_start.elapsed(), service_start.elapsed());
+            }
+            Err(e) => {
+                log::error!("⚡ PROLOG SERVICE: run_query_all failed after {:?} (total: {:?}): {}", 
+                    query_execution_start.elapsed(), service_start.elapsed(), e);
+            }
+        }
+        
+        result
     }
 
     // Note: update_perspective_facts() removed - use update_perspective_links() for production code
@@ -106,11 +126,32 @@ impl PrologService {
         all_links: Vec<DecoratedLinkExpression>,
         neighbourhood_author: Option<String>,
     ) -> Result<(), Error> {
+        let service_start = std::time::Instant::now();
+        log::info!("🔗 PROLOG SERVICE: Starting update_perspective_links for perspective '{}' - {} links, module: {}", 
+            perspective_id, all_links.len(), module_name);
+        
+        let pool_lookup_start = std::time::Instant::now();
         let pools = self.engine_pools.read().await;
         let pool = pools
             .get(&perspective_id)
             .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?;
-        pool.update_all_engines_with_links(module_name, all_links, neighbourhood_author).await
+        log::info!("🔗 PROLOG SERVICE: Pool lookup took {:?}", pool_lookup_start.elapsed());
+        
+        let update_start = std::time::Instant::now();
+        let result = pool.update_all_engines_with_links(module_name, all_links, neighbourhood_author).await;
+        
+        match &result {
+            Ok(()) => {
+                log::info!("🔗 PROLOG SERVICE: update_perspective_links completed successfully in {:?} (total: {:?})", 
+                    update_start.elapsed(), service_start.elapsed());
+            }
+            Err(e) => {
+                log::error!("🔗 PROLOG SERVICE: update_perspective_links failed after {:?} (total: {:?}): {}", 
+                    update_start.elapsed(), service_start.elapsed(), e);
+            }
+        }
+        
+        result
     }
 
     pub async fn has_perspective_pool(&self, perspective_id: String) -> bool {

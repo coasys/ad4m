@@ -227,17 +227,17 @@ impl PrologEnginePool {
         }
 
         // If this is a complete pool and the query contains assertions, also update filtered pools
-        println!("🔄 DEBUG: Checking assert query: pool_type={:?}, is_assert={}, query='{}'", 
+        log::info!("🔄 DEBUG: Checking assert query: pool_type={:?}, is_assert={}, query='{}'", 
             self.pool_type, self.is_assert_query(&query), query);
         
         if matches!(self.pool_type, EnginePoolType::Complete) && self.is_assert_query(&query) {
-            println!("🔄 INCREMENTAL UPDATE: Detected assert query on complete pool, updating filtered pools");
+            log::info!("🔄 INCREMENTAL UPDATE: Detected assert query on complete pool, updating filtered pools");
             if let Err(e) = self.update_filtered_pools_from_assert_query(&query).await {
-                println!("🔄 INCREMENTAL UPDATE: Failed to update filtered pools: {}", e);
+                log::info!("🔄 INCREMENTAL UPDATE: Failed to update filtered pools: {}", e);
                 // Don't fail the main query - just log the error
             }
         } else {
-            println!("🔄 DEBUG: Not updating filtered pools - either not complete pool or not assert query");
+            log::info!("🔄 DEBUG: Not updating filtered pools - either not complete pool or not assert query");
         }
 
         Ok(())
@@ -259,17 +259,17 @@ impl PrologEnginePool {
             return Ok(());
         }
 
-        println!("🔄 INCREMENTAL UPDATE: Updating {} filtered pools from assert query", filtered_pools.len());
-        println!("🔄 INCREMENTAL UPDATE: Original query: {}", query);
+        log::info!("🔄 INCREMENTAL UPDATE: Updating {} filtered pools from assert query", filtered_pools.len());
+        log::info!("🔄 INCREMENTAL UPDATE: Original query: {}", query);
 
         // Extract assert statements from the query
         let assert_statements = self.extract_assert_statements(query);
         if assert_statements.is_empty() {
-            println!("🔄 INCREMENTAL UPDATE: No assert statements found in query");
+            log::info!("🔄 INCREMENTAL UPDATE: No assert statements found in query");
             return Ok(());
         }
 
-        println!("🔄 INCREMENTAL UPDATE: Found {} assert statements to process: {:?}", assert_statements.len(), assert_statements);
+        log::info!("🔄 INCREMENTAL UPDATE: Found {} assert statements to process: {:?}", assert_statements.len(), assert_statements);
 
         // For each filtered pool, determine which assertions are relevant and apply them
         let mut update_futures = Vec::new();
@@ -278,52 +278,52 @@ impl PrologEnginePool {
             let relevant_assertions = self.filter_assert_statements_for_source(&assert_statements, source_filter);
             
             if !relevant_assertions.is_empty() {
-                println!("🔄 INCREMENTAL UPDATE: Pool '{}' - applying {} filtered assertions: {:?}", 
+                log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - applying {} filtered assertions: {:?}", 
                     source_filter, relevant_assertions.len(), relevant_assertions);
                 
                 let pool_clone = pool.clone();
                 let filtered_query = format!("{}.", relevant_assertions.join(","));
-                println!("🔄 INCREMENTAL UPDATE: Pool '{}' - executing query: {}", source_filter, filtered_query);
+                log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - executing query: {}", source_filter, filtered_query);
                 
                 let source_filter_clone = source_filter.clone();
                 let update_future = async move {
-                    println!("🔄 INCREMENTAL UPDATE: Pool '{}' - starting assertion execution", source_filter_clone);
+                    log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - starting assertion execution", source_filter_clone);
                     let result = pool_clone.run_query_all(filtered_query).await;
                     match &result {
-                        Ok(()) => println!("🔄 INCREMENTAL UPDATE: Pool '{}' - assertion execution successful", source_filter_clone),
-                        Err(e) => println!("🔄 INCREMENTAL UPDATE: Pool '{}' - assertion execution failed: {}", source_filter_clone, e),
+                        Ok(()) => log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - assertion execution successful", source_filter_clone),
+                        Err(e) => log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - assertion execution failed: {}", source_filter_clone, e),
                     }
                     result
                 };
                 update_futures.push(update_future);
             } else {
-                println!("🔄 INCREMENTAL UPDATE: No relevant assertions for filtered pool '{}'", source_filter);
+                log::info!("🔄 INCREMENTAL UPDATE: No relevant assertions for filtered pool '{}'", source_filter);
             }
         }
 
         // Execute all filtered pool updates in parallel
         if !update_futures.is_empty() {
             let total_updates = update_futures.len();
-            println!("🔄 INCREMENTAL UPDATE: Executing {} parallel pool updates", total_updates);
+            log::info!("🔄 INCREMENTAL UPDATE: Executing {} parallel pool updates", total_updates);
             let results = join_all(update_futures).await;
             let mut failed_updates = 0;
             
             for (i, result) in results.into_iter().enumerate() {
                 if let Err(e) = result {
-                    println!("🔄 INCREMENTAL UPDATE: Failed to update filtered pool {}: {}", i, e);
+                    log::info!("🔄 INCREMENTAL UPDATE: Failed to update filtered pool {}: {}", i, e);
                     failed_updates += 1;
                 }
             }
             
             if failed_updates > 0 {
-                println!("🔄 INCREMENTAL UPDATE: {} out of {} filtered pool updates failed", 
+                log::info!("🔄 INCREMENTAL UPDATE: {} out of {} filtered pool updates failed", 
                     failed_updates, total_updates);
             } else {
-                println!("🔄 INCREMENTAL UPDATE: Successfully updated all {} filtered pools", 
+                log::info!("🔄 INCREMENTAL UPDATE: Successfully updated all {} filtered pools", 
                     total_updates);
             }
         } else {
-            println!("🔄 INCREMENTAL UPDATE: No filtered pool updates to execute - this suggests filtering issues");
+            log::info!("🔄 INCREMENTAL UPDATE: No filtered pool updates to execute - this suggests filtering issues");
         }
 
         Ok(())
@@ -339,7 +339,7 @@ impl PrologEnginePool {
         // Check if this is a single assert statement (no commas outside parentheses)
         if self.is_single_assert_statement(query_without_period) && !self.has_comma_outside_parens(query_without_period) {
             statements.push(query_without_period.to_string());
-            println!("🔄 EXTRACT: Single statement query: '{}'", query_without_period);
+            log::info!("🔄 EXTRACT: Single statement query: '{}'", query_without_period);
             return statements;
         }
         
@@ -378,7 +378,7 @@ impl PrologEnginePool {
             statements.push(cleaned.to_string());
         }
         
-        println!("🔄 EXTRACT: From query '{}' extracted {} statements: {:?}", 
+        log::info!("🔄 EXTRACT: From query '{}' extracted {} statements: {:?}", 
             query, statements.len(), statements);
         
         statements
@@ -413,13 +413,13 @@ impl PrologEnginePool {
             return Vec::new();
         }
         
-        println!("🔄 BATCH FILTERING: Analyzing {} statements for source filter '{}'", statements.len(), source_filter);
+        log::info!("🔄 BATCH FILTERING: Analyzing {} statements for source filter '{}'", statements.len(), source_filter);
         
         // Parse all statements to extract source->target relationships
         let mut statement_relationships = Vec::new();
         for (idx, statement) in statements.iter().enumerate() {
             if let Some((source, target)) = self.extract_source_target_from_statement(statement) {
-                println!("🔄 BATCH FILTERING: Statement {}: {} -> {}", idx, source, target);
+                log::info!("🔄 BATCH FILTERING: Statement {}: {} -> {}", idx, source, target);
                 statement_relationships.push((idx, source, target, statement.clone()));
             }
         }
@@ -452,11 +452,11 @@ impl PrologEnginePool {
                     // Add both source and target to reachable set for next iteration
                     if reachable_nodes.insert(source.clone()) {
                         changed = true;
-                        println!("🔄 BATCH FILTERING: Added '{}' to reachable set via statement {}", source, idx);
+                        log::info!("🔄 BATCH FILTERING: Added '{}' to reachable set via statement {}", source, idx);
                     }
                     if reachable_nodes.insert(target.clone()) {
                         changed = true;
-                        println!("🔄 BATCH FILTERING: Added '{}' to reachable set via statement {}", target, idx);
+                        log::info!("🔄 BATCH FILTERING: Added '{}' to reachable set via statement {}", target, idx);
                     }
                 }
             }
@@ -466,9 +466,9 @@ impl PrologEnginePool {
         relevant_statements.sort_by_key(|(idx, _)| *idx);
         let result: Vec<String> = relevant_statements.into_iter().map(|(_, statement)| statement).collect();
         
-        println!("🔄 BATCH FILTERING: Result: {} out of {} statements are relevant", result.len(), statements.len());
+        log::info!("🔄 BATCH FILTERING: Result: {} out of {} statements are relevant", result.len(), statements.len());
         for (i, stmt) in result.iter().enumerate() {
-            println!("🔄 BATCH FILTERING: Keeping statement {}: {}", i, stmt);
+            log::info!("🔄 BATCH FILTERING: Keeping statement {}: {}", i, stmt);
         }
         
         result
