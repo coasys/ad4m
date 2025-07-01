@@ -919,24 +919,65 @@ impl PrologEnginePool {
         
         // ⏱️ MEASURE: Query the complete engine for reachable nodes
         let reachability_start = Instant::now();
-        let reachable_query = format!(r#"reachable("{}", Target)."#, source_filter);
-        log::info!("🔍 FILTERING: Running reachable query on complete engine: {}", reachable_query);
-        let result = engine.run_query(reachable_query).await?;
-        let reachability_duration = reachability_start.elapsed();
         
+        // ⚡ OPTIMIZATION: Use findall with aggressive limits to prevent performance explosion
+        // Note: setof() was causing 5+ minute hangs due to redundant path exploration
+        let reachable_query = format!(r#"findall(Target, reachable("{}", Target), Targets)."#, source_filter);
+        log::info!("🔍 FILTERING: Running optimized findall reachable query: {}", reachable_query);
+        
+        // Set a timeout to prevent infinite loops
+        let query_timeout = tokio::time::Duration::from_secs(10); // 10 second timeout
+        let result = tokio::time::timeout(query_timeout, engine.run_query(reachable_query)).await;
+        
+        let reachability_duration = reachability_start.elapsed();
         let mut reachable_nodes = vec![source_filter.to_string()]; // Include the source itself
         
-        if let Ok(QueryResolution::Matches(matches)) = result {
-            log::info!("🔍 FILTERING: Found {} reachable matches in {:?}", matches.len(), reachability_duration);
-            for m in matches {
-                if let Some(Term::String(target)) = m.bindings.get("Target") {
-                    reachable_nodes.push(target.clone());
-                } else if let Some(Term::Atom(target)) = m.bindings.get("Target") {
-                    reachable_nodes.push(target.clone());
+        match result {
+            Ok(Ok(Ok(QueryResolution::Matches(matches)))) => {
+                log::info!("🔍 FILTERING: Found {} findall matches in {:?}", matches.len(), reachability_duration);
+                
+                // findall returns a list of targets in the "Targets" binding
+                for m in matches {
+                    if let Some(Term::List(targets)) = m.bindings.get("Targets") {
+                        // Use HashSet for deduplication and apply size limits
+                        let mut seen = HashSet::new();
+                        const MAX_REACHABLE_NODES: usize = 5000; // Conservative limit
+                        
+                        for target in targets {
+                            if seen.len() >= MAX_REACHABLE_NODES {
+                                log::warn!("🔍 FILTERING: Reached maximum reachable nodes limit ({}), stopping", MAX_REACHABLE_NODES);
+                                break;
+                            }
+                            
+                            let target_str = match target {
+                                Term::String(s) => s.clone(),
+                                Term::Atom(s) => s.clone(),
+                                _ => continue,
+                            };
+                            
+                            if seen.insert(target_str.clone()) {
+                                reachable_nodes.push(target_str);
+                            }
+                        }
+                        log::info!("🔍 FILTERING: Deduplicated to {} unique targets", seen.len());
+                        break; // Only process first match
+                    }
                 }
             }
-        } else {
-            log::warn!("🔍 FILTERING: Reachable query returned no matches or failed in {:?}", reachability_duration);
+            Ok(Ok(Ok(_))) => {
+                log::warn!("🔍 FILTERING: Findall reachable query returned unexpected result type");
+            }
+            Ok(Ok(Err(e))) => {
+                log::warn!("🔍 FILTERING: Findall reachable query failed: {}", e);
+            }
+            Ok(Err(e)) => {
+                log::warn!("🔍 FILTERING: Engine error during reachable query: {}", e);
+            }
+            Err(_) => {
+                log::error!("🔍 FILTERING: Reachable query timed out after 10 seconds! Using source-only fallback.");
+                // Don't try any more reachability queries - just use the source node itself
+                // This prevents the system from hanging completely
+            }
         }
         
         log::info!("🔍 FILTERING: Total reachable nodes: {}", reachable_nodes.len());

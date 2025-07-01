@@ -122,10 +122,30 @@ pub fn get_static_infrastructure_facts() -> Vec<String> {
         ":- dynamic(link/5).".to_string(),
     ];
 
-    // reachable/2
+    // reachable/2 - Optimized version with visited tracking
     lines.push(":- discontiguous(reachable/2).".to_string());
-    lines.push("reachable(A,B) :- triple(A,_,B).".to_string());
-    lines.push("reachable(A,B) :- triple(A,_,X), reachable(X,B).".to_string());
+    lines.push(":- discontiguous(reachable_visited/3).".to_string());
+    
+    // Main reachable predicate - starts with empty visited list
+    lines.push("reachable(A,B) :- reachable_visited(A,B,[]).".to_string());
+    
+    // Base case: direct connection
+    lines.push("reachable_visited(A,B,_) :- triple(A,_,B).".to_string());
+    
+    // Recursive case: avoid cycles by checking visited list
+    lines.push("reachable_visited(A,B,Visited) :- \\+ member(A,Visited), triple(A,_,X), reachable_visited(X,B,[A|Visited]).".to_string());
+
+    // Alternative BFS implementation (comment out above and use this for very dense graphs):
+    // lines.push("reachable(A,B) :- reachable_bfs([A],[],B).".to_string());
+    // lines.push("reachable_bfs([Target|_],_,Target).".to_string());
+    // lines.push("reachable_bfs([Node|Queue],Visited,Target) :- \\+ member(Node,Visited), findall(X,triple(Node,_,X),Children), append(Queue,Children,NewQueue), reachable_bfs(NewQueue,[Node|Visited],Target).".to_string());
+    // lines.push("reachable_bfs([Node|Queue],Visited,Target) :- member(Node,Visited), reachable_bfs(Queue,Visited,Target).".to_string());
+
+    // Alternative iterative deepening (safest for unknown graph sizes - limits to depth 10):
+    // lines.push("reachable(A,B) :- between(0,10,Depth), reachable_depth(A,B,Depth,[]).".to_string());
+    // lines.push("reachable_depth(A,A,_,_).".to_string());
+    // lines.push("reachable_depth(A,B,0,_) :- triple(A,_,B).".to_string());
+    // lines.push("reachable_depth(A,B,Depth,Visited) :- Depth > 0, \\+ member(A,Visited), triple(A,_,X), NextDepth is Depth - 1, reachable_depth(X,B,NextDepth,[A|Visited]).".to_string());
 
     // hiddenExpression/1
     lines.push(":- discontiguous(hiddenExpression/1).".to_string());
