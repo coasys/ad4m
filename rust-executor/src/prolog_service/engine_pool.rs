@@ -983,113 +983,67 @@ impl PrologEnginePool {
         log::info!("🔍 FILTERING: Total reachable nodes: {}", reachable_nodes.len());
         log::info!("🔍 FILTERING: Reachability query took: {:?}", reachability_duration);
         
-        // ⚡ OPTIMIZATION: Pre-compute formatted node strings and use compiled regex for ultra-fast filtering
+        // ⚡ OPTIMIZATION: Use regex-based filtering with automatic chunking for large pattern sets
         let formatting_start = Instant::now();
         let reachable_node_patterns: Vec<String> = reachable_nodes
             .iter()
-            .map(|node| regex::escape(&format!(r#""{}"#, node)))
+            .map(|node| format!(r#""{}"#, node))
             .collect();
         
-        // ⚡ ULTRA-FAST: Compile a single regex that matches any of the patterns in one pass
-        let pattern_regex = if reachable_node_patterns.is_empty() {
-            None
-        } else if reachable_node_patterns.len() == 1 {
-            // Single pattern - no alternation needed
-            Some(regex::Regex::new(&reachable_node_patterns[0]).map_err(|e| {
-                Error::msg(format!("Failed to compile regex pattern: {}", e))
-            })?)
+        let pattern_count = reachable_node_patterns.len();
+        
+        // ⚡ SMART CHUNKING: Build regex chunks to avoid size limits
+        let regex_chunks = if pattern_count == 0 {
+            Vec::new() // Empty - no filtering needed
         } else {
-            // Multiple patterns - use alternation (pattern1|pattern2|...)
-            let alternation_pattern = format!("({})", reachable_node_patterns.join("|"));
-            Some(regex::Regex::new(&alternation_pattern).map_err(|e| {
-                Error::msg(format!("Failed to compile alternation regex: {}", e))
-            })?)
+            const MAX_PATTERNS_PER_CHUNK: usize = 50; // Conservative limit to avoid regex size explosion
+            let mut chunks = Vec::new();
+            
+            for chunk in reachable_node_patterns.chunks(MAX_PATTERNS_PER_CHUNK) {
+                let escaped_patterns: Vec<String> = chunk
+                    .iter()
+                    .map(|pattern| regex::escape(pattern))
+                    .collect();
+                let alternation_pattern = format!("({})", escaped_patterns.join("|"));
+                
+                match regex::Regex::new(&alternation_pattern) {
+                    Ok(regex) => chunks.push(regex),
+                    Err(e) => {
+                        log::error!("🔍 FILTERING: Failed to compile regex chunk with {} patterns: {}", chunk.len(), e);
+                        return Err(Error::msg(format!("Failed to compile regex chunk: {}", e)));
+                    }
+                }
+            }
+            
+            chunks
         };
         
         let formatting_duration = formatting_start.elapsed();
-        log::info!("🔍 FILTERING: Compiled regex for {} node patterns in {:?}", reachable_node_patterns.len(), formatting_duration);
+        log::info!("🔍 FILTERING: Compiled {} regex chunks for {} patterns in {:?}", 
+            regex_chunks.len(), pattern_count, formatting_duration);
         
-        // ⚡ ULTRA-FAST FILTERING: Single regex pass instead of N×M pattern checks
+        // ⚡ ULTRA-FAST FILTERING: Apply regex chunks
         let filtering_start = Instant::now();
         let original_facts_count = all_data_facts.len();
         
-        let filtered_data_facts: Vec<String> = if let Some(regex) = pattern_regex {
-            // ⚡ PARALLEL PROCESSING: For large datasets, use parallel iteration
+        let filtered_data_facts: Vec<String> = if regex_chunks.is_empty() {
+            log::info!("🔍 FILTERING: No patterns - returning empty filtered facts");
+            Vec::new()
+        } else if regex_chunks.len() == 1 {
+            // Single regex chunk - use optimized single regex path
+            let regex = &regex_chunks[0];
             if original_facts_count > 10000 {
-                use std::sync::atomic::{AtomicUsize, Ordering};
-                let kept_count = AtomicUsize::new(0);
-                let dropped_count = AtomicUsize::new(0);
-                
-                log::info!("🔍 FILTERING: Using parallel processing for {} facts", original_facts_count);
-                
-                use std::sync::Mutex;
-                let debug_counter = Mutex::new(0usize);
-                
-                let result: Vec<String> = all_data_facts
-                    .into_par_iter()
-                    .filter(|fact| {
-                        // ⚡ ULTRA-FAST: Single regex check instead of iterating through all patterns
-                        let is_relevant = regex.is_match(fact);
-                        
-                        if is_relevant {
-                            kept_count.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            dropped_count.fetch_add(1, Ordering::Relaxed);
-                        }
-                        
-                        // ⚡ BATCH LOGGING: Only log every 5000 facts to avoid performance hit in parallel
-                        {
-                            let mut counter = debug_counter.lock().unwrap();
-                            *counter += 1;
-                            if *counter % 5000 == 0 {
-                                let kept = kept_count.load(Ordering::Relaxed);
-                                let dropped = dropped_count.load(Ordering::Relaxed);
-                                log::debug!("🔍 FILTERING (parallel): Processed {} facts so far ({} kept, {} dropped)", 
-                                    kept + dropped, kept, dropped);
-                            }
-                        }
-                        
-                        is_relevant
-                    })
-                    .collect();
-                
-                let final_kept = kept_count.load(Ordering::Relaxed);
-                let final_dropped = dropped_count.load(Ordering::Relaxed);
-                log::info!("🔍 FILTERING: Parallel processing completed - {} kept, {} dropped", final_kept, final_dropped);
-                
-                result
+                Self::filter_facts_parallel_regex(all_data_facts, regex)
             } else {
-                // ⚡ SEQUENTIAL: For smaller datasets, sequential is fine and avoids overhead
-                log::info!("🔍 FILTERING: Using sequential processing for {} facts", original_facts_count);
-                let mut kept_count = 0;
-                let mut dropped_count = 0;
-                
-                all_data_facts
-                    .into_iter()
-                    .filter(|fact| {
-                        // ⚡ ULTRA-FAST: Single regex check instead of iterating through all patterns
-                        let is_relevant = regex.is_match(fact);
-                        
-                        if is_relevant {
-                            kept_count += 1;
-                        } else {
-                            dropped_count += 1;
-                        }
-                        
-                        // ⚡ BATCH LOGGING: Only log every 1000 facts to avoid performance hit
-                        if (kept_count + dropped_count) % 1000 == 0 {
-                            log::debug!("🔍 FILTERING: Processed {} facts so far ({} kept, {} dropped)", 
-                                kept_count + dropped_count, kept_count, dropped_count);
-                        }
-                        
-                        is_relevant
-                    })
-                    .collect()
+                Self::filter_facts_sequential_regex(all_data_facts, regex)
             }
         } else {
-            // No patterns - return empty result
-            log::info!("🔍 FILTERING: No reachable patterns - returning empty filtered facts");
-            Vec::new()
+            // Multiple regex chunks - check each fact against all chunks
+            if original_facts_count > 10000 {
+                Self::filter_facts_parallel_chunked_regex(all_data_facts, &regex_chunks)
+            } else {
+                Self::filter_facts_sequential_chunked_regex(all_data_facts, &regex_chunks)
+            }
         };
         
         let filtering_duration = filtering_start.elapsed();
@@ -1171,6 +1125,158 @@ impl PrologEnginePool {
         self.run_query(query).await
     }
 
+    /// Helper method for sequential regex filtering
+    fn filter_facts_sequential_regex(all_facts: Vec<String>, regex: &regex::Regex) -> Vec<String> {
+        log::info!("🔍 FILTERING: Using sequential regex processing for {} facts", all_facts.len());
+        let mut kept_count = 0;
+        let mut dropped_count = 0;
+        
+        let result: Vec<String> = all_facts
+            .into_iter()
+            .filter(|fact| {
+                let is_relevant = regex.is_match(fact);
+                
+                if is_relevant {
+                    kept_count += 1;
+                } else {
+                    dropped_count += 1;
+                }
+                
+                if (kept_count + dropped_count) % 1000 == 0 {
+                    log::debug!("🔍 FILTERING: Processed {} facts so far ({} kept, {} dropped)", 
+                        kept_count + dropped_count, kept_count, dropped_count);
+                }
+                
+                is_relevant
+            })
+            .collect();
+        
+        log::info!("🔍 FILTERING: Sequential regex completed - {} kept, {} dropped", kept_count, dropped_count);
+        result
+    }
+    
+    /// Helper method for parallel regex filtering
+    fn filter_facts_parallel_regex(all_facts: Vec<String>, regex: &regex::Regex) -> Vec<String> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let kept_count = AtomicUsize::new(0);
+        let dropped_count = AtomicUsize::new(0);
+        
+        log::info!("🔍 FILTERING: Using parallel regex processing for {} facts", all_facts.len());
+        
+        use std::sync::Mutex;
+        let debug_counter = Mutex::new(0usize);
+        
+        let result: Vec<String> = all_facts
+            .into_par_iter()
+            .filter(|fact| {
+                let is_relevant = regex.is_match(fact);
+                
+                if is_relevant {
+                    kept_count.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    dropped_count.fetch_add(1, Ordering::Relaxed);
+                }
+                
+                // Batch logging to avoid performance hit in parallel
+                {
+                    let mut counter = debug_counter.lock().unwrap();
+                    *counter += 1;
+                    if *counter % 5000 == 0 {
+                        let kept = kept_count.load(Ordering::Relaxed);
+                        let dropped = dropped_count.load(Ordering::Relaxed);
+                        log::debug!("🔍 FILTERING (parallel): Processed {} facts so far ({} kept, {} dropped)", 
+                            kept + dropped, kept, dropped);
+                    }
+                }
+                
+                is_relevant
+            })
+            .collect();
+        
+        let final_kept = kept_count.load(Ordering::Relaxed);
+        let final_dropped = dropped_count.load(Ordering::Relaxed);
+        log::info!("🔍 FILTERING: Parallel regex completed - {} kept, {} dropped", final_kept, final_dropped);
+        
+        result
+    }
+    
+    /// Helper method for sequential chunked regex filtering
+    fn filter_facts_sequential_chunked_regex(all_facts: Vec<String>, regex_chunks: &[regex::Regex]) -> Vec<String> {
+        log::info!("🔍 FILTERING: Using sequential chunked regex processing for {} facts with {} chunks", all_facts.len(), regex_chunks.len());
+        let mut kept_count = 0;
+        let mut dropped_count = 0;
+        
+        let result: Vec<String> = all_facts
+            .into_iter()
+            .filter(|fact| {
+                // Check if any of the regex chunks match
+                let is_relevant = regex_chunks.iter().any(|regex| regex.is_match(fact));
+                
+                if is_relevant {
+                    kept_count += 1;
+                } else {
+                    dropped_count += 1;
+                }
+                
+                if (kept_count + dropped_count) % 1000 == 0 {
+                    log::debug!("🔍 FILTERING: Processed {} facts so far ({} kept, {} dropped)", 
+                        kept_count + dropped_count, kept_count, dropped_count);
+                }
+                
+                is_relevant
+            })
+            .collect();
+        
+        log::info!("🔍 FILTERING: Sequential chunked regex completed - {} kept, {} dropped", kept_count, dropped_count);
+        result
+    }
+    
+    /// Helper method for parallel chunked regex filtering
+    fn filter_facts_parallel_chunked_regex(all_facts: Vec<String>, regex_chunks: &[regex::Regex]) -> Vec<String> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let kept_count = AtomicUsize::new(0);
+        let dropped_count = AtomicUsize::new(0);
+        
+        log::info!("🔍 FILTERING: Using parallel chunked regex processing for {} facts with {} chunks", all_facts.len(), regex_chunks.len());
+        
+        use std::sync::Mutex;
+        let debug_counter = Mutex::new(0usize);
+        
+        let result: Vec<String> = all_facts
+            .into_par_iter()
+            .filter(|fact| {
+                // Check if any of the regex chunks match
+                let is_relevant = regex_chunks.iter().any(|regex| regex.is_match(fact));
+                
+                if is_relevant {
+                    kept_count.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    dropped_count.fetch_add(1, Ordering::Relaxed);
+                }
+                
+                // Batch logging to avoid performance hit in parallel
+                {
+                    let mut counter = debug_counter.lock().unwrap();
+                    *counter += 1;
+                    if *counter % 5000 == 0 {
+                        let kept = kept_count.load(Ordering::Relaxed);
+                        let dropped = dropped_count.load(Ordering::Relaxed);
+                        log::debug!("🔍 FILTERING (parallel chunked): Processed {} facts so far ({} kept, {} dropped)", 
+                            kept + dropped, kept, dropped);
+                    }
+                }
+                
+                is_relevant
+            })
+            .collect();
+        
+        let final_kept = kept_count.load(Ordering::Relaxed);
+        let final_dropped = dropped_count.load(Ordering::Relaxed);
+        log::info!("🔍 FILTERING: Parallel chunked regex completed - {} kept, {} dropped", final_kept, final_dropped);
+        
+        result
+    }
+    
 
 }
 
