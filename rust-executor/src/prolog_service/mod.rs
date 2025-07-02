@@ -9,6 +9,7 @@ mod embedding_cache;
 pub(crate) mod engine;
 pub(crate) mod engine_pool;
 pub mod assert_utils;
+pub mod source_filtering;
 pub mod types;
 
 use self::engine_pool::PrologEnginePool;

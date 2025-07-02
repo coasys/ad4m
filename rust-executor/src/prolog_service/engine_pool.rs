@@ -2,12 +2,12 @@ use super::embedding_cache::EmbeddingCache;
 use super::engine::PrologEngine;
 use super::types::{QueryResolution, QueryResult};
 use super::assert_utils;
+use super::source_filtering;
 use crate::perspectives::sdna::{get_static_infrastructure_facts, get_sdna_facts, get_data_facts};
 use crate::types::DecoratedLinkExpression;
 use deno_core::anyhow::{anyhow, Error};
 use futures::future::join_all;
 use lazy_static::lazy_static;
-use rayon::prelude::*;  // For parallel processing
 use regex::Regex;
 use scryer_prolog::Term;
 use std::collections::{HashMap, HashSet};
@@ -281,7 +281,7 @@ impl PrologEnginePool {
         let mut update_futures = Vec::new();
         
         for (source_filter, pool) in filtered_pools.iter() {
-            let relevant_assertions = self.filter_assert_statements_for_source(&assert_statements, source_filter);
+            let relevant_assertions = source_filtering::filter_assert_statements_for_source(&assert_statements, source_filter);
             
             if !relevant_assertions.is_empty() {
                 log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - applying {} filtered assertions: {:?}", 
@@ -339,117 +339,7 @@ impl PrologEnginePool {
 
 
 
-    /// Filter assert statements to only include those relevant to a specific source
-    /// This implements batch-aware filtering that considers statement dependencies
-    fn filter_assert_statements_for_source(&self, statements: &[String], source_filter: &str) -> Vec<String> {
-        if statements.is_empty() {
-            return Vec::new();
-        }
-        
-        log::info!("🔄 BATCH FILTERING: Analyzing {} statements for source filter '{}'", statements.len(), source_filter);
-        
-        // Parse all statements to extract source->target relationships
-        let mut statement_relationships = Vec::new();
-        for (idx, statement) in statements.iter().enumerate() {
-            if let Some((source, target)) = self.extract_source_target_from_statement(statement) {
-                log::info!("🔄 BATCH FILTERING: Statement {}: {} -> {}", idx, source, target);
-                statement_relationships.push((idx, source, target, statement.clone()));
-            }
-        }
-        
-        // Start with statements that directly involve the filter source
-        let mut reachable_nodes = std::collections::HashSet::new();
-        reachable_nodes.insert(source_filter.to_string());
-        
-        let mut relevant_statements = Vec::new();
-        let mut changed = true;
-        
-        // Iteratively find statements that involve reachable nodes
-        while changed {
-            changed = false;
-            
-            for (idx, source, target, statement) in statement_relationships.iter() {
-                // Skip if we already included this statement
-                if relevant_statements.iter().any(|(existing_idx, _)| existing_idx == idx) {
-                    continue;
-                }
-                
-                // Include if source is reachable or target is reachable or statement directly mentions filter source
-                let source_reachable = reachable_nodes.contains(source);
-                let target_reachable = reachable_nodes.contains(target);
-                let mentions_filter = statement.contains(&format!(r#""{}"#, source_filter));
-                
-                if source_reachable || target_reachable || mentions_filter {
-                    relevant_statements.push((*idx, statement.clone()));
-                    
-                    // Add both source and target to reachable set for next iteration
-                    if reachable_nodes.insert(source.clone()) {
-                        changed = true;
-                        log::info!("🔄 BATCH FILTERING: Added '{}' to reachable set via statement {}", source, idx);
-                    }
-                    if reachable_nodes.insert(target.clone()) {
-                        changed = true;
-                        log::info!("🔄 BATCH FILTERING: Added '{}' to reachable set via statement {}", target, idx);
-                    }
-                }
-            }
-        }
-        
-        // Sort by original order and return statements
-        relevant_statements.sort_by_key(|(idx, _)| *idx);
-        let result: Vec<String> = relevant_statements.into_iter().map(|(_, statement)| statement).collect();
-        
-        log::info!("🔄 BATCH FILTERING: Result: {} out of {} statements are relevant", result.len(), statements.len());
-        for (i, stmt) in result.iter().enumerate() {
-            log::info!("🔄 BATCH FILTERING: Keeping statement {}: {}", i, stmt);
-        }
-        
-        result
-    }
-    
-    /// Extract source and target from an assert_link_and_triple statement
-    fn extract_source_target_from_statement(&self, statement: &str) -> Option<(String, String)> {
-        // Parse assert_link_and_triple("source", "predicate", "target", timestamp, author)
-        if let Some(start) = statement.find("assert_link_and_triple(") {
-            let args_start = start + "assert_link_and_triple(".len();
-            if let Some(args_end) = statement[args_start..].find(')') {
-                let args = &statement[args_start..args_start + args_end];
-                
-                // Simple parser for the arguments
-                let mut parts = Vec::new();
-                let mut current = String::new();
-                let mut in_quotes = false;
-                let mut escape_next = false;
-                
-                for ch in args.chars() {
-                    if escape_next {
-                        current.push(ch);
-                        escape_next = false;
-                    } else if ch == '\\' {
-                        escape_next = true;
-                        current.push(ch);
-                    } else if ch == '"' {
-                        in_quotes = !in_quotes;
-                        current.push(ch);
-                    } else if ch == ',' && !in_quotes {
-                        parts.push(current.trim().to_string());
-                        current.clear();
-                    } else {
-                        current.push(ch);
-                    }
-                }
-                parts.push(current.trim().to_string());
-                
-                if parts.len() >= 3 {
-                    // Remove quotes from source and target
-                    let source = parts[0].trim_matches('"').to_string();
-                    let target = parts[2].trim_matches('"').to_string();
-                    return Some((source, target));
-                }
-            }
-        }
-        None
-    }
+
 
     // Note: update_all_engines() removed - use update_all_engines_with_links() for production code
 
@@ -798,41 +688,7 @@ impl PrologEnginePool {
         Ok(true)
     }
 
-    /// Extract source filter from a Prolog query if it exists
-    pub fn extract_source_filter(query: &str) -> Option<String> {
-        // Look for the primary Ad4mModel pattern: triple("source", "ad4m://has_child", Base)
-        let ad4m_child_pattern = regex::Regex::new(r#"triple\s*\(\s*"([^"]+)"\s*,\s*"ad4m://has_child"\s*,\s*[A-Z_][a-zA-Z0-9_]*\s*\)"#).unwrap();
-        
-        if let Some(captures) = ad4m_child_pattern.captures(query) {
-            if let Some(source) = captures.get(1) {
-                return Some(source.as_str().to_string());
-            }
-        }
-        
-        // Also look for other common patterns where source is a literal (not a variable)
-        let patterns = [
-            // General triple patterns with literal sources
-            regex::Regex::new(r#"triple\s*\(\s*"([^"]+)"\s*,"#).unwrap(),
-            // Link patterns with literal sources  
-            regex::Regex::new(r#"link\s*\(\s*"([^"]+)"\s*,"#).unwrap(),
-            // Reachable patterns with literal sources
-            regex::Regex::new(r#"reachable\s*\(\s*"([^"]+)"\s*,"#).unwrap(),
-        ];
 
-        for pattern in &patterns {
-            if let Some(captures) = pattern.captures(query) {
-                if let Some(source) = captures.get(1) {
-                    let source_str = source.as_str();
-                    // Only consider it a valid filter if it's not a variable (starts with uppercase or _)
-                    if !source_str.starts_with(char::is_uppercase) && !source_str.starts_with('_') {
-                        return Some(source_str.to_string());
-                    }
-                }
-            }
-        }
-        
-        None
-    }
 
     /// Get filtered data facts for a specific source using reachable query
     async fn get_filtered_data_facts(&self, source_filter: &str, all_links: &[DecoratedLinkExpression]) -> Result<Vec<String>, Error> {
@@ -974,16 +830,16 @@ impl PrologEnginePool {
             // Single regex chunk - use optimized single regex path
             let regex = &regex_chunks[0];
             if original_facts_count > 10000 {
-                Self::filter_facts_parallel_regex(all_data_facts, regex)
+                source_filtering::filter_facts_parallel_regex(all_data_facts, regex)
             } else {
-                Self::filter_facts_sequential_regex(all_data_facts, regex)
+                source_filtering::filter_facts_sequential_regex(all_data_facts, regex)
             }
         } else {
             // Multiple regex chunks - check each fact against all chunks
             if original_facts_count > 10000 {
-                Self::filter_facts_parallel_chunked_regex(all_data_facts, &regex_chunks)
+                source_filtering::filter_facts_parallel_chunked_regex(all_data_facts, &regex_chunks)
             } else {
-                Self::filter_facts_sequential_chunked_regex(all_data_facts, &regex_chunks)
+                source_filtering::filter_facts_sequential_chunked_regex(all_data_facts, &regex_chunks)
             }
         };
         
@@ -1022,7 +878,7 @@ impl PrologEnginePool {
         
         // If this is a subscription query and we can extract a source filter, try to use a filtered pool
         if is_subscription && matches!(self.pool_type, EnginePoolType::Complete) {
-            if let Some(source_filter) = Self::extract_source_filter(&query) {
+            if let Some(source_filter) = source_filtering::extract_source_filter(&query) {
                 log::info!("🚀 QUERY ROUTING: Routing subscription query to filtered pool for source: '{}'", source_filter);
                 
                 // Ensure filtered pool exists and populate it immediately if newly created
@@ -1066,157 +922,7 @@ impl PrologEnginePool {
         self.run_query(query).await
     }
 
-    /// Helper method for sequential regex filtering
-    fn filter_facts_sequential_regex(all_facts: Vec<String>, regex: &regex::Regex) -> Vec<String> {
-        log::info!("🔍 FILTERING: Using sequential regex processing for {} facts", all_facts.len());
-        let mut kept_count = 0;
-        let mut dropped_count = 0;
-        
-        let result: Vec<String> = all_facts
-            .into_iter()
-            .filter(|fact| {
-                let is_relevant = regex.is_match(fact);
-                
-                if is_relevant {
-                    kept_count += 1;
-                } else {
-                    dropped_count += 1;
-                }
-                
-                if (kept_count + dropped_count) % 1000 == 0 {
-                    log::debug!("🔍 FILTERING: Processed {} facts so far ({} kept, {} dropped)", 
-                        kept_count + dropped_count, kept_count, dropped_count);
-                }
-                
-                is_relevant
-            })
-            .collect();
-        
-        log::info!("🔍 FILTERING: Sequential regex completed - {} kept, {} dropped", kept_count, dropped_count);
-        result
-    }
-    
-    /// Helper method for parallel regex filtering
-    fn filter_facts_parallel_regex(all_facts: Vec<String>, regex: &regex::Regex) -> Vec<String> {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let kept_count = AtomicUsize::new(0);
-        let dropped_count = AtomicUsize::new(0);
-        
-        log::info!("🔍 FILTERING: Using parallel regex processing for {} facts", all_facts.len());
-        
-        use std::sync::Mutex;
-        let debug_counter = Mutex::new(0usize);
-        
-        let result: Vec<String> = all_facts
-            .into_par_iter()
-            .filter(|fact| {
-                let is_relevant = regex.is_match(fact);
-                
-                if is_relevant {
-                    kept_count.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    dropped_count.fetch_add(1, Ordering::Relaxed);
-                }
-                
-                // Batch logging to avoid performance hit in parallel
-                {
-                    let mut counter = debug_counter.lock().unwrap();
-                    *counter += 1;
-                    if *counter % 5000 == 0 {
-                        let kept = kept_count.load(Ordering::Relaxed);
-                        let dropped = dropped_count.load(Ordering::Relaxed);
-                        log::debug!("🔍 FILTERING (parallel): Processed {} facts so far ({} kept, {} dropped)", 
-                            kept + dropped, kept, dropped);
-                    }
-                }
-                
-                is_relevant
-            })
-            .collect();
-        
-        let final_kept = kept_count.load(Ordering::Relaxed);
-        let final_dropped = dropped_count.load(Ordering::Relaxed);
-        log::info!("🔍 FILTERING: Parallel regex completed - {} kept, {} dropped", final_kept, final_dropped);
-        
-        result
-    }
-    
-    /// Helper method for sequential chunked regex filtering
-    fn filter_facts_sequential_chunked_regex(all_facts: Vec<String>, regex_chunks: &[regex::Regex]) -> Vec<String> {
-        log::info!("🔍 FILTERING: Using sequential chunked regex processing for {} facts with {} chunks", all_facts.len(), regex_chunks.len());
-        let mut kept_count = 0;
-        let mut dropped_count = 0;
-        
-        let result: Vec<String> = all_facts
-            .into_iter()
-            .filter(|fact| {
-                // Check if any of the regex chunks match
-                let is_relevant = regex_chunks.iter().any(|regex| regex.is_match(fact));
-                
-                if is_relevant {
-                    kept_count += 1;
-                } else {
-                    dropped_count += 1;
-                }
-                
-                if (kept_count + dropped_count) % 1000 == 0 {
-                    log::debug!("🔍 FILTERING: Processed {} facts so far ({} kept, {} dropped)", 
-                        kept_count + dropped_count, kept_count, dropped_count);
-                }
-                
-                is_relevant
-            })
-            .collect();
-        
-        log::info!("🔍 FILTERING: Sequential chunked regex completed - {} kept, {} dropped", kept_count, dropped_count);
-        result
-    }
-    
-    /// Helper method for parallel chunked regex filtering
-    fn filter_facts_parallel_chunked_regex(all_facts: Vec<String>, regex_chunks: &[regex::Regex]) -> Vec<String> {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let kept_count = AtomicUsize::new(0);
-        let dropped_count = AtomicUsize::new(0);
-        
-        log::info!("🔍 FILTERING: Using parallel chunked regex processing for {} facts with {} chunks", all_facts.len(), regex_chunks.len());
-        
-        use std::sync::Mutex;
-        let debug_counter = Mutex::new(0usize);
-        
-        let result: Vec<String> = all_facts
-            .into_par_iter()
-            .filter(|fact| {
-                // Check if any of the regex chunks match
-                let is_relevant = regex_chunks.iter().any(|regex| regex.is_match(fact));
-                
-                if is_relevant {
-                    kept_count.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    dropped_count.fetch_add(1, Ordering::Relaxed);
-                }
-                
-                // Batch logging to avoid performance hit in parallel
-                {
-                    let mut counter = debug_counter.lock().unwrap();
-                    *counter += 1;
-                    if *counter % 5000 == 0 {
-                        let kept = kept_count.load(Ordering::Relaxed);
-                        let dropped = dropped_count.load(Ordering::Relaxed);
-                        log::debug!("🔍 FILTERING (parallel chunked): Processed {} facts so far ({} kept, {} dropped)", 
-                            kept + dropped, kept, dropped);
-                    }
-                }
-                
-                is_relevant
-            })
-            .collect();
-        
-        let final_kept = kept_count.load(Ordering::Relaxed);
-        let final_dropped = dropped_count.load(Ordering::Relaxed);
-        log::info!("🔍 FILTERING: Parallel chunked regex completed - {} kept, {} dropped", final_kept, final_dropped);
-        
-        result
-    }
+
     
 
 }
@@ -1333,58 +1039,7 @@ mod tests {
         assert!(engines.engines.iter().all(|e| e.is_some()));
     }
 
-    #[tokio::test]
-    async fn test_source_filter_extraction() {
-        // Test the primary Ad4mModel pattern: triple("source", "ad4m://has_child", Base)
-        assert_eq!(
-            PrologEnginePool::extract_source_filter(r#"triple("user123", "ad4m://has_child", Base)"#),
-            Some("user123".to_string())
-        );
-        
-        assert_eq!(
-            PrologEnginePool::extract_source_filter(r#"triple("root_node", "ad4m://has_child", Child)"#),
-            Some("root_node".to_string())
-        );
-        
-        // Test variations with whitespace
-        assert_eq!(
-            PrologEnginePool::extract_source_filter(r#"triple( "user456" , "ad4m://has_child" , Base )"#),
-            Some("user456".to_string())
-        );
-        
-        // Test other general patterns (should still work as fallback)
-        assert_eq!(
-            PrologEnginePool::extract_source_filter(r#"triple("user123", "likes", Target)"#),
-            Some("user123".to_string())
-        );
-        
-        assert_eq!(
-            PrologEnginePool::extract_source_filter(r#"link("user456", Predicate, Target, Timestamp, Author)"#),
-            Some("user456".to_string())
-        );
-        
-        assert_eq!(
-            PrologEnginePool::extract_source_filter(r#"reachable("root_node", X)"#),
-            Some("root_node".to_string())
-        );
-        
-        // Should not extract variables (starting with uppercase or _)
-        assert_eq!(
-            PrologEnginePool::extract_source_filter(r#"triple(Source, "ad4m://has_child", Base)"#),
-            None
-        );
-        
-        assert_eq!(
-            PrologEnginePool::extract_source_filter(r#"triple(_Source, "ad4m://has_child", Target)"#),
-            None
-        );
-        
-        // Should not extract from non-matching patterns
-        assert_eq!(
-            PrologEnginePool::extract_source_filter(r#"triple("user123", "some_other_predicate", Target)"#),
-            Some("user123".to_string()) // This should still work as general pattern
-        );
-    }
+
 
     #[tokio::test]
     async fn test_filtered_pool_basic_functionality() {
@@ -1440,7 +1095,7 @@ mod tests {
 
         // Test source filter extraction
         let query = r#"triple("user1", "ad4m://has_child", Base)"#;
-        let extracted = PrologEnginePool::extract_source_filter(query);
+        let extracted = source_filtering::extract_source_filter(query);
         assert_eq!(extracted, Some("user1".to_string()));
 
         // Test smart routing creates filtered pool
@@ -1599,16 +1254,16 @@ mod tests {
         assert!(statements[1].contains("user2"));
 
         // Test filtering of assert statements for specific source
-        let user1_statements = pool.filter_assert_statements_for_source(&statements, "user1");
+        let user1_statements = source_filtering::filter_assert_statements_for_source(&statements, "user1");
         assert_eq!(user1_statements.len(), 1);
         assert!(user1_statements[0].contains("user1"));
 
-        let user2_statements = pool.filter_assert_statements_for_source(&statements, "user2");
+        let user2_statements = source_filtering::filter_assert_statements_for_source(&statements, "user2");
         assert_eq!(user2_statements.len(), 1);
         assert!(user2_statements[0].contains("user2"));
 
         // Test that non-matching statements are filtered out
-        let user3_statements = pool.filter_assert_statements_for_source(&statements, "user3");
+        let user3_statements = source_filtering::filter_assert_statements_for_source(&statements, "user3");
         assert_eq!(user3_statements.len(), 0);
 
         // 🔥 NEW: Test that filtered pools get updated when assert queries run
@@ -2222,7 +1877,7 @@ mod tests {
         println!("🧪 TEST: Testing batch-aware filtering with interdependent statements");
         
         // Test the filtering logic directly
-        let filtered_statements = pool.filter_assert_statements_for_source(&batch_statements, "filter_source");
+        let filtered_statements = source_filtering::filter_assert_statements_for_source(&batch_statements, "filter_source");
         
         // All 3 statements should be included because:
         // - Statement 3 directly involves filter_source
