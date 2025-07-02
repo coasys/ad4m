@@ -4,7 +4,7 @@ use super::types::{QueryResolution, QueryResult};
 use super::assert_utils;
 use super::source_filtering;
 use super::filtered_pool::FilteredPrologPool;
-use super::pool_trait::{FilteredPool, EngineStateManager, EnginePoolState, PoolUtils};
+use super::pool_trait::{FilteredPool, EnginePoolState, PoolUtils};
 use crate::perspectives::sdna::{get_static_infrastructure_facts, get_sdna_facts, get_data_facts};
 use crate::types::DecoratedLinkExpression;
 use deno_core::anyhow::{anyhow, Error};
@@ -58,23 +58,7 @@ pub struct PrologEnginePool {
     filtered_pools: Arc<RwLock<HashMap<String, FilteredPrologPool>>>,
 }
 
-impl EngineStateManager for PrologEnginePool {
-    fn engine_state(&self) -> &Arc<RwLock<EnginePoolState>> {
-        &self.engine_state
-    }
-    
-    fn next_engine(&self) -> &Arc<AtomicUsize> {
-        &self.next_engine
-    }
-    
-    fn embedding_cache(&self) -> &Arc<RwLock<EmbeddingCache>> {
-        &self.embedding_cache
-    }
-    
-    fn pool_name(&self) -> String {
-        "Complete Pool".to_string()
-    }
-}
+
 
 
 
@@ -96,6 +80,11 @@ impl PrologEnginePool {
             embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
             filtered_pools: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+    
+    /// Get access to the engine state (needed by filtered pools)
+    pub fn engine_state(&self) -> &Arc<RwLock<EnginePoolState>> {
+        &self.engine_state
     }
 
     pub async fn initialize(&self, pool_size: usize) -> Result<(), Error> {
@@ -122,7 +111,10 @@ impl PrologEnginePool {
 
         match result {
             Ok(result) => Ok(result),
-            Err(e) => PoolUtils::handle_engine_error(&self.engine_state, engine_idx, e, &query, &self.pool_name()).await,
+            Err(e) => {
+                let pool_name = "Complete Pool".to_string();
+                PoolUtils::handle_engine_error(&self.engine_state, engine_idx, e, &query, &pool_name).await
+            },
         }
     }
 

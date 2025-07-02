@@ -19,7 +19,7 @@ use deno_core::anyhow::{anyhow, Error};
 use super::embedding_cache::EmbeddingCache;
 use super::engine::PrologEngine;
 use super::types::{QueryResolution, QueryResult};
-use super::pool_trait::{FilteredPool, EngineStateManager, EnginePoolState, PoolUtils};
+use super::pool_trait::{FilteredPool, EnginePoolState, PoolUtils};
 use super::source_filtering;
 use crate::perspectives::sdna::{get_static_infrastructure_facts, get_sdna_facts, get_data_facts};
 use crate::types::DecoratedLinkExpression;
@@ -63,23 +63,7 @@ pub struct FilteredPrologPool {
     complete_pool: Arc<super::engine_pool::PrologEnginePool>,
 }
 
-impl EngineStateManager for FilteredPrologPool {
-    fn engine_state(&self) -> &Arc<RwLock<EnginePoolState>> {
-        &self.engine_state
-    }
-    
-    fn next_engine(&self) -> &Arc<AtomicUsize> {
-        &self.next_engine
-    }
-    
-    fn embedding_cache(&self) -> &Arc<RwLock<EmbeddingCache>> {
-        &self.embedding_cache
-    }
-    
-    fn pool_name(&self) -> String {
-        format!("Filtered Pool '{}'", self.source_filter)
-    }
-}
+
 
 impl FilteredPool for FilteredPrologPool {
     fn filter_id(&self) -> String {
@@ -197,7 +181,10 @@ impl FilteredPool for FilteredPrologPool {
 
         match result {
             Ok(result) => Ok(result),
-            Err(e) => PoolUtils::handle_engine_error(&self.engine_state, engine_idx, e, &query, &self.pool_name()).await,
+            Err(e) => {
+                let pool_name = format!("Filtered Pool '{}'", self.source_filter);
+                PoolUtils::handle_engine_error(&self.engine_state, engine_idx, e, &query, &pool_name).await
+            },
         }
     }
     

@@ -220,20 +220,7 @@ impl PoolUtils {
     }
 }
 
-/// Trait for pools that manage engine state
-pub trait EngineStateManager {
-    /// Get access to the engine state
-    fn engine_state(&self) -> &Arc<RwLock<EnginePoolState>>;
-    
-    /// Get access to the next engine counter
-    fn next_engine(&self) -> &Arc<AtomicUsize>;
-    
-    /// Get access to the embedding cache
-    fn embedding_cache(&self) -> &Arc<RwLock<EmbeddingCache>>;
-    
-    /// Get a descriptive name for this pool (for logging)
-    fn pool_name(&self) -> String;
-}
+
 
 #[cfg(test)]
 mod tests {
