@@ -4,6 +4,7 @@ use super::types::{QueryResolution, QueryResult};
 use super::assert_utils;
 use super::source_filtering;
 use super::filtered_pool::FilteredPrologPool;
+use super::sdna_pool::SdnaPrologPool;
 use super::pool_trait::{FilteredPool, EnginePoolState, PoolUtils};
 use crate::perspectives::sdna::{get_static_infrastructure_facts, get_sdna_facts, get_data_facts};
 use crate::types::DecoratedLinkExpression;
@@ -56,6 +57,10 @@ pub struct PrologEnginePool {
     /// Collection of filtered pools created by this complete pool
     /// Each filtered pool contains only data reachable from its specific source filter
     filtered_pools: Arc<RwLock<HashMap<String, FilteredPrologPool>>>,
+    
+    /// SDNA-only pool for subject class queries (contains only infrastructure + SDNA facts)
+    /// This pool is optimized for queries during subject instance creation that don't need link data
+    sdna_pool: Arc<RwLock<Option<SdnaPrologPool>>>,
 }
 
 
@@ -79,6 +84,7 @@ impl PrologEnginePool {
             next_engine: Arc::new(AtomicUsize::new(0)),
             embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
             filtered_pools: Arc::new(RwLock::new(HashMap::new())),
+            sdna_pool: Arc::new(RwLock::new(None)),
         }
     }
     
@@ -94,6 +100,16 @@ impl PrologEnginePool {
             engine.spawn().await?;
             engines.engines.push(Some(engine));
         }
+        drop(engines);
+        
+        // Always create and initialize the SDNA pool
+        let sdna_pool = SdnaPrologPool::new(2, Arc::new(self.clone()));
+        sdna_pool.initialize(2).await?;
+        
+        let mut sdna_pool_guard = self.sdna_pool.write().await;
+        *sdna_pool_guard = Some(sdna_pool);
+        
+        log::info!("📊 POOL INITIALIZATION: Complete pool and SDNA pool both initialized");
         Ok(())
     }
 
@@ -323,6 +339,31 @@ impl PrologEnginePool {
             }
         }
 
+        // Update the SDNA pool (always exists)
+        {
+            let sdna_pool_guard = self.sdna_pool.read().await;
+            if let Some(ref sdna_pool) = *sdna_pool_guard {
+                log::info!("📊 SDNA POOL UPDATE: Updating SDNA pool with new data");
+                
+                let sdna_pool_clone = sdna_pool.clone();
+                let module_name_clone = module_name.clone();
+                let all_links_clone = all_links.clone();
+                let neighbourhood_author_clone = neighbourhood_author.clone();
+                
+                let result = sdna_pool_clone.populate_from_complete_data(module_name_clone, &all_links_clone, neighbourhood_author_clone).await;
+                match result {
+                    Ok(()) => {
+                        log::info!("📊 SDNA POOL UPDATE: Successfully updated SDNA pool");
+                    }
+                    Err(e) => {
+                        log::error!("Failed to update SDNA pool: {}", e);
+                    }
+                }
+            } else {
+                log::error!("📊 SDNA POOL UPDATE: SDNA pool should always exist but was None - this is a bug!");
+            }
+        }
+
         Ok(())
     }
 
@@ -387,15 +428,23 @@ impl PrologEnginePool {
 
 
 
-
-
     /// Run a query with smart routing - use filtered pool if it's a subscription query with source filter
-
-
     pub async fn run_query_smart(&self, query: String, is_subscription: bool) -> Result<QueryResult, Error> {
         log::debug!("🚀 QUERY ROUTING: is_subscription={}, query={}", is_subscription, query);
         
-        // If this is a subscription query and we can extract a source filter, try to use a filtered pool
+        // 🎯 FIRST PRIORITY: Check if this is a subject class query that can use the SDNA pool
+        // Note: SDNA pool always exists after initialization, so no need to check for creation
+        {
+            let sdna_pool_guard = self.sdna_pool.read().await;
+            if let Some(ref sdna_pool) = *sdna_pool_guard {
+                if sdna_pool.should_handle_query(&query) {
+                    log::info!("🎯 SDNA ROUTING: Routing subject class query to SDNA pool: {}", query);
+                    return sdna_pool.run_query(query).await;
+                }
+            }
+        }
+        
+        // 🔍 SECOND PRIORITY: If this is a subscription query and we can extract a source filter, try to use a filtered pool
         if is_subscription {
             if let Some(source_filter) = source_filtering::extract_source_filter(&query) {
                 log::info!("🚀 QUERY ROUTING: Routing subscription query to filtered pool for source: '{}'", source_filter);
@@ -1670,6 +1719,104 @@ mod tests {
         println!("✅ SDNA subject_class mechanism is working correctly!");
         println!("✅ All engines have SDNA loaded and subject_class queries work!");
         println!("✅ This test confirms the SDNA mechanism is functional");
+    }
+
+    #[tokio::test]
+    async fn test_sdna_pool_routing() {
+        AgentService::init_global_test_instance();
+        let pool = PrologEnginePool::new(2);
+        pool.initialize(2).await.unwrap();
+
+        // Verify SDNA pool always exists after initialization
+        let sdna_pool_guard = pool.sdna_pool.read().await;
+        assert!(sdna_pool_guard.is_some(), "SDNA pool should always exist after pool initialization");
+        drop(sdna_pool_guard);
+
+        // Create test data - link data that will only be in the complete pool
+        use crate::types::{DecoratedLinkExpression, Link};
+        let test_links = vec![
+            DecoratedLinkExpression {
+                author: "test_author".to_string(),
+                timestamp: "2023-01-01T00:00:00Z".to_string(),
+                data: Link {
+                    source: "test_source".to_string(),
+                    predicate: Some("test_predicate".to_string()),
+                    target: "test_target".to_string(),
+                },
+                proof: crate::types::DecoratedExpressionProof {
+                    key: "test_key".to_string(),
+                    signature: "test_signature".to_string(),
+                    valid: Some(true),
+                    invalid: Some(false),
+                },
+                status: None,
+            },
+        ];
+        
+        pool.update_all_engines_with_links("facts".to_string(), test_links, None).await.unwrap();
+
+        // Test 1: Verify link queries work on complete pool but not SDNA pool
+        let link_query = "triple(\"test_source\", \"test_predicate\", \"test_target\").";
+        
+        // This should work - complete pool has link data
+        let complete_result = pool.run_query(link_query.to_string()).await.unwrap();
+        assert_eq!(complete_result, Ok(QueryResolution::True), "Complete pool should have link data");
+        
+        // This should fail - SDNA pool doesn't have link data
+        let sdna_pool_guard = pool.sdna_pool.read().await;
+        let sdna_pool = sdna_pool_guard.as_ref().unwrap();
+        let sdna_result = sdna_pool.run_query(link_query.to_string()).await.unwrap();
+        assert_eq!(sdna_result, Ok(QueryResolution::False), "SDNA pool should not have link data");
+        drop(sdna_pool_guard);
+        
+        // Test 2: Verify smart routing sends link queries to complete pool (not SDNA pool)
+        let smart_routing_result = pool.run_query_smart(link_query.to_string(), false).await.unwrap();
+        assert_eq!(smart_routing_result, Ok(QueryResolution::True), "Smart routing should use complete pool for link queries");
+        
+        // Test 3: Verify SDNA queries get detected and routed correctly
+        // Note: These queries will likely return False since we don't have SDNA data, but they should be routed to SDNA pool
+        let sdna_queries = vec![
+            "subject(Class, Properties, Methods).",
+            "constructor(Class, Action).",
+            "property_setter(Class, Property, Action).",
+            "collection_adder(Class, Property, Action).",
+            "collection_remover(Class, Property, Action).",
+            "collection_setter(Class, Property, Action).",
+        ];
+        
+        for query in sdna_queries {
+            // Verify the SDNA pool recognizes these as its queries
+            let sdna_pool_guard = pool.sdna_pool.read().await;
+            let sdna_pool = sdna_pool_guard.as_ref().unwrap();
+            assert!(sdna_pool.should_handle_query(query), "SDNA pool should handle query: {}", query);
+            drop(sdna_pool_guard);
+            
+            // Verify smart routing doesn't crash (actual results may be False due to no SDNA data)
+            let result = pool.run_query_smart(query.to_string(), false).await;
+            assert!(result.is_ok(), "Smart routing should not crash for SDNA query: {}", query);
+        }
+        
+        // Test 4: Verify non-SDNA queries are NOT handled by SDNA pool
+        let non_sdna_queries = vec![
+            "triple(S, P, O).",
+            "has_child(Parent, Child).",
+            "reachable(Source, Target).",
+            "instance(Instance, Value).",
+            "property_getter(Instance, Property, Value).",
+        ];
+        
+        for query in non_sdna_queries {
+            let sdna_pool_guard = pool.sdna_pool.read().await;
+            let sdna_pool = sdna_pool_guard.as_ref().unwrap();
+            assert!(!sdna_pool.should_handle_query(query), "SDNA pool should NOT handle query: {}", query);
+            drop(sdna_pool_guard);
+        }
+        
+        println!("✅ SDNA pool routing test passed!");
+        println!("✅ Link queries correctly use complete pool (with data)");
+        println!("✅ SDNA queries correctly get detected for SDNA pool routing");
+        println!("✅ Non-SDNA queries correctly avoid SDNA pool");
+        println!("✅ Smart routing behavior verified with actual data differences");
     }
 
     #[tokio::test]

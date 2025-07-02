@@ -10,6 +10,7 @@ pub(crate) mod engine;
 pub mod pool_trait;
 pub(crate) mod engine_pool;
 pub mod filtered_pool;
+pub mod sdna_pool;
 pub mod assert_utils;
 pub mod source_filtering;
 pub mod types;
