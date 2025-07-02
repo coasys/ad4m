@@ -28,52 +28,62 @@ pub enum EnginePoolType {
     FilteredBySource(String),
 }
 
+/// Combined state structure to prevent lock ordering deadlocks
+struct EngineState {
+    engines: Vec<Option<PrologEngine>>,
+    current_facts: Option<Vec<String>>,
+    current_all_links: Option<Vec<DecoratedLinkExpression>>,
+    current_neighbourhood_author: Option<String>,
+}
+
+impl EngineState {
+    fn new(pool_size: usize) -> Self {
+        Self {
+            engines: Vec::with_capacity(pool_size),
+            current_facts: None,
+            current_all_links: None,
+            current_neighbourhood_author: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PrologEnginePool {
-    engines: Arc<RwLock<Vec<Option<PrologEngine>>>>,
+    // Combined lock for engines and current state to prevent deadlocks
+    engine_state: Arc<RwLock<EngineState>>,
     next_engine: Arc<AtomicUsize>,
     embedding_cache: Arc<RwLock<EmbeddingCache>>,
     pool_type: EnginePoolType,
     filtered_pools: Arc<RwLock<HashMap<String, PrologEnginePool>>>,
-    // Store current facts for reuse in filtered pools
-    current_facts: Arc<RwLock<Option<Vec<String>>>>,
-    current_all_links: Arc<RwLock<Option<Vec<DecoratedLinkExpression>>>>,
-    current_neighbourhood_author: Arc<RwLock<Option<String>>>,
 }
 
 impl PrologEnginePool {
     pub fn new(pool_size: usize) -> Self {
         PrologEnginePool {
-            engines: Arc::new(RwLock::new(Vec::with_capacity(pool_size))),
+            engine_state: Arc::new(RwLock::new(EngineState::new(pool_size))),
             next_engine: Arc::new(AtomicUsize::new(0)),
             embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
             pool_type: EnginePoolType::Complete,
             filtered_pools: Arc::new(RwLock::new(HashMap::new())),
-            current_facts: Arc::new(RwLock::new(None)),
-            current_all_links: Arc::new(RwLock::new(None)),
-            current_neighbourhood_author: Arc::new(RwLock::new(None)),
         }
     }
 
     pub fn new_filtered(pool_size: usize, source_filter: String) -> Self {
         PrologEnginePool {
-            engines: Arc::new(RwLock::new(Vec::with_capacity(pool_size))),
+            engine_state: Arc::new(RwLock::new(EngineState::new(pool_size))),
             next_engine: Arc::new(AtomicUsize::new(0)),
             embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
             pool_type: EnginePoolType::FilteredBySource(source_filter),
             filtered_pools: Arc::new(RwLock::new(HashMap::new())),
-            current_facts: Arc::new(RwLock::new(None)),
-            current_all_links: Arc::new(RwLock::new(None)),
-            current_neighbourhood_author: Arc::new(RwLock::new(None)),
         }
     }
 
     pub async fn initialize(&self, pool_size: usize) -> Result<(), Error> {
-        let mut engines = self.engines.write().await;
+        let mut engines = self.engine_state.write().await;
         for _ in 0..pool_size {
             let mut engine = PrologEngine::new();
             engine.spawn().await?;
-            engines.push(Some(engine));
+            engines.engines.push(Some(engine));
         }
         Ok(())
     }
@@ -131,17 +141,18 @@ impl PrologEnginePool {
     ) -> Result<QueryResult, Error> {
         log::error!("Prolog engine error: {}", error);
         log::error!("when running query: {}", query);
-        let mut engines = self.engines.write().await;
-        engines[engine_idx] = None;
+        let mut engines = self.engine_state.write().await;
+        engines.engines[engine_idx] = None;
         Err(anyhow!("Engine failed and was invalidated: {}", error))
     }
 
     pub async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
         let (result, engine_idx) = {
-            let engines = self.engines.read().await;
+            let engines = self.engine_state.read().await;
 
             // Get a vec with all non-None (invalidated) engines
             let valid_engines: Vec<_> = engines
+                .engines
                 .iter()
                 .enumerate()
                 .filter_map(|(i, e)| e.as_ref().map(|engine| (i, engine)))
@@ -189,8 +200,8 @@ impl PrologEnginePool {
     }
 
     pub async fn run_query_all(&self, query: String) -> Result<(), Error> {
-        let engines = self.engines.write().await;
-        let valid_engines: Vec<_> = engines.iter().filter_map(|e| e.as_ref()).collect();
+        let engines = self.engine_state.write().await;
+        let valid_engines: Vec<_> = engines.engines.iter().filter_map(|e| e.as_ref()).collect();
 
         if valid_engines.is_empty() {
             return Err(anyhow!("No valid Prolog engines available"));
@@ -526,10 +537,10 @@ impl PrologEnginePool {
         all_links: Vec<DecoratedLinkExpression>,
         neighbourhood_author: Option<String>,
     ) -> Result<(), Error> {
-        let mut engines = self.engines.write().await;
+        let mut engines = self.engine_state.write().await;
 
         // Reinitialize any invalid engines
-        for engine_slot in engines.iter_mut() {
+        for engine_slot in engines.engines.iter_mut() {
             if engine_slot.is_none() {
                 let mut new_engine = PrologEngine::new();
                 new_engine.spawn().await?;
@@ -560,9 +571,9 @@ impl PrologEnginePool {
 
         // Store current state for reuse in filtered pools (only for complete pools)
         if matches!(self.pool_type, EnginePoolType::Complete) {
-            *self.current_facts.write().await = Some(facts_to_load.clone());
-            *self.current_all_links.write().await = Some(all_links.clone());
-            *self.current_neighbourhood_author.write().await = neighbourhood_author.clone();
+            engines.current_facts = Some(facts_to_load.clone());
+            engines.current_all_links = Some(all_links.clone());
+            engines.current_neighbourhood_author = neighbourhood_author.clone();
         }
 
         // Preprocess the facts to handle embeddings
@@ -570,7 +581,7 @@ impl PrologEnginePool {
 
         // Update all engines with facts
         let mut update_futures = Vec::new();
-        for engine in engines.iter().filter_map(|e| e.as_ref()) {
+        for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
             let update_future =
                 engine.load_module_string(module_name.clone(), processed_facts.clone());
             update_futures.push(update_future);
@@ -641,10 +652,10 @@ impl PrologEnginePool {
         module_name: String,
         facts: Vec<String>,
     ) -> Result<(), Error> {
-        let mut engines = self.engines.write().await;
+        let mut engines = self.engine_state.write().await;
 
         // Reinitialize any invalid engines
-        for engine_slot in engines.iter_mut() {
+        for engine_slot in engines.engines.iter_mut() {
             if engine_slot.is_none() {
                 let mut new_engine = PrologEngine::new();
                 new_engine.spawn().await?;
@@ -657,7 +668,7 @@ impl PrologEnginePool {
 
         // Update all engines with the processed facts
         let mut update_futures = Vec::new();
-        for engine in engines.iter().filter_map(|e| e.as_ref()) {
+        for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
             let update_future =
                 engine.load_module_string(module_name.clone(), processed_facts.clone());
             update_futures.push(update_future);
@@ -743,12 +754,19 @@ impl PrologEnginePool {
 
         log::info!("📊 DIRECT POPULATION: Populating filtered pool for source: '{}'", source_filter);
 
-        // Use stored data to populate the filtered pool if available
-        let all_links = self.current_all_links.read().await;
-        let neighbourhood_author = self.current_neighbourhood_author.read().await;
+        // Get the stored data by cloning it from the engine state
+        let (all_links_opt, neighbourhood_author_opt, current_facts_opt) = {
+            let engine_state = self.engine_state.read().await;
+            (
+                engine_state.current_all_links.clone(),
+                engine_state.current_neighbourhood_author.clone(),
+                engine_state.current_facts.clone()
+            )
+        };
         
-        log::info!("📊 DIRECT POPULATION: Checking stored data - has_links: {}", all_links.is_some());
-        if let Some(all_links_ref) = all_links.as_ref() {
+        log::info!("📊 DIRECT POPULATION: Checking stored data - has_links: {}", all_links_opt.is_some());
+        
+        if let Some(all_links_ref) = all_links_opt.as_ref() {
             log::info!("📊 DIRECT POPULATION: Using stored links data ({} links)", all_links_ref.len());
             
             // Log sample links to verify SDNA is present
@@ -769,11 +787,10 @@ impl PrologEnginePool {
             }
         }
         
-        if let Some(all_links) = all_links.as_ref() {
-            let neighbourhood_author = neighbourhood_author.clone();
+        if let Some(all_links) = all_links_opt.as_ref() {
             // Create and load filtered facts
             log::info!("📊 DIRECT POPULATION: Creating filtered facts for source: '{}'", source_filter);
-            let filtered_facts = self.create_filtered_facts(source_filter, all_links, neighbourhood_author).await?;
+            let filtered_facts = self.create_filtered_facts(source_filter, all_links, neighbourhood_author_opt).await?;
             let facts_count = filtered_facts.len();
             
             // Verify SDNA facts are present in filtered facts
@@ -793,23 +810,22 @@ impl PrologEnginePool {
         } else {
             log::warn!("📊 DIRECT POPULATION: No stored links data available for filtering. Using fallback approach.");
             // FALLBACK: If no stored links data, try to get current facts from complete pool and use them
-            let current_facts = self.current_facts.read().await;
-            if let Some(facts) = current_facts.as_ref() {
+            if let Some(current_facts) = current_facts_opt.as_ref() {
                 log::info!("📊 DIRECT POPULATION: Using stored facts as fallback for filtered pool");
-                log::info!("📊 DIRECT POPULATION: Facts to copy: {} facts", facts.len());
+                log::info!("📊 DIRECT POPULATION: Facts to copy: {} facts", current_facts.len());
                 
                 // Check for SDNA facts in the fallback
-                let sdna_fact_count = facts.iter()
+                let sdna_fact_count = current_facts.iter()
                     .filter(|fact| fact.contains("subject_class") || fact.contains("instance") || 
                                   fact.contains("property") || fact.contains("collection"))
                     .count();
                 log::info!("📊 DIRECT POPULATION: Fallback facts contain {} SDNA-related facts", sdna_fact_count);
                 
-                log::info!("📊 DIRECT POPULATION: Sample facts: {:?}", facts.iter().take(5).collect::<Vec<_>>());
+                log::info!("📊 DIRECT POPULATION: Sample facts: {:?}", current_facts.iter().take(5).collect::<Vec<_>>());
                 // For now, just copy all facts to the filtered pool (not ideal, but better than nothing)
                 // TODO: In the future, we could parse the facts and filter them properly
-                filtered_pool.update_all_engines_with_facts("facts".to_string(), facts.clone()).await?;
-                log::info!("📊 DIRECT POPULATION: Populated filtered pool with {} fallback facts", facts.len());
+                filtered_pool.update_all_engines_with_facts("facts".to_string(), current_facts.clone()).await?;
+                log::info!("📊 DIRECT POPULATION: Populated filtered pool with {} fallback facts", current_facts.len());
             } else {
                 log::error!("📊 DIRECT POPULATION: ERROR - No stored facts available!");
                 return Err(anyhow!("No stored data (links or facts) available for populating filtered pool"));
@@ -821,8 +837,8 @@ impl PrologEnginePool {
     }
 
     pub async fn _drop_all(&self) -> Result<(), Error> {
-        let engines = self.engines.read().await;
-        for engine in engines.iter().filter_map(|e| e.as_ref()) {
+        let engines = self.engine_state.read().await;
+        for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
             engine._drop()?;
         }
         Ok(())
@@ -905,8 +921,8 @@ impl PrologEnginePool {
         }
         
         // Use an existing engine from the complete pool - it already has all the data loaded!
-        let engines = self.engines.read().await;
-        let engine = engines
+        let engines = self.engine_state.read().await;
+        let engine = engines.engines
             .iter()
             .find_map(|e| e.as_ref())
             .ok_or_else(|| anyhow!("No engines available in complete pool"))?;
@@ -1292,9 +1308,9 @@ mod tests {
         let pool = PrologEnginePool::new(3);
         assert!(pool.initialize(3).await.is_ok());
 
-        let engines = pool.engines.read().await;
-        assert_eq!(engines.len(), 3);
-        assert!(engines.iter().all(|e| e.is_some()));
+        let engines = pool.engine_state.read().await;
+        assert_eq!(engines.engines.len(), 3);
+        assert!(engines.engines.iter().all(|e| e.is_some()));
     }
 
     #[tokio::test]
@@ -1343,8 +1359,8 @@ mod tests {
         let _ = pool.run_query("invalid_predicate(x).".to_string()).await;
 
         // Check that we still have valid engines
-        let engines = pool.engines.read().await;
-        let valid_count = engines.iter().filter(|e| e.is_some()).count();
+        let engines = pool.engine_state.read().await;
+        let valid_count = engines.engines.iter().filter(|e| e.is_some()).count();
         assert!(
             valid_count > 0,
             "Should still have valid engines after failure"
@@ -1388,8 +1404,8 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify all engines are valid
-        let engines = pool.engines.read().await;
-        assert!(engines.iter().all(|e| e.is_some()));
+        let engines = pool.engine_state.read().await;
+        assert!(engines.engines.iter().all(|e| e.is_some()));
     }
 
     #[tokio::test]
@@ -1579,9 +1595,9 @@ mod tests {
         assert!(pool._drop_all().await.is_ok());
 
         // Verify engines are still in place but can be reinitialized
-        let engines = pool.engines.read().await;
-        assert_eq!(engines.len(), 2);
-        assert!(engines.iter().all(|e| e.is_some()));
+        let engines = pool.engine_state.read().await;
+        assert_eq!(engines.engines.len(), 2);
+        assert!(engines.engines.iter().all(|e| e.is_some()));
     }
 
     #[tokio::test]
@@ -1801,8 +1817,11 @@ mod tests {
         assert!(was_created1 && was_created2 && was_created3);
 
         // Populate filtered pools with initial data - use the test_links we already created
-        *pool.current_all_links.write().await = Some(test_links.clone());
-        *pool.current_neighbourhood_author.write().await = None;
+        {
+            let mut engine_state = pool.engine_state.write().await;
+            engine_state.current_all_links = Some(test_links.clone());
+            engine_state.current_neighbourhood_author = None;
+        }
         
         // Manually populate each filtered pool
         pool.populate_filtered_pool_direct("user1").await.unwrap();
@@ -1933,8 +1952,11 @@ mod tests {
             },
         ];
 
-                 *pool.current_all_links.write().await = Some(test_links);
-         *pool.current_neighbourhood_author.write().await = None;
+        {
+            let mut engine_state = pool.engine_state.write().await;
+            engine_state.current_all_links = Some(test_links);
+            engine_state.current_neighbourhood_author = None;
+        }
          
          // Manually populate the filtered pool
          pool.populate_filtered_pool_direct("root").await.unwrap();
@@ -2510,8 +2532,8 @@ mod tests {
                 assert!(bases.contains(&"task_instance_2".to_string()), "Should find task_instance_2");
                 
                 // Test all engines have SDNA loaded
-                let engines = pool2.engines.read().await;
-                for (engine_id, engine_opt) in engines.iter().enumerate() {
+                let engine_state = pool2.engine_state.read().await;
+                for (engine_id, engine_opt) in engine_state.engines.iter().enumerate() {
                     if let Some(engine) = engine_opt {
                         let engine_result = engine.run_query(subject_class_query.to_string()).await;
                         match engine_result {
