@@ -19,7 +19,14 @@ use deno_core::anyhow::{anyhow, Error};
 use super::embedding_cache::EmbeddingCache;
 use super::engine::PrologEngine;
 use super::types::{QueryResolution, QueryResult};
-use super::pool_trait::{PrologPool, EngineStateManager, EnginePoolState, PoolUtils};
+use super::pool_trait::{FilteredPool, EngineStateManager, EnginePoolState, PoolUtils};
+use super::assert_utils;
+use super::source_filtering;
+use crate::perspectives::sdna::{get_static_infrastructure_facts, get_sdna_facts, get_data_facts};
+use crate::types::DecoratedLinkExpression;
+use std::collections::HashSet;
+use std::time::Instant;
+use scryer_prolog::Term;
 
 
 
@@ -75,7 +82,56 @@ impl EngineStateManager for FilteredPrologPool {
     }
 }
 
-impl PrologPool for FilteredPrologPool {
+impl FilteredPool for FilteredPrologPool {
+    fn filter_id(&self) -> String {
+        self.source_filter.clone()
+    }
+    
+    fn pool_description(&self) -> String {
+        format!("Source-filtered pool for '{}'", self.source_filter)
+    }
+    
+    async fn initialize(&self, pool_size: usize) -> Result<(), Error> {
+        // Delegate to the existing implementation
+        self.initialize(pool_size).await
+    }
+    
+    async fn populate_from_complete_data(
+        &self,
+        module_name: String,
+        all_links: &[DecoratedLinkExpression],
+        neighbourhood_author: Option<String>,
+    ) -> Result<(), Error> {
+        // Implementation will be moved here from PrologEnginePool
+        self.populate_from_complete_data_impl(module_name, all_links, neighbourhood_author).await
+    }
+    
+    async fn handle_incremental_update(
+        &self,
+        assert_statements: &[String],
+    ) -> Result<(), Error> {
+        // Filter assert statements for relevance to this source filter
+        let relevant_assertions = source_filtering::filter_assert_statements_for_source(assert_statements, &self.source_filter);
+        
+        if !relevant_assertions.is_empty() {
+            log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - applying {} filtered assertions: {:?}", 
+                self.source_filter, relevant_assertions.len(), relevant_assertions);
+            
+            let filtered_query = format!("{}.", relevant_assertions.join(","));
+            log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - executing query: {}", self.source_filter, filtered_query);
+            
+            let result = self.run_query_all(filtered_query).await;
+            match &result {
+                Ok(()) => log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - assertion execution successful", self.source_filter),
+                Err(e) => log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - assertion execution failed: {}", self.source_filter, e),
+            }
+            result
+        } else {
+            log::info!("🔄 INCREMENTAL UPDATE: No relevant assertions for filtered pool '{}'", self.source_filter);
+            Ok(())
+        }
+    }
+    
     async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
         // Delegate to the existing implementation
         self.run_query(query).await
@@ -86,21 +142,16 @@ impl PrologPool for FilteredPrologPool {
         self.run_query_all(query).await
     }
     
-    async fn initialize(&self, pool_size: usize) -> Result<(), Error> {
-        // Delegate to the existing implementation
-        self.initialize(pool_size).await
+    fn should_handle_query(&self, query: &str) -> bool {
+        // Check if this query mentions our source filter
+        if let Some(extracted_source) = source_filtering::extract_source_filter(query) {
+            extracted_source == self.source_filter
+        } else {
+            false
+        }
     }
     
-    async fn update_all_engines_with_facts(
-        &self,
-        module_name: String,
-        facts: Vec<String>,
-    ) -> Result<(), Error> {
-        // Delegate to the existing implementation
-        self.update_all_engines_with_facts(module_name, facts).await
-    }
-    
-    async fn _drop_all(&self) -> Result<(), Error> {
+    async fn drop_all(&self) -> Result<(), Error> {
         // Delegate to the existing implementation
         self._drop_all().await
     }
@@ -281,6 +332,250 @@ impl FilteredPrologPool {
             engine._drop()?;
         }
         Ok(())
+    }
+    
+    /// Implementation of populate_from_complete_data - handles the actual filtering logic
+    pub async fn populate_from_complete_data_impl(
+        &self,
+        module_name: String,
+        all_links: &[DecoratedLinkExpression],
+        neighbourhood_author: Option<String>,
+    ) -> Result<(), Error> {
+        log::info!("📊 FILTERED POPULATION: Starting population for pool '{}'", self.source_filter);
+        
+        // Create filtered facts using our own filtering logic
+        let filtered_facts = self.create_filtered_facts(all_links, neighbourhood_author).await?;
+        
+        // Update all engines with the filtered facts
+        self.update_all_engines_with_facts(module_name, filtered_facts).await?;
+        
+        log::info!("📊 FILTERED POPULATION: Successfully populated pool '{}'", self.source_filter);
+        Ok(())
+    }
+    
+    /// Create filtered facts for this specific source filter
+    async fn create_filtered_facts(
+        &self,
+        all_links: &[DecoratedLinkExpression],
+        neighbourhood_author: Option<String>,
+    ) -> Result<Vec<String>, Error> {
+        log::info!("📊 FACT CREATION: Creating filtered facts for source: '{}'", self.source_filter);
+        
+        // Always include infrastructure and SDNA facts - these should never be filtered
+        let mut filtered_lines = get_static_infrastructure_facts();
+        let sdna_facts = get_sdna_facts(all_links, neighbourhood_author.clone())?;
+        
+        log::info!("📊 FACT CREATION: Infrastructure facts: {}, SDNA facts: {}", 
+            filtered_lines.len(), sdna_facts.len());
+        
+        // Log sample SDNA facts for debugging
+        if !sdna_facts.is_empty() {
+            log::info!("📊 FACT CREATION: Sample SDNA facts (first 5):");
+            for (i, fact) in sdna_facts.iter().take(5).enumerate() {
+                log::info!("  {}. {}", i + 1, fact);
+            }
+        } else {
+            log::warn!("📊 FACT CREATION: No SDNA facts found - this might indicate missing SDNA data");
+        }
+        
+        filtered_lines.extend(sdna_facts);
+        
+        // Get filtered data facts (this applies reachability filtering only to data, not SDNA)
+        let filtered_data = self.get_filtered_data_facts(all_links).await?;
+        log::info!("📊 FACT CREATION: Filtered facts for '{}': {} infrastructure + {} SDNA + {} data = {} total", 
+            self.source_filter, 
+            get_static_infrastructure_facts().len(),
+            get_sdna_facts(all_links, neighbourhood_author)?.len(),
+            filtered_data.len(),
+            filtered_lines.len() + filtered_data.len()
+        );
+        filtered_lines.extend(filtered_data);
+        
+        // Log sample of final facts for debugging
+        if !filtered_lines.is_empty() {
+            log::info!("📊 FACT CREATION: Sample final facts (first 10):");
+            for (i, fact) in filtered_lines.iter().take(10).enumerate() {
+                log::info!("  {}. {}", i + 1, fact);
+            }
+        }
+        
+        Ok(filtered_lines)
+    }
+    
+    /// Get filtered data facts for this source using reachable query from the complete pool
+    async fn get_filtered_data_facts(&self, all_links: &[DecoratedLinkExpression]) -> Result<Vec<String>, Error> {
+        let start_time = Instant::now();
+        log::info!("🔍 FILTERING: Starting get_filtered_data_facts for source: '{}'", self.source_filter);
+        log::info!("🔍 FILTERING: Total links provided: {}", all_links.len());
+        
+        // Use an existing engine from the complete pool - it already has all the data loaded!
+        let complete_engines = self.complete_pool.engine_state().read().await;
+        let engine = complete_engines.engines
+            .iter()
+            .find_map(|e| e.as_ref())
+            .ok_or_else(|| anyhow!("No engines available in complete pool"))?;
+        
+        // Get all data facts that we want to filter
+        let facts_start = Instant::now();
+        let all_data_facts = get_data_facts(all_links);
+        let facts_duration = facts_start.elapsed();
+        log::info!("🔍 FILTERING: Generated {} data facts in {:?}", all_data_facts.len(), facts_duration);
+        
+        // ⏱️ MEASURE: Query the complete engine for reachable nodes
+        let reachability_start = Instant::now();
+        
+        // ⚡ OPTIMIZATION: Use findall with aggressive limits to prevent performance explosion
+        let reachable_query = format!(r#"findall(Target, reachable("{}", Target), Targets)."#, self.source_filter);
+        log::info!("🔍 FILTERING: Running optimized findall reachable query: {}", reachable_query);
+        
+        // Set a timeout to prevent infinite loops
+        let query_timeout = tokio::time::Duration::from_secs(10); // 10 second timeout
+        let result = tokio::time::timeout(query_timeout, engine.run_query(reachable_query)).await;
+        
+        let reachability_duration = reachability_start.elapsed();
+        let mut reachable_nodes = vec![self.source_filter.clone()]; // Include the source itself
+        
+        match result {
+            Ok(Ok(Ok(QueryResolution::Matches(matches)))) => {
+                log::info!("🔍 FILTERING: Found {} findall matches in {:?}", matches.len(), reachability_duration);
+                
+                // findall returns a list of targets in the "Targets" binding
+                for m in matches {
+                    if let Some(Term::List(targets)) = m.bindings.get("Targets") {
+                        // Use HashSet for deduplication and apply size limits
+                        let mut seen = HashSet::new();
+                        const MAX_REACHABLE_NODES: usize = 5000; // Conservative limit
+                        
+                        for target in targets {
+                            if seen.len() >= MAX_REACHABLE_NODES {
+                                log::warn!("🔍 FILTERING: Reached maximum reachable nodes limit ({}), stopping", MAX_REACHABLE_NODES);
+                                break;
+                            }
+                            
+                            let target_str = match target {
+                                Term::String(s) => s.clone(),
+                                Term::Atom(s) => s.clone(),
+                                _ => continue,
+                            };
+                            
+                            if seen.insert(target_str.clone()) {
+                                reachable_nodes.push(target_str);
+                            }
+                        }
+                        log::info!("🔍 FILTERING: Deduplicated to {} unique targets", seen.len());
+                        break; // Only process first match
+                    }
+                }
+            }
+            Ok(Ok(Ok(_))) => {
+                log::warn!("🔍 FILTERING: Findall reachable query returned unexpected result type");
+            }
+            Ok(Ok(Err(e))) => {
+                log::warn!("🔍 FILTERING: Findall reachable query failed: {}", e);
+            }
+            Ok(Err(e)) => {
+                log::warn!("🔍 FILTERING: Engine error during reachable query: {}", e);
+            }
+            Err(_) => {
+                log::error!("🔍 FILTERING: Reachable query timed out after 10 seconds! Using source-only fallback.");
+                // Don't try any more reachability queries - just use the source node itself
+                // This prevents the system from hanging completely
+            }
+        }
+        
+        log::info!("🔍 FILTERING: Total reachable nodes: {}", reachable_nodes.len());
+        log::info!("🔍 FILTERING: Reachability query took: {:?}", reachability_duration);
+        
+        // ⚡ OPTIMIZATION: Use regex-based filtering with automatic chunking for large pattern sets
+        let formatting_start = Instant::now();
+        let reachable_node_patterns: Vec<String> = reachable_nodes
+            .iter()
+            .map(|node| format!(r#""{}"#, node))
+            .collect();
+        
+        let pattern_count = reachable_node_patterns.len();
+        
+        // ⚡ SMART CHUNKING: Build regex chunks to avoid size limits
+        let regex_chunks = if pattern_count == 0 {
+            Vec::new() // Empty - no filtering needed
+        } else {
+            const MAX_PATTERNS_PER_CHUNK: usize = 50; // Conservative limit to avoid regex size explosion
+            let mut chunks = Vec::new();
+            
+            for chunk in reachable_node_patterns.chunks(MAX_PATTERNS_PER_CHUNK) {
+                let escaped_patterns: Vec<String> = chunk
+                    .iter()
+                    .map(|pattern| regex::escape(pattern))
+                    .collect();
+                let alternation_pattern = format!("({})", escaped_patterns.join("|"));
+                
+                match regex::Regex::new(&alternation_pattern) {
+                    Ok(regex) => chunks.push(regex),
+                    Err(e) => {
+                        log::error!("🔍 FILTERING: Failed to compile regex chunk with {} patterns: {}", chunk.len(), e);
+                        return Err(Error::msg(format!("Failed to compile regex chunk: {}", e)));
+                    }
+                }
+            }
+            
+            chunks
+        };
+        
+        let formatting_duration = formatting_start.elapsed();
+        log::info!("🔍 FILTERING: Compiled {} regex chunks for {} patterns in {:?}", 
+            regex_chunks.len(), pattern_count, formatting_duration);
+        
+        // ⚡ ULTRA-FAST FILTERING: Apply regex chunks
+        let filtering_start = Instant::now();
+        let original_facts_count = all_data_facts.len();
+        
+        let filtered_data_facts: Vec<String> = if regex_chunks.is_empty() {
+            log::info!("🔍 FILTERING: No patterns - returning empty filtered facts");
+            Vec::new()
+        } else if regex_chunks.len() == 1 {
+            // Single regex chunk - use optimized single regex path
+            let regex = &regex_chunks[0];
+            if original_facts_count > 10000 {
+                source_filtering::filter_facts_parallel_regex(all_data_facts, regex)
+            } else {
+                source_filtering::filter_facts_sequential_regex(all_data_facts, regex)
+            }
+        } else {
+            // Multiple regex chunks - check each fact against all chunks
+            if original_facts_count > 10000 {
+                source_filtering::filter_facts_parallel_chunked_regex(all_data_facts, &regex_chunks)
+            } else {
+                source_filtering::filter_facts_sequential_chunked_regex(all_data_facts, &regex_chunks)
+            }
+        };
+        
+        let filtering_duration = filtering_start.elapsed();
+        let total_duration = start_time.elapsed();
+        
+        // Performance summary
+        log::info!("🔍 FILTERING: ⚡ PERFORMANCE SUMMARY for source '{}':", self.source_filter);
+        log::info!("🔍 FILTERING:   📊 Data generation: {:?}", facts_duration);
+        log::info!("🔍 FILTERING:   🔍 Reachability query: {:?}", reachability_duration);
+        log::info!("🔍 FILTERING:   🔧 Pattern formatting: {:?}", formatting_duration);
+        log::info!("🔍 FILTERING:   ⚡ Facts filtering: {:?}", filtering_duration);
+        log::info!("🔍 FILTERING:   🎯 Total filtering time: {:?}", total_duration);
+        
+        log::info!("🔍 FILTERING: Results: {} → {} facts ({:.1}% reduction, {} facts/sec)", 
+            original_facts_count, 
+            filtered_data_facts.len(),
+            (1.0 - (filtered_data_facts.len() as f64 / original_facts_count as f64)) * 100.0,
+            (original_facts_count as f64 / filtering_duration.as_secs_f64()) as u64
+        );
+        
+        // Log sample of filtered facts (only first few)
+        if !filtered_data_facts.is_empty() {
+            log::info!("🔍 FILTERING: Sample of filtered facts (first 5):");
+            for (i, fact) in filtered_data_facts.iter().take(5).enumerate() {
+                log::info!("  {}. {}", i + 1, fact);
+            }
+        }
+        
+        Ok(filtered_data_facts)
     }
 }
 

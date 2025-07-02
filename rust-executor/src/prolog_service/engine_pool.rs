@@ -4,7 +4,7 @@ use super::types::{QueryResolution, QueryResult};
 use super::assert_utils;
 use super::source_filtering;
 use super::filtered_pool::FilteredPrologPool;
-use super::pool_trait::{PrologPool, EngineStateManager, EnginePoolState, PoolUtils};
+use super::pool_trait::{FilteredPool, EngineStateManager, EnginePoolState, PoolUtils};
 use crate::perspectives::sdna::{get_static_infrastructure_facts, get_sdna_facts, get_data_facts};
 use crate::types::DecoratedLinkExpression;
 use deno_core::anyhow::{anyhow, Error};
@@ -12,10 +12,10 @@ use futures::future::join_all;
 use lazy_static::lazy_static;
 use regex::Regex;
 use scryer_prolog::Term;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-use std::time::Instant;
+
 use tokio::sync::RwLock;
 
 pub const EMBEDDING_LANGUAGE_HASH: &str = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
@@ -77,36 +77,7 @@ impl EngineStateManager for PrologEnginePool {
     }
 }
 
-impl PrologPool for PrologEnginePool {
-    async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
-        // Delegate to the existing implementation
-        self.run_query(query).await
-    }
-    
-    async fn run_query_all(&self, query: String) -> Result<(), Error> {
-        // Delegate to the existing implementation
-        self.run_query_all(query).await
-    }
-    
-    async fn initialize(&self, pool_size: usize) -> Result<(), Error> {
-        // Delegate to the existing implementation
-        self.initialize(pool_size).await
-    }
-    
-    async fn update_all_engines_with_facts(
-        &self,
-        module_name: String,
-        facts: Vec<String>,
-    ) -> Result<(), Error> {
-        // Delegate to the existing implementation
-        self.update_all_engines_with_facts(module_name, facts).await
-    }
-    
-    async fn _drop_all(&self) -> Result<(), Error> {
-        // Delegate to the existing implementation
-        self._drop_all().await
-    }
-}
+
 
 impl PrologEnginePool {
     /// Create a new complete Prolog engine pool
@@ -221,7 +192,7 @@ impl PrologEnginePool {
             return Ok(());
         }
 
-        log::info!("🔄 INCREMENTAL UPDATE: Updating {} filtered pools from assert query", filtered_pools.len());
+        log::info!("🔄 INCREMENTAL UPDATE: Delegating assert updates to {} filtered pools", filtered_pools.len());
         log::info!("🔄 INCREMENTAL UPDATE: Original query: {}", query);
 
         // Extract assert statements from the query
@@ -231,36 +202,40 @@ impl PrologEnginePool {
             return Ok(());
         }
 
-        log::info!("🔄 INCREMENTAL UPDATE: Found {} assert statements to process: {:?}", assert_statements.len(), assert_statements);
+        log::info!("🔄 INCREMENTAL UPDATE: Found {} assert statements to delegate: {:?}", assert_statements.len(), assert_statements);
 
-        // For each filtered pool, determine which assertions are relevant and apply them
+        // Delegate to each filtered pool - they handle their own filtering logic
         let mut update_futures = Vec::new();
         
-        for (source_filter, pool) in filtered_pools.iter() {
-            let relevant_assertions = source_filtering::filter_assert_statements_for_source(&assert_statements, source_filter);
+        for pool in filtered_pools.values() {
+            let pool_clone = pool.clone();
+            let assert_statements_clone = assert_statements.clone();
             
-            if !relevant_assertions.is_empty() {
-                log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - applying {} filtered assertions: {:?}", 
-                    source_filter, relevant_assertions.len(), relevant_assertions);
+            let update_future = async move {
+                log::info!("🔄 INCREMENTAL UPDATE: Delegating incremental update to pool '{}'", pool_clone.pool_description());
                 
-                let pool_clone = pool.clone();
-                let filtered_query = format!("{}.", relevant_assertions.join(","));
-                log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - executing query: {}", source_filter, filtered_query);
+                // Handle incremental update using source filtering logic
+                let relevant_assertions = source_filtering::filter_assert_statements_for_source(&assert_statements_clone, &pool_clone.source_filter());
                 
-                let source_filter_clone = source_filter.clone();
-                let update_future = async move {
-                    log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - starting assertion execution", source_filter_clone);
+                if !relevant_assertions.is_empty() {
+                    log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - applying {} filtered assertions: {:?}", 
+                        pool_clone.source_filter(), relevant_assertions.len(), relevant_assertions);
+                    
+                    let filtered_query = format!("{}.", relevant_assertions.join(","));
+                    log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - executing query: {}", pool_clone.source_filter(), filtered_query);
+                    
                     let result = pool_clone.run_query_all(filtered_query).await;
                     match &result {
-                        Ok(()) => log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - assertion execution successful", source_filter_clone),
-                        Err(e) => log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - assertion execution failed: {}", source_filter_clone, e),
+                        Ok(()) => log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - assertion execution successful", pool_clone.source_filter()),
+                        Err(e) => log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - assertion execution failed: {}", pool_clone.source_filter(), e),
                     }
                     result
-                };
-                update_futures.push(update_future);
-            } else {
-                log::info!("🔄 INCREMENTAL UPDATE: No relevant assertions for filtered pool '{}'", source_filter);
-            }
+                } else {
+                    log::info!("🔄 INCREMENTAL UPDATE: No relevant assertions for filtered pool '{}'", pool_clone.source_filter());
+                    Ok(())
+                }
+            };
+            update_futures.push(update_future);
         }
 
         // Execute all filtered pool updates in parallel
@@ -285,7 +260,7 @@ impl PrologEnginePool {
                     total_updates);
             }
         } else {
-            log::info!("🔄 INCREMENTAL UPDATE: No filtered pool updates to execute - this suggests filtering issues");
+            log::info!("🔄 INCREMENTAL UPDATE: No filtered pool updates to execute");
         }
 
         Ok(())
@@ -348,44 +323,25 @@ impl PrologEnginePool {
         }
 
         // Update any filtered sub-pools managed by this complete pool
+        // Each filtered pool is responsible for its own filtering logic
         {
             let filtered_pools = self.filtered_pools.read().await;
-            log::info!("📊 POOL UPDATE: Complete pool has {} filtered sub-pools to update", filtered_pools.len());
+            log::info!("📊 POOL UPDATE: Complete pool delegating updates to {} filtered sub-pools", filtered_pools.len());
+            
             let mut update_futures = Vec::new();
-            
-            // Pre-compute filtered facts for all sources to avoid borrowing issues in async closures
-            let mut filtered_facts_map = HashMap::new();
-            for source_filter in filtered_pools.keys() {
-                log::info!("📊 POOL UPDATE: Pre-computing filtered facts for source: '{}'", source_filter);
-                match self.create_filtered_facts(source_filter, &all_links, neighbourhood_author.clone()).await {
-                    Ok(facts) => {
-                        filtered_facts_map.insert(source_filter.clone(), facts);
-                    }
-                    Err(e) => {
-                        log::error!("📊 POOL UPDATE: Failed to create filtered facts for source '{}': {}", source_filter, e);
-                    }
-                }
-            }
-            
-            for (source_filter, pool) in filtered_pools.iter() {
-                log::info!("📊 POOL UPDATE: Updating filtered pool for source: '{}'", source_filter);
+            for pool in filtered_pools.values() {
+                let pool_clone = pool.clone();
+                let module_name_clone = module_name.clone();
+                let all_links_clone = all_links.clone();
+                let neighbourhood_author_clone = neighbourhood_author.clone();
                 
-                if let Some(filtered_facts) = filtered_facts_map.get(source_filter) {
-                    let pool_clone = pool.clone();
-                    let module_name_clone = module_name.clone();
-                    let filtered_facts_clone = filtered_facts.clone();
-                    
-                    let update_future = async move {
-                        // Send the pre-filtered facts to the filtered pool
-                        pool_clone.update_all_engines_with_facts(module_name_clone, filtered_facts_clone).await
-                    };
-                    update_futures.push(update_future);
-                } else {
-                    log::error!("📊 POOL UPDATE: No filtered facts available for source: '{}'", source_filter);
-                }
+                let update_future = async move {
+                    // Each filtered pool handles its own filtering and population
+                    pool_clone.populate_from_complete_data_impl(module_name_clone, &all_links_clone, neighbourhood_author_clone).await
+                };
+                update_futures.push(update_future);
             }
             
-            let _total_pools = update_futures.len();
             let results = join_all(update_futures).await;
             for (i, result) in results.into_iter().enumerate() {
                 if let Err(e) = result {
@@ -437,154 +393,11 @@ impl PrologEnginePool {
         Ok(())
     }
 
-    /// Create filtered facts for a given source - shared logic for all filtered pool operations
-    async fn create_filtered_facts(
-        &self,
-        source_filter: &str,
-        all_links: &[DecoratedLinkExpression],
-        neighbourhood_author: Option<String>,
-    ) -> Result<Vec<String>, Error> {
-        log::info!("📊 FACT CREATION: Creating filtered facts for source: '{}'", source_filter);
-        
-        // Always include infrastructure and SDNA facts - these should never be filtered
-        let mut filtered_lines = get_static_infrastructure_facts();
-        let sdna_facts = get_sdna_facts(all_links, neighbourhood_author.clone())?;
-        
-        log::info!("📊 FACT CREATION: Infrastructure facts: {}, SDNA facts: {}", 
-            filtered_lines.len(), sdna_facts.len());
-        
-        // Log sample SDNA facts for debugging
-        if !sdna_facts.is_empty() {
-            log::info!("📊 FACT CREATION: Sample SDNA facts (first 5):");
-            for (i, fact) in sdna_facts.iter().take(5).enumerate() {
-                log::info!("  {}. {}", i + 1, fact);
-            }
-        } else {
-            log::warn!("📊 FACT CREATION: No SDNA facts found - this might indicate missing SDNA data");
-        }
-        
-        filtered_lines.extend(sdna_facts);
-        
-        // Get filtered data facts (this applies reachability filtering only to data, not SDNA)
-        let filtered_data = self.get_filtered_data_facts(source_filter, all_links).await?;
-        log::info!("📊 FACT CREATION: Filtered facts for '{}': {} infrastructure + {} SDNA + {} data = {} total", 
-            source_filter, 
-            get_static_infrastructure_facts().len(),
-            get_sdna_facts(all_links, neighbourhood_author)?.len(),
-            filtered_data.len(),
-            filtered_lines.len() + filtered_data.len()
-        );
-        filtered_lines.extend(filtered_data);
-        
-        // Log sample of final facts for debugging
-        if !filtered_lines.is_empty() {
-            log::info!("📊 FACT CREATION: Sample final facts (first 10):");
-            for (i, fact) in filtered_lines.iter().take(10).enumerate() {
-                log::info!("  {}. {}", i + 1, fact);
-            }
-        }
-        
-        Ok(filtered_lines)
-    }
 
 
 
-    /// Populate a specific filtered pool using stored data from the complete pool  
-    pub async fn populate_filtered_pool_direct(
-        &self,
-        source_filter: &str,
-    ) -> Result<(), Error> {
-        log::info!("📊 DIRECT POPULATION: populate_filtered_pool_direct called for source: '{}'", source_filter);
-        
-        // This method is only called on complete pools (by design)
 
-        let filtered_pools = self.filtered_pools.read().await;
-        let filtered_pool = filtered_pools.get(source_filter)
-            .ok_or_else(|| anyhow!("Filtered pool for source '{}' not found", source_filter))?;
 
-        log::info!("📊 DIRECT POPULATION: Populating filtered pool for source: '{}'", source_filter);
-
-        // Get the stored data by cloning it from the engine state
-        let (all_links_opt, neighbourhood_author_opt, current_facts_opt) = {
-            let engine_state = self.engine_state.read().await;
-            (
-                engine_state.current_all_links.clone(),
-                engine_state.current_neighbourhood_author.clone(),
-                engine_state.current_facts.clone()
-            )
-        };
-        
-        log::info!("📊 DIRECT POPULATION: Checking stored data - has_links: {}", all_links_opt.is_some());
-        
-        if let Some(all_links_ref) = all_links_opt.as_ref() {
-            log::info!("📊 DIRECT POPULATION: Using stored links data ({} links)", all_links_ref.len());
-            
-            // Log sample links to verify SDNA is present
-            let sdna_links: Vec<_> = all_links_ref.iter()
-                .filter(|link| link.data.predicate == Some("ad4m://sdna".to_string()) || 
-                               link.data.predicate == Some("ad4m://has_subject_class".to_string()))
-                .collect();
-            log::info!("📊 DIRECT POPULATION: Found {} SDNA-related links in data", sdna_links.len());
-            
-            if !sdna_links.is_empty() {
-                log::info!("📊 DIRECT POPULATION: Sample SDNA links:");
-                for (i, link) in sdna_links.iter().take(3).enumerate() {
-                    log::info!("  {}. {} -> {} -> {}", i + 1, link.data.source, 
-                        link.data.predicate.as_deref().unwrap_or("None"), link.data.target);
-                }
-            } else {
-                log::warn!("📊 DIRECT POPULATION: No SDNA links found in current data - this may cause subject_class issues");
-            }
-        }
-        
-        if let Some(all_links) = all_links_opt.as_ref() {
-            // Create and load filtered facts
-            log::info!("📊 DIRECT POPULATION: Creating filtered facts for source: '{}'", source_filter);
-            let filtered_facts = self.create_filtered_facts(source_filter, all_links, neighbourhood_author_opt).await?;
-            let facts_count = filtered_facts.len();
-            
-            // Verify SDNA facts are present in filtered facts
-            let sdna_fact_count = filtered_facts.iter()
-                .filter(|fact| fact.contains("subject_class") || fact.contains("instance") || 
-                              fact.contains("property") || fact.contains("collection"))
-                .count();
-            log::info!("📊 DIRECT POPULATION: Created {} total facts, {} appear to be SDNA-related", 
-                facts_count, sdna_fact_count);
-            
-            if sdna_fact_count == 0 {
-                log::warn!("📊 DIRECT POPULATION: No SDNA facts found in filtered facts - this will cause subject_class errors");
-            }
-            
-            filtered_pool.update_all_engines_with_facts("facts".to_string(), filtered_facts).await?;
-            log::info!("📊 DIRECT POPULATION: Successfully populated filtered pool for source: '{}' with {} filtered facts", source_filter, facts_count);
-        } else {
-            log::warn!("📊 DIRECT POPULATION: No stored links data available for filtering. Using fallback approach.");
-            // FALLBACK: If no stored links data, try to get current facts from complete pool and use them
-            if let Some(current_facts) = current_facts_opt.as_ref() {
-                log::info!("📊 DIRECT POPULATION: Using stored facts as fallback for filtered pool");
-                log::info!("📊 DIRECT POPULATION: Facts to copy: {} facts", current_facts.len());
-                
-                // Check for SDNA facts in the fallback
-                let sdna_fact_count = current_facts.iter()
-                    .filter(|fact| fact.contains("subject_class") || fact.contains("instance") || 
-                                  fact.contains("property") || fact.contains("collection"))
-                    .count();
-                log::info!("📊 DIRECT POPULATION: Fallback facts contain {} SDNA-related facts", sdna_fact_count);
-                
-                log::info!("📊 DIRECT POPULATION: Sample facts: {:?}", current_facts.iter().take(5).collect::<Vec<_>>());
-                // For now, just copy all facts to the filtered pool (not ideal, but better than nothing)
-                // TODO: In the future, we could parse the facts and filter them properly
-                filtered_pool.update_all_engines_with_facts("facts".to_string(), current_facts.clone()).await?;
-                log::info!("📊 DIRECT POPULATION: Populated filtered pool with {} fallback facts", current_facts.len());
-            } else {
-                log::error!("📊 DIRECT POPULATION: ERROR - No stored facts available!");
-                return Err(anyhow!("No stored data (links or facts) available for populating filtered pool"));
-            }
-        }
-        
-        log::info!("📊 DIRECT POPULATION: Successfully populated filtered pool for source: '{}'", source_filter);
-        Ok(())
-    }
 
     pub async fn _drop_all(&self) -> Result<(), Error> {
         let engines = self.engine_state.read().await;
@@ -630,186 +443,33 @@ impl PrologEnginePool {
 
 
 
-    /// Get filtered data facts for a specific source using reachable query
-    async fn get_filtered_data_facts(&self, source_filter: &str, all_links: &[DecoratedLinkExpression]) -> Result<Vec<String>, Error> {
-        let start_time = Instant::now();
-        log::info!("🔍 FILTERING: Starting get_filtered_data_facts for source: '{}'", source_filter);
-        log::info!("🔍 FILTERING: Total links provided: {}", all_links.len());
-        
-        // This method is only called on complete pools (by design)
-        
-        // Use an existing engine from the complete pool - it already has all the data loaded!
-        let engines = self.engine_state.read().await;
-        let engine = engines.engines
-            .iter()
-            .find_map(|e| e.as_ref())
-            .ok_or_else(|| anyhow!("No engines available in complete pool"))?;
-        
-        // Get all data facts that we want to filter
-        let facts_start = Instant::now();
-        let all_data_facts = get_data_facts(all_links);
-        let facts_duration = facts_start.elapsed();
-        log::info!("🔍 FILTERING: Generated {} data facts in {:?}", all_data_facts.len(), facts_duration);
-        
-        // ⏱️ MEASURE: Query the complete engine for reachable nodes
-        let reachability_start = Instant::now();
-        
-        // ⚡ OPTIMIZATION: Use findall with aggressive limits to prevent performance explosion
-        // Note: setof() was causing 5+ minute hangs due to redundant path exploration
-        let reachable_query = format!(r#"findall(Target, reachable("{}", Target), Targets)."#, source_filter);
-        log::info!("🔍 FILTERING: Running optimized findall reachable query: {}", reachable_query);
-        
-        // Set a timeout to prevent infinite loops
-        let query_timeout = tokio::time::Duration::from_secs(10); // 10 second timeout
-        let result = tokio::time::timeout(query_timeout, engine.run_query(reachable_query)).await;
-        
-        let reachability_duration = reachability_start.elapsed();
-        let mut reachable_nodes = vec![source_filter.to_string()]; // Include the source itself
-        
-        match result {
-            Ok(Ok(Ok(QueryResolution::Matches(matches)))) => {
-                log::info!("🔍 FILTERING: Found {} findall matches in {:?}", matches.len(), reachability_duration);
-                
-                // findall returns a list of targets in the "Targets" binding
-                for m in matches {
-                    if let Some(Term::List(targets)) = m.bindings.get("Targets") {
-                        // Use HashSet for deduplication and apply size limits
-                        let mut seen = HashSet::new();
-                        const MAX_REACHABLE_NODES: usize = 5000; // Conservative limit
-                        
-                        for target in targets {
-                            if seen.len() >= MAX_REACHABLE_NODES {
-                                log::warn!("🔍 FILTERING: Reached maximum reachable nodes limit ({}), stopping", MAX_REACHABLE_NODES);
-                                break;
-                            }
-                            
-                            let target_str = match target {
-                                Term::String(s) => s.clone(),
-                                Term::Atom(s) => s.clone(),
-                                _ => continue,
-                            };
-                            
-                            if seen.insert(target_str.clone()) {
-                                reachable_nodes.push(target_str);
-                            }
-                        }
-                        log::info!("🔍 FILTERING: Deduplicated to {} unique targets", seen.len());
-                        break; // Only process first match
-                    }
-                }
-            }
-            Ok(Ok(Ok(_))) => {
-                log::warn!("🔍 FILTERING: Findall reachable query returned unexpected result type");
-            }
-            Ok(Ok(Err(e))) => {
-                log::warn!("🔍 FILTERING: Findall reachable query failed: {}", e);
-            }
-            Ok(Err(e)) => {
-                log::warn!("🔍 FILTERING: Engine error during reachable query: {}", e);
-            }
-            Err(_) => {
-                log::error!("🔍 FILTERING: Reachable query timed out after 10 seconds! Using source-only fallback.");
-                // Don't try any more reachability queries - just use the source node itself
-                // This prevents the system from hanging completely
-            }
-        }
-        
-        log::info!("🔍 FILTERING: Total reachable nodes: {}", reachable_nodes.len());
-        log::info!("🔍 FILTERING: Reachability query took: {:?}", reachability_duration);
-        
-        // ⚡ OPTIMIZATION: Use regex-based filtering with automatic chunking for large pattern sets
-        let formatting_start = Instant::now();
-        let reachable_node_patterns: Vec<String> = reachable_nodes
-            .iter()
-            .map(|node| format!(r#""{}"#, node))
-            .collect();
-        
-        let pattern_count = reachable_node_patterns.len();
-        
-        // ⚡ SMART CHUNKING: Build regex chunks to avoid size limits
-        let regex_chunks = if pattern_count == 0 {
-            Vec::new() // Empty - no filtering needed
-        } else {
-            const MAX_PATTERNS_PER_CHUNK: usize = 50; // Conservative limit to avoid regex size explosion
-            let mut chunks = Vec::new();
-            
-            for chunk in reachable_node_patterns.chunks(MAX_PATTERNS_PER_CHUNK) {
-                let escaped_patterns: Vec<String> = chunk
-                    .iter()
-                    .map(|pattern| regex::escape(pattern))
-                    .collect();
-                let alternation_pattern = format!("({})", escaped_patterns.join("|"));
-                
-                match regex::Regex::new(&alternation_pattern) {
-                    Ok(regex) => chunks.push(regex),
-                    Err(e) => {
-                        log::error!("🔍 FILTERING: Failed to compile regex chunk with {} patterns: {}", chunk.len(), e);
-                        return Err(Error::msg(format!("Failed to compile regex chunk: {}", e)));
-                    }
-                }
-            }
-            
-            chunks
-        };
-        
-        let formatting_duration = formatting_start.elapsed();
-        log::info!("🔍 FILTERING: Compiled {} regex chunks for {} patterns in {:?}", 
-            regex_chunks.len(), pattern_count, formatting_duration);
-        
-        // ⚡ ULTRA-FAST FILTERING: Apply regex chunks
-        let filtering_start = Instant::now();
-        let original_facts_count = all_data_facts.len();
-        
-        let filtered_data_facts: Vec<String> = if regex_chunks.is_empty() {
-            log::info!("🔍 FILTERING: No patterns - returning empty filtered facts");
-            Vec::new()
-        } else if regex_chunks.len() == 1 {
-            // Single regex chunk - use optimized single regex path
-            let regex = &regex_chunks[0];
-            if original_facts_count > 10000 {
-                source_filtering::filter_facts_parallel_regex(all_data_facts, regex)
-            } else {
-                source_filtering::filter_facts_sequential_regex(all_data_facts, regex)
-            }
-        } else {
-            // Multiple regex chunks - check each fact against all chunks
-            if original_facts_count > 10000 {
-                source_filtering::filter_facts_parallel_chunked_regex(all_data_facts, &regex_chunks)
-            } else {
-                source_filtering::filter_facts_sequential_chunked_regex(all_data_facts, &regex_chunks)
-            }
-        };
-        
-        let filtering_duration = filtering_start.elapsed();
-        let total_duration = start_time.elapsed();
-        
-        // Performance summary
-        log::info!("🔍 FILTERING: ⚡ PERFORMANCE SUMMARY for source '{}':", source_filter);
-        log::info!("🔍 FILTERING:   📊 Data generation: {:?}", facts_duration);
-        log::info!("🔍 FILTERING:   🔍 Reachability query: {:?}", reachability_duration);
-        log::info!("🔍 FILTERING:   🔧 Pattern formatting: {:?}", formatting_duration);
-        log::info!("🔍 FILTERING:   ⚡ Facts filtering: {:?}", filtering_duration);
-        log::info!("🔍 FILTERING:   🎯 Total filtering time: {:?}", total_duration);
-        
-        log::info!("🔍 FILTERING: Results: {} → {} facts ({:.1}% reduction, {} facts/sec)", 
-            original_facts_count, 
-            filtered_data_facts.len(),
-            (1.0 - (filtered_data_facts.len() as f64 / original_facts_count as f64)) * 100.0,
-            (original_facts_count as f64 / filtering_duration.as_secs_f64()) as u64
-        );
-        
-        // Log sample of filtered facts (only first few)
-        if !filtered_data_facts.is_empty() {
-            log::info!("🔍 FILTERING: Sample of filtered facts (first 5):");
-            for (i, fact) in filtered_data_facts.iter().take(5).enumerate() {
-                log::info!("  {}. {}", i + 1, fact);
-            }
-        }
-        
-        Ok(filtered_data_facts)
-    }
+
 
     /// Run a query with smart routing - use filtered pool if it's a subscription query with source filter
+    /// Temporary helper method for tests - populates filtered pool using the new implementation
+    pub async fn populate_filtered_pool_direct(&self, source_filter: &str) -> Result<(), Error> {
+        // Get current data from complete pool state
+        let (all_links_opt, neighbourhood_author_opt) = {
+            let engine_state = self.engine_state.read().await;
+            (
+                engine_state.current_all_links.clone(),
+                engine_state.current_neighbourhood_author.clone()
+            )
+        };
+        
+        if let Some(all_links) = all_links_opt.as_ref() {
+            // Get the filtered pool and populate it
+            let filtered_pools = self.filtered_pools.read().await;
+            if let Some(filtered_pool) = filtered_pools.get(source_filter) {
+                filtered_pool.populate_from_complete_data_impl("facts".to_string(), all_links, neighbourhood_author_opt).await
+            } else {
+                Err(anyhow!("Filtered pool for source '{}' not found", source_filter))
+            }
+        } else {
+            Err(anyhow!("No stored data available for populating filtered pool"))
+        }
+    }
+
     pub async fn run_query_smart(&self, query: String, is_subscription: bool) -> Result<QueryResult, Error> {
         log::debug!("🚀 QUERY ROUTING: is_subscription={}, query={}", is_subscription, query);
         
@@ -822,13 +482,32 @@ impl PrologEnginePool {
                 match self.get_or_create_filtered_pool(source_filter.clone()).await {
                     Ok(was_created) => {
                         if was_created {
-                            log::info!("🚀 QUERY ROUTING: New filtered pool created, populating directly from complete pool...");
-                            // Populate immediately using direct method to avoid circular dependency
-                            if let Err(e) = self.populate_filtered_pool_direct(&source_filter).await {
-                                log::error!("🚀 QUERY ROUTING: Failed to populate new filtered pool: {}", e);
-                                // Fall back to complete pool if population fails
-                                log::warn!("🚀 QUERY ROUTING: Falling back to complete pool due to population failure");
-                                return self.run_query(query).await;
+                            log::info!("🚀 QUERY ROUTING: New filtered pool created, populating via trait interface...");
+                            // Get current data from complete pool to populate the filtered pool
+                            let (all_links_opt, neighbourhood_author_opt) = {
+                                let engine_state = self.engine_state.read().await;
+                                (
+                                    engine_state.current_all_links.clone(),
+                                    engine_state.current_neighbourhood_author.clone()
+                                )
+                            };
+                            
+                            if let Some(all_links) = all_links_opt.as_ref() {
+                                // Get the filtered pool and populate it
+                                let filtered_pools = self.filtered_pools.read().await;
+                                if let Some(filtered_pool) = filtered_pools.get(&source_filter) {
+                                    if let Err(e) = filtered_pool.populate_from_complete_data_impl("facts".to_string(), all_links, neighbourhood_author_opt).await {
+                                        log::error!("🚀 QUERY ROUTING: Failed to populate new filtered pool: {}", e);
+                                        // Fall back to complete pool if population fails
+                                        log::warn!("🚀 QUERY ROUTING: Falling back to complete pool due to population failure");
+                                        return self.run_query(query).await;
+                                    }
+                                } else {
+                                    log::error!("🚀 QUERY ROUTING: Filtered pool not found after creation");
+                                    return self.run_query(query).await;
+                                }
+                            } else {
+                                log::warn!("🚀 QUERY ROUTING: No stored data available, filtered pool will be empty");
                             }
                         }
                     }

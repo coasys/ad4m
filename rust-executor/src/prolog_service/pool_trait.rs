@@ -16,29 +16,62 @@ use super::engine::PrologEngine;
 use super::types::{QueryResolution, QueryResult};
 use crate::types::DecoratedLinkExpression;
 
-/// Common interface for all Prolog engine pools
+/// Interface for filtered Prolog pools
 /// 
-/// This trait defines the core operations that all pool types should support,
-/// providing a consistent interface for query execution and engine management.
-pub trait PrologPool {
-    /// Execute a query on one engine using round-robin selection
-    async fn run_query(&self, query: String) -> Result<QueryResult, Error>;
+/// This trait defines the operations that different types of filtered pools should support.
+/// Unlike the complete pool, filtered pools are responsible for their own filtering logic,
+/// population strategies, and update handling.
+/// 
+/// ## Design Philosophy
+/// - **Autonomy**: Each filtered pool type handles its own concerns
+/// - **Specialization**: Different pool types can implement different filtering strategies
+/// - **Delegation**: Complete pools delegate to filtered pools rather than managing them
+/// - **Extensibility**: Easy to add new filtered pool types by implementing this trait
+pub trait FilteredPool: Send + Sync {
+    /// Get the filter identifier for this pool (e.g., "user123", "after:2023-01-01")
+    fn filter_id(&self) -> String;
     
-    /// Execute a query on all engines in the pool
-    async fn run_query_all(&self, query: String) -> Result<(), Error>;
+    /// Get a human-readable description of this pool type and filter
+    fn pool_description(&self) -> String;
     
-    /// Initialize the pool by spawning Prolog engines
+    /// Initialize the filtered pool with the given pool size
     async fn initialize(&self, pool_size: usize) -> Result<(), Error>;
     
-    /// Update all engines with pre-computed facts
-    async fn update_all_engines_with_facts(
+    /// Populate this filtered pool with data from all_links
+    /// 
+    /// This is called by the complete pool when it has new data. The filtered pool
+    /// is responsible for determining what subset of the data is relevant and
+    /// populating its engines accordingly.
+    async fn populate_from_complete_data(
         &self,
         module_name: String,
-        facts: Vec<String>,
+        all_links: &[DecoratedLinkExpression],
+        neighbourhood_author: Option<String>,
     ) -> Result<(), Error>;
     
-    /// Drop all engines (cleanup)
-    async fn _drop_all(&self) -> Result<(), Error>;
+    /// Handle incremental updates from assert operations
+    /// 
+    /// This is called when new assert statements are added to the complete pool.
+    /// The filtered pool should determine which assertions are relevant and apply them.
+    async fn handle_incremental_update(
+        &self,
+        assert_statements: &[String],
+    ) -> Result<(), Error>;
+    
+    /// Execute a query on this filtered pool
+    async fn run_query(&self, query: String) -> Result<QueryResult, Error>;
+    
+    /// Execute a query on all engines in this filtered pool (for assertions)
+    async fn run_query_all(&self, query: String) -> Result<(), Error>;
+    
+    /// Check if this filtered pool should handle the given subscription query
+    /// 
+    /// This allows different filtered pool types to decide whether they're
+    /// the appropriate pool for a given query based on the query content.
+    fn should_handle_query(&self, query: &str) -> bool;
+    
+    /// Clean up resources
+    async fn drop_all(&self) -> Result<(), Error>;
 }
 
 /// Engine state that can be shared between different pool implementations
