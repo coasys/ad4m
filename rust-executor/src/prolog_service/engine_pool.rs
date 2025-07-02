@@ -7,6 +7,7 @@ use super::filtered_pool::FilteredPrologPool;
 use super::sdna_pool::SdnaPrologPool;
 use super::pool_trait::{FilteredPool, EnginePoolState, PoolUtils};
 use crate::perspectives::sdna::{get_static_infrastructure_facts, get_sdna_facts, get_data_facts};
+use crate::prolog_service::DEFAULT_POOL_SIZE;
 use crate::types::DecoratedLinkExpression;
 use deno_core::anyhow::{anyhow, Error};
 use futures::future::join_all;
@@ -104,7 +105,7 @@ impl PrologEnginePool {
         
         // Always create and initialize the SDNA pool
         let sdna_pool = SdnaPrologPool::new(2, Arc::new(self.clone()));
-        sdna_pool.initialize(2).await?;
+        sdna_pool.initialize(DEFAULT_POOL_SIZE).await?;
         
         let mut sdna_pool_guard = self.sdna_pool.write().await;
         *sdna_pool_guard = Some(sdna_pool);
@@ -399,7 +400,7 @@ impl PrologEnginePool {
 
         // Create new filtered pool with smaller size (2-3 engines should be enough for subscriptions)
         let filtered_pool = FilteredPrologPool::new(3, source_filter.clone(), Arc::new(self.clone()));
-        filtered_pool.initialize(3).await?;
+        filtered_pool.initialize(DEFAULT_POOL_SIZE).await?;
         
         // Get current data from complete pool state to populate the new filtered pool
         let (all_links_opt, neighbourhood_author_opt) = {
