@@ -11,7 +11,6 @@ use deno_core::anyhow::{anyhow, Error};
 use futures::future::join_all;
 use lazy_static::lazy_static;
 use regex::Regex;
-use scryer_prolog::Term;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -213,27 +212,7 @@ impl PrologEnginePool {
             
             let update_future = async move {
                 log::info!("🔄 INCREMENTAL UPDATE: Delegating incremental update to pool '{}'", pool_clone.pool_description());
-                
-                // Handle incremental update using source filtering logic
-                let relevant_assertions = source_filtering::filter_assert_statements_for_source(&assert_statements_clone, &pool_clone.source_filter());
-                
-                if !relevant_assertions.is_empty() {
-                    log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - applying {} filtered assertions: {:?}", 
-                        pool_clone.source_filter(), relevant_assertions.len(), relevant_assertions);
-                    
-                    let filtered_query = format!("{}.", relevant_assertions.join(","));
-                    log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - executing query: {}", pool_clone.source_filter(), filtered_query);
-                    
-                    let result = pool_clone.run_query_all(filtered_query).await;
-                    match &result {
-                        Ok(()) => log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - assertion execution successful", pool_clone.source_filter()),
-                        Err(e) => log::info!("🔄 INCREMENTAL UPDATE: Pool '{}' - assertion execution failed: {}", pool_clone.source_filter(), e),
-                    }
-                    result
-                } else {
-                    log::info!("🔄 INCREMENTAL UPDATE: No relevant assertions for filtered pool '{}'", pool_clone.source_filter());
-                    Ok(())
-                }
+                pool_clone.handle_incremental_update(&assert_statements_clone).await
             };
             update_futures.push(update_future);
         }
@@ -337,7 +316,7 @@ impl PrologEnginePool {
                 
                 let update_future = async move {
                     // Each filtered pool handles its own filtering and population
-                    pool_clone.populate_from_complete_data_impl(module_name_clone, &all_links_clone, neighbourhood_author_clone).await
+                    pool_clone.populate_from_complete_data(module_name_clone, &all_links_clone, neighbourhood_author_clone).await
                 };
                 update_futures.push(update_future);
             }
@@ -354,49 +333,6 @@ impl PrologEnginePool {
 
         Ok(())
     }
-
-    /// Update engines with pre-computed facts (used for filtered pools)
-    async fn update_all_engines_with_facts(
-        &self,
-        module_name: String,
-        facts: Vec<String>,
-    ) -> Result<(), Error> {
-        let mut engines = self.engine_state.write().await;
-
-        // Reinitialize any invalid engines
-        for engine_slot in engines.engines.iter_mut() {
-            if engine_slot.is_none() {
-                let mut new_engine = PrologEngine::new();
-                new_engine.spawn().await?;
-                *engine_slot = Some(new_engine);
-            }
-        }
-
-        // Preprocess the facts
-        let processed_facts = PoolUtils::preprocess_program_lines(facts, &self.embedding_cache).await;
-
-        // Update all engines with the processed facts
-        let mut update_futures = Vec::new();
-        for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
-            let update_future =
-                engine.load_module_string(module_name.clone(), processed_facts.clone());
-            update_futures.push(update_future);
-        }
-
-        let results = join_all(update_futures).await;
-        for (i, result) in results.into_iter().enumerate() {
-            if let Err(e) = result {
-                log::error!("Failed to update Prolog engine {}: {}", i, e);
-            }
-        }
-
-        Ok(())
-    }
-
-
-
-
-
 
 
     pub async fn _drop_all(&self) -> Result<(), Error> {
@@ -426,17 +362,33 @@ impl PrologEnginePool {
             return Ok(false);
         }
 
-        log::info!("📊 POOL CREATION: Creating new filtered pool for source: '{}'", source_filter);
+        log::info!("📊 POOL CREATION: Creating and populating new filtered pool for source: '{}'", source_filter);
 
         // Create new filtered pool with smaller size (2-3 engines should be enough for subscriptions)
-        // The filtered pool gets a reference back to this complete pool for data access
         let filtered_pool = FilteredPrologPool::new(3, source_filter.clone(), Arc::new(self.clone()));
         filtered_pool.initialize(3).await?;
+        
+        // Get current data from complete pool state to populate the new filtered pool
+        let (all_links_opt, neighbourhood_author_opt) = {
+            let engine_state = self.engine_state.read().await;
+            (
+                engine_state.current_all_links.clone(),
+                engine_state.current_neighbourhood_author.clone()
+            )
+        };
+        
+        // Populate the filtered pool with current data if available
+        if let Some(all_links) = all_links_opt.as_ref() {
+            log::info!("📊 POOL CREATION: Populating new filtered pool with current data ({} links)", all_links.len());
+            filtered_pool.populate_from_complete_data("facts".to_string(), all_links, neighbourhood_author_opt).await?;
+        } else {
+            log::warn!("📊 POOL CREATION: No stored data available for populating filtered pool - it will be empty until next update");
+        }
         
         // Insert the pool into the map
         filtered_pools.insert(source_filter.clone(), filtered_pool);
         
-        log::info!("📊 POOL CREATION: New filtered pool created for source: '{}'", source_filter);
+        log::info!("📊 POOL CREATION: New filtered pool created and populated for source: '{}'", source_filter);
         
         Ok(true)
     }
@@ -446,29 +398,7 @@ impl PrologEnginePool {
 
 
     /// Run a query with smart routing - use filtered pool if it's a subscription query with source filter
-    /// Temporary helper method for tests - populates filtered pool using the new implementation
-    pub async fn populate_filtered_pool_direct(&self, source_filter: &str) -> Result<(), Error> {
-        // Get current data from complete pool state
-        let (all_links_opt, neighbourhood_author_opt) = {
-            let engine_state = self.engine_state.read().await;
-            (
-                engine_state.current_all_links.clone(),
-                engine_state.current_neighbourhood_author.clone()
-            )
-        };
-        
-        if let Some(all_links) = all_links_opt.as_ref() {
-            // Get the filtered pool and populate it
-            let filtered_pools = self.filtered_pools.read().await;
-            if let Some(filtered_pool) = filtered_pools.get(source_filter) {
-                filtered_pool.populate_from_complete_data_impl("facts".to_string(), all_links, neighbourhood_author_opt).await
-            } else {
-                Err(anyhow!("Filtered pool for source '{}' not found", source_filter))
-            }
-        } else {
-            Err(anyhow!("No stored data available for populating filtered pool"))
-        }
-    }
+
 
     pub async fn run_query_smart(&self, query: String, is_subscription: bool) -> Result<QueryResult, Error> {
         log::debug!("🚀 QUERY ROUTING: is_subscription={}, query={}", is_subscription, query);
@@ -478,52 +408,22 @@ impl PrologEnginePool {
             if let Some(source_filter) = source_filtering::extract_source_filter(&query) {
                 log::info!("🚀 QUERY ROUTING: Routing subscription query to filtered pool for source: '{}'", source_filter);
                 
-                // Ensure filtered pool exists and populate it immediately if newly created
+                // Ensure filtered pool exists (creation will automatically populate it)
                 match self.get_or_create_filtered_pool(source_filter.clone()).await {
-                    Ok(was_created) => {
-                        if was_created {
-                            log::info!("🚀 QUERY ROUTING: New filtered pool created, populating via trait interface...");
-                            // Get current data from complete pool to populate the filtered pool
-                            let (all_links_opt, neighbourhood_author_opt) = {
-                                let engine_state = self.engine_state.read().await;
-                                (
-                                    engine_state.current_all_links.clone(),
-                                    engine_state.current_neighbourhood_author.clone()
-                                )
-                            };
-                            
-                            if let Some(all_links) = all_links_opt.as_ref() {
-                                // Get the filtered pool and populate it
-                                let filtered_pools = self.filtered_pools.read().await;
-                                if let Some(filtered_pool) = filtered_pools.get(&source_filter) {
-                                    if let Err(e) = filtered_pool.populate_from_complete_data_impl("facts".to_string(), all_links, neighbourhood_author_opt).await {
-                                        log::error!("🚀 QUERY ROUTING: Failed to populate new filtered pool: {}", e);
-                                        // Fall back to complete pool if population fails
-                                        log::warn!("🚀 QUERY ROUTING: Falling back to complete pool due to population failure");
-                                        return self.run_query(query).await;
-                                    }
-                                } else {
-                                    log::error!("🚀 QUERY ROUTING: Filtered pool not found after creation");
-                                    return self.run_query(query).await;
-                                }
-                            } else {
-                                log::warn!("🚀 QUERY ROUTING: No stored data available, filtered pool will be empty");
-                            }
+                    Ok(_was_created) => {
+                        // Get the filtered pool and run query on it
+                        let filtered_pools = self.filtered_pools.read().await;
+                        if let Some(filtered_pool) = filtered_pools.get(&source_filter) {
+                            log::info!("🚀 QUERY ROUTING: Successfully routing to filtered pool for source: '{}'", source_filter);
+                            return filtered_pool.run_query(query).await;
+                        } else {
+                            log::warn!("🚀 QUERY ROUTING: Filtered pool not found after creation attempt, using complete pool");
                         }
                     }
                     Err(e) => {
                         log::warn!("🚀 QUERY ROUTING: Failed to create filtered pool, falling back to complete pool: {}", e);
                         return self.run_query(query).await;
                     }
-                }
-                
-                // Get the filtered pool and run query on it
-                let filtered_pools = self.filtered_pools.read().await;
-                if let Some(filtered_pool) = filtered_pools.get(&source_filter) {
-                    log::info!("🚀 QUERY ROUTING: Successfully routing to filtered pool for source: '{}'", source_filter);
-                    return filtered_pool.run_query(query).await;
-                } else {
-                    log::warn!("🚀 QUERY ROUTING: Filtered pool not found after creation attempt, using complete pool");
                 }
             } else {
                 log::debug!("🚀 QUERY ROUTING: No source filter extracted from subscription query, using complete pool");
@@ -862,10 +762,8 @@ mod tests {
         let was_created = pool.get_or_create_filtered_pool("user1".to_string()).await.unwrap();
         assert!(was_created);
         
-        // Manually populate the filtered pool since the automatic population isn't working
-        println!("🧪 TEST: About to populate filtered pool...");
-        pool.populate_filtered_pool_direct("user1").await.unwrap();
-        println!("🧪 TEST: Filtered pool populated");
+        // The filtered pool was automatically populated when it was created
+        println!("🧪 TEST: Filtered pool created and populated automatically");
         
         // Test that assert queries are properly detected
         assert!(assert_utils::is_assert_query("assert_link_and_triple(\"user1\", \"likes\", \"item1\", \"123\", \"author1\")."));
@@ -1028,10 +926,7 @@ mod tests {
             engine_state.current_neighbourhood_author = None;
         }
         
-        // Manually populate each filtered pool
-        pool.populate_filtered_pool_direct("user1").await.unwrap();
-        pool.populate_filtered_pool_direct("user2").await.unwrap();
-        pool.populate_filtered_pool_direct("user3").await.unwrap();
+        // Filtered pools are automatically populated when created
 
         // Run a multi-statement assert query affecting multiple users
         let multi_assert_query = "assert_link_and_triple(\"user1\", \"follows\", \"user2\", \"123\", \"author1\"), assert_link_and_triple(\"user2\", \"follows\", \"user3\", \"124\", \"author2\").";
@@ -1163,8 +1058,7 @@ mod tests {
             engine_state.current_neighbourhood_author = None;
         }
          
-         // Manually populate the filtered pool
-         pool.populate_filtered_pool_direct("root").await.unwrap();
+         // Filtered pool is automatically populated when created
 
         // Verify initial reachability filtering
         let filtered_pools = pool.filtered_pools.read().await;
@@ -1485,7 +1379,7 @@ mod tests {
         // Create filtered pool for the source
         let was_created = pool.get_or_create_filtered_pool("filter_source".to_string()).await.unwrap();
         assert!(was_created);
-        pool.populate_filtered_pool_direct("filter_source").await.unwrap();
+        // Filtered pool is automatically populated when created
 
         // Simulate the exact scenario from the user's log:
         // 3 statements where only the 3rd directly involves the filter source,
@@ -1757,7 +1651,7 @@ mod tests {
                 // Test filtered pools
                 let was_created = pool2.get_or_create_filtered_pool("user1".to_string()).await.unwrap();
                 assert!(was_created);
-                pool2.populate_filtered_pool_direct("user1").await.unwrap();
+                // Filtered pool is automatically populated when created
 
                 let filtered_pools = pool2.filtered_pools.read().await;
                 let user1_pool = filtered_pools.get("user1").unwrap();
@@ -1874,7 +1768,7 @@ mod tests {
             let user_id = format!("user{}", i);
             let was_created = pool.get_or_create_filtered_pool(user_id.clone()).await.unwrap();
             assert!(was_created);
-            pool.populate_filtered_pool_direct(&user_id).await.unwrap();
+            // Filtered pool is automatically populated when created
         }
 
         println!("🧪 Created pool with 10 engines and 5 filtered pools");

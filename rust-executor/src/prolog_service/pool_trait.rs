@@ -10,7 +10,6 @@ use tokio::sync::RwLock;
 use futures::future::join_all;
 use deno_core::anyhow::{anyhow, Error};
 use scryer_prolog::Term;
-
 use super::embedding_cache::EmbeddingCache;
 use super::engine::PrologEngine;
 use super::types::{QueryResolution, QueryResult};
