@@ -1258,7 +1258,7 @@ impl PerspectiveInstance {
         let query_start = std::time::Instant::now();
         log::info!("🔍 PROLOG QUERY: About to execute query...");
         
-        let result = service.run_query(uuid, query.clone()).await?;
+        let result = service.run_query_smart(uuid, query.clone()).await?;
         
         log::info!("🔍 PROLOG QUERY: Query executed in {:?} (total: {:?})", 
             query_start.elapsed(), prolog_start.elapsed());

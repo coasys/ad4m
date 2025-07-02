@@ -84,6 +84,38 @@ impl PrologService {
     }
 
     /// Run query with subscription optimization - uses filtered pools for subscription queries
+    pub async fn run_query_smart(
+        &self,
+        perspective_id: String,
+        query: String,
+    ) -> Result<QueryResult, Error> {
+        // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
+        let pool = {
+            let pools = self.engine_pools.read().await;
+            pools
+                .get(&perspective_id)
+                .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
+                .clone() // Clone the Arc<> to release the lock
+        }; // Read lock is released here
+        
+        // The smart routing and population is now handled entirely within the engine pool
+        // This eliminates circular dependencies and potential deadlocks
+        let result = pool.run_query_smart(query.clone(), true).await;
+        match &result {
+            Ok(Ok(query_result)) => {
+                log::info!("⚡ SMART Query succeeded with result: {:?}", query_result);
+            }
+            Ok(Err(error)) => {
+                log::warn!("⚡ SMART Query failed with error: {}", error);
+            }
+            Err(error) => {
+                log::error!("⚡ SMART Query execution error: {}", error);
+            }
+        }
+        result
+    }
+
+    /// Run query with subscription optimization - uses filtered pools for subscription queries
     pub async fn run_query_subscription(
         &self,
         perspective_id: String,
