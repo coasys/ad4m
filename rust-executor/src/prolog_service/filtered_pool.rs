@@ -20,7 +20,6 @@ use super::embedding_cache::EmbeddingCache;
 use super::engine::PrologEngine;
 use super::types::{QueryResolution, QueryResult};
 use super::pool_trait::{FilteredPool, EngineStateManager, EnginePoolState, PoolUtils};
-use super::assert_utils;
 use super::source_filtering;
 use crate::perspectives::sdna::{get_static_infrastructure_facts, get_sdna_facts, get_data_facts};
 use crate::types::DecoratedLinkExpression;
@@ -42,7 +41,7 @@ use scryer_prolog::Term;
 /// 
 /// ## Lifecycle
 /// 1. Created by complete pool via `get_or_create_filtered_pool()`
-/// 2. Populated with filtered facts via complete pool's `populate_filtered_pool_direct()`
+/// 2. Automatically populated with filtered facts during creation
 /// 3. Updated when new assert queries affect the filtered data
 /// 4. Queries are routed to filtered pools for efficiency
 #[derive(Clone)]
@@ -91,9 +90,17 @@ impl FilteredPool for FilteredPrologPool {
         format!("Source-filtered pool for '{}'", self.source_filter)
     }
     
+    /// Initialize the filtered pool by spawning the Prolog engines
+    /// This creates the actual Prolog engine processes but does not populate them with data.
+    /// Use the complete pool's `populate_filtered_pool_direct()` method to load filtered facts.
     async fn initialize(&self, pool_size: usize) -> Result<(), Error> {
-        // Delegate to the existing implementation
-        self.initialize(pool_size).await
+        let mut engines = self.engine_state.write().await;
+        for _ in 0..pool_size {
+            let mut engine = PrologEngine::new();
+            engine.spawn().await?;
+            engines.engines.push(Some(engine));
+        }
+        Ok(())
     }
     
     async fn populate_from_complete_data(
@@ -102,8 +109,46 @@ impl FilteredPool for FilteredPrologPool {
         all_links: &[DecoratedLinkExpression],
         neighbourhood_author: Option<String>,
     ) -> Result<(), Error> {
-        // Implementation will be moved here from PrologEnginePool
-        self.populate_from_complete_data_impl(module_name, all_links, neighbourhood_author).await
+        log::info!("📊 FILTERED POPULATION: Starting population for pool '{}'", self.source_filter);
+        
+        // Create filtered facts using our own filtering logic
+        let facts = self.create_filtered_facts(all_links, neighbourhood_author).await?;
+        
+        // Update all engines with the filtered facts
+
+        log::info!("📊 FILTERED UPDATE: Pool '{}' updating engines with {} facts", self.source_filter, facts.len());
+        
+        let mut engines = self.engine_state.write().await;
+
+        // Reinitialize any invalid engines
+        for engine_slot in engines.engines.iter_mut() {
+            if engine_slot.is_none() {
+                let mut new_engine = PrologEngine::new();
+                new_engine.spawn().await?;
+                *engine_slot = Some(new_engine);
+            }
+        }
+
+        // Preprocess the facts to handle embeddings
+        let processed_facts = PoolUtils::preprocess_program_lines(facts, &self.embedding_cache).await;
+
+        // Update all engines with the processed facts
+        let mut update_futures = Vec::new();
+        for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
+            let update_future =
+                engine.load_module_string(module_name.clone(), processed_facts.clone());
+            update_futures.push(update_future);
+        }
+
+        let results = join_all(update_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            if let Err(e) = result {
+                log::error!("Failed to update filtered pool '{}' engine {}: {}", self.source_filter, i, e);
+            }
+        }
+        
+        log::info!("📊 FILTERED POPULATION: Successfully populated pool '{}'", self.source_filter);
+        Ok(())
     }
     
     async fn handle_incremental_update(
@@ -132,77 +177,6 @@ impl FilteredPool for FilteredPrologPool {
         }
     }
     
-    async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
-        // Delegate to the existing implementation
-        self.run_query(query).await
-    }
-    
-    async fn run_query_all(&self, query: String) -> Result<(), Error> {
-        // Delegate to the existing implementation
-        self.run_query_all(query).await
-    }
-    
-    fn should_handle_query(&self, query: &str) -> bool {
-        // Check if this query mentions our source filter
-        if let Some(extracted_source) = source_filtering::extract_source_filter(query) {
-            extracted_source == self.source_filter
-        } else {
-            false
-        }
-    }
-    
-    async fn drop_all(&self) -> Result<(), Error> {
-        // Delegate to the existing implementation
-        self._drop_all().await
-    }
-}
-
-impl FilteredPrologPool {
-    /// Create a new filtered pool for the given source filter
-    /// 
-    /// ## Arguments
-    /// - `pool_size`: Number of Prolog engines to create in this filtered pool
-    /// - `source_filter`: The source node this pool should filter by (e.g., "user123")
-    /// - `complete_pool`: Reference to the complete pool for data access
-    /// 
-    /// ## Note
-    /// This only creates the structure - you must call `initialize()` to spawn the engines
-    /// and then use the complete pool's methods to populate it with filtered data.
-    pub fn new(
-        pool_size: usize, 
-        source_filter: String, 
-        complete_pool: Arc<super::engine_pool::PrologEnginePool>
-    ) -> Self {
-        Self {
-            source_filter,
-            engine_state: Arc::new(RwLock::new(EnginePoolState::new(pool_size))),
-            next_engine: Arc::new(AtomicUsize::new(0)),
-            embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
-            complete_pool,
-        }
-    }
-    
-    /// Get the source filter this pool represents
-    pub fn source_filter(&self) -> &str {
-        &self.source_filter
-    }
-    
-    /// Initialize the filtered pool by spawning the Prolog engines
-    /// 
-    /// This creates the actual Prolog engine processes but does not populate them with data.
-    /// Use the complete pool's `populate_filtered_pool_direct()` method to load filtered facts.
-    pub async fn initialize(&self, pool_size: usize) -> Result<(), Error> {
-        let mut engines = self.engine_state.write().await;
-        for _ in 0..pool_size {
-            let mut engine = PrologEngine::new();
-            engine.spawn().await?;
-            engines.engines.push(Some(engine));
-        }
-        Ok(())
-    }
-    
-
-    
     /// Execute a query on this filtered pool
     /// 
     /// This is the main query execution method for filtered pools. It automatically:
@@ -213,7 +187,7 @@ impl FilteredPrologPool {
     /// ## Performance Notes
     /// Filtered pools should execute queries faster than complete pools because they
     /// contain a smaller subset of facts, leading to more efficient Prolog execution.
-    pub async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
+    async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
         let (result, engine_idx) = {
             let engines = self.engine_state.read().await;
             let (engine_idx, engine) = PoolUtils::select_engine_round_robin(&engines.engines, &self.next_engine)?;
@@ -227,12 +201,13 @@ impl FilteredPrologPool {
         }
     }
     
+
     /// Execute a query on all engines in this filtered pool
     /// 
     /// This is used for assert operations that need to update all engines consistently.
     /// It's typically called by the complete pool when propagating assert operations
     /// to filtered pools.
-    pub async fn run_query_all(&self, query: String) -> Result<(), Error> {
+    async fn run_query_all(&self, query: String) -> Result<(), Error> {
         let engines = self.engine_state.write().await;
         let valid_engines: Vec<_> = engines.engines.iter().filter_map(|e| e.as_ref()).collect();
 
@@ -273,85 +248,54 @@ impl FilteredPrologPool {
         Ok(())
     }
     
-    /// Update engines with pre-computed facts (called by complete pool)
-    /// 
-    /// This method is called by the complete pool when it has prepared filtered facts
-    /// for this pool. It's the main way filtered pools receive their data.
-    /// 
-    /// ## Arguments
-    /// - `module_name`: Name of the Prolog module to load (usually "facts")
-    /// - `facts`: Pre-filtered facts ready to load into engines
-    /// 
-    /// ## Note
-    /// The facts should already be filtered for this pool's source filter by the complete pool.
-    pub async fn update_all_engines_with_facts(
-        &self,
-        module_name: String,
-        facts: Vec<String>,
-    ) -> Result<(), Error> {
-        log::info!("📊 FILTERED UPDATE: Pool '{}' updating engines with {} facts", 
-            self.source_filter, facts.len());
-            
-        let mut engines = self.engine_state.write().await;
-
-        // Reinitialize any invalid engines
-        for engine_slot in engines.engines.iter_mut() {
-            if engine_slot.is_none() {
-                let mut new_engine = PrologEngine::new();
-                new_engine.spawn().await?;
-                *engine_slot = Some(new_engine);
-            }
+    fn should_handle_query(&self, query: &str) -> bool {
+        // Check if this query mentions our source filter
+        if let Some(extracted_source) = source_filtering::extract_source_filter(query) {
+            extracted_source == self.source_filter
+        } else {
+            false
         }
-
-        // Preprocess the facts to handle embeddings
-        let processed_facts = PoolUtils::preprocess_program_lines(facts, &self.embedding_cache).await;
-
-        // Update all engines with the processed facts
-        let mut update_futures = Vec::new();
-        for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
-            let update_future =
-                engine.load_module_string(module_name.clone(), processed_facts.clone());
-            update_futures.push(update_future);
-        }
-
-        let results = join_all(update_futures).await;
-        for (i, result) in results.into_iter().enumerate() {
-            if let Err(e) = result {
-                log::error!("Failed to update filtered pool '{}' engine {}: {}", self.source_filter, i, e);
-            }
-        }
-
-        log::info!("📊 FILTERED UPDATE: Pool '{}' successfully updated all engines", self.source_filter);
-        Ok(())
     }
     
-    /// Drop all engines (cleanup method)
-    pub async fn _drop_all(&self) -> Result<(), Error> {
+    async fn drop_all(&self) -> Result<(), Error> {
         let engines = self.engine_state.read().await;
         for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
             engine._drop()?;
         }
         Ok(())
     }
-    
-    /// Implementation of populate_from_complete_data - handles the actual filtering logic
-    pub async fn populate_from_complete_data_impl(
-        &self,
-        module_name: String,
-        all_links: &[DecoratedLinkExpression],
-        neighbourhood_author: Option<String>,
-    ) -> Result<(), Error> {
-        log::info!("📊 FILTERED POPULATION: Starting population for pool '{}'", self.source_filter);
-        
-        // Create filtered facts using our own filtering logic
-        let filtered_facts = self.create_filtered_facts(all_links, neighbourhood_author).await?;
-        
-        // Update all engines with the filtered facts
-        self.update_all_engines_with_facts(module_name, filtered_facts).await?;
-        
-        log::info!("📊 FILTERED POPULATION: Successfully populated pool '{}'", self.source_filter);
-        Ok(())
+}
+
+impl FilteredPrologPool {
+    /// Create a new filtered pool for the given source filter
+    /// 
+    /// ## Arguments
+    /// - `pool_size`: Number of Prolog engines to create in this filtered pool
+    /// - `source_filter`: The source node this pool should filter by (e.g., "user123")
+    /// - `complete_pool`: Reference to the complete pool for data access
+    /// 
+    /// ## Note
+    /// This only creates the structure - you must call `initialize()` to spawn the engines
+    /// and then use the complete pool's methods to populate it with filtered data.
+    pub fn new(
+        pool_size: usize, 
+        source_filter: String, 
+        complete_pool: Arc<super::engine_pool::PrologEnginePool>
+    ) -> Self {
+        Self {
+            source_filter,
+            engine_state: Arc::new(RwLock::new(EnginePoolState::new(pool_size))),
+            next_engine: Arc::new(AtomicUsize::new(0)),
+            embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
+            complete_pool,
+        }
     }
+    
+    /// Get the source filter this pool represents
+    pub fn source_filter(&self) -> &str {
+        &self.source_filter
+    }
+    
     
     /// Create filtered facts for this specific source filter
     async fn create_filtered_facts(
