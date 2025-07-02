@@ -1,6 +1,7 @@
 use super::embedding_cache::EmbeddingCache;
 use super::engine::PrologEngine;
 use super::types::{QueryResolution, QueryResult};
+use super::assert_utils;
 use crate::perspectives::sdna::{get_static_infrastructure_facts, get_sdna_facts, get_data_facts};
 use crate::types::DecoratedLinkExpression;
 use deno_core::anyhow::{anyhow, Error};
@@ -239,9 +240,9 @@ impl PrologEnginePool {
 
         // If this is a complete pool and the query contains assertions, also update filtered pools
         log::info!("🔄 DEBUG: Checking assert query: pool_type={:?}, is_assert={}, query='{}'", 
-            self.pool_type, self.is_assert_query(&query), query);
+            self.pool_type, assert_utils::is_assert_query(&query), query);
         
-        if matches!(self.pool_type, EnginePoolType::Complete) && self.is_assert_query(&query) {
+        if matches!(self.pool_type, EnginePoolType::Complete) && assert_utils::is_assert_query(&query) {
             log::info!("🔄 INCREMENTAL UPDATE: Detected assert query on complete pool, updating filtered pools");
             if let Err(e) = self.update_filtered_pools_from_assert_query(&query).await {
                 log::info!("🔄 INCREMENTAL UPDATE: Failed to update filtered pools: {}", e);
@@ -254,13 +255,7 @@ impl PrologEnginePool {
         Ok(())
     }
 
-    /// Check if a query contains assertion operations
-    fn is_assert_query(&self, query: &str) -> bool {
-        query.contains("assert_link_and_triple") || 
-        query.contains("assert(") ||
-        query.contains("assertz(") ||
-        query.contains("asserta(")
-    }
+
 
     /// Update filtered pools when an assert query is run on the complete pool
     async fn update_filtered_pools_from_assert_query(&self, query: &str) -> Result<(), Error> {
@@ -274,7 +269,7 @@ impl PrologEnginePool {
         log::info!("🔄 INCREMENTAL UPDATE: Original query: {}", query);
 
         // Extract assert statements from the query
-        let assert_statements = self.extract_assert_statements(query);
+        let assert_statements = assert_utils::extract_assert_statements(query);
         if assert_statements.is_empty() {
             log::info!("🔄 INCREMENTAL UPDATE: No assert statements found in query");
             return Ok(());
@@ -340,82 +335,9 @@ impl PrologEnginePool {
         Ok(())
     }
 
-    /// Extract individual assert statements from a query
-    fn extract_assert_statements(&self, query: &str) -> Vec<String> {
-        let mut statements = Vec::new();
-        
-        // Remove the final period and trim
-        let query_without_period = query.trim_end_matches('.').trim();
-        
-        // Check if this is a single assert statement (no commas outside parentheses)
-        if self.is_single_assert_statement(query_without_period) && !self.has_comma_outside_parens(query_without_period) {
-            statements.push(query_without_period.to_string());
-            log::info!("🔄 EXTRACT: Single statement query: '{}'", query_without_period);
-            return statements;
-        }
-        
-        // For multiple statements, we need to split more carefully
-        // This is a simplified approach - for now we'll split by comma outside of parentheses
-        let mut paren_depth = 0;
-        let mut current_statement = String::new();
-        
-        for ch in query_without_period.chars() {
-            match ch {
-                '(' => {
-                    paren_depth += 1;
-                    current_statement.push(ch);
-                }
-                ')' => {
-                    paren_depth -= 1;
-                    current_statement.push(ch);
-                }
-                ',' if paren_depth == 0 => {
-                    // This comma is a statement separator
-                    let cleaned = current_statement.trim();
-                    if !cleaned.is_empty() && self.is_single_assert_statement(cleaned) {
-                        statements.push(cleaned.to_string());
-                    }
-                    current_statement.clear();
-                }
-                _ => {
-                    current_statement.push(ch);
-                }
-            }
-        }
-        
-        // Don't forget the last statement
-        let cleaned = current_statement.trim();
-        if !cleaned.is_empty() && self.is_single_assert_statement(cleaned) {
-            statements.push(cleaned.to_string());
-        }
-        
-        log::info!("🔄 EXTRACT: From query '{}' extracted {} statements: {:?}", 
-            query, statements.len(), statements);
-        
-        statements
-    }
 
-    /// Check if a single statement is an assert operation
-    fn is_single_assert_statement(&self, statement: &str) -> bool {
-        statement.contains("assert_link_and_triple") ||
-        statement.starts_with("assert(") ||
-        statement.starts_with("assertz(") ||
-        statement.starts_with("asserta(")
-    }
 
-    /// Check if a string has commas outside of parentheses (indicating multiple statements)
-    fn has_comma_outside_parens(&self, text: &str) -> bool {
-        let mut paren_depth = 0;
-        for ch in text.chars() {
-            match ch {
-                '(' => paren_depth += 1,
-                ')' => paren_depth -= 1,
-                ',' if paren_depth == 0 => return true,
-                _ => {}
-            }
-        }
-        false
-    }
+
 
     /// Filter assert statements to only include those relevant to a specific source
     /// This implements batch-aware filtering that considers statement dependencies
@@ -1666,12 +1588,12 @@ mod tests {
         println!("🧪 TEST: Filtered pool populated");
         
         // Test that assert queries are properly detected
-        assert!(pool.is_assert_query("assert_link_and_triple(\"user1\", \"likes\", \"item1\", \"123\", \"author1\")."));
-        assert!(pool.is_assert_query("assert(triple(\"a\", \"b\", \"c\"))."));
-        assert!(!pool.is_assert_query("triple(\"a\", \"b\", \"c\")."));
+        assert!(assert_utils::is_assert_query("assert_link_and_triple(\"user1\", \"likes\", \"item1\", \"123\", \"author1\")."));
+        assert!(assert_utils::is_assert_query("assert(triple(\"a\", \"b\", \"c\"))."));
+        assert!(!assert_utils::is_assert_query("triple(\"a\", \"b\", \"c\")."));
 
         // Test assert statement extraction
-        let statements = pool.extract_assert_statements("assert_link_and_triple(\"user1\", \"likes\", \"item1\", \"123\", \"author1\"),assert_link_and_triple(\"user2\", \"likes\", \"item2\", \"124\", \"author2\").");
+        let statements = assert_utils::extract_assert_statements("assert_link_and_triple(\"user1\", \"likes\", \"item1\", \"123\", \"author1\"),assert_link_and_triple(\"user2\", \"likes\", \"item2\", \"124\", \"author2\").");
         assert_eq!(statements.len(), 2);
         assert!(statements[0].contains("user1"));
         assert!(statements[1].contains("user2"));
