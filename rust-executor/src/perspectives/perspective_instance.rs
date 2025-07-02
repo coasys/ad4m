@@ -1964,72 +1964,78 @@ impl PerspectiveInstance {
                             prop, prop_start.elapsed());
 
                         // Compare predicates between setter and constructor commands
-                        let setter_predicates: std::collections::HashSet<String> = setter_commands
-                            .iter()
-                            .filter_map(|cmd| cmd.predicate.clone())
-                            .collect();
-
-                        let constructor_predicates: std::collections::HashSet<String> = commands
-                            .iter()
-                            .filter_map(|cmd| cmd.predicate.clone())
-                            .collect();
-
-                        let has_overlap = setter_predicates
-                            .intersection(&constructor_predicates)
-                            .next()
-                            .is_some();
-
-                        if has_overlap {
-                            // Merge setter commands with constructor commands
-                            for setter_command in setter_commands {
-                                let mut merged_command = setter_command;
-                                merged_command.source = merged_command.source.map(|s| {
-                                    if s == "this" {
-                                        expression_address.clone()
-                                    } else {
-                                        s
+                        for setter_cmd in setter_commands.iter() {
+                            let mut overwritten = false;
+                            if let Some(setter_pred) = &setter_cmd.predicate {
+                                for cmd in commands.iter_mut() {
+                                    if let Some(pred) = &cmd.predicate {
+                                        if pred == setter_pred {
+                                            cmd.target = Some(target_value.clone());
+                                            overwritten = true;
+                                            break;
+                                        }
                                     }
-                                });
-                                merged_command.target = merged_command.target.map(|t| {
-                                    if t == "value" {
-                                        target_value.clone()
-                                    } else {
-                                        t
-                                    }
-                                });
-
-                                // Check if we need to replace or append this command
-                                if let Some(existing_index) = commands.iter().position(|cmd| {
-                                    cmd.predicate == merged_command.predicate
-                                        && cmd.source == merged_command.source
-                                }) {
-                                    commands[existing_index] = merged_command;
-                                } else {
-                                    commands.push(merged_command);
                                 }
                             }
-                        } else {
-                            // No overlap, just add setter commands
-                            commands.extend(setter_commands);
+                            if !overwritten {
+                                commands.push(Command {
+                                    target: Some(target_value.clone()),
+                                    ..setter_cmd.clone()
+                                });
+                            }
                         }
-                    } else {
-                        log::info!("🎯 CREATE SUBJECT: No setter found for property '{}' in {:?}", 
-                            prop, prop_start.elapsed());
                     }
                 }
             }
-            
-            log::info!("🎯 CREATE SUBJECT: Initial values processing took {:?}", initial_values_start.elapsed());
         }
 
         let execute_start = std::time::Instant::now();
         log::info!("🎯 CREATE SUBJECT: Executing {} commands...", commands.len());
-        
-        self.execute_commands(commands, expression_address, vec![], batch_id)
-            .await?;
-        
+        // Execute the merged commands
+        self.execute_commands(
+            commands,
+            expression_address.clone(),
+            vec![],
+            batch_id.clone(),
+        )
+        .await?;
+    
         log::info!("🎯 CREATE SUBJECT: Commands executed in {:?}", execute_start.elapsed());
         log::info!("🎯 CREATE SUBJECT: Total create_subject took {:?}", create_start.elapsed());
+
+        if batch_id.is_some() {
+            return Ok(());
+        }
+
+        // Verify instance was created successfully
+        let mut tries = 0;
+        let mut instance_check_passed = false;
+        while !instance_check_passed && tries < 50 {
+            match self
+                .prolog_query(format!(
+                    "subject_class(\"{}\", C), instance(C, \"{}\").",
+                    class_name, expression_address
+                ))
+                .await
+            {
+                Ok(QueryResolution::True) => instance_check_passed = true,
+                Ok(QueryResolution::Matches(_)) => instance_check_passed = true,
+                Err(e) => log::warn!("Error trying to check instance after create_subject: {}", e),
+                Ok(_) => {} //log::info!("create_subject instance query returned: {:?}", r),
+            }
+            sleep(Duration::from_millis(10)).await;
+            tries += 1;
+        }
+
+        if instance_check_passed {
+            // log::info!(
+            //     "Subject class \"{}\" successfully instantiated around \"{}\".",
+            //     class_name,
+            //     expression_address
+            // );
+        } else {
+            log::warn!("create_subject: instance check still false after running constructor and waiting 5s. Something seems off with subject class: {}", class_name);
+        }
 
         Ok(())
     }
