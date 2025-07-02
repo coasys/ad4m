@@ -3,6 +3,8 @@ use super::engine::PrologEngine;
 use super::types::{QueryResolution, QueryResult};
 use super::assert_utils;
 use super::source_filtering;
+use super::filtered_pool::FilteredPrologPool;
+use super::pool_trait::{PrologPool, EngineStateManager, EnginePoolState, PoolUtils};
 use crate::perspectives::sdna::{get_static_infrastructure_facts, get_sdna_facts, get_data_facts};
 use crate::types::DecoratedLinkExpression;
 use deno_core::anyhow::{anyhow, Error};
@@ -11,7 +13,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use scryer_prolog::Term;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -20,61 +22,108 @@ pub const EMBEDDING_LANGUAGE_HASH: &str = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg
 
 lazy_static! {
     // Match embedding vector URLs inside string literals (both single and double quotes)
-    static ref EMBEDDING_URL_RE: Regex = Regex::new(format!(r#"['"]({}://[^'"]*)['"]"#, EMBEDDING_LANGUAGE_HASH).as_str()).unwrap();
+    pub static ref EMBEDDING_URL_RE: Regex = Regex::new(format!(r#"['"]({}://[^'"]*)['"]"#, EMBEDDING_LANGUAGE_HASH).as_str()).unwrap();
 }
 
-#[derive(Clone, Debug)]
-pub enum EnginePoolType {
-    Complete,
-    FilteredBySource(String),
+
+
+/// Complete Prolog Engine Pool
+/// 
+/// This is the main pool type that contains all Prolog engines with complete data.
+/// Complete pools are responsible for:
+/// 
+/// 1. **Full Data Management**: Storing and querying all available facts and rules
+/// 2. **Filtered Pool Creation**: Creating and managing filtered sub-pools for specific sources  
+/// 3. **Query Routing**: Routing subscription queries to appropriate filtered pools
+/// 4. **Assert Propagation**: Propagating assert operations to relevant filtered pools
+/// 5. **Reachability Analysis**: Computing filtered data sets using reachability queries
+/// 
+/// ## Architecture
+/// - Contains full dataset across multiple Prolog engines for parallelism and fault tolerance
+/// - Manages a collection of filtered pools for performance optimization
+/// - Handles embedding URL transformations for vector operations
+/// - Provides smart query routing based on query patterns
+#[derive(Clone)]
+pub struct PrologEnginePool {
+    /// Combined lock for engines and current state to prevent deadlocks
+    engine_state: Arc<RwLock<EnginePoolState>>,
+    
+    /// Round-robin index for engine selection
+    next_engine: Arc<AtomicUsize>,
+    
+    /// Shared embedding cache for URL replacements
+    embedding_cache: Arc<RwLock<EmbeddingCache>>,
+    
+    /// Collection of filtered pools created by this complete pool
+    /// Each filtered pool contains only data reachable from its specific source filter
+    filtered_pools: Arc<RwLock<HashMap<String, FilteredPrologPool>>>,
 }
 
-/// Combined state structure to prevent lock ordering deadlocks
-struct EngineState {
-    engines: Vec<Option<PrologEngine>>,
-    current_facts: Option<Vec<String>>,
-    current_all_links: Option<Vec<DecoratedLinkExpression>>,
-    current_neighbourhood_author: Option<String>,
-}
-
-impl EngineState {
-    fn new(pool_size: usize) -> Self {
-        Self {
-            engines: Vec::with_capacity(pool_size),
-            current_facts: None,
-            current_all_links: None,
-            current_neighbourhood_author: None,
-        }
+impl EngineStateManager for PrologEnginePool {
+    fn engine_state(&self) -> &Arc<RwLock<EnginePoolState>> {
+        &self.engine_state
+    }
+    
+    fn next_engine(&self) -> &Arc<AtomicUsize> {
+        &self.next_engine
+    }
+    
+    fn embedding_cache(&self) -> &Arc<RwLock<EmbeddingCache>> {
+        &self.embedding_cache
+    }
+    
+    fn pool_name(&self) -> String {
+        "Complete Pool".to_string()
     }
 }
 
-#[derive(Clone)]
-pub struct PrologEnginePool {
-    // Combined lock for engines and current state to prevent deadlocks
-    engine_state: Arc<RwLock<EngineState>>,
-    next_engine: Arc<AtomicUsize>,
-    embedding_cache: Arc<RwLock<EmbeddingCache>>,
-    pool_type: EnginePoolType,
-    filtered_pools: Arc<RwLock<HashMap<String, PrologEnginePool>>>,
+impl PrologPool for PrologEnginePool {
+    async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
+        // Delegate to the existing implementation
+        self.run_query(query).await
+    }
+    
+    async fn run_query_all(&self, query: String) -> Result<(), Error> {
+        // Delegate to the existing implementation
+        self.run_query_all(query).await
+    }
+    
+    async fn initialize(&self, pool_size: usize) -> Result<(), Error> {
+        // Delegate to the existing implementation
+        self.initialize(pool_size).await
+    }
+    
+    async fn update_all_engines_with_facts(
+        &self,
+        module_name: String,
+        facts: Vec<String>,
+    ) -> Result<(), Error> {
+        // Delegate to the existing implementation
+        self.update_all_engines_with_facts(module_name, facts).await
+    }
+    
+    async fn _drop_all(&self) -> Result<(), Error> {
+        // Delegate to the existing implementation
+        self._drop_all().await
+    }
 }
 
 impl PrologEnginePool {
+    /// Create a new complete Prolog engine pool
+    /// 
+    /// This creates a complete pool that will contain all available data and can create
+    /// filtered sub-pools for performance optimization. 
+    /// 
+    /// ## Arguments
+    /// - `pool_size`: Number of Prolog engines to create (for parallelism and fault tolerance)
+    /// 
+    /// ## Note
+    /// You must call `initialize()` after creation to spawn the actual Prolog engine processes.
     pub fn new(pool_size: usize) -> Self {
         PrologEnginePool {
-            engine_state: Arc::new(RwLock::new(EngineState::new(pool_size))),
+            engine_state: Arc::new(RwLock::new(EnginePoolState::new(pool_size))),
             next_engine: Arc::new(AtomicUsize::new(0)),
             embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
-            pool_type: EnginePoolType::Complete,
-            filtered_pools: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    pub fn new_filtered(pool_size: usize, source_filter: String) -> Self {
-        PrologEnginePool {
-            engine_state: Arc::new(RwLock::new(EngineState::new(pool_size))),
-            next_engine: Arc::new(AtomicUsize::new(0)),
-            embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
-            pool_type: EnginePoolType::FilteredBySource(source_filter),
             filtered_pools: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -89,115 +138,22 @@ impl PrologEnginePool {
         Ok(())
     }
 
-    async fn replace_embedding_url(&self, query: String) -> String {
-        let mut cache = self.embedding_cache.write().await;
-        EMBEDDING_URL_RE
-            .replace_all(&query, |caps: &regex::Captures| {
-                let url = &caps[1];
-                let id = cache.get_or_create_id(url);
-                format!("\"{}\"", id)
-            })
-            .to_string()
-    }
 
-    async fn replace_embedding_url_in_value_recursively(&self, value: &mut Term) {
-        let cache = self.embedding_cache.read().await;
-        match value {
-            Term::String(s) => {
-                if let Some(url) = cache.get_vector_url(s) {
-                    *value = Term::String(url);
-                }
-            }
-            Term::Atom(s) => {
-                if let Some(url) = cache.get_vector_url(s) {
-                    *value = Term::Atom(url);
-                }
-            }
-            Term::List(list) => {
-                for item in list {
-                    Box::pin(self.replace_embedding_url_in_value_recursively(item)).await;
-                }
-            }
-            _ => {}
-        }
-    }
 
-    // Helper to preprocess program lines before loading into engines
-    async fn preprocess_program_lines(&self, lines: Vec<String>) -> Vec<String> {
-        let futures = lines.into_iter().map(|line| {
-            let line_clone = line.clone();
-            async move {
-                let new_line = self.replace_embedding_url(line_clone).await;
-                new_line
-            }
-        });
-        join_all(futures).await.into_iter().collect()
-    }
 
-    async fn handle_engine_error(
-        &self,
-        engine_idx: usize,
-        error: impl std::fmt::Display,
-        query: &str,
-    ) -> Result<QueryResult, Error> {
-        log::error!("Prolog engine error: {}", error);
-        log::error!("when running query: {}", query);
-        let mut engines = self.engine_state.write().await;
-        engines.engines[engine_idx] = None;
-        Err(anyhow!("Engine failed and was invalidated: {}", error))
-    }
 
     pub async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
         let (result, engine_idx) = {
             let engines = self.engine_state.read().await;
-
-            // Get a vec with all non-None (invalidated) engines
-            let valid_engines: Vec<_> = engines
-                .engines
-                .iter()
-                .enumerate()
-                .filter_map(|(i, e)| e.as_ref().map(|engine| (i, engine)))
-                .collect();
-            if valid_engines.is_empty() {
-                log::error!("No valid Prolog engines available");
-                return Err(anyhow!("No valid Prolog engines available"));
-            }
-
-            // Round-robin selection of engine
-            let current = self.next_engine.fetch_add(1, Ordering::SeqCst);
-            let idx = current % valid_engines.len();
-            let (engine_idx, engine) = valid_engines[idx];
-
-            // Preprocess query to replace huge vector URLs with small cache IDs
-            let processed_query = self.replace_embedding_url(query.clone()).await;
-
-            // Run query
-            let result = engine.run_query(processed_query.clone()).await;
+            let (engine_idx, engine) = PoolUtils::select_engine_round_robin(&engines.engines, &self.next_engine)?;
+            let result = PoolUtils::execute_query_with_processing(query.clone(), engine, &self.embedding_cache).await;
             (result, engine_idx)
         };
 
-        let result = match result {
-            // Outer Result is an error -> engine panicked
-            Err(e) => self.handle_engine_error(engine_idx, e, &query).await,
-            // Inner Result is an error -> query failed
-            Ok(Err(e)) => Ok(Err(e)),
-            // Inner Result is a QueryResolution -> query succeeded
-            Ok(Ok(mut result)) => {
-                // Postprocess result to replace small cache IDs with huge vector URLs
-                // In-place and async/parallel processing of all values in all matches
-                if let QueryResolution::Matches(ref mut matches) = result {
-                    join_all(matches.iter_mut().map(|m| {
-                        join_all(m.bindings.iter_mut().map(|(_, value)| {
-                            self.replace_embedding_url_in_value_recursively(value)
-                        }))
-                    }))
-                    .await;
-                }
-                Ok(Ok(result))
-            }
-        };
-
-        result.map_err(|e| anyhow!("{}", e))
+        match result {
+            Ok(result) => Ok(result),
+            Err(e) => PoolUtils::handle_engine_error(&self.engine_state, engine_idx, e, &query, &self.pool_name()).await,
+        }
     }
 
     pub async fn run_query_all(&self, query: String) -> Result<(), Error> {
@@ -209,7 +165,7 @@ impl PrologEnginePool {
         }
 
         // Preprocess query once for all engines
-        let processed_query = self.replace_embedding_url(query.clone()).await;
+        let processed_query = PoolUtils::replace_embedding_url(query.clone(), &self.embedding_cache).await;
 
         let futures: Vec<_> = valid_engines
             .iter()
@@ -238,18 +194,18 @@ impl PrologEnginePool {
             ));
         }
 
-        // If this is a complete pool and the query contains assertions, also update filtered pools
-        log::info!("🔄 DEBUG: Checking assert query: pool_type={:?}, is_assert={}, query='{}'", 
-            self.pool_type, assert_utils::is_assert_query(&query), query);
+        // Since this is a complete pool, check if we need to update filtered pools for assert queries
+        log::info!("🔄 DEBUG: Checking assert query: is_assert={}, query='{}'", 
+            assert_utils::is_assert_query(&query), query);
         
-        if matches!(self.pool_type, EnginePoolType::Complete) && assert_utils::is_assert_query(&query) {
+        if assert_utils::is_assert_query(&query) {
             log::info!("🔄 INCREMENTAL UPDATE: Detected assert query on complete pool, updating filtered pools");
             if let Err(e) = self.update_filtered_pools_from_assert_query(&query).await {
                 log::info!("🔄 INCREMENTAL UPDATE: Failed to update filtered pools: {}", e);
                 // Don't fail the main query - just log the error
             }
         } else {
-            log::info!("🔄 DEBUG: Not updating filtered pools - either not complete pool or not assert query");
+            log::info!("🔄 DEBUG: Not updating filtered pools - not an assert query");
         }
 
         Ok(())
@@ -361,36 +317,18 @@ impl PrologEnginePool {
                 }
             }
     
-            // Determine what facts to load based on pool type
-            let facts_to_load: Vec<String> = match &self.pool_type {
-                EnginePoolType::Complete => {
-                    // For complete pools, use all facts
-                    let mut lines = get_static_infrastructure_facts();
-                    lines.extend(get_data_facts(&all_links));
-                    lines.extend(get_sdna_facts(&all_links, neighbourhood_author.clone())?);
-                    lines
-                }
-                EnginePoolType::FilteredBySource(source_filter) => {
-                    // For filtered pools, use static infrastructure + SDNA + filtered data
-                    let mut lines = get_static_infrastructure_facts();
-                    lines.extend(get_sdna_facts(&all_links, neighbourhood_author.clone())?);
-                    
-                    // Filter data facts by reachability from source
-                    let filtered_data = self.get_filtered_data_facts(source_filter, &all_links).await?;
-                    lines.extend(filtered_data);
-                    lines
-                }
-            };
+            // For complete pools, use all facts (infrastructure + data + SDNA)
+            let mut facts_to_load = get_static_infrastructure_facts();
+            facts_to_load.extend(get_data_facts(&all_links));
+            facts_to_load.extend(get_sdna_facts(&all_links, neighbourhood_author.clone())?);
     
-            // Store current state for reuse in filtered pools (only for complete pools)
-            if matches!(self.pool_type, EnginePoolType::Complete) {
-                engines.current_facts = Some(facts_to_load.clone());
-                engines.current_all_links = Some(all_links.clone());
-                engines.current_neighbourhood_author = neighbourhood_author.clone();
-            }
+            // Store current state for reuse in filtered pools
+            engines.current_facts = Some(facts_to_load.clone());
+            engines.current_all_links = Some(all_links.clone());
+            engines.current_neighbourhood_author = neighbourhood_author.clone();
     
-            // Preprocess the facts to handle embeddings
-            let processed_facts = self.preprocess_program_lines(facts_to_load.clone()).await;
+                    // Preprocess the facts to handle embeddings
+        let processed_facts = PoolUtils::preprocess_program_lines(facts_to_load.clone(), &self.embedding_cache).await;
     
             // Update all engines with facts
             let mut update_futures = Vec::new();
@@ -409,8 +347,8 @@ impl PrologEnginePool {
     
         }
 
-        // If this is a complete pool, also update any filtered sub-pools
-        if matches!(self.pool_type, EnginePoolType::Complete) {
+        // Update any filtered sub-pools managed by this complete pool
+        {
             let filtered_pools = self.filtered_pools.read().await;
             log::info!("📊 POOL UPDATE: Complete pool has {} filtered sub-pools to update", filtered_pools.len());
             let mut update_futures = Vec::new();
@@ -479,7 +417,7 @@ impl PrologEnginePool {
         }
 
         // Preprocess the facts
-        let processed_facts = self.preprocess_program_lines(facts).await;
+        let processed_facts = PoolUtils::preprocess_program_lines(facts, &self.embedding_cache).await;
 
         // Update all engines with the processed facts
         let mut update_futures = Vec::new();
@@ -558,10 +496,7 @@ impl PrologEnginePool {
     ) -> Result<(), Error> {
         log::info!("📊 DIRECT POPULATION: populate_filtered_pool_direct called for source: '{}'", source_filter);
         
-        // Only complete pools can populate filtered sub-pools
-        if !matches!(self.pool_type, EnginePoolType::Complete) {
-            return Err(anyhow!("Only complete pools can populate filtered sub-pools"));
-        }
+        // This method is only called on complete pools (by design)
 
         let filtered_pools = self.filtered_pools.read().await;
         let filtered_pool = filtered_pools.get(source_filter)
@@ -660,13 +595,17 @@ impl PrologEnginePool {
     }
 
     /// Get or create a filtered pool for subscription queries with the given source filter
-    /// Returns Ok(true) if a new pool was created, Ok(false) if it already existed
+    /// 
+    /// This creates a new `FilteredPrologPool` that points back to this complete pool for data access.
+    /// The filtered pool will contain only data reachable from the specified source filter.
+    /// 
+    /// ## Arguments  
+    /// - `source_filter`: The source node to filter by (e.g., "user123")
+    /// 
+    /// ## Returns
+    /// - `Ok(true)` if a new pool was created
+    /// - `Ok(false)` if the pool already existed
     pub async fn get_or_create_filtered_pool(&self, source_filter: String) -> Result<bool, Error> {
-        // Only complete pools can have filtered sub-pools
-        if !matches!(self.pool_type, EnginePoolType::Complete) {
-            return Err(anyhow!("Only complete pools can create filtered sub-pools"));
-        }
-
         let mut filtered_pools = self.filtered_pools.write().await;
         
         if filtered_pools.contains_key(&source_filter) {
@@ -677,7 +616,8 @@ impl PrologEnginePool {
         log::info!("📊 POOL CREATION: Creating new filtered pool for source: '{}'", source_filter);
 
         // Create new filtered pool with smaller size (2-3 engines should be enough for subscriptions)
-        let filtered_pool = PrologEnginePool::new_filtered(3, source_filter.clone());
+        // The filtered pool gets a reference back to this complete pool for data access
+        let filtered_pool = FilteredPrologPool::new(3, source_filter.clone(), Arc::new(self.clone()));
         filtered_pool.initialize(3).await?;
         
         // Insert the pool into the map
@@ -696,10 +636,7 @@ impl PrologEnginePool {
         log::info!("🔍 FILTERING: Starting get_filtered_data_facts for source: '{}'", source_filter);
         log::info!("🔍 FILTERING: Total links provided: {}", all_links.len());
         
-        // Only complete pools should call this method
-        if !matches!(self.pool_type, EnginePoolType::Complete) {
-            return Err(anyhow!("get_filtered_data_facts can only be called on complete pools"));
-        }
+        // This method is only called on complete pools (by design)
         
         // Use an existing engine from the complete pool - it already has all the data loaded!
         let engines = self.engine_state.read().await;
@@ -877,7 +814,7 @@ impl PrologEnginePool {
         log::debug!("🚀 QUERY ROUTING: is_subscription={}, query={}", is_subscription, query);
         
         // If this is a subscription query and we can extract a source filter, try to use a filtered pool
-        if is_subscription && matches!(self.pool_type, EnginePoolType::Complete) {
+        if is_subscription {
             if let Some(source_filter) = source_filtering::extract_source_filter(&query) {
                 log::info!("🚀 QUERY ROUTING: Routing subscription query to filtered pool for source: '{}'", source_filter);
                 
@@ -913,8 +850,7 @@ impl PrologEnginePool {
                 log::debug!("🚀 QUERY ROUTING: No source filter extracted from subscription query, using complete pool");
             }
         } else {
-            log::debug!("🚀 QUERY ROUTING: Using complete pool - is_subscription={}, pool_type={:?}", 
-                is_subscription, self.pool_type);
+            log::debug!("🚀 QUERY ROUTING: Using complete pool - is_subscription={}", is_subscription);
         }
         
         // Default to using this pool directly
@@ -929,8 +865,18 @@ impl PrologEnginePool {
 
 #[cfg(test)]
 mod tests {
+    //! Tests for Complete Prolog Engine Pool
+    //! 
+    //! These tests focus on:
+    //! - Basic complete pool functionality (initialization, query execution, engine management)
+    //! - Filtered pool creation and management by complete pools
+    //! - Assert query propagation from complete pools to filtered pools
+    //! - Smart query routing and subscription handling
+    //! - Integration scenarios that involve both complete and filtered pools
+    //! 
+    //! For tests of FilteredPrologPool functionality in isolation, see filtered_pool.rs tests.
+    
     use crate::agent::AgentService;
-
     use super::*;
     use chrono::Utc;
     use scryer_prolog::Term;
