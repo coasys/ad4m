@@ -537,61 +537,64 @@ impl PrologEnginePool {
         all_links: Vec<DecoratedLinkExpression>,
         neighbourhood_author: Option<String>,
     ) -> Result<(), Error> {
-        let mut engines = self.engine_state.write().await;
+        {
+            let mut engines = self.engine_state.write().await;
 
-        // Reinitialize any invalid engines
-        for engine_slot in engines.engines.iter_mut() {
-            if engine_slot.is_none() {
-                let mut new_engine = PrologEngine::new();
-                new_engine.spawn().await?;
-                *engine_slot = Some(new_engine);
+            // Reinitialize any invalid engines
+            for engine_slot in engines.engines.iter_mut() {
+                if engine_slot.is_none() {
+                    let mut new_engine = PrologEngine::new();
+                    new_engine.spawn().await?;
+                    *engine_slot = Some(new_engine);
+                }
             }
-        }
-
-        // Determine what facts to load based on pool type
-        let facts_to_load: Vec<String> = match &self.pool_type {
-            EnginePoolType::Complete => {
-                // For complete pools, use all facts
-                let mut lines = get_static_infrastructure_facts();
-                lines.extend(get_data_facts(&all_links));
-                lines.extend(get_sdna_facts(&all_links, neighbourhood_author.clone())?);
-                lines
+    
+            // Determine what facts to load based on pool type
+            let facts_to_load: Vec<String> = match &self.pool_type {
+                EnginePoolType::Complete => {
+                    // For complete pools, use all facts
+                    let mut lines = get_static_infrastructure_facts();
+                    lines.extend(get_data_facts(&all_links));
+                    lines.extend(get_sdna_facts(&all_links, neighbourhood_author.clone())?);
+                    lines
+                }
+                EnginePoolType::FilteredBySource(source_filter) => {
+                    // For filtered pools, use static infrastructure + SDNA + filtered data
+                    let mut lines = get_static_infrastructure_facts();
+                    lines.extend(get_sdna_facts(&all_links, neighbourhood_author.clone())?);
+                    
+                    // Filter data facts by reachability from source
+                    let filtered_data = self.get_filtered_data_facts(source_filter, &all_links).await?;
+                    lines.extend(filtered_data);
+                    lines
+                }
+            };
+    
+            // Store current state for reuse in filtered pools (only for complete pools)
+            if matches!(self.pool_type, EnginePoolType::Complete) {
+                engines.current_facts = Some(facts_to_load.clone());
+                engines.current_all_links = Some(all_links.clone());
+                engines.current_neighbourhood_author = neighbourhood_author.clone();
             }
-            EnginePoolType::FilteredBySource(source_filter) => {
-                // For filtered pools, use static infrastructure + SDNA + filtered data
-                let mut lines = get_static_infrastructure_facts();
-                lines.extend(get_sdna_facts(&all_links, neighbourhood_author.clone())?);
-                
-                // Filter data facts by reachability from source
-                let filtered_data = self.get_filtered_data_facts(source_filter, &all_links).await?;
-                lines.extend(filtered_data);
-                lines
+    
+            // Preprocess the facts to handle embeddings
+            let processed_facts = self.preprocess_program_lines(facts_to_load.clone()).await;
+    
+            // Update all engines with facts
+            let mut update_futures = Vec::new();
+            for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
+                let update_future =
+                    engine.load_module_string(module_name.clone(), processed_facts.clone());
+                update_futures.push(update_future);
             }
-        };
-
-        // Store current state for reuse in filtered pools (only for complete pools)
-        if matches!(self.pool_type, EnginePoolType::Complete) {
-            engines.current_facts = Some(facts_to_load.clone());
-            engines.current_all_links = Some(all_links.clone());
-            engines.current_neighbourhood_author = neighbourhood_author.clone();
-        }
-
-        // Preprocess the facts to handle embeddings
-        let processed_facts = self.preprocess_program_lines(facts_to_load.clone()).await;
-
-        // Update all engines with facts
-        let mut update_futures = Vec::new();
-        for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
-            let update_future =
-                engine.load_module_string(module_name.clone(), processed_facts.clone());
-            update_futures.push(update_future);
-        }
-
-        let results = join_all(update_futures).await;
-        for (i, result) in results.into_iter().enumerate() {
-            if let Err(e) = result {
-                log::error!("Failed to update Prolog engine {}: {}", i, e);
+    
+            let results = join_all(update_futures).await;
+            for (i, result) in results.into_iter().enumerate() {
+                if let Err(e) = result {
+                    log::error!("Failed to update Prolog engine {}: {}", i, e);
+                }
             }
+    
         }
 
         // If this is a complete pool, also update any filtered sub-pools
