@@ -46,6 +46,10 @@ static IMMEDIATE_COMMITS_COUNT: usize = 20;
 static QUERY_SUBSCRIPTION_TIMEOUT: u64 = 300; // 5 minutes in seconds
 static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
 
+fn notification_pool_name(uuid: &str) -> String {
+    format!("notification_{}", uuid)
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub enum SdnaType {
     SubjectClass,
@@ -373,21 +377,36 @@ impl PerspectiveInstance {
     }
 
     async fn notification_check_loop(&self) {
+        log::debug!("Starting notification check loop for perspective {}", self.persisted.lock().await.uuid);
         let uuid = self.persisted.lock().await.uuid.clone();
         let mut interval = time::interval(Duration::from_secs(5));
         let mut before = self.notification_trigger_snapshot().await;
         while !*self.is_teardown.lock().await {
             interval.tick().await;
             let changed = *(self.trigger_notification_check.lock().await);
+            
             if changed {
+                log::debug!("Notification check loop triggered for perspective {}", uuid);
+                let start = std::time::Instant::now();
+                *(self.trigger_notification_check.lock().await) = false;
+                let snapshot_start = std::time::Instant::now();
+
                 let after = self.notification_trigger_snapshot().await;
+                let snapshot_duration = snapshot_start.elapsed();
+                log::debug!("Notification trigger snapshot took {:?} - for perspective {}", snapshot_duration, uuid);
+
+                let diff_start = std::time::Instant::now();
                 let new_matches = Self::subtract_before_notification_matches(&before, &after);
+                let diff_duration = diff_start.elapsed();
+                log::debug!("Computing notification diff took {:?} - for perspective {}", diff_duration, uuid);
+
                 tokio::spawn(Self::publish_notification_matches(
                     uuid.clone(),
                     new_matches,
                 ));
                 before = after;
-                *(self.trigger_notification_check.lock().await) = false;
+                let total_duration = start.elapsed();
+                log::debug!("Total notification check iteration took {:?} - for perspective {}", total_duration, uuid);
             }
         }
     }
@@ -1200,11 +1219,7 @@ impl PerspectiveInstance {
         let service = get_prolog_service().await;
         let uuid = self.persisted.lock().await.uuid.clone();
 
-        // Check if pool exists under the write lock
-        if !service.has_perspective_pool(uuid.clone()).await {
-            // Create and initialize new pool
-            service.ensure_perspective_pool(uuid.clone()).await?;
-
+        if !service.has_perspective_pool(uuid.clone()).await || !service.has_perspective_pool(notification_pool_name(&uuid)).await {
             // Initialize with links for optimized filtering
             let all_links = self.get_links(&LinkQuery::default()).await?;
             let neighbourhood_author = self.persisted
@@ -1214,9 +1229,24 @@ impl PerspectiveInstance {
                 .as_ref()
                 .map(|n| n.author.clone());
                 
-            service
-                .update_perspective_links(uuid, "facts".to_string(), all_links, neighbourhood_author)
-                .await?;
+            // Check if pool exists under the write lock
+            if !service.has_perspective_pool(uuid.clone()).await {
+                // Create and initialize new pool
+                service.ensure_perspective_pool(uuid.clone()).await?;                
+                service
+                    .update_perspective_links(uuid.clone(), "facts".to_string(), all_links.clone(), neighbourhood_author.clone())
+                    .await?;
+            }
+
+            let notification_pool = format!("notification_{}", uuid);
+
+            if !service.has_perspective_pool(notification_pool.clone()).await {
+                // Create and initialize new pool
+                service.ensure_perspective_pool(notification_pool.clone()).await?;                
+                service
+                    .update_perspective_links(notification_pool, "facts".to_string(), all_links, neighbourhood_author)
+                    .await?;
+            }
         }
 
         Ok(())
@@ -1348,6 +1378,45 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
+    pub async fn prolog_query_notification(&self, query: String) -> Result<QueryResolution, AnyError> {
+        let prolog_start = std::time::Instant::now();
+        log::info!("🔔 NOTIFICATIONS PROLOG QUERY: Starting query: {} (chars: {})", 
+            query.chars().take(100).collect::<String>(), query.len());
+        
+        self.ensure_prolog_engine_pool().await?;
+
+        let uuid = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
+
+        let service = get_prolog_service().await;
+
+        let query = if !query.ends_with('.') {
+            query + "."
+        } else {
+            query
+        };
+        
+        // ⚠️ CRITICAL: This might be blocked waiting for prolog_update_mutex!
+        let query_start = std::time::Instant::now();
+        log::info!("🔔 NOTIFICATIONS PROLOG QUERY: About to execute query...");
+        
+        let result = service.run_query_smart(notification_pool_name(&uuid), query.clone()).await?;
+        
+        log::info!("🔔 NOTIFICATIONS PROLOG QUERY: Query executed in {:?} (total: {:?})", 
+            query_start.elapsed(), prolog_start.elapsed());
+        
+        match result {
+            Err(e) => {
+                // Engine error is handled at pool level now
+                Err(anyhow!(e))
+            }
+            Ok(resolution) => Ok(resolution),
+        }
+    }
+
     fn spawn_prolog_facts_update(
         &self,
         diff: DecoratedPerspectiveDiff,
@@ -1409,7 +1478,8 @@ impl PerspectiveInstance {
                 let query_start = std::time::Instant::now();
                 let query = format!("{}.", assertions.join(","));
                 log::info!("🔧 PROLOG UPDATE: Running assertion query: {} chars", query.len());
-                
+
+                let _ = service.run_query_all(notification_pool_name(&uuid), query.clone()).await;
                 match service.run_query_all(uuid, query).await {
                     Ok(()) => {
                         log::info!("🔧 PROLOG UPDATE: Assertion query completed successfully in {:?}", query_start.elapsed());
@@ -1480,10 +1550,11 @@ impl PerspectiveInstance {
             persisted_guard.uuid.clone()
         };
 
-        let notifications = Self::all_notifications_for_perspective_id(uuid)?;
+        let notifications = Self::all_notifications_for_perspective_id(uuid.clone())?;
+        log::info!("🔔 NOTIFICATIONS: Found {} notifications for perspective {}", notifications.len(), uuid);
         let mut result_map = BTreeMap::new();
         for n in notifications {
-            if let QueryResolution::Matches(matches) = self.prolog_query(n.trigger.clone()).await? {
+            if let QueryResolution::Matches(matches) = self.prolog_query_notification(n.trigger.clone()).await? {
                 result_map.insert(n.clone(), matches);
             }
         }
@@ -1580,7 +1651,10 @@ impl PerspectiveInstance {
 
         let service = get_prolog_service().await;
         service
-            .update_perspective_links(uuid, "facts".to_string(), all_links, neighbourhood_author)
+            .update_perspective_links(uuid.clone(), "facts".to_string(), all_links.clone(), neighbourhood_author.clone())
+            .await?;
+        service
+            .update_perspective_links(notification_pool_name(&uuid), "facts".to_string(), all_links, neighbourhood_author)
             .await?;
         Ok(())
     }
