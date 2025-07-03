@@ -51,8 +51,6 @@ pub struct SdnaPrologPool {
     /// Shared embedding cache for URL replacements
     embedding_cache: Arc<RwLock<EmbeddingCache>>,
     
-    /// Reference back to the complete pool for coordination
-    complete_pool: Arc<super::engine_pool::PrologEnginePool>,
 }
 
 impl FilteredPool for SdnaPrologPool {
@@ -220,15 +218,11 @@ impl SdnaPrologPool {
     /// ## Note
     /// This only creates the structure - you must call `initialize()` to spawn the engines
     /// and then populate it with SDNA data.
-    pub fn new(
-        pool_size: usize, 
-        complete_pool: Arc<super::engine_pool::PrologEnginePool>
-    ) -> Self {
+    pub fn new(pool_size: usize) -> Self {
         Self {
             engine_state: Arc::new(RwLock::new(EnginePoolState::new(pool_size))),
             next_engine: Arc::new(AtomicUsize::new(0)),
             embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
-            complete_pool,
         }
     }
     

@@ -123,7 +123,7 @@ impl PrologEnginePool {
         drop(engines);
         
         // Always create and initialize the SDNA pool
-        let sdna_pool = SdnaPrologPool::new(2, Arc::new(self.clone()));
+        let sdna_pool = SdnaPrologPool::new(2);
         sdna_pool.initialize(DEFAULT_POOL_SIZE).await?;
         
         let mut sdna_pool_guard = self.sdna_pool.write().await;
