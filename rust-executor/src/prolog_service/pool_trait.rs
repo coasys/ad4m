@@ -27,9 +27,6 @@ use crate::types::DecoratedLinkExpression;
 /// - **Delegation**: Complete pools delegate to filtered pools rather than managing them
 /// - **Extensibility**: Easy to add new filtered pool types by implementing this trait
 pub trait FilteredPool: Send + Sync {
-    /// Get the filter identifier for this pool (e.g., "user123", "after:2023-01-01")
-    fn filter_id(&self) -> String;
-    
     /// Get a human-readable description of this pool type and filter
     fn pool_description(&self) -> String;
     

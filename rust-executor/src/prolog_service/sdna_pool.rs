@@ -54,10 +54,6 @@ pub struct SdnaPrologPool {
 }
 
 impl FilteredPool for SdnaPrologPool {
-    fn filter_id(&self) -> String {
-        "SDNA_ONLY".to_string()
-    }
-    
     fn pool_description(&self) -> String {
         "SDNA-only pool for subject class queries".to_string()
     }

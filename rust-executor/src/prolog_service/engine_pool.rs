@@ -393,6 +393,17 @@ impl PrologEnginePool {
         for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
             engine._drop()?;
         }
+        // Drop all filtered pools
+        let filtered_pools = self.filtered_pools.read().await;
+        for pool in filtered_pools.values() {
+            pool.drop_all().await?;
+        }
+
+        // Drop SDNA pool
+        let sdna_pool_guard = self.sdna_pool.read().await;
+        if let Some(ref sdna_pool) = *sdna_pool_guard {
+            sdna_pool.drop_all().await?;
+        }
         Ok(())
     }
 

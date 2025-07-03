@@ -66,10 +66,6 @@ pub struct FilteredPrologPool {
 
 
 impl FilteredPool for FilteredPrologPool {
-    fn filter_id(&self) -> String {
-        self.source_filter.clone()
-    }
-    
     fn pool_description(&self) -> String {
         format!("Source-filtered pool for '{}'", self.source_filter)
     }
@@ -277,12 +273,6 @@ impl FilteredPrologPool {
             complete_pool,
         }
     }
-    
-    /// Get the source filter this pool represents
-    pub fn source_filter(&self) -> &str {
-        &self.source_filter
-    }
-    
     
     /// Create filtered facts for this specific source filter
     async fn create_filtered_facts(

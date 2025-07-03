@@ -66,7 +66,8 @@ impl PrologService {
         Ok(())
     }
 
-    pub async fn run_query(
+    // Currently always using smart query
+    pub async fn _run_query(
         &self,
         perspective_id: String,
         query: String,
