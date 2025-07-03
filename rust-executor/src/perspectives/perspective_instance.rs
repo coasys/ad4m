@@ -1558,10 +1558,30 @@ impl PerspectiveInstance {
 
         let notifications = Self::all_notifications_for_perspective_id(uuid.clone())?;
         log::info!("🔔 NOTIFICATIONS: Found {} notifications for perspective {}", notifications.len(), uuid);
+
+        log::info!("🔔 NOTIFICATIONS: All triggers:\n{}", notifications.iter()
+            .map(|n| n.trigger.clone())
+            .collect::<Vec<String>>()
+            .join("\n"));
         let mut result_map = BTreeMap::new();
+        let mut trigger_cache: HashMap<String, Vec<QueryMatch>>  = HashMap::new();
+
         for n in notifications {
-            if let QueryResolution::Matches(matches) = self.prolog_query_notification(n.trigger.clone()).await? {
+            log::info!("🔔 NOTIFICATIONS: Processing notification for perspective {}: {}", uuid, n.trigger);
+            if let Some(cached_matches) = trigger_cache.get(&n.trigger) {
+                log::info!("🔔 NOTIFICATIONS: Using cached matches for notification for perspective {}: {}", uuid, n.trigger);
+                result_map.insert(n.clone(), cached_matches.clone());
+            } else {
+                let query_start = std::time::Instant::now();
+                log::info!("🔔 NOTIFICATIONS: not cached - Querying notification for perspective {}", uuid);
+                let query_result = self.prolog_query_notification(n.trigger.clone()).await?;
+                let matches = match query_result {
+                    QueryResolution::Matches(matches) => matches,
+                    _ => Vec::new(), // For True/False results, use empty matches
+                };
+                trigger_cache.insert(n.trigger.clone(), matches.clone());
                 result_map.insert(n.clone(), matches);
+                log::info!("🔔 NOTIFICATIONS: Querying notification: {} - took {:?}", n.trigger, query_start.elapsed());
             }
         }
 
