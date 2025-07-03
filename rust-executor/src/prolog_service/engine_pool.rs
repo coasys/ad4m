@@ -94,6 +94,25 @@ impl PrologEnginePool {
         &self.engine_state
     }
 
+    /// Run a query directly on the SDNA pool (bypassing smart routing)
+    /// 
+    /// This method directly calls the SDNA pool for maximum performance when you know
+    /// the query should be handled by the SDNA pool. It avoids all routing logic and locks.
+    /// 
+    /// ## Use Cases
+    /// - Subject class queries during create_subject flow
+    /// - Constructor/setter/collection action queries
+    /// - Any query that only needs SDNA + infrastructure facts
+    pub async fn run_query_sdna(&self, query: String) -> Result<QueryResult, Error> {
+        let sdna_pool_guard = self.sdna_pool.read().await;
+        if let Some(ref sdna_pool) = *sdna_pool_guard {
+            log::debug!("🎯 DIRECT SDNA: Running query directly on SDNA pool: {}", query);
+            sdna_pool.run_query(query).await
+        } else {
+            Err(anyhow!("SDNA pool not available - this should not happen"))
+        }
+    }
+
     pub async fn initialize(&self, pool_size: usize) -> Result<(), Error> {
         let mut engines = self.engine_state.write().await;
         for _ in 0..pool_size {
@@ -1818,6 +1837,29 @@ mod tests {
         println!("✅ SDNA queries correctly get detected for SDNA pool routing");
         println!("✅ Non-SDNA queries correctly avoid SDNA pool");
         println!("✅ Smart routing behavior verified with actual data differences");
+    }
+
+    #[tokio::test]
+    async fn test_direct_sdna_pool_access() {
+        AgentService::init_global_test_instance();
+        let pool = PrologEnginePool::new(2);
+        pool.initialize(2).await.unwrap();
+
+        // Test direct SDNA pool access method
+        let direct_query = "subject(Class, Properties, Methods).";
+        let result = pool.run_query_sdna(direct_query.to_string()).await;
+        assert!(result.is_ok(), "Direct SDNA pool access should work");
+        
+        // Verify it matches what smart routing would do for SDNA queries
+        let smart_result = pool.run_query_smart(direct_query.to_string(), false).await;
+        assert!(smart_result.is_ok(), "Smart routing should also work for SDNA queries");
+        
+        // Both should return the same result (likely False since no SDNA data loaded)
+        assert_eq!(result.unwrap(), smart_result.unwrap(), "Direct and smart routing should return same result");
+        
+        println!("✅ Direct SDNA pool access test passed!");
+        println!("✅ run_query_sdna() method works correctly");
+        println!("✅ Direct access matches smart routing results");
     }
 
     #[tokio::test]

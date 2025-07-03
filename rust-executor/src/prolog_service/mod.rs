@@ -83,6 +83,27 @@ impl PrologService {
         pool.run_query(query).await
     }
 
+    /// Run query directly on the SDNA pool for maximum performance
+    /// 
+    /// This bypasses all smart routing logic and goes directly to the SDNA pool.
+    /// Use this for subject class queries during create_subject flow for best performance.
+    pub async fn run_query_sdna(
+        &self,
+        perspective_id: String,
+        query: String,
+    ) -> Result<QueryResult, Error> {
+        // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
+        let pool = {
+            let pools = self.engine_pools.read().await;
+            pools
+                .get(&perspective_id)
+                .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
+                .clone() // Clone the Arc<> to release the lock
+        }; // Read lock is released here
+        
+        pool.run_query_sdna(query).await
+    }
+
     /// Run query with subscription optimization - uses filtered pools for subscription queries
     pub async fn run_query_smart(
         &self,

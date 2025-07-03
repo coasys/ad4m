@@ -1300,6 +1300,54 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Executes a Prolog query directly on the SDNA pool for maximum performance
+    /// 
+    /// This bypasses all smart routing logic and goes directly to the SDNA pool.
+    /// Use this for subject class queries during create_subject flow for best performance.
+    /// Only use this for queries that you KNOW should be handled by the SDNA pool.
+    pub async fn prolog_query_sdna(&self, query: String) -> Result<QueryResolution, AnyError> {
+        let prolog_start = std::time::Instant::now();
+        log::info!("🎯 DIRECT SDNA QUERY: Starting query: {} (chars: {})", 
+            query.chars().take(100).collect::<String>(), query.len());
+        
+        let ensure_start = std::time::Instant::now();
+        self.ensure_prolog_engine_pool().await?;
+        log::info!("🎯 DIRECT SDNA QUERY: Engine pool ensured in {:?}", ensure_start.elapsed());
+
+        let uuid_start = std::time::Instant::now();
+        let uuid = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
+        log::info!("🎯 DIRECT SDNA QUERY: UUID retrieved in {:?}", uuid_start.elapsed());
+
+        let service_start = std::time::Instant::now();
+        let service = get_prolog_service().await;
+        log::info!("🎯 DIRECT SDNA QUERY: Service retrieved in {:?}", service_start.elapsed());
+
+        let query = if !query.ends_with('.') {
+            query + "."
+        } else {
+            query
+        };
+        
+        let query_start = std::time::Instant::now();
+        log::info!("🎯 DIRECT SDNA QUERY: About to execute query directly on SDNA pool...");
+        
+        let result = service.run_query_sdna(uuid, query.clone()).await?;
+        
+        log::info!("🎯 DIRECT SDNA QUERY: Query executed in {:?} (total: {:?})", 
+            query_start.elapsed(), prolog_start.elapsed());
+        
+        match result {
+            Err(e) => {
+                // Engine error is handled at pool level now
+                Err(anyhow!(e))
+            }
+            Ok(resolution) => Ok(resolution),
+        }
+    }
+
     fn spawn_prolog_facts_update(
         &self,
         diff: DecoratedPerspectiveDiff,
@@ -1807,7 +1855,7 @@ impl PerspectiveInstance {
             log::info!("🔍 SUBJECT CLASS: Running prolog query to resolve class name: {}", query);
             let query_start = std::time::Instant::now();
             
-            let result = self.prolog_query(query.to_string()).await.map_err(|e| {
+            let result = self.prolog_query_sdna(query.to_string()).await.map_err(|e| {
                 log::error!("Error creating subject: {:?}", e);
                 e
             })?;
@@ -1828,7 +1876,7 @@ impl PerspectiveInstance {
         &self,
         query: String,
     ) -> Result<Option<Vec<Command>>, AnyError> {
-        let result = self.prolog_query(query).await?;
+        let result = self.prolog_query_sdna(query).await?;
 
         if let Some(actions_str) = prolog_get_first_string_binding(&result, "Actions") {
             // json5 seems to have a bug, blocking when a property is set to undefined
