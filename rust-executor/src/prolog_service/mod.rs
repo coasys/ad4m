@@ -1,17 +1,17 @@
+use crate::types::DecoratedLinkExpression;
 use deno_core::anyhow::Error;
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::types::DecoratedLinkExpression;
 
+pub mod assert_utils;
 mod embedding_cache;
 pub(crate) mod engine;
-pub mod pool_trait;
 pub(crate) mod engine_pool;
 pub mod filtered_pool;
+pub mod pool_trait;
 pub mod sdna_pool;
-pub mod assert_utils;
 pub mod source_filtering;
 pub mod types;
 
@@ -32,7 +32,11 @@ impl PrologService {
         }
     }
 
-    pub async fn ensure_perspective_pool(&self, perspective_id: String, pool_size: Option<usize>) -> Result<(), Error> {
+    pub async fn ensure_perspective_pool(
+        &self,
+        perspective_id: String,
+        pool_size: Option<usize>,
+    ) -> Result<(), Error> {
         // ⚠️ DEADLOCK FIX: Use optimistic locking to avoid race conditions
         // First check with read lock (fast path)
         {
@@ -41,20 +45,21 @@ impl PrologService {
                 return Ok(()); // Pool already exists, nothing to do
             }
         }
-        
+
         // Pool doesn't exist, acquire write lock to create it
         let mut pools = self.engine_pools.write().await;
-        
+
         // Double-check pattern: another task might have created it while we waited for write lock
         if pools.contains_key(&perspective_id) {
             return Ok(()); // Someone else created it while we waited
         }
-        
+
         // Create and initialize the pool
         let pool = PrologEnginePool::new(pool_size.unwrap_or(DEFAULT_POOL_SIZE));
-        pool.initialize(pool_size.unwrap_or(pool_size.unwrap_or(DEFAULT_POOL_SIZE))).await?;
+        pool.initialize(pool_size.unwrap_or(pool_size.unwrap_or(DEFAULT_POOL_SIZE)))
+            .await?;
         pools.insert(perspective_id, pool);
-        
+
         Ok(())
     }
 
@@ -80,12 +85,12 @@ impl PrologService {
                 .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
                 .clone() // Clone the Arc<> to release the lock
         }; // Read lock is released here
-        
+
         pool.run_query(query).await
     }
 
     /// Run query directly on the SDNA pool for maximum performance
-    /// 
+    ///
     /// This bypasses all smart routing logic and goes directly to the SDNA pool.
     /// Use this for subject class queries during create_subject flow for best performance.
     pub async fn run_query_sdna(
@@ -101,7 +106,7 @@ impl PrologService {
                 .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
                 .clone() // Clone the Arc<> to release the lock
         }; // Read lock is released here
-        
+
         pool.run_query_sdna(query).await
     }
 
@@ -119,7 +124,7 @@ impl PrologService {
                 .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
                 .clone() // Clone the Arc<> to release the lock
         }; // Read lock is released here
-        
+
         // The smart routing and population is now handled entirely within the engine pool
         // This eliminates circular dependencies and potential deadlocks
         let result = pool.run_query_smart(query.clone(), true).await;
@@ -151,7 +156,7 @@ impl PrologService {
                 .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
                 .clone() // Clone the Arc<> to release the lock
         }; // Read lock is released here
-        
+
         // The smart routing and population is now handled entirely within the engine pool
         // This eliminates circular dependencies and potential deadlocks
         let result = pool.run_query_smart(query.clone(), true).await;
@@ -172,9 +177,12 @@ impl PrologService {
 
     pub async fn run_query_all(&self, perspective_id: String, query: String) -> Result<(), Error> {
         let service_start = std::time::Instant::now();
-        log::info!("⚡ PROLOG SERVICE: Starting run_query_all for perspective '{}' - query: {} chars", 
-            perspective_id, query.len());
-        
+        log::info!(
+            "⚡ PROLOG SERVICE: Starting run_query_all for perspective '{}' - query: {} chars",
+            perspective_id,
+            query.len()
+        );
+
         // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
         let pool = {
             let pool_lookup_start = std::time::Instant::now();
@@ -183,24 +191,34 @@ impl PrologService {
                 .get(&perspective_id)
                 .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
                 .clone(); // Clone the Arc<> to release the lock
-            log::info!("⚡ PROLOG SERVICE: Pool lookup took {:?}", pool_lookup_start.elapsed());
+            log::info!(
+                "⚡ PROLOG SERVICE: Pool lookup took {:?}",
+                pool_lookup_start.elapsed()
+            );
             pool
         }; // Read lock is released here
-        
+
         let query_execution_start = std::time::Instant::now();
         let result = pool.run_query_all(query).await;
-        
+
         match &result {
             Ok(()) => {
-                log::info!("⚡ PROLOG SERVICE: run_query_all completed successfully in {:?} (total: {:?})", 
-                    query_execution_start.elapsed(), service_start.elapsed());
+                log::info!(
+                    "⚡ PROLOG SERVICE: run_query_all completed successfully in {:?} (total: {:?})",
+                    query_execution_start.elapsed(),
+                    service_start.elapsed()
+                );
             }
             Err(e) => {
-                log::error!("⚡ PROLOG SERVICE: run_query_all failed after {:?} (total: {:?}): {}", 
-                    query_execution_start.elapsed(), service_start.elapsed(), e);
+                log::error!(
+                    "⚡ PROLOG SERVICE: run_query_all failed after {:?} (total: {:?}): {}",
+                    query_execution_start.elapsed(),
+                    service_start.elapsed(),
+                    e
+                );
             }
         }
-        
+
         result
     }
 
@@ -217,7 +235,7 @@ impl PrologService {
         let service_start = std::time::Instant::now();
         log::info!("🔗 PROLOG SERVICE: Starting update_perspective_links for perspective '{}' - {} links, module: {}", 
             perspective_id, all_links.len(), module_name);
-        
+
         // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
         let pool = {
             let pool_lookup_start = std::time::Instant::now();
@@ -226,13 +244,18 @@ impl PrologService {
                 .get(&perspective_id)
                 .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
                 .clone(); // Clone the Arc<> to release the lock
-            log::info!("🔗 PROLOG SERVICE: Pool lookup took {:?}", pool_lookup_start.elapsed());
+            log::info!(
+                "🔗 PROLOG SERVICE: Pool lookup took {:?}",
+                pool_lookup_start.elapsed()
+            );
             pool
         }; // Read lock is released here
-        
+
         let update_start = std::time::Instant::now();
-        let result = pool.update_all_engines_with_links(module_name, all_links, neighbourhood_author).await;
-        
+        let result = pool
+            .update_all_engines_with_links(module_name, all_links, neighbourhood_author)
+            .await;
+
         match &result {
             Ok(()) => {
                 log::info!("🔗 PROLOG SERVICE: update_perspective_links completed successfully in {:?} (total: {:?})", 
@@ -243,7 +266,7 @@ impl PrologService {
                     update_start.elapsed(), service_start.elapsed(), e);
             }
         }
-        
+
         result
     }
 
@@ -326,7 +349,12 @@ mod prolog_test {
 
         // Load facts into the pool using production method
         let load_facts = service
-            .update_perspective_links(perspective_id.clone(), "facts".to_string(), test_links, None)
+            .update_perspective_links(
+                perspective_id.clone(),
+                "facts".to_string(),
+                test_links,
+                None,
+            )
             .await;
         assert!(load_facts.is_ok());
 

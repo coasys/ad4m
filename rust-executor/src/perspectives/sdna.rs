@@ -125,13 +125,13 @@ pub fn get_static_infrastructure_facts() -> Vec<String> {
     // reachable/2 - Optimized version with visited tracking
     lines.push(":- discontiguous(reachable/2).".to_string());
     lines.push(":- discontiguous(reachable_visited/3).".to_string());
-    
+
     // Main reachable predicate - starts with empty visited list
     lines.push("reachable(A,B) :- reachable_visited(A,B,[]).".to_string());
-    
+
     // Base case: direct connection
     lines.push("reachable_visited(A,B,_) :- triple(A,_,B).".to_string());
-    
+
     // Recursive case: avoid cycles by checking visited list
     lines.push("reachable_visited(A,B,Visited) :- \\+ member(A,Visited), triple(A,_,X), reachable_visited(X,B,[A|Visited]).".to_string());
 
@@ -510,11 +510,8 @@ url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
 /// Get just the data facts (triple and link facts) from the links
 pub fn get_data_facts(links: &[DecoratedLinkExpression]) -> Vec<String> {
     let mut lines = Vec::new();
-    
-    let links_without_sdna: Vec<_> = links
-        .iter()
-        .filter(|l| !is_sdna_link(&l.data))
-        .collect();
+
+    let links_without_sdna: Vec<_> = links.iter().filter(|l| !is_sdna_link(&l.data)).collect();
 
     for link in &links_without_sdna {
         lines.push(format!("{}.", triple_fact(link)));
@@ -522,7 +519,7 @@ pub fn get_data_facts(links: &[DecoratedLinkExpression]) -> Vec<String> {
     for link in &links_without_sdna {
         lines.push(format!("{}.", link_fact(link)));
     }
-    
+
     lines
 }
 
@@ -610,10 +607,10 @@ pub async fn init_engine_facts(
     neighbourhood_author: Option<String>,
 ) -> Result<Vec<String>, AnyError> {
     let mut lines = get_static_infrastructure_facts();
-    
+
     // Add data facts
     lines.extend(get_data_facts(&all_links));
-    
+
     // Add SDNA facts
     lines.extend(get_sdna_facts(&all_links, neighbourhood_author)?);
 
