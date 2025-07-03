@@ -1479,7 +1479,13 @@ impl PerspectiveInstance {
                 let query = format!("{}.", assertions.join(","));
                 log::info!("🔧 PROLOG UPDATE: Running assertion query: {} chars", query.len());
 
-                let _ = service.run_query_all(notification_pool_name(&uuid), query.clone()).await;
+                let service_clone = service.clone();
+                let uuid_clone = uuid.clone();
+                let query_clone = query.clone();
+                tokio::spawn(async move {
+                    let _ =service_clone.run_query_all(notification_pool_name(&uuid_clone), query_clone).await;
+                });
+
                 match service.run_query_all(uuid, query).await {
                     Ok(()) => {
                         log::info!("🔧 PROLOG UPDATE: Assertion query completed successfully in {:?}", query_start.elapsed());
@@ -1653,9 +1659,12 @@ impl PerspectiveInstance {
         service
             .update_perspective_links(uuid.clone(), "facts".to_string(), all_links.clone(), neighbourhood_author.clone())
             .await?;
-        service
-            .update_perspective_links(notification_pool_name(&uuid), "facts".to_string(), all_links, neighbourhood_author)
-            .await?;
+        let service_clone = service.clone();
+        tokio::spawn(async move {
+            let _= service_clone
+                .update_perspective_links(notification_pool_name(&uuid), "facts".to_string(), all_links, neighbourhood_author)
+                .await;
+        });
         Ok(())
     }
 
