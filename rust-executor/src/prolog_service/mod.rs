@@ -32,7 +32,7 @@ impl PrologService {
         }
     }
 
-    pub async fn ensure_perspective_pool(&self, perspective_id: String) -> Result<(), Error> {
+    pub async fn ensure_perspective_pool(&self, perspective_id: String, pool_size: Option<usize>) -> Result<(), Error> {
         // ⚠️ DEADLOCK FIX: Use optimistic locking to avoid race conditions
         // First check with read lock (fast path)
         {
@@ -51,8 +51,8 @@ impl PrologService {
         }
         
         // Create and initialize the pool
-        let pool = PrologEnginePool::new(DEFAULT_POOL_SIZE);
-        pool.initialize(DEFAULT_POOL_SIZE).await?;
+        let pool = PrologEnginePool::new(pool_size.unwrap_or(DEFAULT_POOL_SIZE));
+        pool.initialize(pool_size.unwrap_or(pool_size.unwrap_or(DEFAULT_POOL_SIZE))).await?;
         pools.insert(perspective_id, pool);
         
         Ok(())

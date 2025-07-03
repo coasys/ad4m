@@ -1232,7 +1232,7 @@ impl PerspectiveInstance {
             // Check if pool exists under the write lock
             if !service.has_perspective_pool(uuid.clone()).await {
                 // Create and initialize new pool
-                service.ensure_perspective_pool(uuid.clone()).await?;                
+                service.ensure_perspective_pool(uuid.clone(), None).await?;                
                 service
                     .update_perspective_links(uuid.clone(), "facts".to_string(), all_links.clone(), neighbourhood_author.clone())
                     .await?;
@@ -1242,7 +1242,7 @@ impl PerspectiveInstance {
 
             if !service.has_perspective_pool(notification_pool.clone()).await {
                 // Create and initialize new pool
-                service.ensure_perspective_pool(notification_pool.clone()).await?;                
+                service.ensure_perspective_pool(notification_pool.clone(), Some(1)).await?;                
                 service
                     .update_perspective_links(notification_pool, "facts".to_string(), all_links, neighbourhood_author)
                     .await?;
