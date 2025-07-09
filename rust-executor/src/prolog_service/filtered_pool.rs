@@ -84,9 +84,7 @@ impl FilteredPool for FilteredPrologPool {
         );
 
         // Create filtered facts using our own filtering logic
-        let facts = self
-            .create_filtered_facts()
-            .await?;
+        let facts = self.create_filtered_facts().await?;
 
         // Update all engines with the filtered facts
 
@@ -114,8 +112,7 @@ impl FilteredPool for FilteredPrologPool {
         // Update all engines with the processed facts using references to avoid cloning
         let mut update_futures = Vec::new();
         for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
-            let update_future =
-                engine.load_module_string("facts", &processed_facts);
+            let update_future = engine.load_module_string("facts", &processed_facts);
             update_futures.push(update_future);
         }
 
@@ -331,13 +328,12 @@ impl FilteredPrologPool {
         // Always include infrastructure and SDNA facts - these should never be filtered
         let mut filtered_lines = get_static_infrastructure_facts();
         let sdna_facts = {
-                        // Use an existing engine from the complete pool - it already has all the data loaded!
+            // Use an existing engine from the complete pool - it already has all the data loaded!
             let complete_pool_state = self.complete_pool.engine_state().read().await;
             let all_links = complete_pool_state.current_all_links.as_ref().unwrap();
             let neighbourhood_author = complete_pool_state.current_neighbourhood_author.clone();
             get_sdna_facts(all_links, neighbourhood_author)?
         };
-         
 
         log::info!(
             "📊 FACT CREATION: Infrastructure facts: {}, SDNA facts: {}",
@@ -384,7 +380,6 @@ impl FilteredPrologPool {
             "🔍 FILTERING: Starting get_filtered_data_facts for source: '{}'",
             self.source_filter
         );
-        
 
         // Use an existing engine from the complete pool - it already has all the data loaded!
         let complete_engines = self.complete_pool.engine_state().read().await;

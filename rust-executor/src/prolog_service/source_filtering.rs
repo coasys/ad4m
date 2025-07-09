@@ -248,7 +248,6 @@ pub fn filter_facts_parallel_regex(all_facts: Vec<String>, regex: &regex::Regex)
             let mut local_result = Vec::new();
             let mut local_kept = 0;
             let mut local_dropped = 0;
-            
             for fact in chunk {
                 let is_relevant = regex.is_match(fact);
                 if is_relevant {
@@ -258,11 +257,11 @@ pub fn filter_facts_parallel_regex(all_facts: Vec<String>, regex: &regex::Regex)
                     local_dropped += 1;
                 }
             }
-            
+
             // Update global counters
             kept_count.fetch_add(local_kept, Ordering::Relaxed);
             dropped_count.fetch_add(local_dropped, Ordering::Relaxed);
-            
+
             // Batch logging to avoid performance hit in parallel
             {
                 let mut counter = debug_counter.lock().unwrap();
@@ -278,7 +277,7 @@ pub fn filter_facts_parallel_regex(all_facts: Vec<String>, regex: &regex::Regex)
                     );
                 }
             }
-            
+
             local_result
         })
         .collect();
@@ -368,7 +367,7 @@ pub fn filter_facts_parallel_chunked_regex(
             let mut local_result = Vec::new();
             let mut local_kept = 0;
             let mut local_dropped = 0;
-            
+
             for fact in chunk {
                 // Check if any of the regex chunks match
                 let is_relevant = regex_chunks.iter().any(|regex| regex.is_match(fact));
@@ -379,11 +378,11 @@ pub fn filter_facts_parallel_chunked_regex(
                     local_dropped += 1;
                 }
             }
-            
+
             // Update global counters
             kept_count.fetch_add(local_kept, Ordering::Relaxed);
             dropped_count.fetch_add(local_dropped, Ordering::Relaxed);
-            
+
             // Batch logging to avoid performance hit in parallel
             {
                 let mut counter = debug_counter.lock().unwrap();
@@ -395,7 +394,6 @@ pub fn filter_facts_parallel_chunked_regex(
                         kept + dropped, kept, dropped);
                 }
             }
-            
             local_result
         })
         .collect();

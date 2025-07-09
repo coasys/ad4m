@@ -13,9 +13,11 @@ use crate::graphql::graphql_types::{
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
-use crate::prolog_service::{DEFAULT_POOL_SIZE, DEFAULT_POOL_SIZE_WITH_FILTERING, engine_pool::FILTERING_THRESHOLD};
 use crate::prolog_service::get_prolog_service;
 use crate::prolog_service::types::{QueryMatch, QueryResolution};
+use crate::prolog_service::{
+    engine_pool::FILTERING_THRESHOLD, DEFAULT_POOL_SIZE, DEFAULT_POOL_SIZE_WITH_FILTERING,
+};
 use crate::pubsub::{
     get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC,
     PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
@@ -1243,7 +1245,9 @@ impl PerspectiveInstance {
                     Some(DEFAULT_POOL_SIZE)
                 };
                 // Create and initialize new pool
-                service.ensure_perspective_pool(uuid.clone(), pool_size).await?;
+                service
+                    .ensure_perspective_pool(uuid.clone(), pool_size)
+                    .await?;
                 service
                     .update_perspective_links(
                         uuid.clone(),

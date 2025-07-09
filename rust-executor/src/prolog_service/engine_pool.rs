@@ -348,8 +348,7 @@ impl PrologEnginePool {
             // Update all engines with facts using references to avoid cloning
             let mut update_futures = Vec::new();
             for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
-                let update_future =
-                    engine.load_module_string(&module_name, &processed_facts);
+                let update_future = engine.load_module_string(&module_name, &processed_facts);
                 update_futures.push(update_future);
             }
 
@@ -376,9 +375,7 @@ impl PrologEnginePool {
 
                 let update_future = async move {
                     // Each filtered pool handles its own filtering and population
-                    pool_clone
-                        .populate_from_complete_data()
-                        .await
+                    pool_clone.populate_from_complete_data().await
                 };
                 update_futures.push(update_future);
             }
@@ -401,9 +398,7 @@ impl PrologEnginePool {
 
                 let sdna_pool_clone = sdna_pool.clone();
 
-                let result = sdna_pool_clone
-                    .populate_from_complete_data()
-                    .await;
+                let result = sdna_pool_clone.populate_from_complete_data().await;
                 match result {
                     Ok(()) => {
                         log::info!("📊 SDNA POOL UPDATE: Successfully updated SDNA pool");
@@ -471,9 +466,7 @@ impl PrologEnginePool {
             FilteredPrologPool::new(3, source_filter.clone(), Arc::new(self.clone()));
         filtered_pool.initialize(FILTERED_POOL_SIZE).await?;
 
-        filtered_pool
-            .populate_from_complete_data()
-            .await?;
+        filtered_pool.populate_from_complete_data().await?;
 
         // Insert the pool into the map
         filtered_pools.insert(source_filter.clone(), filtered_pool);
@@ -571,7 +564,9 @@ impl PrologEnginePool {
                     }
                 }
             } else {
-                log::debug!("🚀 QUERY ROUTING: No source filter extracted from query, using complete pool");
+                log::debug!(
+                    "🚀 QUERY ROUTING: No source filter extracted from query, using complete pool"
+                );
             }
         } else if is_subscription {
             log::debug!("🚀 QUERY ROUTING: Filtering disabled for small perspective, using complete pool for subscription");
@@ -606,10 +601,10 @@ mod tests {
     /// Helper function to create enough test links to trigger filtering (above threshold)
     fn create_large_test_dataset() -> Vec<crate::types::DecoratedLinkExpression> {
         use crate::types::{DecoratedLinkExpression, Link};
-        
+
         let mut links = Vec::new();
         let base_count = FILTERING_THRESHOLD + 100; // Create more than threshold to ensure filtering
-        
+
         for i in 0..base_count {
             links.push(DecoratedLinkExpression {
                 author: format!("user{}", i % 10),
@@ -628,7 +623,7 @@ mod tests {
                 status: None,
             });
         }
-        
+
         links
     }
     #[tokio::test]
@@ -1427,8 +1422,11 @@ mod tests {
 
         // Use large dataset to trigger filtering
         let mut test_links = create_large_test_dataset();
-        log::info!("🧪 TEST: Using {} links to trigger filtering (threshold: {})", 
-                  test_links.len(), FILTERING_THRESHOLD);
+        log::info!(
+            "🧪 TEST: Using {} links to trigger filtering (threshold: {})",
+            test_links.len(),
+            FILTERING_THRESHOLD
+        );
 
         // Add specific test data for user1
         use crate::types::{DecoratedLinkExpression, Link};
@@ -1548,8 +1546,11 @@ mod tests {
 
         // Use large dataset to trigger filtering
         let mut test_links = create_large_test_dataset();
-        log::info!("🧪 INTEGRATION: Using {} links to trigger filtering (threshold: {})", 
-                  test_links.len(), FILTERING_THRESHOLD);
+        log::info!(
+            "🧪 INTEGRATION: Using {} links to trigger filtering (threshold: {})",
+            test_links.len(),
+            FILTERING_THRESHOLD
+        );
 
         // Add specific test data for user1 and user2
         use crate::types::{DecoratedLinkExpression, Link};
@@ -2601,7 +2602,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_regular_queries_use_existing_filtered_pools() {
-        // This test verifies that regular queries (subscription=false) will use existing 
+        // This test verifies that regular queries (subscription=false) will use existing
         // filtered pools but won't create new ones
         AgentService::init_global_test_instance();
         let pool = PrologEnginePool::new(5);
@@ -2629,15 +2630,15 @@ mod tests {
         // Verify the filtered pool was created
         {
             let filtered_pools = pool.filtered_pools.read().await;
-            assert!(filtered_pools.contains_key("user1"), "Filtered pool should exist for user1");
+            assert!(
+                filtered_pools.contains_key("user1"),
+                "Filtered pool should exist for user1"
+            );
         }
 
         // Now run a regular query (subscription=false) with the same source filter
         let regular_query = "triple(\"user1\", \"has_child\", \"target_1\").".to_string();
-        let regular_result = pool
-            .run_query_smart(regular_query, false)
-            .await
-            .unwrap();
+        let regular_result = pool.run_query_smart(regular_query, false).await.unwrap();
 
         // The query should succeed (using the existing filtered pool)
         match regular_result {
@@ -2659,20 +2660,24 @@ mod tests {
         };
 
         let new_source_query = "triple(\"user999\", \"has_child\", X).".to_string();
-        let _new_source_result = pool
-            .run_query_smart(new_source_query, false)
-            .await
-            .unwrap();
+        let _new_source_result = pool.run_query_smart(new_source_query, false).await.unwrap();
 
         // Verify no new filtered pool was created
         {
             let filtered_pools = pool.filtered_pools.read().await;
-            assert_eq!(filtered_pools.len(), initial_pool_count, 
-                      "Regular query should not create new filtered pools");
-            assert!(!filtered_pools.contains_key("user999"), 
-                   "No filtered pool should exist for user999");
+            assert_eq!(
+                filtered_pools.len(),
+                initial_pool_count,
+                "Regular query should not create new filtered pools"
+            );
+            assert!(
+                !filtered_pools.contains_key("user999"),
+                "No filtered pool should exist for user999"
+            );
         }
 
-        println!("✅ Regular queries correctly use existing filtered pools but don't create new ones");
+        println!(
+            "✅ Regular queries correctly use existing filtered pools but don't create new ones"
+        );
     }
 }

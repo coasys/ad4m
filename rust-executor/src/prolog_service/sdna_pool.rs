@@ -101,8 +101,7 @@ impl FilteredPool for SdnaPrologPool {
         // Update all engines with the processed facts using references to avoid cloning
         let mut update_futures = Vec::new();
         for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
-            let update_future =
-                engine.load_module_string("facts", &processed_facts);
+            let update_future = engine.load_module_string("facts", &processed_facts);
             update_futures.push(update_future);
         }
 
@@ -293,7 +292,9 @@ impl SdnaPrologPool {
         // Get current data from complete pool state
         let (all_links, neighbourhood_author) = {
             let complete_pool_state = self.complete_pool.engine_state().read().await;
-            let all_links = complete_pool_state.current_all_links.as_ref()
+            let all_links = complete_pool_state
+                .current_all_links
+                .as_ref()
                 .ok_or_else(|| anyhow!("No current links available in complete pool"))?;
             let neighbourhood_author = complete_pool_state.current_neighbourhood_author.clone();
             (all_links.clone(), neighbourhood_author)
@@ -349,7 +350,10 @@ mod tests {
         complete_pool.initialize(2).await.unwrap();
 
         let sdna_pool = SdnaPrologPool::new(2, complete_pool);
-        assert_eq!(sdna_pool.pool_description(), "SDNA-only pool for subject class queries");
+        assert_eq!(
+            sdna_pool.pool_description(),
+            "SDNA-only pool for subject class queries"
+        );
 
         // Initialize the SDNA pool
         sdna_pool.initialize(2).await.unwrap();
@@ -414,13 +418,13 @@ mod tests {
         }];
 
         // Set up test data in the complete pool first
-        complete_pool.update_all_engines_with_links("facts".to_string(), test_links, None)
-            .await.unwrap();
+        complete_pool
+            .update_all_engines_with_links("facts".to_string(), test_links, None)
+            .await
+            .unwrap();
 
         // Populate with test data - should only include infrastructure + SDNA
-        let result = sdna_pool
-            .populate_from_complete_data()
-            .await;
+        let result = sdna_pool.populate_from_complete_data().await;
         assert!(result.is_ok());
 
         // Test basic infrastructure query

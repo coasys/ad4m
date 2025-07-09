@@ -23,7 +23,6 @@ pub const DEFAULT_POOL_SIZE_WITH_FILTERING: usize = 2;
 const SDNA_POOL_SIZE: usize = 1;
 const FILTERED_POOL_SIZE: usize = 2;
 
-
 #[derive(Clone)]
 pub struct PrologService {
     engine_pools: Arc<RwLock<HashMap<String, PrologEnginePool>>>,
