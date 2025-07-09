@@ -37,12 +37,7 @@ pub trait FilteredPool: Send + Sync {
     /// This is called by the complete pool when it has new data. The filtered pool
     /// is responsible for determining what subset of the data is relevant and
     /// populating its engines accordingly.
-    async fn populate_from_complete_data(
-        &self,
-        module_name: String,
-        all_links: &[DecoratedLinkExpression],
-        neighbourhood_author: Option<String>,
-    ) -> Result<(), Error>;
+    async fn populate_from_complete_data(&self) -> Result<(), Error>;
 
     /// Handle incremental updates from assert operations
     ///

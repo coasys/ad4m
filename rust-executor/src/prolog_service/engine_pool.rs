@@ -123,7 +123,7 @@ impl PrologEnginePool {
         drop(engines);
 
         // Always create and initialize the SDNA pool
-        let sdna_pool = SdnaPrologPool::new(2);
+        let sdna_pool = SdnaPrologPool::new(2, Arc::new(self.clone()));
         sdna_pool.initialize(SDNA_POOL_SIZE).await?;
 
         let mut sdna_pool_guard = self.sdna_pool.write().await;
@@ -373,18 +373,11 @@ impl PrologEnginePool {
             let mut update_futures = Vec::new();
             for pool in filtered_pools.values() {
                 let pool_clone = pool.clone();
-                let module_name_ref = &module_name;
-                let all_links_ref = &all_links;
-                let neighbourhood_author_ref = &neighbourhood_author;
 
                 let update_future = async move {
                     // Each filtered pool handles its own filtering and population
                     pool_clone
-                        .populate_from_complete_data(
-                            module_name_ref.clone(),
-                            all_links_ref,
-                            neighbourhood_author_ref.clone(),
-                        )
+                        .populate_from_complete_data()
                         .await
                 };
                 update_futures.push(update_future);
@@ -409,11 +402,7 @@ impl PrologEnginePool {
                 let sdna_pool_clone = sdna_pool.clone();
 
                 let result = sdna_pool_clone
-                    .populate_from_complete_data(
-                        module_name.clone(),
-                        &all_links,
-                        neighbourhood_author.clone(),
-                    )
+                    .populate_from_complete_data()
                     .await;
                 match result {
                     Ok(()) => {
@@ -482,31 +471,9 @@ impl PrologEnginePool {
             FilteredPrologPool::new(3, source_filter.clone(), Arc::new(self.clone()));
         filtered_pool.initialize(FILTERED_POOL_SIZE).await?;
 
-        // Get current data from complete pool state to populate the new filtered pool
-        let (all_links_opt, neighbourhood_author_opt) = {
-            let engine_state = self.engine_state.read().await;
-            (
-                engine_state.current_all_links.clone(),
-                engine_state.current_neighbourhood_author.clone(),
-            )
-        };
-
-        // Populate the filtered pool with current data if available
-        if let Some(all_links) = all_links_opt.as_ref() {
-            log::info!(
-                "📊 POOL CREATION: Populating new filtered pool with current data ({} links)",
-                all_links.len()
-            );
-            filtered_pool
-                .populate_from_complete_data(
-                    "facts".to_string(),
-                    all_links,  // Already a reference, no need to clone
-                    neighbourhood_author_opt,
-                )
-                .await?;
-        } else {
-            log::warn!("📊 POOL CREATION: No stored data available for populating filtered pool - it will be empty until next update");
-        }
+        filtered_pool
+            .populate_from_complete_data()
+            .await?;
 
         // Insert the pool into the map
         filtered_pools.insert(source_filter.clone(), filtered_pool);

@@ -21,7 +21,6 @@ use super::engine::PrologEngine;
 use super::pool_trait::{EmbeddingCache, EnginePoolState, FilteredPool, PoolUtils};
 use super::types::{QueryResolution, QueryResult};
 use crate::perspectives::sdna::{get_sdna_facts, get_static_infrastructure_facts};
-use crate::types::DecoratedLinkExpression;
 
 /// SDNA-Only Prolog Pool for subject class queries
 ///
@@ -50,6 +49,10 @@ pub struct SdnaPrologPool {
 
     /// Shared embedding cache for URL replacements
     embedding_cache: Arc<RwLock<EmbeddingCache>>,
+
+    /// Reference back to the complete pool for data access
+    /// This allows SDNA pools to get current links and neighbourhood author data
+    complete_pool: Arc<super::engine_pool::PrologEnginePool>,
 }
 
 impl FilteredPool for SdnaPrologPool {
@@ -69,18 +72,11 @@ impl FilteredPool for SdnaPrologPool {
         Ok(())
     }
 
-    async fn populate_from_complete_data(
-        &self,
-        module_name: String,
-        all_links: &[DecoratedLinkExpression],
-        neighbourhood_author: Option<String>,
-    ) -> Result<(), Error> {
+    async fn populate_from_complete_data(&self) -> Result<(), Error> {
         log::info!("📊 SDNA POPULATION: Starting population for SDNA-only pool");
 
         // Create SDNA-only facts (infrastructure + SDNA, no link data)
-        let facts = self
-            .create_sdna_only_facts(all_links, neighbourhood_author)
-            .await?;
+        let facts = self.create_sdna_only_facts().await?;
 
         log::info!(
             "📊 SDNA UPDATE: Pool updating engines with {} facts",
@@ -106,7 +102,7 @@ impl FilteredPool for SdnaPrologPool {
         let mut update_futures = Vec::new();
         for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
             let update_future =
-                engine.load_module_string(&module_name, &processed_facts);
+                engine.load_module_string("facts", &processed_facts);
             update_futures.push(update_future);
         }
 
@@ -230,11 +226,12 @@ impl SdnaPrologPool {
     /// ## Note
     /// This only creates the structure - you must call `initialize()` to spawn the engines
     /// and then populate it with SDNA data.
-    pub fn new(pool_size: usize) -> Self {
+    pub fn new(pool_size: usize, complete_pool: Arc<super::engine_pool::PrologEnginePool>) -> Self {
         Self {
             engine_state: Arc::new(RwLock::new(EnginePoolState::new(pool_size))),
             next_engine: Arc::new(AtomicUsize::new(0)),
             embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
+            complete_pool,
         }
     }
 
@@ -287,18 +284,23 @@ impl SdnaPrologPool {
     }
 
     /// Create SDNA-only facts (infrastructure + SDNA, no link data)
-    async fn create_sdna_only_facts(
-        &self,
-        all_links: &[DecoratedLinkExpression],
-        neighbourhood_author: Option<String>,
-    ) -> Result<Vec<String>, Error> {
+    async fn create_sdna_only_facts(&self) -> Result<Vec<String>, Error> {
         log::info!("📊 SDNA FACT CREATION: Creating SDNA-only facts");
 
         // Always include infrastructure facts
         let mut sdna_lines = get_static_infrastructure_facts();
 
+        // Get current data from complete pool state
+        let (all_links, neighbourhood_author) = {
+            let complete_pool_state = self.complete_pool.engine_state().read().await;
+            let all_links = complete_pool_state.current_all_links.as_ref()
+                .ok_or_else(|| anyhow!("No current links available in complete pool"))?;
+            let neighbourhood_author = complete_pool_state.current_neighbourhood_author.clone();
+            (all_links.clone(), neighbourhood_author)
+        };
+
         // Add SDNA facts (subject class definitions, constructors, setters, etc.)
-        let sdna_facts = get_sdna_facts(all_links, neighbourhood_author.clone())?;
+        let sdna_facts = get_sdna_facts(&all_links, neighbourhood_author.clone())?;
 
         log::info!(
             "📊 SDNA FACT CREATION: Infrastructure facts: {}, SDNA facts: {}",
@@ -346,7 +348,7 @@ mod tests {
         let complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new(2));
         complete_pool.initialize(2).await.unwrap();
 
-        let sdna_pool = SdnaPrologPool::new(2);
+        let sdna_pool = SdnaPrologPool::new(2, complete_pool);
         assert_eq!(sdna_pool.pool_description(), "SDNA-only pool for subject class queries");
 
         // Initialize the SDNA pool
@@ -359,8 +361,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_subject_class_query_detection() {
-        let _complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new(2));
-        let sdna_pool = SdnaPrologPool::new(2);
+        let complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new(2));
+        let sdna_pool = SdnaPrologPool::new(2, complete_pool);
 
         // Test subject class queries (should be handled)
         assert!(sdna_pool.should_handle_query("subject(Class, Properties, Methods)."));
@@ -389,7 +391,7 @@ mod tests {
         let complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new(2));
         complete_pool.initialize(2).await.unwrap();
 
-        let sdna_pool = SdnaPrologPool::new(2);
+        let sdna_pool = SdnaPrologPool::new(2, complete_pool.clone());
         sdna_pool.initialize(2).await.unwrap();
 
         // Create test links (these should be ignored for SDNA pool)
@@ -411,9 +413,13 @@ mod tests {
             status: None,
         }];
 
+        // Set up test data in the complete pool first
+        complete_pool.update_all_engines_with_links("facts".to_string(), test_links, None)
+            .await.unwrap();
+
         // Populate with test data - should only include infrastructure + SDNA
         let result = sdna_pool
-            .populate_from_complete_data("facts".to_string(), &test_links, None)
+            .populate_from_complete_data()
             .await;
         assert!(result.is_ok());
 

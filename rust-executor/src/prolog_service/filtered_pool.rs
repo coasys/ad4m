@@ -21,7 +21,6 @@ use super::pool_trait::{EnginePoolState, FilteredPool, PoolUtils};
 use super::source_filtering;
 use super::types::{QueryResolution, QueryResult};
 use crate::perspectives::sdna::{get_data_facts, get_sdna_facts, get_static_infrastructure_facts};
-use crate::types::DecoratedLinkExpression;
 use scryer_prolog::Term;
 use std::collections::HashSet;
 use std::time::Instant;
@@ -78,12 +77,7 @@ impl FilteredPool for FilteredPrologPool {
         Ok(())
     }
 
-    async fn populate_from_complete_data(
-        &self,
-        module_name: String,
-        all_links: &[DecoratedLinkExpression],
-        neighbourhood_author: Option<String>,
-    ) -> Result<(), Error> {
+    async fn populate_from_complete_data(&self) -> Result<(), Error> {
         log::info!(
             "📊 FILTERED POPULATION: Starting population for pool '{}'",
             self.source_filter
@@ -91,7 +85,7 @@ impl FilteredPool for FilteredPrologPool {
 
         // Create filtered facts using our own filtering logic
         let facts = self
-            .create_filtered_facts(all_links, neighbourhood_author)
+            .create_filtered_facts()
             .await?;
 
         // Update all engines with the filtered facts
@@ -121,7 +115,7 @@ impl FilteredPool for FilteredPrologPool {
         let mut update_futures = Vec::new();
         for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
             let update_future =
-                engine.load_module_string(&module_name, &processed_facts);
+                engine.load_module_string("facts", &processed_facts);
             update_futures.push(update_future);
         }
 
@@ -328,11 +322,7 @@ impl FilteredPrologPool {
     }
 
     /// Create filtered facts for this specific source filter
-    async fn create_filtered_facts(
-        &self,
-        all_links: &[DecoratedLinkExpression],
-        neighbourhood_author: Option<String>,
-    ) -> Result<Vec<String>, Error> {
+    async fn create_filtered_facts(&self) -> Result<Vec<String>, Error> {
         log::info!(
             "📊 FACT CREATION: Creating filtered facts for source: '{}'",
             self.source_filter
@@ -340,7 +330,14 @@ impl FilteredPrologPool {
 
         // Always include infrastructure and SDNA facts - these should never be filtered
         let mut filtered_lines = get_static_infrastructure_facts();
-        let sdna_facts = get_sdna_facts(all_links, neighbourhood_author.clone())?;
+        let sdna_facts = {
+                        // Use an existing engine from the complete pool - it already has all the data loaded!
+            let complete_pool_state = self.complete_pool.engine_state().read().await;
+            let all_links = complete_pool_state.current_all_links.as_ref().unwrap();
+            let neighbourhood_author = complete_pool_state.current_neighbourhood_author.clone();
+            get_sdna_facts(all_links, neighbourhood_author)?
+        };
+         
 
         log::info!(
             "📊 FACT CREATION: Infrastructure facts: {}, SDNA facts: {}",
@@ -363,14 +360,7 @@ impl FilteredPrologPool {
         filtered_lines.extend(sdna_facts);
 
         // Get filtered data facts (this applies reachability filtering only to data, not SDNA)
-        let filtered_data = self.get_filtered_data_facts(all_links).await?;
-        log::info!("📊 FACT CREATION: Filtered facts for '{}': {} infrastructure + {} SDNA + {} data = {} total", 
-            self.source_filter,
-            get_static_infrastructure_facts().len(),
-            get_sdna_facts(all_links, neighbourhood_author)?.len(),
-            filtered_data.len(),
-            filtered_lines.len() + filtered_data.len()
-        );
+        let filtered_data = self.get_filtered_data_facts().await?;
         filtered_lines.extend(filtered_data);
 
         // Log sample of final facts for debugging
@@ -387,14 +377,14 @@ impl FilteredPrologPool {
     /// Get filtered data facts for this source using reachable query from the complete pool
     async fn get_filtered_data_facts(
         &self,
-        all_links: &[DecoratedLinkExpression],
+        //all_links: &[DecoratedLinkExpression],
     ) -> Result<Vec<String>, Error> {
         let start_time = Instant::now();
         log::info!(
             "🔍 FILTERING: Starting get_filtered_data_facts for source: '{}'",
             self.source_filter
         );
-        log::info!("🔍 FILTERING: Total links provided: {}", all_links.len());
+        
 
         // Use an existing engine from the complete pool - it already has all the data loaded!
         let complete_engines = self.complete_pool.engine_state().read().await;
@@ -403,10 +393,12 @@ impl FilteredPrologPool {
             .iter()
             .find_map(|e| e.as_ref())
             .ok_or_else(|| anyhow!("No engines available in complete pool"))?;
+        let all_links = complete_engines.current_all_links.as_ref().unwrap();
+        log::info!("🔍 FILTERING: Total links provided: {}", all_links.len());
 
         // Get all data facts that we want to filter
         let facts_start = Instant::now();
-        let all_data_facts = get_data_facts(all_links);
+        let all_data_facts = get_data_facts(all_links.as_ref());
         let facts_duration = facts_start.elapsed();
         log::info!(
             "🔍 FILTERING: Generated {} data facts in {:?}",
