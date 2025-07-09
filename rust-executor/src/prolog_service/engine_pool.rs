@@ -21,6 +21,9 @@ use tokio::sync::RwLock;
 
 pub const EMBEDDING_LANGUAGE_HASH: &str = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
 
+// Filtering threshold - only use filtered pools for perspectives with more links than this
+const FILTERING_THRESHOLD: usize = 6000;
+
 lazy_static! {
     // Match embedding vector URLs inside string literals (both single and double quotes)
     pub static ref EMBEDDING_URL_RE: Regex = Regex::new(format!(r#"['"]({}://[^'"]*)['"]"#, EMBEDDING_LANGUAGE_HASH).as_str()).unwrap();
@@ -547,8 +550,29 @@ impl PrologEnginePool {
             }
         }
 
-        // 🔍 SECOND PRIORITY: If this is a subscription query and we can extract a source filter, try to use a filtered pool
-        if is_subscription {
+        // 🔍 SECOND PRIORITY: Check if we should use filtered pools based on link count
+        // Only use filtered pools for large perspectives (above threshold)
+        let should_use_filtering = {
+            let engine_state = self.engine_state.read().await;
+            if let Some(ref all_links) = engine_state.current_all_links {
+                let link_count = all_links.len();
+                let should_filter = link_count > FILTERING_THRESHOLD;
+                log::debug!(
+                    "📊 FILTERING CHECK: {} links - filtering {} (threshold: {})",
+                    link_count,
+                    if should_filter { "ENABLED" } else { "DISABLED" },
+                    FILTERING_THRESHOLD
+                );
+                should_filter
+            } else {
+                // No link data available, disable filtering
+                log::debug!("📊 FILTERING CHECK: No link data available - filtering DISABLED");
+                false
+            }
+        };
+
+        // 🔍 THIRD PRIORITY: If this is a subscription query and filtering is enabled, try to use a filtered pool
+        if is_subscription && should_use_filtering {
             if let Some(source_filter) = source_filtering::extract_source_filter(&query) {
                 log::info!("🚀 QUERY ROUTING: Routing subscription query to filtered pool for source: '{}'", source_filter);
 
@@ -575,6 +599,8 @@ impl PrologEnginePool {
             } else {
                 log::debug!("🚀 QUERY ROUTING: No source filter extracted from subscription query, using complete pool");
             }
+        } else if is_subscription && !should_use_filtering {
+            log::debug!("🚀 QUERY ROUTING: Filtering disabled for small perspective, using complete pool for subscription");
         } else {
             log::debug!(
                 "🚀 QUERY ROUTING: Using complete pool - is_subscription={}",
@@ -605,6 +631,35 @@ mod tests {
     use crate::agent::AgentService;
     use chrono::Utc;
     use scryer_prolog::Term;
+
+    /// Helper function to create enough test links to trigger filtering (above threshold)
+    fn create_large_test_dataset() -> Vec<crate::types::DecoratedLinkExpression> {
+        use crate::types::{DecoratedLinkExpression, Link};
+        
+        let mut links = Vec::new();
+        let base_count = FILTERING_THRESHOLD + 100; // Create more than threshold to ensure filtering
+        
+        for i in 0..base_count {
+            links.push(DecoratedLinkExpression {
+                author: format!("user{}", i % 10),
+                timestamp: "2023-01-01T00:00:00Z".to_string(),
+                data: Link {
+                    source: format!("source_{}", i),
+                    predicate: Some("has_child".to_string()),
+                    target: format!("target_{}", i),
+                },
+                proof: crate::types::DecoratedExpressionProof {
+                    key: "test_key".to_string(),
+                    signature: "test_signature".to_string(),
+                    valid: Some(true),
+                    invalid: Some(false),
+                },
+                status: None,
+            });
+        }
+        
+        links
+    }
     #[tokio::test]
     async fn test_pool_initialization() {
         let pool = PrologEnginePool::new(3);
@@ -1399,9 +1454,14 @@ mod tests {
         let pool = PrologEnginePool::new(2);
         pool.initialize(2).await.unwrap();
 
-        // Use production method with structured link data
+        // Use large dataset to trigger filtering
+        let mut test_links = create_large_test_dataset();
+        log::info!("🧪 TEST: Using {} links to trigger filtering (threshold: {})", 
+                  test_links.len(), FILTERING_THRESHOLD);
+
+        // Add specific test data for user1
         use crate::types::{DecoratedLinkExpression, Link};
-        let test_links = vec![DecoratedLinkExpression {
+        test_links.push(DecoratedLinkExpression {
             author: "user1".to_string(),
             timestamp: "2023-01-01T00:00:00Z".to_string(),
             data: Link {
@@ -1416,7 +1476,7 @@ mod tests {
                 invalid: Some(false),
             },
             status: None,
-        }];
+        });
 
         // Use the PRODUCTION method that properly sets up the pool state
         pool.update_all_engines_with_links("test_facts".to_string(), test_links, None)
@@ -1515,9 +1575,14 @@ mod tests {
         let pool = PrologEnginePool::new(3);
         pool.initialize(3).await.unwrap();
 
-        // Use production method with structured link data matching the expected test data
+        // Use large dataset to trigger filtering
+        let mut test_links = create_large_test_dataset();
+        log::info!("🧪 INTEGRATION: Using {} links to trigger filtering (threshold: {})", 
+                  test_links.len(), FILTERING_THRESHOLD);
+
+        // Add specific test data for user1 and user2
         use crate::types::{DecoratedLinkExpression, Link};
-        let test_links = vec![
+        test_links.extend(vec![
             DecoratedLinkExpression {
                 author: "user1".to_string(),
                 timestamp: Utc::now().to_rfc3339().to_string(),
@@ -1550,7 +1615,7 @@ mod tests {
                 },
                 status: None,
             },
-        ];
+        ]);
 
         log::info!("🧪 INTEGRATION: Setting up initial facts like perspective instance");
         // Use the PRODUCTION method that properly sets up the pool state
