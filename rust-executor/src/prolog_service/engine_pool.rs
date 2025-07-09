@@ -342,8 +342,8 @@ impl PrologEnginePool {
                     .await;
 
             // Store current state for reuse in filtered pools
-            engines.current_all_links = Some(all_links.clone());
-            engines.current_neighbourhood_author = neighbourhood_author.clone();
+            engines.current_all_links = Some(all_links);
+            engines.current_neighbourhood_author = neighbourhood_author;
 
             // Update all engines with facts using references to avoid cloning
             let mut update_futures = Vec::new();
