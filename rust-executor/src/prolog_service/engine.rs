@@ -194,14 +194,14 @@ impl PrologEngine {
 
     pub async fn load_module_string(
         &self,
-        module_name: String,
-        program_lines: Vec<String>,
+        module_name: &str,
+        program_lines: &[String],
     ) -> Result<(), Error> {
         let (response_sender, response_receiver) = mpsc::channel();
         self.request_sender
             .send(PrologServiceRequest::LoadModuleString(
-                module_name,
-                program_lines,
+                module_name.to_string(),
+                program_lines.to_vec(),
                 response_sender,
             ))?;
 
@@ -239,7 +239,7 @@ mod prolog_test {
         );
 
         let load_facts = engine
-            .load_module_string("facts".to_string(), vec![facts])
+            .load_module_string("facts", &vec![facts])
             .await;
         assert!(load_facts.is_ok());
         println!("Facts loaded");

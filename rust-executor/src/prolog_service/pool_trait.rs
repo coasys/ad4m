@@ -69,7 +69,6 @@ pub trait FilteredPool: Send + Sync {
 /// Engine state that can be shared between different pool implementations
 pub struct EnginePoolState {
     pub engines: Vec<Option<PrologEngine>>,
-    pub current_facts: Option<Vec<String>>,
     pub current_all_links: Option<Vec<DecoratedLinkExpression>>,
     pub current_neighbourhood_author: Option<String>,
 }
@@ -78,7 +77,6 @@ impl EnginePoolState {
     pub fn new(pool_size: usize) -> Self {
         Self {
             engines: Vec::with_capacity(pool_size),
-            current_facts: None,
             current_all_links: None,
             current_neighbourhood_author: None,
         }

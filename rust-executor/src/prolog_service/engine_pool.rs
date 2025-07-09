@@ -336,21 +336,20 @@ impl PrologEnginePool {
             facts_to_load.extend(get_data_facts(&all_links));
             facts_to_load.extend(get_sdna_facts(&all_links, neighbourhood_author.clone())?);
 
-            // Store current state for reuse in filtered pools
-            engines.current_facts = Some(facts_to_load.clone());
-            engines.current_all_links = Some(all_links.clone());
-            engines.current_neighbourhood_author = neighbourhood_author.clone();
-
-            // Preprocess the facts to handle embeddings
+            // Preprocess the facts to handle embeddings ONCE
             let processed_facts =
                 PoolUtils::preprocess_program_lines(facts_to_load.clone(), &self.embedding_cache)
                     .await;
 
-            // Update all engines with facts
+            // Store current state for reuse in filtered pools
+            engines.current_all_links = Some(all_links.clone());
+            engines.current_neighbourhood_author = neighbourhood_author.clone();
+
+            // Update all engines with facts using references to avoid cloning
             let mut update_futures = Vec::new();
             for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
                 let update_future =
-                    engine.load_module_string(module_name.clone(), processed_facts.clone());
+                    engine.load_module_string(&module_name, &processed_facts);
                 update_futures.push(update_future);
             }
 
@@ -374,17 +373,17 @@ impl PrologEnginePool {
             let mut update_futures = Vec::new();
             for pool in filtered_pools.values() {
                 let pool_clone = pool.clone();
-                let module_name_clone = module_name.clone();
-                let all_links_clone = all_links.clone();
-                let neighbourhood_author_clone = neighbourhood_author.clone();
+                let module_name_ref = &module_name;
+                let all_links_ref = &all_links;
+                let neighbourhood_author_ref = &neighbourhood_author;
 
                 let update_future = async move {
                     // Each filtered pool handles its own filtering and population
                     pool_clone
                         .populate_from_complete_data(
-                            module_name_clone,
-                            &all_links_clone,
-                            neighbourhood_author_clone,
+                            module_name_ref.clone(),
+                            all_links_ref,
+                            neighbourhood_author_ref.clone(),
                         )
                         .await
                 };
@@ -408,15 +407,12 @@ impl PrologEnginePool {
                 log::info!("📊 SDNA POOL UPDATE: Updating SDNA pool with new data");
 
                 let sdna_pool_clone = sdna_pool.clone();
-                let module_name_clone = module_name.clone();
-                let all_links_clone = all_links.clone();
-                let neighbourhood_author_clone = neighbourhood_author.clone();
 
                 let result = sdna_pool_clone
                     .populate_from_complete_data(
-                        module_name_clone,
-                        &all_links_clone,
-                        neighbourhood_author_clone,
+                        module_name.clone(),
+                        &all_links,
+                        neighbourhood_author.clone(),
                     )
                     .await;
                 match result {
@@ -504,7 +500,7 @@ impl PrologEnginePool {
             filtered_pool
                 .populate_from_complete_data(
                     "facts".to_string(),
-                    all_links,
+                    all_links,  // Already a reference, no need to clone
                     neighbourhood_author_opt,
                 )
                 .await?;
@@ -1292,7 +1288,7 @@ mod tests {
         let pool = PrologEnginePool::new(2);
         pool.initialize(2).await.unwrap();
 
-        let initial_facts = vec![
+        let _initial_facts = vec![
             ":- discontiguous(triple/3).".to_string(),
             ":- dynamic(triple/3).".to_string(),
             ":- discontiguous(link/5).".to_string(),

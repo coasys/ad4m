@@ -231,48 +231,62 @@ pub fn filter_facts_parallel_regex(all_facts: Vec<String>, regex: &regex::Regex)
     let dropped_count = AtomicUsize::new(0);
 
     log::info!(
-        "🔍 FILTERING: Using parallel regex processing for {} facts",
+        "🔍 FILTERING: Using memory-efficient parallel regex processing for {} facts",
         all_facts.len()
     );
 
     use std::sync::Mutex;
     let debug_counter = Mutex::new(0usize);
 
+    // Process in chunks to reduce memory usage - each thread gets a slice reference instead of copying data
+    const CHUNK_SIZE: usize = 1000;
     let result: Vec<String> = all_facts
+        .chunks(CHUNK_SIZE)
+        .collect::<Vec<_>>()
         .into_par_iter()
-        .filter(|fact| {
-            let is_relevant = regex.is_match(fact);
-
-            if is_relevant {
-                kept_count.fetch_add(1, Ordering::Relaxed);
-            } else {
-                dropped_count.fetch_add(1, Ordering::Relaxed);
+        .flat_map(|chunk| {
+            let mut local_result = Vec::new();
+            let mut local_kept = 0;
+            let mut local_dropped = 0;
+            
+            for fact in chunk {
+                let is_relevant = regex.is_match(fact);
+                if is_relevant {
+                    local_result.push(fact.clone());
+                    local_kept += 1;
+                } else {
+                    local_dropped += 1;
+                }
             }
-
+            
+            // Update global counters
+            kept_count.fetch_add(local_kept, Ordering::Relaxed);
+            dropped_count.fetch_add(local_dropped, Ordering::Relaxed);
+            
             // Batch logging to avoid performance hit in parallel
             {
                 let mut counter = debug_counter.lock().unwrap();
-                *counter += 1;
+                *counter += chunk.len();
                 if *counter % 5000 == 0 {
                     let kept = kept_count.load(Ordering::Relaxed);
                     let dropped = dropped_count.load(Ordering::Relaxed);
                     log::debug!(
-                        "🔍 FILTERING (parallel): Processed {} facts so far ({} kept, {} dropped)",
+                        "🔍 FILTERING (parallel chunked): Processed {} facts so far ({} kept, {} dropped)",
                         kept + dropped,
                         kept,
                         dropped
                     );
                 }
             }
-
-            is_relevant
+            
+            local_result
         })
         .collect();
 
     let final_kept = kept_count.load(Ordering::Relaxed);
     let final_dropped = dropped_count.load(Ordering::Relaxed);
     log::info!(
-        "🔍 FILTERING: Parallel regex completed - {} kept, {} dropped",
+        "🔍 FILTERING: Memory-efficient parallel regex completed - {} kept, {} dropped",
         final_kept,
         final_dropped
     );
@@ -336,7 +350,7 @@ pub fn filter_facts_parallel_chunked_regex(
     let dropped_count = AtomicUsize::new(0);
 
     log::info!(
-        "🔍 FILTERING: Using parallel chunked regex processing for {} facts with {} chunks",
+        "🔍 FILTERING: Using memory-efficient parallel chunked regex processing for {} facts with {} chunks",
         all_facts.len(),
         regex_chunks.len()
     );
@@ -344,35 +358,52 @@ pub fn filter_facts_parallel_chunked_regex(
     use std::sync::Mutex;
     let debug_counter = Mutex::new(0usize);
 
+    // Process in chunks to reduce memory usage
+    const CHUNK_SIZE: usize = 1000;
     let result: Vec<String> = all_facts
+        .chunks(CHUNK_SIZE)
+        .collect::<Vec<_>>()
         .into_par_iter()
-        .filter(|fact| {
-            // Check if any of the regex chunks match
-            let is_relevant = regex_chunks.iter().any(|regex| regex.is_match(fact));
-            if is_relevant {
-                kept_count.fetch_add(1, Ordering::Relaxed);
-            } else {
-                dropped_count.fetch_add(1, Ordering::Relaxed);
+        .flat_map(|chunk| {
+            let mut local_result = Vec::new();
+            let mut local_kept = 0;
+            let mut local_dropped = 0;
+            
+            for fact in chunk {
+                // Check if any of the regex chunks match
+                let is_relevant = regex_chunks.iter().any(|regex| regex.is_match(fact));
+                if is_relevant {
+                    local_result.push(fact.clone());
+                    local_kept += 1;
+                } else {
+                    local_dropped += 1;
+                }
             }
+            
+            // Update global counters
+            kept_count.fetch_add(local_kept, Ordering::Relaxed);
+            dropped_count.fetch_add(local_dropped, Ordering::Relaxed);
+            
             // Batch logging to avoid performance hit in parallel
             {
                 let mut counter = debug_counter.lock().unwrap();
-                *counter += 1;
+                *counter += chunk.len();
                 if *counter % 5000 == 0 {
                     let kept = kept_count.load(Ordering::Relaxed);
                     let dropped = dropped_count.load(Ordering::Relaxed);
-                    log::debug!("🔍 FILTERING (parallel chunked): Processed {} facts so far ({} kept, {} dropped)", 
+                    log::debug!("🔍 FILTERING (memory-efficient parallel chunked): Processed {} facts so far ({} kept, {} dropped)", 
                         kept + dropped, kept, dropped);
                 }
             }
-            is_relevant
+            
+            local_result
         })
         .collect();
 
     let final_kept = kept_count.load(Ordering::Relaxed);
     let final_dropped = dropped_count.load(Ordering::Relaxed);
     log::info!(
-        "🔍 FILTERING: Parallel chunked regex completed - {} kept, {} dropped",
+        "🔍 FILTERING: Memory-efficient parallel chunked regex completed - {} kept, {} dropped",
         final_kept,
         final_dropped
     );

@@ -117,11 +117,11 @@ impl FilteredPool for FilteredPrologPool {
         let processed_facts =
             PoolUtils::preprocess_program_lines(facts, &self.embedding_cache).await;
 
-        // Update all engines with the processed facts
+        // Update all engines with the processed facts using references to avoid cloning
         let mut update_futures = Vec::new();
         for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
             let update_future =
-                engine.load_module_string(module_name.clone(), processed_facts.clone());
+                engine.load_module_string(&module_name, &processed_facts);
             update_futures.push(update_future);
         }
 
