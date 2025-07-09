@@ -13,6 +13,7 @@ use crate::graphql::graphql_types::{
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
+use crate::prolog_service::{DEFAULT_POOL_SIZE, DEFAULT_POOL_SIZE_WITH_FILTERING, engine_pool::FILTERING_THRESHOLD};
 use crate::prolog_service::get_prolog_service;
 use crate::prolog_service::types::{QueryMatch, QueryResolution};
 use crate::pubsub::{
@@ -1236,8 +1237,13 @@ impl PerspectiveInstance {
 
             // Check if pool exists under the write lock
             if !service.has_perspective_pool(uuid.clone()).await {
+                let pool_size = if all_links.len() > FILTERING_THRESHOLD {
+                    Some(DEFAULT_POOL_SIZE_WITH_FILTERING)
+                } else {
+                    Some(DEFAULT_POOL_SIZE)
+                };
                 // Create and initialize new pool
-                service.ensure_perspective_pool(uuid.clone(), None).await?;
+                service.ensure_perspective_pool(uuid.clone(), pool_size).await?;
                 service
                     .update_perspective_links(
                         uuid.clone(),

@@ -18,7 +18,11 @@ pub mod types;
 use self::engine_pool::PrologEnginePool;
 use self::types::QueryResult;
 
-const DEFAULT_POOL_SIZE: usize = 10;
+pub const DEFAULT_POOL_SIZE: usize = 5;
+pub const DEFAULT_POOL_SIZE_WITH_FILTERING: usize = 2;
+const SDNA_POOL_SIZE: usize = 1;
+const FILTERED_POOL_SIZE: usize = 2;
+
 
 #[derive(Clone)]
 pub struct PrologService {

@@ -7,7 +7,7 @@ use super::sdna_pool::SdnaPrologPool;
 use super::source_filtering;
 use super::types::{QueryResolution, QueryResult};
 use crate::perspectives::sdna::{get_data_facts, get_sdna_facts, get_static_infrastructure_facts};
-use crate::prolog_service::DEFAULT_POOL_SIZE;
+use crate::prolog_service::{FILTERED_POOL_SIZE, SDNA_POOL_SIZE};
 use crate::types::DecoratedLinkExpression;
 use deno_core::anyhow::{anyhow, Error};
 use futures::future::join_all;
@@ -22,7 +22,7 @@ use tokio::sync::RwLock;
 pub const EMBEDDING_LANGUAGE_HASH: &str = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
 
 // Filtering threshold - only use filtered pools for perspectives with more links than this
-const FILTERING_THRESHOLD: usize = 6000;
+pub const FILTERING_THRESHOLD: usize = 6000;
 
 lazy_static! {
     // Match embedding vector URLs inside string literals (both single and double quotes)
@@ -124,7 +124,7 @@ impl PrologEnginePool {
 
         // Always create and initialize the SDNA pool
         let sdna_pool = SdnaPrologPool::new(2);
-        sdna_pool.initialize(DEFAULT_POOL_SIZE).await?;
+        sdna_pool.initialize(SDNA_POOL_SIZE).await?;
 
         let mut sdna_pool_guard = self.sdna_pool.write().await;
         *sdna_pool_guard = Some(sdna_pool);
@@ -484,7 +484,7 @@ impl PrologEnginePool {
         // Create new filtered pool with smaller size (2-3 engines should be enough for subscriptions)
         let filtered_pool =
             FilteredPrologPool::new(3, source_filter.clone(), Arc::new(self.clone()));
-        filtered_pool.initialize(DEFAULT_POOL_SIZE).await?;
+        filtered_pool.initialize(FILTERED_POOL_SIZE).await?;
 
         // Get current data from complete pool state to populate the new filtered pool
         let (all_links_opt, neighbourhood_author_opt) = {
