@@ -639,7 +639,7 @@ mod tests {
         complete_pool.initialize(2).await.unwrap();
 
         let filtered_pool = FilteredPrologPool::new(2, "test_user".to_string(), complete_pool);
-        assert_eq!(filtered_pool.source_filter(), "test_user");
+        assert_eq!(filtered_pool.source_filter, "test_user");
 
         // Initialize the filtered pool
         filtered_pool.initialize(2).await.unwrap();

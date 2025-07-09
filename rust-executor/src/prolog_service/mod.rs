@@ -306,7 +306,7 @@ mod prolog_test {
 
         // Ensure pool is created
         assert!(service
-            .ensure_perspective_pool(perspective_id.clone())
+            .ensure_perspective_pool(perspective_id.clone(), None)
             .await
             .is_ok());
 
@@ -360,7 +360,7 @@ mod prolog_test {
 
         let query = String::from("triple(\"a\",P,\"b\").");
         let result = service
-            .run_query(perspective_id.clone(), query)
+            .run_query_smart(perspective_id.clone(), query)
             .await
             .expect("no error running query");
 
@@ -378,7 +378,7 @@ mod prolog_test {
 
         let query = String::from("triple(\"a\",\"p1\",\"b\").");
         let result = service
-            .run_query(perspective_id.clone(), query)
+            .run_query_smart(perspective_id.clone(), query)
             .await
             .expect("no error running query");
 
@@ -386,7 +386,7 @@ mod prolog_test {
 
         let query = String::from("non_existant_predicate(\"a\",\"p1\",\"b\").");
         let result = service
-            .run_query(perspective_id.clone(), query)
+            .run_query_smart(perspective_id.clone(), query)
             .await
             .expect("Error running query");
 

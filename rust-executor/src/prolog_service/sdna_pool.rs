@@ -346,8 +346,8 @@ mod tests {
         let complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new(2));
         complete_pool.initialize(2).await.unwrap();
 
-        let sdna_pool = SdnaPrologPool::new(2, complete_pool);
-        assert_eq!(sdna_pool.filter_id(), "SDNA_ONLY");
+        let sdna_pool = SdnaPrologPool::new(2);
+        assert_eq!(sdna_pool.pool_description(), "SDNA-only pool for subject class queries");
 
         // Initialize the SDNA pool
         sdna_pool.initialize(2).await.unwrap();
@@ -359,8 +359,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_subject_class_query_detection() {
-        let complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new(2));
-        let sdna_pool = SdnaPrologPool::new(2, complete_pool);
+        let _complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new(2));
+        let sdna_pool = SdnaPrologPool::new(2);
 
         // Test subject class queries (should be handled)
         assert!(sdna_pool.should_handle_query("subject(Class, Properties, Methods)."));
@@ -389,7 +389,7 @@ mod tests {
         let complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new(2));
         complete_pool.initialize(2).await.unwrap();
 
-        let sdna_pool = SdnaPrologPool::new(2, complete_pool);
+        let sdna_pool = SdnaPrologPool::new(2);
         sdna_pool.initialize(2).await.unwrap();
 
         // Create test links (these should be ignored for SDNA pool)
