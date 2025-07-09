@@ -571,41 +571,49 @@ impl PrologEnginePool {
             }
         };
 
-        // 🔍 THIRD PRIORITY: If this is a subscription query and filtering is enabled, try to use a filtered pool
-        if is_subscription && should_use_filtering {
+        // 🔍 THIRD PRIORITY: If filtering is enabled, try to use a filtered pool
+        if should_use_filtering {
             if let Some(source_filter) = source_filtering::extract_source_filter(&query) {
-                log::info!("🚀 QUERY ROUTING: Routing subscription query to filtered pool for source: '{}'", source_filter);
+                if is_subscription {
+                    log::info!("🚀 QUERY ROUTING: Routing subscription query to filtered pool for source: '{}'", source_filter);
 
-                // Ensure filtered pool exists (creation will automatically populate it)
-                match self
-                    .get_or_create_filtered_pool(source_filter.clone())
-                    .await
-                {
-                    Ok(_was_created) => {
-                        // Get the filtered pool and run query on it
-                        let filtered_pools = self.filtered_pools.read().await;
-                        if let Some(filtered_pool) = filtered_pools.get(&source_filter) {
-                            log::info!("🚀 QUERY ROUTING: Successfully routing to filtered pool for source: '{}'", source_filter);
-                            return filtered_pool.run_query(query).await;
-                        } else {
-                            log::warn!("🚀 QUERY ROUTING: Filtered pool not found after creation attempt, using complete pool");
+                    // For subscription queries, ensure filtered pool exists (creation will automatically populate it)
+                    match self
+                        .get_or_create_filtered_pool(source_filter.clone())
+                        .await
+                    {
+                        Ok(_was_created) => {
+                            // Get the filtered pool and run query on it
+                            let filtered_pools = self.filtered_pools.read().await;
+                            if let Some(filtered_pool) = filtered_pools.get(&source_filter) {
+                                log::info!("🚀 QUERY ROUTING: Successfully routing to filtered pool for source: '{}'", source_filter);
+                                return filtered_pool.run_query(query).await;
+                            } else {
+                                log::warn!("🚀 QUERY ROUTING: Filtered pool not found after creation attempt, using complete pool");
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("🚀 QUERY ROUTING: Failed to create filtered pool, falling back to complete pool: {}", e);
+                            return self.run_query(query).await;
                         }
                     }
-                    Err(e) => {
-                        log::warn!("🚀 QUERY ROUTING: Failed to create filtered pool, falling back to complete pool: {}", e);
-                        return self.run_query(query).await;
+                } else {
+                    // For regular queries, only use existing filtered pools, don't create new ones
+                    let filtered_pools = self.filtered_pools.read().await;
+                    if let Some(filtered_pool) = filtered_pools.get(&source_filter) {
+                        log::info!("🚀 QUERY ROUTING: Using existing filtered pool for regular query with source: '{}'", source_filter);
+                        return filtered_pool.run_query(query).await;
+                    } else {
+                        log::debug!("🚀 QUERY ROUTING: No existing filtered pool for source '{}', using complete pool", source_filter);
                     }
                 }
             } else {
-                log::debug!("🚀 QUERY ROUTING: No source filter extracted from subscription query, using complete pool");
+                log::debug!("🚀 QUERY ROUTING: No source filter extracted from query, using complete pool");
             }
-        } else if is_subscription && !should_use_filtering {
+        } else if is_subscription {
             log::debug!("🚀 QUERY ROUTING: Filtering disabled for small perspective, using complete pool for subscription");
         } else {
-            log::debug!(
-                "🚀 QUERY ROUTING: Using complete pool - is_subscription={}",
-                is_subscription
-            );
+            log::debug!("🚀 QUERY ROUTING: Filtering disabled for small perspective, using complete pool for regular query");
         }
 
         // Default to using this pool directly
@@ -2626,5 +2634,82 @@ mod tests {
         println!("✅ 10-engine pool SDNA consistency test passed!");
         println!("✅ If this test passes, the production issue might be elsewhere");
         println!("✅ If this test fails, it confirms engine initialization inconsistencies");
+    }
+
+    #[tokio::test]
+    async fn test_regular_queries_use_existing_filtered_pools() {
+        // This test verifies that regular queries (subscription=false) will use existing 
+        // filtered pools but won't create new ones
+        AgentService::init_global_test_instance();
+        let pool = PrologEnginePool::new(5);
+        pool.initialize(5).await.unwrap();
+
+        // Create a large test dataset to enable filtering
+        let large_test_links = create_large_test_dataset();
+
+        // Update the pool with large dataset
+        pool.update_all_engines_with_links(
+            "facts".to_string(),
+            large_test_links,
+            Some("neighbourhood".to_string()),
+        )
+        .await
+        .unwrap();
+
+        // First, create a filtered pool using a subscription query
+        let subscription_query = "triple(\"user1\", \"has_child\", X).".to_string();
+        let _subscription_result = pool
+            .run_query_smart(subscription_query, true)
+            .await
+            .unwrap();
+
+        // Verify the filtered pool was created
+        {
+            let filtered_pools = pool.filtered_pools.read().await;
+            assert!(filtered_pools.contains_key("user1"), "Filtered pool should exist for user1");
+        }
+
+        // Now run a regular query (subscription=false) with the same source filter
+        let regular_query = "triple(\"user1\", \"has_child\", \"target_1\").".to_string();
+        let regular_result = pool
+            .run_query_smart(regular_query, false)
+            .await
+            .unwrap();
+
+        // The query should succeed (using the existing filtered pool)
+        match regular_result {
+            Ok(QueryResolution::True) => {
+                println!("✅ Regular query succeeded using existing filtered pool");
+            }
+            Ok(other) => {
+                println!("✅ Regular query got result: {:?}", other);
+            }
+            Err(e) => {
+                panic!("Regular query failed: {}", e);
+            }
+        }
+
+        // Now test that a regular query for a non-existent source doesn't create a new filtered pool
+        let initial_pool_count = {
+            let filtered_pools = pool.filtered_pools.read().await;
+            filtered_pools.len()
+        };
+
+        let new_source_query = "triple(\"user999\", \"has_child\", X).".to_string();
+        let _new_source_result = pool
+            .run_query_smart(new_source_query, false)
+            .await
+            .unwrap();
+
+        // Verify no new filtered pool was created
+        {
+            let filtered_pools = pool.filtered_pools.read().await;
+            assert_eq!(filtered_pools.len(), initial_pool_count, 
+                      "Regular query should not create new filtered pools");
+            assert!(!filtered_pools.contains_key("user999"), 
+                   "No filtered pool should exist for user999");
+        }
+
+        println!("✅ Regular queries correctly use existing filtered pools but don't create new ones");
     }
 }

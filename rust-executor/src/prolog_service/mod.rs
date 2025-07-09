@@ -127,7 +127,7 @@ impl PrologService {
 
         // The smart routing and population is now handled entirely within the engine pool
         // This eliminates circular dependencies and potential deadlocks
-        let result = pool.run_query_smart(query.clone(), true).await;
+        let result = pool.run_query_smart(query.clone(), false).await;
         match &result {
             Ok(Ok(query_result)) => {
                 log::info!("⚡ SMART Query succeeded with result: {:?}", query_result);
