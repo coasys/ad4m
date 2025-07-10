@@ -35,8 +35,8 @@ fn maybe_transpile(
             });
             Ok(ModuleSource::new(
                 ModuleType::JavaScript,
-                ModuleSourceCode::String(js_code.into()),
-                &module_specifier,
+                ModuleSourceCode::String(js_code),
+                module_specifier,
                 maybe_code_cache,
             ))
         }
@@ -111,7 +111,7 @@ impl ModuleLoader for StringModuleLoader {
                             Ok(ModuleSource::new(
                                 deno_core::ModuleType::JavaScript,
                                 ModuleSourceCode::String(code.into()),
-                                &module_specifier,
+                                module_specifier,
                                 None,
                             ))
                         }
