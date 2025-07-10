@@ -647,8 +647,7 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
     ) -> Result<DecoratedLinkExpression, AnyError> {
         let link_expr: LinkExpression = create_signed_expression(link)?.into();
-        self.add_link_expression(link_expr, status, batch_id)
-            .await
+        self.add_link_expression(link_expr, status, batch_id).await
     }
 
     pub async fn remove_link(
@@ -2006,7 +2005,6 @@ impl PerspectiveInstance {
         //log::info!("🔍 SUBJECT CLASS: Starting class name resolution...");
 
         Ok(if subject_class.class_name.is_some() {
-            
             //log::info!("🔍 SUBJECT CLASS: Using provided class name '{}' in {:?}", class_name, method_start.elapsed());
             subject_class.class_name.unwrap()
         } else {
@@ -2061,13 +2059,10 @@ impl PerspectiveInstance {
         //log::info!("🏗️ CONSTRUCTOR: Running prolog query: {}", query);
         //let query_start = std::time::Instant::now();
 
-        
-
         //log::info!("🏗️ CONSTRUCTOR: Prolog query completed in {:?} (total: {:?})",
         //    query_start.elapsed(), method_start.elapsed());
 
-        self
-            .get_actions_from_prolog(query)
+        self.get_actions_from_prolog(query)
             .await?
             .ok_or(anyhow!("No constructor found for class: {}", class_name))
     }
@@ -2087,8 +2082,6 @@ impl PerspectiveInstance {
 
         //log::info!("🔧 PROPERTY SETTER: Running prolog query: {}", query);
         //let query_start = std::time::Instant::now();
-
-        
 
         //log::info!("🔧 PROPERTY SETTER: Prolog query completed in {:?} (total: {:?})",
         //    query_start.elapsed(), method_start.elapsed());
@@ -2572,10 +2565,7 @@ impl PerspectiveInstance {
     async fn subscribed_queries_loop(&self) {
         while !*self.is_teardown.lock().await {
             // Check trigger without holding lock during the operation
-            let should_check = {
-                
-                *self.trigger_prolog_subscription_check.lock().await
-            };
+            let should_check = { *self.trigger_prolog_subscription_check.lock().await };
 
             if should_check {
                 self.check_subscribed_queries().await;
@@ -2606,9 +2596,9 @@ impl PerspectiveInstance {
         //let batch_retrieval_start = std::time::Instant::now();
 
         // Get the diff without holding lock during the entire operation
-        let diff = {            
+        let diff = {
             let mut batch_store = self.batch_store.write().await;
-            
+
             match batch_store.remove(&batch_uuid) {
                 Some(diff) => diff,
                 None => return Err(anyhow!("No batch found with given UUID")),

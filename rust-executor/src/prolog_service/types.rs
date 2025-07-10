@@ -65,9 +65,7 @@ impl From<Vec<LeafAnswer>> for QueryResolution {
 pub type QueryResult = Result<QueryResolution, String>;
 
 pub fn query_result_from_leaf_answer(result: Result<Vec<LeafAnswer>, Term>) -> QueryResult {
-    result
-        .map(QueryResolution::from)
-        .map_err(term_to_string)
+    result.map(QueryResolution::from).map_err(term_to_string)
 }
 
 pub fn term_to_string(value: Term) -> String {

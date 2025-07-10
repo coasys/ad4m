@@ -224,7 +224,6 @@ impl PrologEngine {
 #[cfg(test)]
 mod prolog_test {
     use super::*;
-    
 
     #[tokio::test]
     async fn test_init_prolog_engine() {

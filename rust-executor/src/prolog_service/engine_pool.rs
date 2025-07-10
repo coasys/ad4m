@@ -2547,7 +2547,9 @@ mod tests {
         let mut query_futures = Vec::new();
         for i in 1..=10 {
             let pool_clone = pool.clone();
-            let query = "triple(\"message1\", \"flux://body\", Body), Body = \"literal://Hello World\".".to_string();
+            let query =
+                "triple(\"message1\", \"flux://body\", Body), Body = \"literal://Hello World\"."
+                    .to_string();
             let future = async move {
                 let result = pool_clone.run_query(query).await;
                 (i, result)
