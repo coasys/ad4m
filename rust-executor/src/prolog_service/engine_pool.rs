@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Mutex};
 
 pub const EMBEDDING_LANGUAGE_HASH: &str = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
 
@@ -63,6 +63,10 @@ pub struct PrologEnginePool {
     /// SDNA-only pool for subject class queries (contains only infrastructure + SDNA facts)
     /// This pool is optimized for queries during subject instance creation that don't need link data
     sdna_pool: Arc<RwLock<Option<SdnaPrologPool>>>,
+
+    /// Per-source-filter creation synchronization to prevent race conditions
+    /// This ensures only one thread can create a filtered pool for a specific source filter
+    creation_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl PrologEnginePool {
@@ -80,6 +84,7 @@ impl PrologEnginePool {
             embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
             filtered_pools: Arc::new(RwLock::new(HashMap::new())),
             sdna_pool: Arc::new(RwLock::new(None)),
+            creation_locks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -446,15 +451,50 @@ impl PrologEnginePool {
     /// ## Returns
     /// - `Ok(true)` if a new pool was created
     /// - `Ok(false)` if the pool already existed
+    ///
+    /// ## Race Condition Prevention
+    /// This method uses per-source-filter synchronization to ensure only one thread can create
+    /// a filtered pool for a specific source filter at a time. Multiple threads requesting
+    /// the same source filter will be serialized, while different source filters can be
+    /// created concurrently.
     pub async fn get_or_create_filtered_pool(&self, source_filter: String) -> Result<bool, Error> {
-        let mut filtered_pools = self.filtered_pools.write().await;
+        // Fast path: check if pool already exists with read lock
+        {
+            let filtered_pools = self.filtered_pools.read().await;
+            if filtered_pools.contains_key(&source_filter) {
+                log::debug!(
+                    "📊 POOL CREATION: Filtered pool for source '{}' already exists",
+                    source_filter
+                );
+                return Ok(false);
+            }
+        }
 
-        if filtered_pools.contains_key(&source_filter) {
-            log::debug!(
-                "📊 POOL CREATION: Filtered pool for source '{}' already exists",
-                source_filter
-            );
-            return Ok(false);
+        // Get or create a per-source-filter creation lock
+        let creation_lock = {
+            let mut creation_locks = self.creation_locks.write().await;
+            creation_locks
+                .entry(source_filter.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+
+        // Acquire the per-source-filter lock to prevent concurrent creation
+        let _guard = creation_lock.lock().await;
+
+        // Double-check pattern: pool might have been created while we waited for the lock
+        {
+            let filtered_pools = self.filtered_pools.read().await;
+            if filtered_pools.contains_key(&source_filter) {
+                log::debug!(
+                    "📊 POOL CREATION: Filtered pool for source '{}' was created by another thread",
+                    source_filter
+                );
+                // Clean up the creation lock since we don't need it anymore
+                let mut creation_locks = self.creation_locks.write().await;
+                creation_locks.remove(&source_filter);
+                return Ok(false);
+            }
         }
 
         log::info!(
@@ -469,7 +509,16 @@ impl PrologEnginePool {
         filtered_pool.populate_from_complete_data().await?;
 
         // Insert the pool into the map
-        filtered_pools.insert(source_filter.clone(), filtered_pool);
+        {
+            let mut filtered_pools = self.filtered_pools.write().await;
+            filtered_pools.insert(source_filter.clone(), filtered_pool);
+        }
+
+        // Clean up the creation lock since we're done
+        {
+            let mut creation_locks = self.creation_locks.write().await;
+            creation_locks.remove(&source_filter);
+        }
 
         log::info!(
             "📊 POOL CREATION: New filtered pool created and populated for source: '{}'",
@@ -2679,5 +2728,126 @@ mod tests {
         println!(
             "✅ Regular queries correctly use existing filtered pools but don't create new ones"
         );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_filtered_pool_creation_race_condition() {
+        // Test that multiple concurrent attempts to create the same filtered pool
+        // result in only one pool being created and no race conditions
+        AgentService::init_global_test_instance();
+        let pool = Arc::new(PrologEnginePool::new());
+        pool.initialize(3).await.unwrap();
+
+        // Set up some test data
+        use crate::types::{DecoratedLinkExpression, Link};
+        let test_links = vec![DecoratedLinkExpression {
+            author: "user1".to_string(),
+            timestamp: "2023-01-01T00:00:00Z".to_string(),
+            data: Link {
+                source: "user1".to_string(),
+                predicate: Some("has_child".to_string()),
+                target: "post1".to_string(),
+            },
+            proof: crate::types::DecoratedExpressionProof {
+                key: "test_key".to_string(),
+                signature: "test_signature".to_string(),
+                valid: Some(true),
+                invalid: Some(false),
+            },
+            status: None,
+        }];
+
+        pool.update_all_engines_with_links("test_facts".to_string(), test_links, None)
+            .await
+            .unwrap();
+
+        // Launch multiple concurrent attempts to create the same filtered pool
+        let source_filter = "user1".to_string();
+        let num_concurrent_attempts = 10;
+        let mut handles = Vec::new();
+
+        for i in 0..num_concurrent_attempts {
+            let pool_clone = pool.clone();
+            let source_filter_clone = source_filter.clone();
+
+            let handle = tokio::spawn(async move {
+                let result = pool_clone
+                    .get_or_create_filtered_pool(source_filter_clone)
+                    .await;
+                (i, result)
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all concurrent attempts to complete
+        let mut creation_results = Vec::new();
+        for handle in handles {
+            let (attempt_id, result) = handle.await.unwrap();
+            creation_results.push((attempt_id, result));
+        }
+
+        // Verify results
+        let mut successful_creations = 0;
+        let mut failed_creations = 0;
+
+        for (attempt_id, result) in creation_results {
+            match result {
+                Ok(true) => {
+                    successful_creations += 1;
+                    println!("✅ Attempt {} successfully created the pool", attempt_id);
+                }
+                Ok(false) => {
+                    failed_creations += 1;
+                    println!("✅ Attempt {} found pool already existed", attempt_id);
+                }
+                Err(e) => {
+                    panic!("❌ Attempt {} failed unexpectedly: {}", attempt_id, e);
+                }
+            }
+        }
+
+        // Verify that exactly one pool was created
+        assert_eq!(
+            successful_creations, 1,
+            "Expected exactly 1 successful creation, got {}",
+            successful_creations
+        );
+        assert_eq!(
+            failed_creations,
+            num_concurrent_attempts - 1,
+            "Expected {} failed creations, got {}",
+            num_concurrent_attempts - 1,
+            failed_creations
+        );
+
+        // Verify that only one pool exists in the map
+        let filtered_pools = pool.filtered_pools.read().await;
+        assert_eq!(
+            filtered_pools.len(),
+            1,
+            "Expected exactly 1 pool in the map, got {}",
+            filtered_pools.len()
+        );
+        assert!(
+            filtered_pools.contains_key(&source_filter),
+            "Expected pool for source '{}' to exist",
+            source_filter
+        );
+
+        // Verify that creation locks are cleaned up
+        let creation_locks = pool.creation_locks.read().await;
+        assert_eq!(
+            creation_locks.len(),
+            0,
+            "Expected no creation locks to remain, got {}",
+            creation_locks.len()
+        );
+
+        println!("✅ Race condition test passed!");
+        println!(
+            "✅ {} concurrent attempts resulted in exactly 1 pool creation",
+            num_concurrent_attempts
+        );
+        println!("✅ All creation locks were properly cleaned up");
     }
 }
