@@ -332,7 +332,12 @@ impl FilteredPrologPool {
         let sdna_facts = {
             // Use an existing engine from the complete pool - it already has all the data loaded!
             let complete_pool_state = self.complete_pool.engine_state().read().await;
-            let all_links = complete_pool_state.current_all_links.as_ref().unwrap();
+            let all_links = complete_pool_state.current_all_links.as_ref()
+                .ok_or_else(|| anyhow!(
+                    "🚨 RACE CONDITION: Parent pool not yet populated with data for source '{}'. \
+                     This indicates filtered pool creation happened before parent pool data population.",
+                    self.source_filter
+                ))?;
             let neighbourhood_author = complete_pool_state.current_neighbourhood_author.clone();
             get_sdna_facts(all_links, neighbourhood_author)?
         };
@@ -387,7 +392,12 @@ impl FilteredPrologPool {
             .iter()
             .find_map(|e| e.as_ref())
             .ok_or_else(|| anyhow!("No engines available in complete pool"))?;
-        let all_links = complete_engines.current_all_links.as_ref().unwrap();
+        let all_links = complete_engines.current_all_links.as_ref()
+            .ok_or_else(|| anyhow!(
+                "🚨 RACE CONDITION: Parent pool not yet populated with data for source '{}'. \
+                 This indicates filtered pool creation happened before parent pool data population.",
+                self.source_filter
+            ))?;
         log::info!("🔍 FILTERING: Total links provided: {}", all_links.len());
 
         // Get all data facts that we want to filter
@@ -511,16 +521,16 @@ impl FilteredPrologPool {
                 }
             }
             Ok(Ok(Ok(_))) => {
-                log::warn!("🔍 FILTERING: Findall reachable query returned unexpected result type");
+                log::warn!("🔍 FILTERING: Findall reachable query returned unexpected result type - parent pool may not be fully populated yet");
             }
             Ok(Ok(Err(e))) => {
-                log::warn!("🔍 FILTERING: Findall reachable query failed: {}", e);
+                log::warn!("🔍 FILTERING: Findall reachable query failed (parent pool may not be fully populated): {}", e);
             }
             Ok(Err(e)) => {
-                log::warn!("🔍 FILTERING: Engine error during reachable query: {}", e);
+                log::warn!("🔍 FILTERING: Engine error during reachable query (parent pool may not be fully populated): {}", e);
             }
             Err(_) => {
-                log::error!("🔍 FILTERING: Reachable query timed out after 10 seconds! Using source-only fallback.");
+                log::error!("🔍 FILTERING: Reachable query timed out after 10 seconds! Using source-only fallback. This may indicate parent pool is not fully populated or system is overloaded.");
                 // Don't try any more reachability queries - just use the source node itself
                 // This prevents the system from hanging completely
             }

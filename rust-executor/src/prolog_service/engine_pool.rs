@@ -502,6 +502,28 @@ impl PrologEnginePool {
             source_filter
         );
 
+        // 🛡️ RACE CONDITION PROTECTION: Validate that parent pool is ready before creating filtered pool
+        {
+            let pool_state = self.engine_pool_state.read().await;
+            if pool_state.current_all_links.is_none() {
+                return Err(anyhow!(
+                    "🚨 RACE CONDITION PREVENTED: Cannot create filtered pool for source '{}' \
+                     because parent pool has not been populated with data yet. \
+                     This prevents the creation of empty filtered pools.",
+                    source_filter
+                ));
+            }
+            
+            // Verify engines are available and populated
+            if pool_state.engines.is_empty() || pool_state.engines.iter().all(|e| e.is_none()) {
+                return Err(anyhow!(
+                    "🚨 RACE CONDITION PREVENTED: Cannot create filtered pool for source '{}' \
+                     because parent pool has no valid engines available.",
+                    source_filter
+                ));
+            }
+        }
+
         // Create new filtered pool with smaller size (2-3 engines should be enough for subscriptions)
         let filtered_pool = FilteredPrologPool::new(source_filter.clone(), Arc::new(self.clone()));
         filtered_pool.initialize(FILTERED_POOL_SIZE).await?;
@@ -598,7 +620,13 @@ impl PrologEnginePool {
                             }
                         }
                         Err(e) => {
-                            log::warn!("🚀 QUERY ROUTING: Failed to create filtered pool, falling back to complete pool: {}", e);
+                            // Check if this is a race condition error - these are expected and should not be logged as errors
+                            if e.to_string().contains("RACE CONDITION PREVENTED") {
+                                log::info!("🚀 QUERY ROUTING: Race condition prevented filtered pool creation for source '{}', safely falling back to complete pool: {}", source_filter, e);
+                            } else {
+                                log::warn!("🚀 QUERY ROUTING: Failed to create filtered pool for source '{}', falling back to complete pool: {}", source_filter, e);
+                            }
+                            // Always fall back to complete pool - this is safe and correct
                             return self.run_query(query).await;
                         }
                     }
@@ -2849,5 +2877,110 @@ mod tests {
             num_concurrent_attempts
         );
         println!("✅ All creation locks were properly cleaned up");
+    }
+
+    #[tokio::test]
+    async fn test_race_condition_prevention_pool_not_ready() {
+        // Test that filtered pool creation fails gracefully when parent pool is not ready
+        AgentService::init_global_test_instance();
+        let pool = Arc::new(PrologEnginePool::new());
+        
+        // Initialize pool but DON'T populate it with data
+        pool.initialize(2).await.unwrap();
+        
+        // Verify parent pool state: engines exist but no data
+        {
+            let pool_state = pool.engine_pool_state.read().await;
+            assert!(!pool_state.engines.is_empty());
+            assert!(pool_state.current_all_links.is_none());
+        }
+        
+        // Attempt to create filtered pool - should fail with race condition prevention
+        let result = pool.get_or_create_filtered_pool("user1".to_string()).await;
+        
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("RACE CONDITION PREVENTED"));
+        assert!(error_msg.contains("parent pool has not been populated with data yet"));
+        
+        // Verify no filtered pool was created
+        let filtered_pools = pool.filtered_pools.read().await;
+        assert_eq!(filtered_pools.len(), 0);
+        
+        // Test that smart query routing handles this gracefully
+        let subscription_query = "triple(\"user1\", \"has_child\", X).".to_string();
+        let result = pool.run_query_smart(subscription_query, true).await;
+        
+        // Should succeed by falling back to complete pool (even though it has no data)
+        assert!(result.is_ok());
+        
+        println!("✅ Race condition prevention test passed!");
+        println!("✅ System correctly prevents creating filtered pools when parent pool not ready");
+        println!("✅ Graceful fallback to complete pool works correctly");
+    }
+
+    #[tokio::test]
+    async fn test_race_condition_fix_full_scenario() {
+        // Test the complete scenario: simulate the exact race condition timing
+        AgentService::init_global_test_instance();
+        let pool = Arc::new(PrologEnginePool::new());
+        
+        // Step 1: Initialize pool (like perspective instance does)
+        pool.initialize(2).await.unwrap();
+        
+        // Step 2: Simulate subscription query arriving before data population
+        let query_task = {
+            let pool_clone = pool.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                let subscription_query = "triple(\"user1\", \"has_child\", X).".to_string();
+                pool_clone.run_query_smart(subscription_query, true).await
+            })
+        };
+        
+        // Step 3: Populate with data (like perspective instance does)
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        use crate::types::{DecoratedLinkExpression, Link};
+        let test_links = vec![DecoratedLinkExpression {
+            author: "user1".to_string(),
+            timestamp: "2023-01-01T00:00:00Z".to_string(),
+            data: Link {
+                source: "user1".to_string(),
+                predicate: Some("has_child".to_string()),
+                target: "post1".to_string(),
+            },
+            proof: crate::types::DecoratedExpressionProof {
+                key: "test_key".to_string(),
+                signature: "test_signature".to_string(),
+                valid: Some(true),
+                invalid: Some(false),
+            },
+            status: None,
+        }];
+        
+        pool.update_all_engines_with_links("facts".to_string(), test_links, None)
+            .await
+            .unwrap();
+        
+        // Step 4: Wait for query task to complete
+        let query_result = query_task.await.unwrap();
+        
+        // Query should succeed (fallback to complete pool)
+        assert!(query_result.is_ok());
+        
+        // Step 5: Now try creating filtered pool - should succeed
+        let create_result = pool.get_or_create_filtered_pool("user1".to_string()).await;
+        assert!(create_result.is_ok());
+        assert_eq!(create_result.unwrap(), true); // New pool created
+        
+        // Verify filtered pool exists and works
+        let filtered_pools = pool.filtered_pools.read().await;
+        assert_eq!(filtered_pools.len(), 1);
+        assert!(filtered_pools.contains_key("user1"));
+        
+        println!("✅ Full race condition scenario test passed!");
+        println!("✅ Early subscription queries handled gracefully");
+        println!("✅ Later filtered pool creation works correctly");
+        println!("✅ System is robust against initialization timing issues");
     }
 }
