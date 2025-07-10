@@ -289,7 +289,7 @@ impl FilteredPool for FilteredPrologPool {
     }
 
     async fn drop_all(&self) -> Result<(), Error> {
-        let pool_state = self.engine_pool_state.read().await;
+        let pool_state = self.engine_pool_state.write().await;
         for engine in pool_state.engines.iter().filter_map(|e| e.as_ref()) {
             engine._drop()?;
         }
