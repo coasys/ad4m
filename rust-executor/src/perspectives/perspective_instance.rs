@@ -1876,7 +1876,7 @@ impl PerspectiveInstance {
             }
         };
 
-        for (_i, command) in commands.iter().enumerate() {
+        for command in commands.iter() {
             //let command_start = std::time::Instant::now();
             //log::info!("⚙️ EXECUTE COMMANDS: Processing command {}/{}: {:?}", i + 1, commands.len(), command.action);
 
@@ -1998,8 +1998,6 @@ impl PerspectiveInstance {
         //let method_start = std::time::Instant::now();
         //log::info!("🔍 SUBJECT CLASS: Starting class name resolution...");
 
-        
-
         Ok(if subject_class.class_name.is_some() {
             
             //log::info!("🔍 SUBJECT CLASS: Using provided class name '{}' in {:?}", class_name, method_start.elapsed());
@@ -2022,14 +2020,9 @@ impl PerspectiveInstance {
 
             //log::info!("🔍 SUBJECT CLASS: Prolog query completed in {:?}", query_start.elapsed());
 
-            let class_name = prolog_get_first_string_binding(&result, "Class")
-                .ok_or(anyhow!("No matching subject class found!"))?;
-
-            //log::info!("🔍 SUBJECT CLASS: Resolved class name '{}' in {:?}", class_name, method_start.elapsed());
-            class_name
-        });
-
-        result
+            prolog_get_first_string_binding(&result, "Class")
+                .ok_or(anyhow!("No matching subject class found!"))?
+        })
     }
 
     async fn get_actions_from_prolog(
@@ -2603,19 +2596,20 @@ impl PerspectiveInstance {
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
         //let commit_start = std::time::Instant::now();
         //log::info!("🔄 BATCH COMMIT: Starting batch commit for batch_uuid: {}", batch_uuid);
+        //let batch_retrieval_start = std::time::Instant::now();
 
         // Get the diff without holding lock during the entire operation
-        let diff = {
-            //let batch_retrieval_start = std::time::Instant::now();
+        let diff = {            
             let mut batch_store = self.batch_store.write().await;
-            let result = match batch_store.remove(&batch_uuid) {
+            
+            match batch_store.remove(&batch_uuid) {
                 Some(diff) => diff,
                 None => return Err(anyhow!("No batch found with given UUID")),
-            };
-            //log::info!("🔄 BATCH COMMIT: Retrieved batch diff in {:?} - {} additions, {} removals",
-            //    batch_retrieval_start.elapsed(), result.additions.len(), result.removals.len());
-            result
+            }
         };
+
+        //log::info!("🔄 BATCH COMMIT: Retrieved batch diff in {:?} - {} additions, {} removals",
+        //    batch_retrieval_start.elapsed(), diff.additions.len(), diff.removals.len());
 
         //let processing_start = std::time::Instant::now();
         let mut shared_diff = DecoratedPerspectiveDiff {
