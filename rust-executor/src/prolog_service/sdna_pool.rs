@@ -42,7 +42,7 @@ use crate::perspectives::sdna::{get_sdna_facts, get_static_infrastructure_facts}
 #[derive(Clone)]
 pub struct SdnaPrologPool {
     /// Combined lock for engines and current state to prevent deadlocks
-    engine_state: Arc<RwLock<EnginePoolState>>,
+    engine_pool_state: Arc<RwLock<EnginePoolState>>,
 
     /// Round-robin index for engine selection
     next_engine: Arc<AtomicUsize>,
@@ -63,11 +63,11 @@ impl FilteredPool for SdnaPrologPool {
     /// Initialize the SDNA pool by spawning the Prolog engines
     /// This creates the actual Prolog engine processes but does not populate them with data.
     async fn initialize(&self, pool_size: usize) -> Result<(), Error> {
-        let mut engines = self.engine_state.write().await;
+        let mut pool_state = self.engine_pool_state.write().await;
         for _ in 0..pool_size {
             let mut engine = PrologEngine::new();
             engine.spawn().await?;
-            engines.engines.push(Some(engine));
+            pool_state.engines.push(Some(engine));
         }
         Ok(())
     }
@@ -83,10 +83,10 @@ impl FilteredPool for SdnaPrologPool {
             facts.len()
         );
 
-        let mut engines = self.engine_state.write().await;
+        let mut pool_state = self.engine_pool_state.write().await;
 
         // Reinitialize any invalid engines
-        for engine_slot in engines.engines.iter_mut() {
+        for engine_slot in pool_state.engines.iter_mut() {
             if engine_slot.is_none() {
                 let mut new_engine = PrologEngine::new();
                 new_engine.spawn().await?;
@@ -100,7 +100,7 @@ impl FilteredPool for SdnaPrologPool {
 
         // Update all engines with the processed facts using references to avoid cloning
         let mut update_futures = Vec::new();
-        for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
+        for engine in pool_state.engines.iter().filter_map(|e| e.as_ref()) {
             let update_future = engine.load_module_string("facts", &processed_facts);
             update_futures.push(update_future);
         }
@@ -128,9 +128,9 @@ impl FilteredPool for SdnaPrologPool {
     /// Should be much faster than complete pool queries since it contains much less data.
     async fn run_query(&self, query: String) -> Result<QueryResult, Error> {
         let (result, engine_idx) = {
-            let engines = self.engine_state.read().await;
+            let pool_state = self.engine_pool_state.read().await;
             let (engine_idx, engine) =
-                PoolUtils::select_engine_round_robin(&engines.engines, &self.next_engine)?;
+                PoolUtils::select_engine_round_robin(&pool_state.engines, &self.next_engine)?;
             let result = PoolUtils::execute_query_with_processing(
                 query.clone(),
                 engine,
@@ -145,7 +145,7 @@ impl FilteredPool for SdnaPrologPool {
             Err(e) => {
                 let pool_name = "SDNA Pool".to_string();
                 PoolUtils::handle_engine_error(
-                    &self.engine_state,
+                    &self.engine_pool_state,
                     engine_idx,
                     e,
                     &query,
@@ -160,8 +160,8 @@ impl FilteredPool for SdnaPrologPool {
     ///
     /// This is used for assert operations that need to update all engines consistently.
     async fn run_query_all(&self, query: String) -> Result<(), Error> {
-        let engines = self.engine_state.write().await;
-        let valid_engines: Vec<_> = engines.engines.iter().filter_map(|e| e.as_ref()).collect();
+        let pool_state = self.engine_pool_state.write().await;
+        let valid_engines: Vec<_> = pool_state.engines.iter().filter_map(|e| e.as_ref()).collect();
 
         if valid_engines.is_empty() {
             return Err(anyhow!("No valid Prolog engines available in SDNA pool"));
@@ -207,8 +207,8 @@ impl FilteredPool for SdnaPrologPool {
     }
 
     async fn drop_all(&self) -> Result<(), Error> {
-        let engines = self.engine_state.read().await;
-        for engine in engines.engines.iter().filter_map(|e| e.as_ref()) {
+        let pool_state = self.engine_pool_state.read().await;
+        for engine in pool_state.engines.iter().filter_map(|e| e.as_ref()) {
             engine._drop()?;
         }
         Ok(())
