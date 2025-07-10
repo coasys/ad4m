@@ -66,6 +66,9 @@ pub struct EnginePoolState {
     pub engines: Vec<Option<PrologEngine>>,
     pub current_all_links: Option<Vec<DecoratedLinkExpression>>,
     pub current_neighbourhood_author: Option<String>,
+    /// Explicit ready state - only true when ALL engines are successfully populated
+    /// This prevents race conditions where current_all_links is set but engines aren't ready
+    pub is_pool_ready: bool,
 }
 
 impl EnginePoolState {
@@ -74,6 +77,7 @@ impl EnginePoolState {
             engines: Vec::new(),
             current_all_links: None,
             current_neighbourhood_author: None,
+            is_pool_ready: false,
         }
     }
 }

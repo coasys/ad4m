@@ -295,10 +295,15 @@ impl SdnaPrologPool {
         // Get current data from complete pool state
         let (all_links, neighbourhood_author) = {
             let complete_pool_state = self.complete_pool.engine_state().read().await;
+            if !complete_pool_state.is_pool_ready {
+                return Err(anyhow!(
+                    "🚨 RACE CONDITION DETECTED: SDNA pool cannot create facts because parent pool is not fully ready. \
+                     This indicates SDNA pool population happened before parent pool engines were populated."
+                ));
+            }
             let all_links = complete_pool_state.current_all_links.as_ref()
                 .ok_or_else(|| anyhow!(
-                    "🚨 RACE CONDITION DETECTED: SDNA pool cannot create facts because parent pool not yet populated with data. \
-                     This indicates SDNA pool population happened before parent pool data population."
+                    "🚨 RACE CONDITION DETECTED: Parent pool marked ready but has no link data - this shouldn't happen"
                 ))?;
             let neighbourhood_author = complete_pool_state.current_neighbourhood_author.clone();
             (all_links.clone(), neighbourhood_author)

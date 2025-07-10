@@ -332,10 +332,16 @@ impl FilteredPrologPool {
         let sdna_facts = {
             // Use an existing engine from the complete pool - it already has all the data loaded!
             let complete_pool_state = self.complete_pool.engine_state().read().await;
+            if !complete_pool_state.is_pool_ready {
+                return Err(anyhow!(
+                    "🚨 RACE CONDITION: Parent pool not fully ready for source '{}'. \
+                     This indicates filtered pool creation happened before parent pool engines were populated.",
+                    self.source_filter
+                ));
+            }
             let all_links = complete_pool_state.current_all_links.as_ref()
                 .ok_or_else(|| anyhow!(
-                    "🚨 RACE CONDITION: Parent pool not yet populated with data for source '{}'. \
-                     This indicates filtered pool creation happened before parent pool data population.",
+                    "🚨 RACE CONDITION: Parent pool marked ready but has no data for source '{}' - this shouldn't happen",
                     self.source_filter
                 ))?;
             let neighbourhood_author = complete_pool_state.current_neighbourhood_author.clone();
@@ -387,6 +393,13 @@ impl FilteredPrologPool {
 
         // Use an existing engine from the complete pool - it already has all the data loaded!
         let complete_engines = self.complete_pool.engine_state().read().await;
+        if !complete_engines.is_pool_ready {
+            return Err(anyhow!(
+                "🚨 RACE CONDITION: Parent pool not fully ready for source '{}'. \
+                 This indicates filtered pool querying happened before parent pool engines were populated.",
+                self.source_filter
+            ));
+        }
         let engine = complete_engines
             .engines
             .iter()
@@ -394,8 +407,7 @@ impl FilteredPrologPool {
             .ok_or_else(|| anyhow!("No engines available in complete pool"))?;
         let all_links = complete_engines.current_all_links.as_ref()
             .ok_or_else(|| anyhow!(
-                "🚨 RACE CONDITION: Parent pool not yet populated with data for source '{}'. \
-                 This indicates filtered pool creation happened before parent pool data population.",
+                "🚨 RACE CONDITION: Parent pool marked ready but has no data for source '{}' - this shouldn't happen",
                 self.source_filter
             ))?;
         log::info!("🔍 FILTERING: Total links provided: {}", all_links.len());
