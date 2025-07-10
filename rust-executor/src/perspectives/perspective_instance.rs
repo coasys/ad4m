@@ -647,7 +647,7 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
     ) -> Result<DecoratedLinkExpression, AnyError> {
         let link_expr: LinkExpression = create_signed_expression(link)?.into();
-        self.add_link_expression(link_expr.into(), status, batch_id)
+        self.add_link_expression(link_expr, status, batch_id)
             .await
     }
 
@@ -1998,10 +1998,12 @@ impl PerspectiveInstance {
         //let method_start = std::time::Instant::now();
         //log::info!("🔍 SUBJECT CLASS: Starting class name resolution...");
 
-        let result = Ok(if subject_class.class_name.is_some() {
-            let class_name = subject_class.class_name.unwrap();
+        
+
+        Ok(if subject_class.class_name.is_some() {
+            
             //log::info!("🔍 SUBJECT CLASS: Using provided class name '{}' in {:?}", class_name, method_start.elapsed());
-            class_name
+            subject_class.class_name.unwrap()
         } else {
             let query = subject_class.query.ok_or(anyhow!(
                 "SubjectClassOption needs to either have `name` or `query` set"
@@ -2059,15 +2061,15 @@ impl PerspectiveInstance {
         //log::info!("🏗️ CONSTRUCTOR: Running prolog query: {}", query);
         //let query_start = std::time::Instant::now();
 
-        let result = self
-            .get_actions_from_prolog(query)
-            .await?
-            .ok_or(anyhow!("No constructor found for class: {}", class_name));
+        
 
         //log::info!("🏗️ CONSTRUCTOR: Prolog query completed in {:?} (total: {:?})",
         //    query_start.elapsed(), method_start.elapsed());
 
-        result
+        self
+            .get_actions_from_prolog(query)
+            .await?
+            .ok_or(anyhow!("No constructor found for class: {}", class_name))
     }
 
     async fn get_property_setter_actions(
@@ -2086,12 +2088,12 @@ impl PerspectiveInstance {
         //log::info!("🔧 PROPERTY SETTER: Running prolog query: {}", query);
         //let query_start = std::time::Instant::now();
 
-        let result = self.get_actions_from_prolog(query).await;
+        
 
         //log::info!("🔧 PROPERTY SETTER: Prolog query completed in {:?} (total: {:?})",
         //    query_start.elapsed(), method_start.elapsed());
 
-        result
+        self.get_actions_from_prolog(query).await
     }
 
     async fn resolve_property_value(
@@ -2416,7 +2418,7 @@ impl PerspectiveInstance {
             get_global_pubsub()
                 .await
                 .publish(
-                    &PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC.to_string(),
+                    &PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
                     &serde_json::to_string(&filter).unwrap(),
                 )
                 .await;
@@ -2571,8 +2573,8 @@ impl PerspectiveInstance {
         while !*self.is_teardown.lock().await {
             // Check trigger without holding lock during the operation
             let should_check = {
-                let trigger_check = *self.trigger_prolog_subscription_check.lock().await;
-                trigger_check
+                
+                *self.trigger_prolog_subscription_check.lock().await
             };
 
             if should_check {

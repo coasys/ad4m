@@ -224,7 +224,7 @@ impl PrologEngine {
 #[cfg(test)]
 mod prolog_test {
     use super::*;
-    use tokio;
+    
 
     #[tokio::test]
     async fn test_init_prolog_engine() {
@@ -238,7 +238,7 @@ mod prolog_test {
         "#,
         );
 
-        let load_facts = engine.load_module_string("facts", &vec![facts]).await;
+        let load_facts = engine.load_module_string("facts", &[facts]).await;
         assert!(load_facts.is_ok());
         println!("Facts loaded");
 
