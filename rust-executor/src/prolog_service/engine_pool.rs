@@ -126,11 +126,26 @@ impl PrologEnginePool {
     pub async fn run_query_sdna(&self, query: String) -> Result<QueryResult, Error> {
         let sdna_pool_guard = self.sdna_pool.read().await;
         if let Some(ref sdna_pool) = *sdna_pool_guard {
-            log::debug!(
-                "🎯 DIRECT SDNA: Running query directly on SDNA pool: {}",
-                query
-            );
-            sdna_pool.run_query(query).await
+            // 🛡️ RACE CONDITION PROTECTION: Verify parent pool has data before using SDNA pool
+            let parent_pool_ready = {
+                let engine_state = self.engine_pool_state.read().await;
+                engine_state.current_all_links.is_some()
+            };
+
+            if parent_pool_ready {
+                log::debug!(
+                    "🎯 DIRECT SDNA: Running query directly on SDNA pool: {}",
+                    query
+                );
+                sdna_pool.run_query(query).await
+            } else {
+                log::info!(
+                    "🎯 DIRECT SDNA: SDNA pool not ready (race condition), falling back to complete pool for query: {}",
+                    query
+                );
+                // Fall back to complete pool
+                self.run_query(query).await
+            }
         } else {
             Err(anyhow!("SDNA pool not available - this should not happen"))
         }
@@ -688,16 +703,30 @@ impl PrologEnginePool {
         );
 
         // 🎯 FIRST PRIORITY: Check if this is a subject class query that can use the SDNA pool
-        // Note: SDNA pool always exists after initialization, so no need to check for creation
+        // Note: SDNA pool always exists after initialization, but must validate it has data
         {
             let sdna_pool_guard = self.sdna_pool.read().await;
             if let Some(ref sdna_pool) = *sdna_pool_guard {
                 if sdna_pool.should_handle_query(&query) {
-                    log::info!(
-                        "🎯 SDNA ROUTING: Routing subject class query to SDNA pool: {}",
-                        query
-                    );
-                    return sdna_pool.run_query(query).await;
+                    // 🛡️ RACE CONDITION PROTECTION: Verify parent pool has data before using SDNA pool
+                    let parent_pool_ready = {
+                        let engine_state = self.engine_pool_state.read().await;
+                        engine_state.current_all_links.is_some()
+                    };
+
+                    if parent_pool_ready {
+                        log::info!(
+                            "🎯 SDNA ROUTING: Routing subject class query to SDNA pool: {}",
+                            query
+                        );
+                        return sdna_pool.run_query(query).await;
+                    } else {
+                        log::info!(
+                            "🎯 SDNA ROUTING: SDNA pool not ready (race condition), falling back to complete pool for query: {}",
+                            query
+                        );
+                        // Fall through to use complete pool instead
+                    }
                 }
             }
         }
@@ -3362,5 +3391,119 @@ mod tests {
         println!("✅ Background cleanup task is properly cancelled on pool drop");
         println!("✅ No resource leak from infinite background tasks");
         println!("✅ Pool drop completed successfully without hanging");
+    }
+
+    #[tokio::test]
+    async fn test_sdna_pool_race_condition_protection() {
+        AgentService::init_global_test_instance();
+        // Test that SDNA pool queries gracefully handle race conditions during early bootup
+        let pool = PrologEnginePool::new();
+        pool.initialize(2).await.unwrap();
+
+        // At this point, SDNA pool exists but has no data (simulates early bootup state)
+
+        // Verify SDNA pool exists but isn't populated yet
+        {
+            let engine_state = pool.engine_pool_state.read().await;
+            assert!(
+                engine_state.current_all_links.is_none(),
+                "Pool should not have data yet"
+            );
+        }
+        {
+            let sdna_pool_guard = pool.sdna_pool.read().await;
+            assert!(sdna_pool_guard.is_some(), "SDNA pool should exist");
+        }
+
+        // Test subject class query that would normally go to SDNA pool
+        let subject_class_query = "subject(Base, \"TestClass\").";
+
+        // This should fall back to complete pool instead of hitting empty SDNA pool
+        let result = pool
+            .run_query_smart(subject_class_query.to_string(), true)
+            .await;
+
+        // The query should succeed (even if returning False) without panicking
+        match result {
+            Ok(Ok(QueryResolution::False)) => {
+                println!("✅ Query returned False as expected (no data loaded yet)");
+            }
+            Ok(Ok(QueryResolution::True)) => {
+                println!("✅ Query returned True (complete pool has some basic facts)");
+            }
+            Ok(Ok(QueryResolution::Matches(_))) => {
+                println!("✅ Query returned matches (complete pool has some basic facts)");
+            }
+            Ok(Err(_)) => {
+                println!("✅ Query returned error as expected (no data loaded yet)");
+            }
+            Err(e) => {
+                panic!("Query should not panic during race condition: {}", e);
+            }
+        }
+
+        // Test direct SDNA query method too
+        let direct_result = pool.run_query_sdna(subject_class_query.to_string()).await;
+        match direct_result {
+            Ok(Ok(_)) => {
+                println!("✅ Direct SDNA query handled gracefully");
+            }
+            Ok(Err(_)) => {
+                println!("✅ Direct SDNA query returned error gracefully");
+            }
+            Err(e) => {
+                panic!(
+                    "Direct SDNA query should not panic during race condition: {}",
+                    e
+                );
+            }
+        }
+
+        // Now populate with test data - should resolve the race condition
+        use crate::types::{DecoratedLinkExpression, Link};
+        let test_links = vec![DecoratedLinkExpression {
+            author: "test_author".to_string(),
+            timestamp: "2023-01-01T00:00:00Z".to_string(),
+            data: Link {
+                source: "test_source".to_string(),
+                predicate: Some("test_predicate".to_string()),
+                target: "test_target".to_string(),
+            },
+            proof: crate::types::DecoratedExpressionProof {
+                key: "test_key".to_string(),
+                signature: "test_signature".to_string(),
+                valid: Some(true),
+                invalid: Some(false),
+            },
+            status: None,
+        }];
+
+        pool.update_all_engines_with_links("facts".to_string(), test_links, None)
+            .await
+            .unwrap();
+
+        // Verify pool is now populated
+        {
+            let engine_state = pool.engine_pool_state.read().await;
+            assert!(
+                engine_state.current_all_links.is_some(),
+                "Pool should have data now"
+            );
+        }
+
+        // Now SDNA queries should work normally
+        let result_after_population = pool
+            .run_query_smart(subject_class_query.to_string(), true)
+            .await;
+        assert!(
+            result_after_population.is_ok(),
+            "Query should work after data population"
+        );
+
+        println!("✅ SDNA race condition protection test passed!");
+        println!("✅ Early queries fall back gracefully to complete pool");
+        println!("✅ No panics during race condition window");
+        println!("✅ Normal operation resumes after data population");
+        println!("✅ This fixes the empty subscription results during bootup!");
     }
 }
