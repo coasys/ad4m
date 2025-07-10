@@ -14,15 +14,28 @@ use futures::future::join_all;
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
 pub const EMBEDDING_LANGUAGE_HASH: &str = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
 
 // Filtering threshold - only use filtered pools for perspectives with more links than this
 pub const FILTERING_THRESHOLD: usize = 6000;
+
+// Pool cleanup configuration
+const POOL_CLEANUP_INTERVAL_SECS: u64 = 300; // Check every 5 minutes
+const POOL_INACTIVE_TIMEOUT_SECS: u64 = 900; // Remove pools inactive for 15 minutes
+
+/// Entry for a filtered pool with metadata for cleanup
+#[derive(Clone)]
+struct FilteredPoolEntry {
+    pool: FilteredPrologPool,
+    reference_count: Arc<std::sync::atomic::AtomicUsize>,
+    last_access: Arc<Mutex<Instant>>,
+}
 
 lazy_static! {
     // Match embedding vector URLs inside string literals (both single and double quotes)
@@ -58,7 +71,7 @@ pub struct PrologEnginePool {
 
     /// Collection of filtered pools created by this complete pool
     /// Each filtered pool contains only data reachable from its specific source filter
-    filtered_pools: Arc<RwLock<HashMap<String, FilteredPrologPool>>>,
+    filtered_pools: Arc<RwLock<HashMap<String, FilteredPoolEntry>>>,
 
     /// SDNA-only pool for subject class queries (contains only infrastructure + SDNA facts)
     /// This pool is optimized for queries during subject instance creation that don't need link data
@@ -67,6 +80,9 @@ pub struct PrologEnginePool {
     /// Per-source-filter creation synchronization to prevent race conditions
     /// This ensures only one thread can create a filtered pool for a specific source filter
     creation_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
+
+    /// Cleanup task handle to stop the cleanup task when the pool is dropped
+    cleanup_task_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl PrologEnginePool {
@@ -78,14 +94,19 @@ impl PrologEnginePool {
     /// ## Note
     /// You must call `initialize()` after creation to spawn the actual Prolog engine processes.
     pub fn new() -> Self {
-        PrologEnginePool {
+        let pool = PrologEnginePool {
             engine_pool_state: Arc::new(RwLock::new(EnginePoolState::new())),
             next_engine: Arc::new(AtomicUsize::new(0)),
             embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
             filtered_pools: Arc::new(RwLock::new(HashMap::new())),
             sdna_pool: Arc::new(RwLock::new(None)),
             creation_locks: Arc::new(RwLock::new(HashMap::new())),
-        }
+            cleanup_task_handle: Arc::new(Mutex::new(None)),
+        };
+
+        // Start cleanup task
+        pool.start_cleanup_task();
+        pool
     }
 
     /// Get access to the engine state (needed by filtered pools)
@@ -261,8 +282,9 @@ impl PrologEnginePool {
         // Delegate to each filtered pool - they handle their own filtering logic
         let mut update_futures = Vec::new();
 
-        for pool in filtered_pools.values() {
-            let pool_clone = pool.clone();
+        for entry in filtered_pools.values() {
+            let pool_clone = entry.pool.clone();
+            let last_access = entry.last_access.clone();
             let assert_statements_clone = assert_statements.clone();
 
             let update_future = async move {
@@ -270,6 +292,8 @@ impl PrologEnginePool {
                     "🔄 INCREMENTAL UPDATE: Delegating incremental update to pool '{}'",
                     pool_clone.pool_description()
                 );
+                // Update access time since pool is being updated
+                *last_access.lock().await = Instant::now();
                 pool_clone
                     .handle_incremental_update(&assert_statements_clone)
                     .await
@@ -376,10 +400,13 @@ impl PrologEnginePool {
             );
 
             let mut update_futures = Vec::new();
-            for pool in filtered_pools.values() {
-                let pool_clone = pool.clone();
+            for entry in filtered_pools.values() {
+                let pool_clone = entry.pool.clone();
+                let last_access = entry.last_access.clone();
 
                 let update_future = async move {
+                    // Update access time since pool is being updated with new data
+                    *last_access.lock().await = Instant::now();
                     // Each filtered pool handles its own filtering and population
                     pool_clone.populate_from_complete_data().await
                 };
@@ -428,8 +455,8 @@ impl PrologEnginePool {
         }
         // Drop all filtered pools
         let filtered_pools = self.filtered_pools.read().await;
-        for pool in filtered_pools.values() {
-            pool.drop_all().await?;
+        for entry in filtered_pools.values() {
+            entry.pool.drop_all().await?;
         }
 
         // Drop SDNA pool
@@ -530,10 +557,15 @@ impl PrologEnginePool {
 
         filtered_pool.populate_from_complete_data().await?;
 
-        // Insert the pool into the map
+        // Insert the pool into the map with metadata
         {
             let mut filtered_pools = self.filtered_pools.write().await;
-            filtered_pools.insert(source_filter.clone(), filtered_pool);
+            let entry = FilteredPoolEntry {
+                pool: filtered_pool,
+                reference_count: Arc::new(AtomicUsize::new(0)),
+                last_access: Arc::new(Mutex::new(Instant::now())),
+            };
+            filtered_pools.insert(source_filter.clone(), entry);
         }
 
         // Clean up the creation lock since we're done
@@ -548,6 +580,99 @@ impl PrologEnginePool {
         );
 
         Ok(true)
+    }
+
+    /// Start the cleanup task for removing inactive filtered pools
+    fn start_cleanup_task(&self) {
+        let pools_ref = self.filtered_pools.clone();
+        let cleanup_handle = tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(POOL_CLEANUP_INTERVAL_SECS));
+
+            loop {
+                interval.tick().await;
+                Self::cleanup_inactive_pools(&pools_ref).await;
+            }
+        });
+
+        // Store the handle for potential cleanup
+        // Use spawn to avoid blocking in tests
+        let handle_clone = self.cleanup_task_handle.clone();
+        tokio::spawn(async move {
+            *handle_clone.lock().await = Some(cleanup_handle);
+        });
+    }
+
+    /// Clean up filtered pools that have been inactive for too long
+    async fn cleanup_inactive_pools(pools: &Arc<RwLock<HashMap<String, FilteredPoolEntry>>>) {
+        let mut pools_to_remove = Vec::new();
+        let now = Instant::now();
+
+        // Identify pools to remove
+        {
+            let pools_read = pools.read().await;
+            for (source_filter, entry) in pools_read.iter() {
+                let reference_count = entry.reference_count.load(Ordering::Relaxed);
+                let last_access = *entry.last_access.lock().await;
+                let inactive_duration = now.duration_since(last_access);
+
+                // Remove pools that have no active references and have been inactive
+                if reference_count == 0 && inactive_duration.as_secs() > POOL_INACTIVE_TIMEOUT_SECS
+                {
+                    pools_to_remove.push(source_filter.clone());
+                }
+            }
+        }
+
+        // Remove the identified pools
+        if !pools_to_remove.is_empty() {
+            let mut pools_write = pools.write().await;
+            for source_filter in &pools_to_remove {
+                if let Some(entry) = pools_write.remove(source_filter) {
+                    // Clean up the pool
+                    let _ = entry.pool.drop_all().await;
+                    log::info!(
+                        "🧹 POOL CLEANUP: Removed inactive filtered pool for source: '{}'",
+                        source_filter
+                    );
+                }
+            }
+        }
+
+        if !pools_to_remove.is_empty() {
+            log::info!(
+                "🧹 POOL CLEANUP: Cleaned up {} inactive filtered pools",
+                pools_to_remove.len()
+            );
+        }
+    }
+
+    /// Increment reference count for a filtered pool (called when subscription starts)
+    pub async fn increment_pool_reference(&self, source_filter: &str) {
+        let pools = self.filtered_pools.read().await;
+        if let Some(entry) = pools.get(source_filter) {
+            entry.reference_count.fetch_add(1, Ordering::Relaxed);
+            *entry.last_access.lock().await = Instant::now();
+            log::debug!(
+                "📊 POOL REF: Incremented reference for '{}' to {}",
+                source_filter,
+                entry.reference_count.load(Ordering::Relaxed)
+            );
+        }
+    }
+
+    /// Decrement reference count for a filtered pool (called when subscription ends)
+    pub async fn decrement_pool_reference(&self, source_filter: &str) {
+        let pools = self.filtered_pools.read().await;
+        if let Some(entry) = pools.get(source_filter) {
+            let prev_count = entry.reference_count.fetch_sub(1, Ordering::Relaxed);
+            log::debug!(
+                "📊 POOL REF: Decremented reference for '{}' from {} to {}",
+                source_filter,
+                prev_count,
+                prev_count.saturating_sub(1)
+            );
+        }
     }
 
     /// Run a query with smart routing - use filtered pool if it's a subscription query with source filter
@@ -612,9 +737,17 @@ impl PrologEnginePool {
                         Ok(_was_created) => {
                             // Get the filtered pool and run query on it
                             let filtered_pools = self.filtered_pools.read().await;
-                            if let Some(filtered_pool) = filtered_pools.get(&source_filter) {
+                            if let Some(entry) = filtered_pools.get(&source_filter) {
+                                // Update access time and increment reference for subscription
+                                *entry.last_access.lock().await = Instant::now();
+                                entry.reference_count.fetch_add(1, Ordering::Relaxed);
+
                                 log::info!("🚀 QUERY ROUTING: Successfully routing to filtered pool for source: '{}'", source_filter);
-                                return filtered_pool.run_query(query).await;
+                                let result = entry.pool.run_query(query).await;
+
+                                // Decrement reference after query completes
+                                entry.reference_count.fetch_sub(1, Ordering::Relaxed);
+                                return result;
                             } else {
                                 log::warn!("🚀 QUERY ROUTING: Filtered pool not found after creation attempt, using complete pool");
                             }
@@ -633,9 +766,12 @@ impl PrologEnginePool {
                 } else {
                     // For regular queries, only use existing filtered pools, don't create new ones
                     let filtered_pools = self.filtered_pools.read().await;
-                    if let Some(filtered_pool) = filtered_pools.get(&source_filter) {
+                    if let Some(entry) = filtered_pools.get(&source_filter) {
+                        // Update access time for regular queries too
+                        *entry.last_access.lock().await = Instant::now();
+
                         log::info!("🚀 QUERY ROUTING: Using existing filtered pool for regular query with source: '{}'", source_filter);
-                        return filtered_pool.run_query(query).await;
+                        return entry.pool.run_query(query).await;
                     } else {
                         log::debug!("🚀 QUERY ROUTING: No existing filtered pool for source '{}', using complete pool", source_filter);
                     }
@@ -1057,7 +1193,7 @@ mod tests {
 
         // Query the filtered pool before adding new data - should only see initial data
         let filtered_pools = pool.filtered_pools.read().await;
-        let user1_pool = filtered_pools.get("user1").unwrap();
+        let user1_pool = &filtered_pools.get("user1").unwrap().pool;
 
         // Test initial state: user1 pool should have user1's data but not user2's
         println!("🧪 TEST: Testing initial state - checking if user1 pool has user1's data");
@@ -1090,7 +1226,7 @@ mod tests {
 
         // 🔥 VERIFY: Check that filtered pools were updated
         let filtered_pools = pool.filtered_pools.read().await;
-        let user1_pool = filtered_pools.get("user1").unwrap();
+        let user1_pool = &filtered_pools.get("user1").unwrap().pool;
 
         // The new triple should now be visible in the user1 filtered pool
         println!("🧪 TEST: Checking if new data is visible in filtered pool...");
@@ -1246,7 +1382,7 @@ mod tests {
         let filtered_pools = pool.filtered_pools.read().await;
 
         // User1 pool should see user1's new data AND user2's data (due to batch-aware dependency filtering)
-        let user1_pool = filtered_pools.get("user1").unwrap();
+        let user1_pool = &filtered_pools.get("user1").unwrap().pool;
         let user1_result = user1_pool
             .run_query("triple(\"user1\", \"follows\", \"user2\").".to_string())
             .await
@@ -1268,7 +1404,7 @@ mod tests {
         );
 
         // User2 pool should see both statements due to batch-aware dependency filtering
-        let user2_pool = filtered_pools.get("user2").unwrap();
+        let user2_pool = &filtered_pools.get("user2").unwrap().pool;
         let user2_result = user2_pool
             .run_query("triple(\"user2\", \"follows\", \"user3\").".to_string())
             .await
@@ -1290,7 +1426,7 @@ mod tests {
         );
 
         // User3 pool should see both statements due to batch-aware dependency filtering
-        let user3_pool = filtered_pools.get("user3").unwrap();
+        let user3_pool = &filtered_pools.get("user3").unwrap().pool;
         let user3_result = user3_pool
             .run_query("triple(\"user1\", \"follows\", \"user2\").".to_string())
             .await
@@ -1416,7 +1552,7 @@ mod tests {
 
         // Verify initial reachability filtering
         let filtered_pools = pool.filtered_pools.read().await;
-        let root_pool = filtered_pools.get("root").unwrap();
+        let root_pool = &filtered_pools.get("root").unwrap().pool;
 
         // Root pool should see items reachable from root
         let reachable_item1 = root_pool
@@ -1460,7 +1596,7 @@ mod tests {
 
         // After the bridge, other_item should now be reachable from root
         let filtered_pools = pool.filtered_pools.read().await;
-        let root_pool = filtered_pools.get("root").unwrap();
+        let root_pool = &filtered_pools.get("root").unwrap().pool;
 
         // The bridge triple should be visible
         let bridge_triple = root_pool
@@ -1564,7 +1700,7 @@ mod tests {
             filtered_pools.contains_key("user1"),
             "Filtered pool should have been created for user1"
         );
-        let user1_pool = filtered_pools.get("user1").cloned().unwrap();
+        let user1_pool = filtered_pools.get("user1").unwrap().pool.clone();
         drop(filtered_pools);
 
         // Add new data via assertion that should appear in the filtered pool
@@ -1695,7 +1831,7 @@ mod tests {
             filtered_pools.contains_key("user1"),
             "Filtered pool should exist for user1"
         );
-        let user1_pool = filtered_pools.get("user1").cloned().unwrap();
+        let user1_pool = filtered_pools.get("user1").unwrap().pool.clone();
         drop(filtered_pools);
 
         // Test initial filtering - user1 pool should see user1's data but not user2's
@@ -1957,7 +2093,7 @@ mod tests {
 
         // Verify all data is visible in the filtered pool
         let filtered_pools = pool.filtered_pools.read().await;
-        let filter_source_pool = filtered_pools.get("filter_source").unwrap();
+        let filter_source_pool = &filtered_pools.get("filter_source").unwrap().pool;
 
         // Should see the connecting link
         let connection_result = filter_source_pool
@@ -2241,7 +2377,7 @@ mod tests {
                 // Filtered pool is automatically populated when created
 
                 let filtered_pools = pool2.filtered_pools.read().await;
-                let user1_pool = filtered_pools.get("user1").unwrap();
+                let user1_pool = &filtered_pools.get("user1").unwrap().pool;
 
                 let filtered_result = user1_pool.run_query(subject_class_query.to_string()).await;
                 match filtered_result {
@@ -2982,5 +3118,176 @@ mod tests {
         println!("✅ Early subscription queries handled gracefully");
         println!("✅ Later filtered pool creation works correctly");
         println!("✅ System is robust against initialization timing issues");
+    }
+
+    #[tokio::test]
+    async fn test_filtered_pool_cleanup() {
+        use std::time::Duration;
+
+        AgentService::init_global_test_instance();
+        // Test that inactive filtered pools are automatically cleaned up
+        let pool = PrologEnginePool::new();
+        pool.initialize(2).await.unwrap();
+
+        // Use large dataset to trigger filtering
+        let test_links = create_large_test_dataset();
+        pool.update_all_engines_with_links("cleanup_test".to_string(), test_links, None)
+            .await
+            .unwrap();
+
+        // Create some filtered pools
+        let user1_created = pool
+            .get_or_create_filtered_pool("cleanup_user1".to_string())
+            .await
+            .unwrap();
+        let user2_created = pool
+            .get_or_create_filtered_pool("cleanup_user2".to_string())
+            .await
+            .unwrap();
+        assert!(user1_created && user2_created);
+
+        // Verify pools exist
+        {
+            let filtered_pools = pool.filtered_pools.read().await;
+            assert_eq!(filtered_pools.len(), 2);
+            assert!(filtered_pools.contains_key("cleanup_user1"));
+            assert!(filtered_pools.contains_key("cleanup_user2"));
+        }
+
+        // Simulate subscription activity on user1 pool but not user2
+        pool.increment_pool_reference("cleanup_user1").await;
+
+        // Verify reference counts
+        {
+            let filtered_pools = pool.filtered_pools.read().await;
+            let user1_entry = filtered_pools.get("cleanup_user1").unwrap();
+            let user2_entry = filtered_pools.get("cleanup_user2").unwrap();
+            assert_eq!(user1_entry.reference_count.load(Ordering::Relaxed), 1);
+            assert_eq!(user2_entry.reference_count.load(Ordering::Relaxed), 0);
+        }
+
+        // End the subscription for user1
+        pool.decrement_pool_reference("cleanup_user1").await;
+
+        // Verify reference counts are back to 0
+        {
+            let filtered_pools = pool.filtered_pools.read().await;
+            let user1_entry = filtered_pools.get("cleanup_user1").unwrap();
+            let user2_entry = filtered_pools.get("cleanup_user2").unwrap();
+            assert_eq!(user1_entry.reference_count.load(Ordering::Relaxed), 0);
+            assert_eq!(user2_entry.reference_count.load(Ordering::Relaxed), 0);
+        }
+
+        // Force last access time to be in the past (simulate timeout)
+        {
+            let filtered_pools = pool.filtered_pools.read().await;
+            for entry in filtered_pools.values() {
+                *entry.last_access.lock().await =
+                    Instant::now() - Duration::from_secs(POOL_INACTIVE_TIMEOUT_SECS + 60);
+            }
+        }
+
+        // Manually trigger cleanup (simulating the background task)
+        PrologEnginePool::cleanup_inactive_pools(&pool.filtered_pools).await;
+
+        // Verify pools were cleaned up
+        {
+            let filtered_pools = pool.filtered_pools.read().await;
+            assert_eq!(
+                filtered_pools.len(),
+                0,
+                "All inactive pools should have been cleaned up"
+            );
+        }
+
+        println!("✅ Filtered pool cleanup test passed!");
+        println!("✅ Reference counting works correctly");
+        println!("✅ Timeout-based cleanup works correctly");
+        println!("✅ Inactive pools are properly removed");
+    }
+
+    #[tokio::test]
+    async fn test_filtered_pool_cleanup_preserves_active_pools() {
+        use std::time::Duration;
+
+        AgentService::init_global_test_instance();
+        // Test that active pools are preserved during cleanup
+        let pool = PrologEnginePool::new();
+        pool.initialize(2).await.unwrap();
+
+        // Use large dataset to trigger filtering
+        let test_links = create_large_test_dataset();
+        pool.update_all_engines_with_links("preserve_test".to_string(), test_links, None)
+            .await
+            .unwrap();
+
+        // Create some filtered pools
+        let user1_created = pool
+            .get_or_create_filtered_pool("preserve_user1".to_string())
+            .await
+            .unwrap();
+        let user2_created = pool
+            .get_or_create_filtered_pool("preserve_user2".to_string())
+            .await
+            .unwrap();
+        assert!(user1_created && user2_created);
+
+        // Make user1 pool active with subscription
+        pool.increment_pool_reference("preserve_user1").await;
+
+        // Force both pools' last access time to be in the past
+        {
+            let filtered_pools = pool.filtered_pools.read().await;
+            for entry in filtered_pools.values() {
+                *entry.last_access.lock().await =
+                    Instant::now() - Duration::from_secs(POOL_INACTIVE_TIMEOUT_SECS + 60);
+            }
+        }
+
+        // Manually trigger cleanup
+        PrologEnginePool::cleanup_inactive_pools(&pool.filtered_pools).await;
+
+        // Verify only the inactive pool was cleaned up
+        {
+            let filtered_pools = pool.filtered_pools.read().await;
+            assert_eq!(filtered_pools.len(), 1, "Only active pool should remain");
+            assert!(
+                filtered_pools.contains_key("preserve_user1"),
+                "Active pool should be preserved"
+            );
+            assert!(
+                !filtered_pools.contains_key("preserve_user2"),
+                "Inactive pool should be removed"
+            );
+        }
+
+        // End the subscription and verify cleanup works
+        pool.decrement_pool_reference("preserve_user1").await;
+
+        // Force time again and cleanup
+        {
+            let filtered_pools = pool.filtered_pools.read().await;
+            for entry in filtered_pools.values() {
+                *entry.last_access.lock().await =
+                    Instant::now() - Duration::from_secs(POOL_INACTIVE_TIMEOUT_SECS + 60);
+            }
+        }
+
+        PrologEnginePool::cleanup_inactive_pools(&pool.filtered_pools).await;
+
+        // Now all pools should be cleaned up
+        {
+            let filtered_pools = pool.filtered_pools.read().await;
+            assert_eq!(
+                filtered_pools.len(),
+                0,
+                "All pools should be cleaned up after subscription ends"
+            );
+        }
+
+        println!("✅ Active pool preservation test passed!");
+        println!("✅ Active pools are preserved during cleanup");
+        println!("✅ Reference counting prevents premature cleanup");
+        println!("✅ Cleanup works correctly after subscriptions end");
     }
 }

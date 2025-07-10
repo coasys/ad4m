@@ -2495,8 +2495,25 @@ impl PerspectiveInstance {
         &self,
         subscription_id: String,
     ) -> Result<bool, AnyError> {
-        let mut queries = self.subscribed_queries.lock().await;
-        Ok(queries.remove(&subscription_id).is_some())
+        let removed_query = {
+            let mut queries = self.subscribed_queries.lock().await;
+            queries.remove(&subscription_id)
+        };
+
+        if let Some(query) = removed_query {
+            // Notify prolog service that subscription ended
+            let uuid = self.persisted.lock().await.uuid.clone();
+            if let Err(e) = get_prolog_service()
+                .await
+                .subscription_ended(uuid, query.query)
+                .await
+            {
+                log::warn!("Failed to notify prolog service of subscription end: {}", e);
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     async fn check_subscribed_queries(&self) {
@@ -2553,11 +2570,29 @@ impl PerspectiveInstance {
         future::join_all(query_futures).await;
         //log::info!("done checking subscribed queries in {:?}", now.elapsed());
 
-        // Remove timed out queries
+        // Remove timed out queries and notify prolog service
         if !queries_to_remove.is_empty() {
-            let mut queries = self.subscribed_queries.lock().await;
-            for id in queries_to_remove {
-                queries.remove(&id);
+            let removed_queries = {
+                let mut queries = self.subscribed_queries.lock().await;
+                queries_to_remove
+                    .iter()
+                    .filter_map(|id| queries.remove(id).map(|q| (id.clone(), q.query)))
+                    .collect::<Vec<_>>()
+            };
+
+            // Notify prolog service for each timed out subscription
+            let uuid = self.persisted.lock().await.uuid.clone();
+            for (_id, query) in removed_queries {
+                if let Err(e) = get_prolog_service()
+                    .await
+                    .subscription_ended(uuid.clone(), query)
+                    .await
+                {
+                    log::warn!(
+                        "Failed to notify prolog service of subscription timeout: {}",
+                        e
+                    );
+                }
             }
         }
     }

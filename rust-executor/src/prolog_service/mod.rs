@@ -160,6 +160,13 @@ impl PrologService {
                 .clone() // Clone the Arc<> to release the lock
         }; // Read lock is released here
 
+        // Increment reference count for filtered pools if this query would use one
+        if let Some(source_filter) =
+            crate::prolog_service::source_filtering::extract_source_filter(&query)
+        {
+            pool.increment_pool_reference(&source_filter).await;
+        }
+
         // The smart routing and population is now handled entirely within the engine pool
         // This eliminates circular dependencies and potential deadlocks
         let result = pool.run_query_smart(query.clone(), true).await;
@@ -176,6 +183,34 @@ impl PrologService {
             }
         }
         result
+    }
+
+    /// Called when a subscription ends - decrements reference count for any associated filtered pool
+    pub async fn subscription_ended(
+        &self,
+        perspective_id: String,
+        query: String,
+    ) -> Result<(), Error> {
+        let pool = {
+            let pools = self.engine_pools.read().await;
+            pools
+                .get(&perspective_id)
+                .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
+                .clone()
+        };
+
+        // Decrement reference count for filtered pools if this query would use one
+        if let Some(source_filter) =
+            crate::prolog_service::source_filtering::extract_source_filter(&query)
+        {
+            pool.decrement_pool_reference(&source_filter).await;
+            log::debug!(
+                "📊 SUBSCRIPTION END: Decremented pool reference for source: '{}'",
+                source_filter
+            );
+        }
+
+        Ok(())
     }
 
     pub async fn run_query_all(&self, perspective_id: String, query: String) -> Result<(), Error> {
