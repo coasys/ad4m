@@ -219,15 +219,14 @@ impl SdnaPrologPool {
     /// Create a new SDNA-only pool
     ///
     /// ## Arguments
-    /// - `pool_size`: Number of Prolog engines to create (typically 2-3 for efficiency)
     /// - `complete_pool`: Reference to the complete pool for coordination
     ///
     /// ## Note
     /// This only creates the structure - you must call `initialize()` to spawn the engines
     /// and then populate it with SDNA data.
-    pub fn new(pool_size: usize, complete_pool: Arc<super::engine_pool::PrologEnginePool>) -> Self {
+    pub fn new(complete_pool: Arc<super::engine_pool::PrologEnginePool>) -> Self {
         Self {
-            engine_state: Arc::new(RwLock::new(EnginePoolState::new(pool_size))),
+            engine_pool_state: Arc::new(RwLock::new(EnginePoolState::new())),
             next_engine: Arc::new(AtomicUsize::new(0)),
             embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
             complete_pool,
@@ -346,10 +345,10 @@ mod tests {
     #[tokio::test]
     async fn test_sdna_pool_creation() {
         // This test validates the basic creation and initialization of SDNA pools
-        let complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new(2));
+        let complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new());
         complete_pool.initialize(2).await.unwrap();
 
-        let sdna_pool = SdnaPrologPool::new(2, complete_pool);
+        let sdna_pool = SdnaPrologPool::new(complete_pool);
         assert_eq!(
             sdna_pool.pool_description(),
             "SDNA-only pool for subject class queries"
@@ -365,8 +364,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_subject_class_query_detection() {
-        let complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new(2));
-        let sdna_pool = SdnaPrologPool::new(2, complete_pool);
+        let complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new());
+        let sdna_pool = SdnaPrologPool::new(complete_pool);
 
         // Test subject class queries (should be handled)
         assert!(sdna_pool.should_handle_query("subject(Class, Properties, Methods)."));
@@ -392,10 +391,10 @@ mod tests {
     #[tokio::test]
     async fn test_sdna_only_population() {
         AgentService::init_global_test_instance();
-        let complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new(2));
+        let complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new());
         complete_pool.initialize(2).await.unwrap();
 
-        let sdna_pool = SdnaPrologPool::new(2, complete_pool.clone());
+        let sdna_pool = SdnaPrologPool::new(complete_pool.clone());
         sdna_pool.initialize(2).await.unwrap();
 
         // Create test links (these should be ignored for SDNA pool)

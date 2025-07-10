@@ -297,7 +297,6 @@ impl FilteredPrologPool {
     /// Create a new filtered pool for the given source filter
     ///
     /// ## Arguments
-    /// - `pool_size`: Number of Prolog engines to create in this filtered pool
     /// - `source_filter`: The source node this pool should filter by (e.g., "user123")
     /// - `complete_pool`: Reference to the complete pool for data access
     ///
@@ -305,13 +304,12 @@ impl FilteredPrologPool {
     /// This only creates the structure - you must call `initialize()` to spawn the engines
     /// and then use the complete pool's methods to populate it with filtered data.
     pub fn new(
-        pool_size: usize,
         source_filter: String,
         complete_pool: Arc<super::engine_pool::PrologEnginePool>,
     ) -> Self {
         Self {
             source_filter,
-            engine_pool_state: Arc::new(RwLock::new(EnginePoolState::new(pool_size))),
+            engine_pool_state: Arc::new(RwLock::new(EnginePoolState::new())),
             next_engine: Arc::new(AtomicUsize::new(0)),
             embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
             complete_pool,
@@ -622,10 +620,10 @@ mod tests {
     #[tokio::test]
     async fn test_filtered_pool_creation() {
         // This test validates the basic creation and initialization of filtered pools
-        let complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new(2));
+        let complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new());
         complete_pool.initialize(2).await.unwrap();
 
-        let filtered_pool = FilteredPrologPool::new(2, "test_user".to_string(), complete_pool);
+        let filtered_pool = FilteredPrologPool::new("test_user".to_string(), complete_pool);
         assert_eq!(filtered_pool.source_filter, "test_user");
 
         // Initialize the filtered pool
@@ -641,10 +639,10 @@ mod tests {
         AgentService::init_global_test_instance();
 
         // Create complete pool and filtered pool
-        let complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new(2));
+        let complete_pool = Arc::new(super::super::engine_pool::PrologEnginePool::new());
         complete_pool.initialize(2).await.unwrap();
 
-        let filtered_pool = FilteredPrologPool::new(2, "user1".to_string(), complete_pool);
+        let filtered_pool = FilteredPrologPool::new("user1".to_string(), complete_pool);
         filtered_pool.initialize(2).await.unwrap();
 
         // Test that we can run basic Prolog queries

@@ -58,7 +58,7 @@ impl PrologService {
         }
 
         // Create and initialize the pool
-        let pool = PrologEnginePool::new(pool_size.unwrap_or(DEFAULT_POOL_SIZE));
+        let pool = PrologEnginePool::new();
         pool.initialize(pool_size.unwrap_or(DEFAULT_POOL_SIZE))
             .await?;
         pools.insert(perspective_id, pool);

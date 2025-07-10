@@ -69,9 +69,9 @@ pub struct EnginePoolState {
 }
 
 impl EnginePoolState {
-    pub fn new(pool_size: usize) -> Self {
+    pub fn new() -> Self {
         Self {
-            engines: Vec::with_capacity(pool_size),
+            engines: Vec::new(),
             current_all_links: None,
             current_neighbourhood_author: None,
         }

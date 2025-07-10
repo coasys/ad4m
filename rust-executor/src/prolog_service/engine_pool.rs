@@ -71,14 +71,11 @@ impl PrologEnginePool {
     /// This creates a complete pool that will contain all available data and can create
     /// filtered sub-pools for performance optimization.
     ///
-    /// ## Arguments
-    /// - `pool_size`: Number of Prolog engines to create (for parallelism and fault tolerance)
-    ///
     /// ## Note
     /// You must call `initialize()` after creation to spawn the actual Prolog engine processes.
-    pub fn new(pool_size: usize) -> Self {
+    pub fn new() -> Self {
         PrologEnginePool {
-            engine_pool_state: Arc::new(RwLock::new(EnginePoolState::new(pool_size))),
+            engine_pool_state: Arc::new(RwLock::new(EnginePoolState::new())),
             next_engine: Arc::new(AtomicUsize::new(0)),
             embedding_cache: Arc::new(RwLock::new(EmbeddingCache::new())),
             filtered_pools: Arc::new(RwLock::new(HashMap::new())),
@@ -123,7 +120,7 @@ impl PrologEnginePool {
         drop(pool_state);
 
         // Always create and initialize the SDNA pool
-        let sdna_pool = SdnaPrologPool::new(2, Arc::new(self.clone()));
+        let sdna_pool = SdnaPrologPool::new(Arc::new(self.clone()));
         sdna_pool.initialize(SDNA_POOL_SIZE).await?;
 
         let mut sdna_pool_guard = self.sdna_pool.write().await;
@@ -463,7 +460,7 @@ impl PrologEnginePool {
 
         // Create new filtered pool with smaller size (2-3 engines should be enough for subscriptions)
         let filtered_pool =
-            FilteredPrologPool::new(3, source_filter.clone(), Arc::new(self.clone()));
+            FilteredPrologPool::new(source_filter.clone(), Arc::new(self.clone()));
         filtered_pool.initialize(FILTERED_POOL_SIZE).await?;
 
         filtered_pool.populate_from_complete_data().await?;
@@ -628,7 +625,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_pool_initialization() {
-        let pool = PrologEnginePool::new(3);
+        let pool = PrologEnginePool::new();
         assert!(pool.initialize(3).await.is_ok());
 
         let engines = pool.engine_pool_state.read().await;
@@ -638,7 +635,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_query() {
-        let pool = PrologEnginePool::new(2);
+        let pool = PrologEnginePool::new();
         pool.initialize(2).await.unwrap();
 
         // Test simple query
@@ -659,7 +656,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_query_all() {
-        let pool = PrologEnginePool::new(3);
+        let pool = PrologEnginePool::new();
         pool.initialize(3).await.unwrap();
 
         // Test simple query on all engines
@@ -675,7 +672,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine_failure_handling() {
-        let pool = PrologEnginePool::new(2);
+        let pool = PrologEnginePool::new();
         pool.initialize(2).await.unwrap();
 
         // Force an engine failure with an invalid query
@@ -697,7 +694,7 @@ mod tests {
     #[tokio::test]
     async fn test_engine_recovery() {
         AgentService::init_global_test_instance();
-        let pool = PrologEnginePool::new(2);
+        let pool = PrologEnginePool::new();
         pool.initialize(2).await.unwrap();
 
         // Force an engine failure
@@ -734,7 +731,7 @@ mod tests {
     #[tokio::test]
     async fn test_filtered_pool_basic_functionality() {
         AgentService::init_global_test_instance();
-        let pool = PrologEnginePool::new(2);
+        let pool = PrologEnginePool::new();
         pool.initialize(2).await.unwrap();
 
         // Use production method with structured link data
@@ -824,7 +821,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_regular_queries_use_complete_pool() {
-        let pool = PrologEnginePool::new(2);
+        let pool = PrologEnginePool::new();
         pool.initialize(2).await.unwrap();
 
         use crate::types::{DecoratedLinkExpression, Link};
@@ -867,7 +864,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_drop_all() {
-        let pool = PrologEnginePool::new(2);
+        let pool = PrologEnginePool::new();
         pool.initialize(2).await.unwrap();
 
         assert!(pool._drop_all().await.is_ok());
@@ -884,7 +881,7 @@ mod tests {
         AgentService::init_global_test_instance();
 
         // Create a complete pool with initial facts
-        let pool = PrologEnginePool::new(2);
+        let pool = PrologEnginePool::new();
         pool.initialize(2).await.unwrap();
         println!("🧪 TEST: Pool initialized");
 
@@ -1056,7 +1053,7 @@ mod tests {
     async fn test_assert_updates_multiple_filtered_pools() {
         AgentService::init_global_test_instance();
         // Test that assert queries affecting multiple sources update all relevant filtered pools
-        let pool = PrologEnginePool::new(3);
+        let pool = PrologEnginePool::new();
         pool.initialize(3).await.unwrap();
 
         use crate::types::{DecoratedLinkExpression, Link};
@@ -1247,7 +1244,7 @@ mod tests {
     async fn test_reachability_filtering_with_assert_updates() {
         AgentService::init_global_test_instance();
         // Test that reachability-based filtering works when new data is added via assertions
-        let pool = PrologEnginePool::new(2);
+        let pool = PrologEnginePool::new();
         pool.initialize(2).await.unwrap();
 
         let _initial_facts = vec![
@@ -1417,7 +1414,7 @@ mod tests {
     async fn test_subscription_query_routing_with_live_updates() {
         AgentService::init_global_test_instance();
         // Test that subscription queries are routed to filtered pools and see live updates
-        let pool = PrologEnginePool::new(2);
+        let pool = PrologEnginePool::new();
         pool.initialize(2).await.unwrap();
 
         // Use large dataset to trigger filtering
@@ -1541,7 +1538,7 @@ mod tests {
     async fn test_full_perspective_integration_scenario() {
         AgentService::init_global_test_instance();
         // Test that simulates the full perspective instance integration scenario
-        let pool = PrologEnginePool::new(3);
+        let pool = PrologEnginePool::new();
         pool.initialize(3).await.unwrap();
 
         // Use large dataset to trigger filtering
@@ -1790,7 +1787,7 @@ mod tests {
     async fn test_batch_aware_filtering_dependencies() {
         AgentService::init_global_test_instance();
         // Test that batch filtering considers statement dependencies within a single transaction
-        let pool = PrologEnginePool::new(2);
+        let pool = PrologEnginePool::new();
         pool.initialize(2).await.unwrap();
 
         // 🔥 PRODUCTION METHOD: Use the same method as production code
@@ -1930,7 +1927,7 @@ mod tests {
         let now = chrono::Utc::now().to_rfc3339();
 
         // Step 1: Test basic data without SDNA first
-        let pool1 = PrologEnginePool::new(3);
+        let pool1 = PrologEnginePool::new();
         pool1.initialize(3).await.unwrap();
 
         let basic_data_only = vec![
@@ -1990,7 +1987,7 @@ mod tests {
         }
 
         // Step 2: Now test with SDNA links added using proper Literal struct
-        let pool2 = PrologEnginePool::new(3);
+        let pool2 = PrologEnginePool::new();
         pool2.initialize(3).await.unwrap();
 
         let mut all_data = basic_data_only.clone();
@@ -2195,7 +2192,7 @@ mod tests {
     #[tokio::test]
     async fn test_sdna_pool_routing() {
         AgentService::init_global_test_instance();
-        let pool = PrologEnginePool::new(2);
+        let pool = PrologEnginePool::new();
         pool.initialize(2).await.unwrap();
 
         // Verify SDNA pool always exists after initialization
@@ -2323,7 +2320,7 @@ mod tests {
     #[tokio::test]
     async fn test_direct_sdna_pool_access() {
         AgentService::init_global_test_instance();
-        let pool = PrologEnginePool::new(2);
+        let pool = PrologEnginePool::new();
         pool.initialize(2).await.unwrap();
 
         // Test direct SDNA pool access method
@@ -2356,7 +2353,7 @@ mod tests {
         println!("🧪 Testing 10-engine pool for SDNA consistency issues");
 
         // Create a larger pool like in production
-        let pool = PrologEnginePool::new(10);
+        let pool = PrologEnginePool::new();
         pool.initialize(10).await.unwrap();
 
         // Create social DNA data representing Ad4mModel-like patterns
@@ -2605,7 +2602,7 @@ mod tests {
         // This test verifies that regular queries (subscription=false) will use existing
         // filtered pools but won't create new ones
         AgentService::init_global_test_instance();
-        let pool = PrologEnginePool::new(5);
+        let pool = PrologEnginePool::new();
         pool.initialize(5).await.unwrap();
 
         // Create a large test dataset to enable filtering
