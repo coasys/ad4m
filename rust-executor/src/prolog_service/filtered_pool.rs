@@ -373,10 +373,7 @@ impl FilteredPrologPool {
     }
 
     /// Get filtered data facts for this source using reachable query from the complete pool
-    async fn get_filtered_data_facts(
-        &self,
-        //all_links: &[DecoratedLinkExpression],
-    ) -> Result<Vec<String>, Error> {
+    async fn get_filtered_data_facts(&self) -> Result<Vec<String>, Error> {
         let start_time = Instant::now();
         log::info!(
             "🔍 FILTERING: Starting get_filtered_data_facts for source: '{}'",
@@ -403,7 +400,58 @@ impl FilteredPrologPool {
             facts_duration
         );
 
-        // ⏱️ MEASURE: Query the complete engine for reachable nodes
+        // Query for reachable nodes using the complete pool engine
+        let (reachable_nodes, reachability_duration) = self.query_reachable_nodes(engine).await?;
+
+        // Build regex chunks from reachable nodes
+        let (regex_chunks, formatting_duration) = self.build_regex_chunks(reachable_nodes).await?;
+
+        // Filter facts using the regex chunks
+        let (filtered_data_facts, filtering_duration) = self
+            .filter_facts_with_strategy(all_data_facts, regex_chunks)
+            .await?;
+
+        let total_duration = start_time.elapsed();
+
+        // Performance summary
+        log::info!(
+            "🔍 FILTERING: ⚡ PERFORMANCE SUMMARY for source '{}':",
+            self.source_filter
+        );
+        log::info!("🔍 FILTERING:   📊 Data generation: {:?}", facts_duration);
+        log::info!(
+            "🔍 FILTERING:   🔍 Reachability query: {:?}",
+            reachability_duration
+        );
+        log::info!(
+            "🔍 FILTERING:   🔧 Pattern formatting: {:?}",
+            formatting_duration
+        );
+        log::info!(
+            "🔍 FILTERING:   ⚡ Facts filtering: {:?}",
+            filtering_duration
+        );
+        log::info!(
+            "🔍 FILTERING:   🎯 Total filtering time: {:?}",
+            total_duration
+        );
+
+        // Log sample of filtered facts (only first few)
+        if !filtered_data_facts.is_empty() {
+            log::info!("🔍 FILTERING: Sample of filtered facts (first 5):");
+            for (i, fact) in filtered_data_facts.iter().take(5).enumerate() {
+                log::info!("  {}. {}", i + 1, fact);
+            }
+        }
+
+        Ok(filtered_data_facts)
+    }
+
+    /// Query the complete pool engine for reachable nodes from the source filter
+    async fn query_reachable_nodes(
+        &self,
+        engine: &PrologEngine,
+    ) -> Result<(Vec<String>, std::time::Duration), Error> {
         let reachability_start = Instant::now();
 
         // ⚡ OPTIMIZATION: Use findall with aggressive limits to prevent performance explosion
@@ -487,7 +535,14 @@ impl FilteredPrologPool {
             reachability_duration
         );
 
-        // ⚡ OPTIMIZATION: Use regex-based filtering with automatic chunking for large pattern sets
+        Ok((reachable_nodes, reachability_duration))
+    }
+
+    /// Build regex chunks from reachable nodes for efficient pattern matching
+    async fn build_regex_chunks(
+        &self,
+        reachable_nodes: Vec<String>,
+    ) -> Result<(Vec<regex::Regex>, std::time::Duration), Error> {
         let formatting_start = Instant::now();
         let reachable_node_patterns: Vec<String> = reachable_nodes
             .iter()
@@ -532,7 +587,15 @@ impl FilteredPrologPool {
             formatting_duration
         );
 
-        // ⚡ ULTRA-FAST FILTERING: Apply regex chunks
+        Ok((regex_chunks, formatting_duration))
+    }
+
+    /// Filter facts using regex chunks with strategy based on data size
+    async fn filter_facts_with_strategy(
+        &self,
+        all_data_facts: Vec<String>,
+        regex_chunks: Vec<regex::Regex>,
+    ) -> Result<(Vec<String>, std::time::Duration), Error> {
         let filtering_start = Instant::now();
         let original_facts_count = all_data_facts.len();
 
@@ -560,30 +623,6 @@ impl FilteredPrologPool {
         };
 
         let filtering_duration = filtering_start.elapsed();
-        let total_duration = start_time.elapsed();
-
-        // Performance summary
-        log::info!(
-            "🔍 FILTERING: ⚡ PERFORMANCE SUMMARY for source '{}':",
-            self.source_filter
-        );
-        log::info!("🔍 FILTERING:   📊 Data generation: {:?}", facts_duration);
-        log::info!(
-            "🔍 FILTERING:   🔍 Reachability query: {:?}",
-            reachability_duration
-        );
-        log::info!(
-            "🔍 FILTERING:   🔧 Pattern formatting: {:?}",
-            formatting_duration
-        );
-        log::info!(
-            "🔍 FILTERING:   ⚡ Facts filtering: {:?}",
-            filtering_duration
-        );
-        log::info!(
-            "🔍 FILTERING:   🎯 Total filtering time: {:?}",
-            total_duration
-        );
 
         log::info!(
             "🔍 FILTERING: Results: {} → {} facts ({:.1}% reduction, {} facts/sec)",
@@ -593,15 +632,7 @@ impl FilteredPrologPool {
             (original_facts_count as f64 / filtering_duration.as_secs_f64()) as u64
         );
 
-        // Log sample of filtered facts (only first few)
-        if !filtered_data_facts.is_empty() {
-            log::info!("🔍 FILTERING: Sample of filtered facts (first 5):");
-            for (i, fact) in filtered_data_facts.iter().take(5).enumerate() {
-                log::info!("  {}. {}", i + 1, fact);
-            }
-        }
-
-        Ok(filtered_data_facts)
+        Ok((filtered_data_facts, filtering_duration))
     }
 }
 
