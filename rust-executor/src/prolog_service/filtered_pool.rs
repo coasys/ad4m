@@ -226,7 +226,11 @@ impl FilteredPool for FilteredPrologPool {
     /// to filtered pools.
     async fn run_query_all(&self, query: String) -> Result<(), Error> {
         let pool_state = self.engine_pool_state.write().await;
-        let valid_engines: Vec<_> = pool_state.engines.iter().filter_map(|e| e.as_ref()).collect();
+        let valid_engines: Vec<_> = pool_state
+            .engines
+            .iter()
+            .filter_map(|e| e.as_ref())
+            .collect();
 
         if valid_engines.is_empty() {
             return Err(anyhow!(

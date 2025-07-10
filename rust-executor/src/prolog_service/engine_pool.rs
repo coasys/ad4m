@@ -162,7 +162,11 @@ impl PrologEnginePool {
 
     pub async fn run_query_all(&self, query: String) -> Result<(), Error> {
         let pool_state = self.engine_pool_state.write().await;
-        let valid_engines: Vec<_> = pool_state.engines.iter().filter_map(|e| e.as_ref()).collect();
+        let valid_engines: Vec<_> = pool_state
+            .engines
+            .iter()
+            .filter_map(|e| e.as_ref())
+            .collect();
 
         if valid_engines.is_empty() {
             return Err(anyhow!("No valid Prolog engines available"));
@@ -459,8 +463,7 @@ impl PrologEnginePool {
         );
 
         // Create new filtered pool with smaller size (2-3 engines should be enough for subscriptions)
-        let filtered_pool =
-            FilteredPrologPool::new(source_filter.clone(), Arc::new(self.clone()));
+        let filtered_pool = FilteredPrologPool::new(source_filter.clone(), Arc::new(self.clone()));
         filtered_pool.initialize(FILTERED_POOL_SIZE).await?;
 
         filtered_pool.populate_from_complete_data().await?;
