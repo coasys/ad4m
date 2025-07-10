@@ -1521,9 +1521,16 @@ impl PerspectiveInstance {
                 let uuid_clone = uuid.clone();
                 let query_clone = query.clone();
                 tokio::spawn(async move {
-                    let _ = service_clone
+                    if let Err(e) = service_clone
                         .run_query_all(notification_pool_name(&uuid_clone), query_clone)
-                        .await;
+                        .await
+                    {
+                        log::error!(
+                            "Failed to update notification pool for perspective {}: {:?}",
+                            uuid_clone,
+                            e
+                        );
+                    }
                 });
 
                 match service.run_query_all(uuid, query).await {
