@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use tokio::sync::{RwLock, Mutex};
+use tokio::sync::{Mutex, RwLock};
 
 pub const EMBEDDING_LANGUAGE_HASH: &str = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
 
@@ -513,7 +513,7 @@ impl PrologEnginePool {
                     source_filter
                 ));
             }
-            
+
             // Verify engines are available and populated
             if pool_state.engines.is_empty() || pool_state.engines.iter().all(|e| e.is_none()) {
                 return Err(anyhow!(
@@ -2884,36 +2884,36 @@ mod tests {
         // Test that filtered pool creation fails gracefully when parent pool is not ready
         AgentService::init_global_test_instance();
         let pool = Arc::new(PrologEnginePool::new());
-        
+
         // Initialize pool but DON'T populate it with data
         pool.initialize(2).await.unwrap();
-        
+
         // Verify parent pool state: engines exist but no data
         {
             let pool_state = pool.engine_pool_state.read().await;
             assert!(!pool_state.engines.is_empty());
             assert!(pool_state.current_all_links.is_none());
         }
-        
+
         // Attempt to create filtered pool - should fail with race condition prevention
         let result = pool.get_or_create_filtered_pool("user1".to_string()).await;
-        
+
         assert!(result.is_err());
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("RACE CONDITION PREVENTED"));
         assert!(error_msg.contains("parent pool has not been populated with data yet"));
-        
+
         // Verify no filtered pool was created
         let filtered_pools = pool.filtered_pools.read().await;
         assert_eq!(filtered_pools.len(), 0);
-        
+
         // Test that smart query routing handles this gracefully
         let subscription_query = "triple(\"user1\", \"has_child\", X).".to_string();
         let result = pool.run_query_smart(subscription_query, true).await;
-        
+
         // Should succeed by falling back to complete pool (even though it has no data)
         assert!(result.is_ok());
-        
+
         println!("✅ Race condition prevention test passed!");
         println!("✅ System correctly prevents creating filtered pools when parent pool not ready");
         println!("✅ Graceful fallback to complete pool works correctly");
@@ -2924,10 +2924,10 @@ mod tests {
         // Test the complete scenario: simulate the exact race condition timing
         AgentService::init_global_test_instance();
         let pool = Arc::new(PrologEnginePool::new());
-        
+
         // Step 1: Initialize pool (like perspective instance does)
         pool.initialize(2).await.unwrap();
-        
+
         // Step 2: Simulate subscription query arriving before data population
         let query_task = {
             let pool_clone = pool.clone();
@@ -2937,7 +2937,7 @@ mod tests {
                 pool_clone.run_query_smart(subscription_query, true).await
             })
         };
-        
+
         // Step 3: Populate with data (like perspective instance does)
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         use crate::types::{DecoratedLinkExpression, Link};
@@ -2957,27 +2957,27 @@ mod tests {
             },
             status: None,
         }];
-        
+
         pool.update_all_engines_with_links("facts".to_string(), test_links, None)
             .await
             .unwrap();
-        
+
         // Step 4: Wait for query task to complete
         let query_result = query_task.await.unwrap();
-        
+
         // Query should succeed (fallback to complete pool)
         assert!(query_result.is_ok());
-        
+
         // Step 5: Now try creating filtered pool - should succeed
         let create_result = pool.get_or_create_filtered_pool("user1".to_string()).await;
         assert!(create_result.is_ok());
         assert_eq!(create_result.unwrap(), true); // New pool created
-        
+
         // Verify filtered pool exists and works
         let filtered_pools = pool.filtered_pools.read().await;
         assert_eq!(filtered_pools.len(), 1);
         assert!(filtered_pools.contains_key("user1"));
-        
+
         println!("✅ Full race condition scenario test passed!");
         println!("✅ Early subscription queries handled gracefully");
         println!("✅ Later filtered pool creation works correctly");
