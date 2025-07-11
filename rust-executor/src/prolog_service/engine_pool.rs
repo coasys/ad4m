@@ -126,10 +126,10 @@ impl PrologEnginePool {
     pub async fn run_query_sdna(&self, query: String) -> Result<QueryResult, Error> {
         let sdna_pool_guard = self.sdna_pool.read().await;
         if let Some(ref sdna_pool) = *sdna_pool_guard {
-            // 🛡️ RACE CONDITION PROTECTION: Verify parent pool is fully ready before using SDNA pool
+            // 🛡️ RACE CONDITION PROTECTION: Verify parent pool has data before using SDNA pool
             let parent_pool_ready = {
                 let engine_state = self.engine_pool_state.read().await;
-                engine_state.is_pool_ready
+                engine_state.current_all_links.is_some()
             };
 
             if parent_pool_ready {
@@ -386,8 +386,9 @@ impl PrologEnginePool {
                 PoolUtils::preprocess_program_lines(facts_to_load.clone(), &self.embedding_cache)
                     .await;
 
-            // 🚨 CRITICAL: Mark pool as NOT ready during population to prevent race conditions
-            pool_state.is_pool_ready = false;
+            // Store current state for reuse in filtered pools
+            pool_state.current_all_links = Some(all_links);
+            pool_state.current_neighbourhood_author = neighbourhood_author;
 
             // Update all engines with facts using references to avoid cloning
             let mut update_futures = Vec::new();
@@ -397,36 +398,11 @@ impl PrologEnginePool {
             }
 
             let results = join_all(update_futures).await;
-            
-            // 🛡️ CRITICAL: Verify ALL engines populated successfully before marking ready
-            let mut failed_engines = Vec::new();
             for (i, result) in results.into_iter().enumerate() {
                 if let Err(e) = result {
-                    failed_engines.push((i, e));
-                }
-            }
-
-            if !failed_engines.is_empty() {
-                // Log all failures and fail the operation
-                for (i, e) in &failed_engines {
                     log::error!("Failed to update Prolog engine {}: {}", i, e);
                 }
-                return Err(anyhow!(
-                    "🚨 POOL POPULATION FAILED: {} out of {} engines failed to populate. \
-                     Cannot mark pool as ready with inconsistent engine state. \
-                     Failed engines: {:?}",
-                    failed_engines.len(),
-                    pool_state.engines.len(),
-                    failed_engines.iter().map(|(i, _)| *i).collect::<Vec<_>>()
-                ));
             }
-
-            // ✅ SUCCESS: All engines populated successfully - now mark pool ready
-            pool_state.current_all_links = Some(all_links);
-            pool_state.current_neighbourhood_author = neighbourhood_author;
-            pool_state.is_pool_ready = true;
-            
-            log::info!("📊 POOL POPULATION: All {} engines populated successfully - pool marked READY", pool_state.engines.len());
         }
 
         // Update any filtered sub-pools managed by this complete pool
@@ -568,14 +544,14 @@ impl PrologEnginePool {
             source_filter
         );
 
-        // 🛡️ RACE CONDITION PROTECTION: Validate that parent pool is fully ready before creating filtered pool
+        // 🛡️ RACE CONDITION PROTECTION: Validate that parent pool is ready before creating filtered pool
         {
             let pool_state = self.engine_pool_state.read().await;
-            if !pool_state.is_pool_ready {
+            if pool_state.current_all_links.is_none() {
                 return Err(anyhow!(
                     "🚨 RACE CONDITION PREVENTED: Cannot create filtered pool for source '{}' \
-                     because parent pool is not fully ready (engines may not be populated yet). \
-                     This prevents the creation of filtered pools with inconsistent engine state.",
+                     because parent pool has not been populated with data yet. \
+                     This prevents the creation of empty filtered pools.",
                     source_filter
                 ));
             }
@@ -732,10 +708,10 @@ impl PrologEnginePool {
             let sdna_pool_guard = self.sdna_pool.read().await;
             if let Some(ref sdna_pool) = *sdna_pool_guard {
                 if sdna_pool.should_handle_query(&query) {
-                    // 🛡️ RACE CONDITION PROTECTION: Verify parent pool is fully ready before using SDNA pool
+                    // 🛡️ RACE CONDITION PROTECTION: Verify parent pool has data before using SDNA pool
                     let parent_pool_ready = {
                         let engine_state = self.engine_pool_state.read().await;
-                        engine_state.is_pool_ready
+                        engine_state.current_all_links.is_some()
                     };
 
                     if parent_pool_ready {
@@ -756,28 +732,22 @@ impl PrologEnginePool {
         }
 
         // 🔍 SECOND PRIORITY: Check if we should use filtered pools based on link count
-        // Only use filtered pools for large perspectives (above threshold) AND when pool is fully ready
+        // Only use filtered pools for large perspectives (above threshold)
         let should_use_filtering = {
             let engine_state = self.engine_pool_state.read().await;
-            if engine_state.is_pool_ready {
-                if let Some(ref all_links) = engine_state.current_all_links {
-                    let link_count = all_links.len();
-                    let should_filter = link_count > FILTERING_THRESHOLD;
-                    log::debug!(
-                        "📊 FILTERING CHECK: {} links - filtering {} (threshold: {})",
-                        link_count,
-                        if should_filter { "ENABLED" } else { "DISABLED" },
-                        FILTERING_THRESHOLD
-                    );
-                    should_filter
-                } else {
-                    // Pool marked ready but no data - shouldn't happen
-                    log::warn!("📊 FILTERING CHECK: Pool ready but no link data - this shouldn't happen");
-                    false
-                }
+            if let Some(ref all_links) = engine_state.current_all_links {
+                let link_count = all_links.len();
+                let should_filter = link_count > FILTERING_THRESHOLD;
+                log::debug!(
+                    "📊 FILTERING CHECK: {} links - filtering {} (threshold: {})",
+                    link_count,
+                    if should_filter { "ENABLED" } else { "DISABLED" },
+                    FILTERING_THRESHOLD
+                );
+                should_filter
             } else {
-                // Pool not ready, disable filtering
-                log::debug!("📊 FILTERING CHECK: Pool not ready - filtering DISABLED");
+                // No link data available, disable filtering
+                log::debug!("📊 FILTERING CHECK: No link data available - filtering DISABLED");
                 false
             }
         };
@@ -3117,7 +3087,7 @@ mod tests {
         assert!(result.is_err());
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("RACE CONDITION PREVENTED"));
-        assert!(error_msg.contains("not fully ready"));
+        assert!(error_msg.contains("parent pool has not been populated with data yet"));
 
         // Verify no filtered pool was created
         let filtered_pools = pool.filtered_pools.read().await;
@@ -3432,13 +3402,9 @@ mod tests {
 
         // At this point, SDNA pool exists but has no data (simulates early bootup state)
 
-        // Verify SDNA pool exists but isn't ready yet
+        // Verify SDNA pool exists but isn't populated yet
         {
             let engine_state = pool.engine_pool_state.read().await;
-            assert!(
-                !engine_state.is_pool_ready,
-                "Pool should not be ready yet"
-            );
             assert!(
                 engine_state.current_all_links.is_none(),
                 "Pool should not have data yet"
@@ -3516,13 +3482,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Verify pool is now ready and populated
+        // Verify pool is now populated
         {
             let engine_state = pool.engine_pool_state.read().await;
-            assert!(
-                engine_state.is_pool_ready,
-                "Pool should be ready now"
-            );
             assert!(
                 engine_state.current_all_links.is_some(),
                 "Pool should have data now"
@@ -3543,74 +3505,5 @@ mod tests {
         println!("✅ No panics during race condition window");
         println!("✅ Normal operation resumes after data population");
         println!("✅ This fixes the empty subscription results during bootup!");
-    }
-
-    #[tokio::test]
-    async fn test_explicit_pool_ready_state() {
-        AgentService::init_global_test_instance();
-        // Test that the explicit is_pool_ready state prevents race conditions properly
-        let pool = PrologEnginePool::new();
-        pool.initialize(2).await.unwrap();
-
-        // Initially, pool should not be ready
-        {
-            let engine_state = pool.engine_pool_state.read().await;
-            assert!(!engine_state.is_pool_ready, "Pool should not be ready initially");
-            assert!(engine_state.current_all_links.is_none(), "Pool should not have data initially");
-        }
-
-        // SDNA and filtered pools should not be usable yet
-        let subject_query = "subject(Base, \"TestClass\").";
-        let result = pool.run_query_smart(subject_query.to_string(), true).await;
-        assert!(result.is_ok(), "Query should not panic but should fall back");
-
-        // Filtered pool creation should fail
-        let filter_creation = pool.get_or_create_filtered_pool("test_user".to_string()).await;
-        assert!(filter_creation.is_err(), "Filtered pool creation should fail when pool not ready");
-        assert!(filter_creation.unwrap_err().to_string().contains("not fully ready"), "Error should mention pool not ready");
-
-        // Now populate the pool
-        use crate::types::{DecoratedLinkExpression, Link};
-        let test_links = vec![DecoratedLinkExpression {
-            author: "test_author".to_string(),
-            timestamp: "2023-01-01T00:00:00Z".to_string(),
-            data: Link {
-                source: "test_source".to_string(),
-                predicate: Some("test_predicate".to_string()),
-                target: "test_target".to_string(),
-            },
-            proof: crate::types::DecoratedExpressionProof {
-                key: "test_key".to_string(),
-                signature: "test_signature".to_string(),
-                valid: Some(true),
-                invalid: Some(false),
-            },
-            status: None,
-        }];
-
-        let populate_result = pool.update_all_engines_with_links("facts".to_string(), test_links, None).await;
-        assert!(populate_result.is_ok(), "Pool population should succeed");
-
-        // After successful population, pool should be ready
-        {
-            let engine_state = pool.engine_pool_state.read().await;
-            assert!(engine_state.is_pool_ready, "Pool should be ready after successful population");
-            assert!(engine_state.current_all_links.is_some(), "Pool should have data after population");
-        }
-
-        // Now SDNA queries should work
-        let result = pool.run_query_smart(subject_query.to_string(), true).await;
-        assert!(result.is_ok(), "Query should work after pool is ready");
-
-        // Filtered pool creation should now succeed
-        let filter_creation = pool.get_or_create_filtered_pool("test_user".to_string()).await;
-        assert!(filter_creation.is_ok(), "Filtered pool creation should succeed when pool ready");
-
-        println!("✅ Explicit pool ready state test passed!");
-        println!("✅ Pool starts in not-ready state");
-        println!("✅ Operations properly fail when pool not ready");
-        println!("✅ Pool becomes ready only after successful engine population");
-        println!("✅ Operations work correctly after pool becomes ready");
-        println!("✅ This prevents inconsistent engine state issues!");
     }
 }
