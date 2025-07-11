@@ -152,8 +152,70 @@ impl PrologEngine {
                             .map(|l| l.replace(['\n', '\r'], ""))
                             .collect::<Vec<String>>()
                             .join("\n");
-                        machine.consult_module_string(module_name.as_str(), program);
-                        let _ = response.send(PrologServiceResponse::LoadModuleResult(Ok(())));
+                        
+                        // 🛡️ CRITICAL: Properly handle errors from consult_module_string
+                        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                            machine.consult_module_string(module_name.as_str(), program.clone())
+                        }));
+                        
+                        let load_result = match result {
+                            Ok(()) => {
+                                // 🔍 VERIFICATION: Test if module was actually loaded by running a simple query
+                                let verification_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                                    // Try to run a simple query that should work if the module loaded
+                                    let mut iter = machine.run_query("true.".to_string());
+                                    iter.next()
+                                }));
+                                
+                                match verification_result {
+                                    Ok(Some(Ok(_))) => {
+                                        log::debug!("✅ Engine successfully consulted and verified module '{}' with {} lines", 
+                                            module_name, program_lines.len());
+                                        Ok(())
+                                    }
+                                    Ok(Some(Err(e))) => {
+                                        let error_msg = format!("Prolog engine failed verification query after consult_module_string: {:?} - module: {}", e, module_name);
+                                        log::error!("🚨 {}", error_msg);
+                                        Err(Error::msg(error_msg))
+                                    }
+                                    Ok(None) => {
+                                        let error_msg = format!("Prolog engine verification query returned None after consult_module_string - module: {}", module_name);
+                                        log::error!("🚨 {}", error_msg);
+                                        Err(Error::msg(error_msg))
+                                    }
+                                    Err(e) => {
+                                        let error_msg = if let Some(string) = e.downcast_ref::<String>() {
+                                            format!("Prolog engine panic during verification query: {} - module: {}", 
+                                                string, module_name)
+                                        } else if let Some(&str) = e.downcast_ref::<&str>() {
+                                            format!("Prolog engine panic during verification query: {} - module: {}", 
+                                                str, module_name)
+                                        } else {
+                                            format!("Prolog engine panic during verification query: {:?} - module: {}", 
+                                                e, module_name)
+                                        };
+                                        log::error!("🚨 {}", error_msg);
+                                        Err(Error::msg(error_msg))
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let error_msg = if let Some(string) = e.downcast_ref::<String>() {
+                                    format!("Prolog engine panic during consult_module_string: {} - module: {}", 
+                                        string, module_name)
+                                } else if let Some(&str) = e.downcast_ref::<&str>() {
+                                    format!("Prolog engine panic during consult_module_string: {} - module: {}", 
+                                        str, module_name)
+                                } else {
+                                    format!("Prolog engine panic during consult_module_string: {:?} - module: {}", 
+                                        e, module_name)
+                                };
+                                log::error!("🚨 {}", error_msg);
+                                Err(Error::msg(error_msg))
+                            }
+                        };
+                        
+                        let _ = response.send(PrologServiceResponse::LoadModuleResult(load_result));
                     }
                     PrologServiceRequest::Drop => return,
                 }
