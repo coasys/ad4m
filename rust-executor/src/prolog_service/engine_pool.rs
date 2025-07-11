@@ -962,8 +962,15 @@ impl PrologEnginePool {
             );
 
             if filtered_link_count < 1000 {
-                let filtered_links = entry.pool.get_filtered_links().await;
-                log::info!("🚨 ALL FILTERED LINKS: \n{}", filtered_links.iter().join("\n"));
+                match entry.pool.get_filtered_links().await {
+                    Ok(filtered_links) => {
+                        log::info!("🚨 ALL FILTERED LINKS: \n{}", filtered_links.join("\n"));
+                    }
+                    Err(e) => {
+                        log::error!("🚨 ERROR GETTING FILTERED LINKS: {}", e);
+                    }
+                }
+            }
         }
     }
 }

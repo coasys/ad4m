@@ -21,6 +21,7 @@ use super::pool_trait::{EnginePoolState, FilteredPool, PoolUtils};
 use super::source_filtering;
 use super::types::{QueryResolution, QueryResult};
 use crate::perspectives::sdna::{get_data_facts, get_sdna_facts, get_static_infrastructure_facts};
+use crate::prolog_service::types::term_to_string;
 use scryer_prolog::Term;
 use std::collections::HashSet;
 use std::time::Instant;
@@ -501,13 +502,13 @@ impl FilteredPrologPool {
         match result {
             Ok(QueryResolution::Matches(matches)) => {
                 if matches.is_empty() {
-                    return Ok(0);
+                    return Ok(vec![]);
                 }
                 // The first match should contain the Triples list
                 if let Some(first_match) = matches.first() {
                     if let Some(triples_term) = first_match.bindings.get("Triples") {
                         match triples_term {
-                            Term::List(list) => Ok(list.iter().map(|t| t.to_string())),
+                            Term::List(list) => Ok(list.into_iter().map(|t| term_to_string(t.clone())).collect()),
                             _ => Ok(vec![]), // Not a list, return empty vector
                         }
                     } else {
@@ -517,11 +518,8 @@ impl FilteredPrologPool {
                     Ok(vec![])
                 }
             }
-            Ok(QueryResolution::True) => {
-                // If it returns True, we can't get the count easily, so estimate
-                Ok(0)
-            }
-            Ok(QueryResolution::False) => Ok(0),
+            Ok(QueryResolution::True) => Ok(vec![]),
+            Ok(QueryResolution::False) => Ok(vec![]),
             Err(e) => Err(anyhow!("Failed to count links in filtered pool: {}", e)),
         }
     }
