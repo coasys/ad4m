@@ -183,13 +183,31 @@ export class RuntimeClient {
         return runtimeFriends
     }
 
-    async hcAgentInfos(): Promise<String> {
+    async hcAgentInfos(): Promise<string> {
         const { runtimeHcAgentInfos } = unwrapApolloResult(await this.#apolloClient.query({
             query: gql`query runtimeHcAgentInfos {
                 runtimeHcAgentInfos
             }`,
         }))
         return runtimeHcAgentInfos
+    }
+
+    async getNetworkMetrics(): Promise<string> {
+        const { runtimeGetNetworkMetrics } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeGetNetworkMetrics {
+                runtimeGetNetworkMetrics
+            }`,
+        }))
+        return runtimeGetNetworkMetrics
+    }
+
+    async restartHolochain(): Promise<boolean> {
+        const { runtimeRestartHolochain } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeRestartHolochain {
+                runtimeRestartHolochain
+            }`,
+        }))
+        return runtimeRestartHolochain
     }
 
     async hcAddAgentInfos(agentInfos: String): Promise<void> {

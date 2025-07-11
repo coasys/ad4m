@@ -4,7 +4,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { join } from '@tauri-apps/api/path';
-import { save as dialogSave, open as dialogOpen, message as dialogMessage, type MessageDialogOptions } from "@tauri-apps/plugin-dialog";
+import { save as dialogSave, open as dialogOpen, message as dialogMessage, ask as dialogAsk, type MessageDialogOptions } from "@tauri-apps/plugin-dialog";
 import { useCallback, useContext, useEffect, useState } from "react";
 import QRCode from "react-qr-code";
 import { PREDICATE_FIRSTNAME, PREDICATE_LASTNAME, PREDICATE_USERNAME } from "../constants/triples";
@@ -13,6 +13,8 @@ import { AgentContext } from "../context/AgentContext";
 import { buildAd4mClient, copyTextToClipboard } from "../util";
 import ActionButton from "./ActionButton";
 import { cardStyle } from "./styles";
+import { HoloHash } from '@spartan-hc/holo-hash';
+
 const appWindow = getCurrentWebviewWindow();
 
 type Props = {
@@ -87,6 +89,14 @@ const Profile = (props: Props) => {
   const [exportStatus, setExportStatus] = useState("");
   const [importStatus, setImportStatus] = useState("");
 
+  const [networkMetrics, setNetworkMetrics] = useState("");
+  const [showNetworkMetrics, setShowNetworkMetrics] = useState(false);
+
+  const [agentInfos, setAgentInfos] = useState("");
+  const [showAgentInfos, setShowAgentInfos] = useState(false);
+
+  const [restartingHolochain, setRestartingHolochain] = useState(false);
+
   async function openLogs() {
     let dataPath = await invoke("get_data_path") as string;
     revealItemInDir(await join(dataPath, "ad4m.log"))
@@ -145,17 +155,16 @@ const Profile = (props: Props) => {
 
   const getAgentInfo = async () => {
     const info = await client?.runtime.hcAgentInfos();
-
-    console.log("info", info);
-
-    await writeText(info);
-
-    setCopied(true);
-
-    setTimeout(() => {
-      setCopied(false);
-      closeSecretCodeModal();
-    }, 3000);
+    if (info) {
+      try {
+        const formattedInfo = JSON.stringify(JSON.parse(info), null, 2);
+        setAgentInfos(formattedInfo);
+        setShowAgentInfos(true);
+      } catch (error) {
+        console.error("Failed to parse agent info data:", error);
+        alert("Failed to display agent info: The data returned from the backend is malformed. Please check the console for details.");
+      }
+    }
   };
 
   const addAgentInfo = async (info: string) => {
@@ -406,6 +415,20 @@ const Profile = (props: Props) => {
             </j-button>
           </j-box>
           <j-box px="500" my="500">
+            <j-button onClick={() => settrustedAgentModalOpen(true)} full variant="ghost">
+              <j-icon size="sm" slot="start" name="shield-check"></j-icon>
+              Show trusted agents
+            </j-button>
+          </j-box>
+
+          {/* Holochain Section */}
+          <j-box px="500" my="500">
+            <j-text size="600" weight="600" color="black">
+              Holochain
+            </j-text>
+          </j-box>
+          
+          <j-box px="500" my="500">
             <j-button
               onClick={() => {
                 getAgentInfo();
@@ -414,7 +437,7 @@ const Profile = (props: Props) => {
               variant="ghost"
             >
               <j-icon size="sm" slot="start" name={!copied ? "clipboard" : "clipboard-check"}></j-icon>
-              Copy Holochain Agent Info(s)
+              Show Holochain Agent Info(s)
             </j-button>
           </j-box>
 
@@ -431,12 +454,67 @@ const Profile = (props: Props) => {
             </j-button>
           </j-box>
           <j-box px="500" my="500">
-            <j-button onClick={() => settrustedAgentModalOpen(true)} full variant="ghost">
-              <j-icon size="sm" slot="start" name="shield-check"></j-icon>
-              Show trusted agents
+            <j-button onClick={async () => {
+              if (client) {
+                try {
+                  const metrics = await client.runtime.getNetworkMetrics();
+                  const parsedMetrics = JSON.parse(metrics);
+                  const formattedMetrics = JSON.stringify(parsedMetrics, (key, value) => {
+                    // Keep buffer arrays on one line by not formatting them
+                    if (Array.isArray(value) && value.every(item => typeof item === 'number' && item >= 0 && item <= 255)) {
+
+                      if(value.length > 0){
+                        let array = new Uint8Array(value)
+                        try{
+                          const holoHash = new HoloHash(array);
+                          return holoHash.toString();
+                        } catch (error) {
+                          return JSON.stringify(value);
+                        }
+                      }
+                    }
+                    return value;
+                  }, 2);
+                  setNetworkMetrics(formattedMetrics);
+                  setShowNetworkMetrics(true);
+                } catch (error) {
+                  console.error('Failed to get network metrics:', error);
+                  alert('Failed to get network metrics. Check console for details.');
+                }
+              }
+            }} full variant="ghost">
+              <j-icon size="sm" slot="start" name="graph-up"></j-icon>
+              Get Network Metrics
             </j-button>
           </j-box>
           <j-box px="500" my="500">
+            <j-button onClick={async () => {
+              if (client) {
+                try {
+                  const confirmed = await dialogAsk('Are you sure you want to restart Holochain? This will temporarily disconnect you from the network and restart the Holochain conductor.', {
+                    title: 'Restart Holochain'
+                  });
+                  
+                  if (confirmed) {
+                    setRestartingHolochain(true);
+                    await client.runtime.restartHolochain();
+                    await dialogMessage('Holochain has been restarted successfully!', {
+                      title: 'Success'
+                    });
+                    setRestartingHolochain(false);
+                  }
+                } catch (error) {
+                  console.error('Failed to restart Holochain:', error);
+                  await dialogMessage('Failed to restart Holochain. Check console for details.', {
+                    title: 'Error'
+                  });
+                  setRestartingHolochain(false);
+                }
+              }
+            }} full variant="ghost" loading={restartingHolochain} disabled={restartingHolochain}>
+              <j-icon size="sm" slot="start" name="arrow-clockwise"></j-icon>
+              Restart Holochain
+            </j-button>
           </j-box>
         </div>
       )}
@@ -625,6 +703,106 @@ const Profile = (props: Props) => {
                 Delete Agent
               </j-button>
             </j-flex>
+          </j-box>
+        </j-modal>
+      )}
+      
+      {showNetworkMetrics && (
+        <j-modal
+          size="fullscreen"
+          open={showNetworkMetrics}
+          onToggle={(e: any) => setShowNetworkMetrics(e.target.open)}
+        >
+          <j-box px="400" py="600" style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Network Metrics
+              </j-text>
+            </j-box>
+            <j-box pb="500">
+              <j-button 
+                onClick={() => {
+                  navigator.clipboard.writeText(networkMetrics);
+                  alert('Network metrics copied to clipboard!');
+                }}
+                variant="primary"
+              >
+                <j-icon size="sm" slot="start" name="clipboard"></j-icon>
+                Copy to Clipboard
+              </j-button>
+            </j-box>
+            <div style={{ 
+              flex: 1, 
+              overflow: 'auto', 
+              border: '1px solid #ccc', 
+              padding: '10px', 
+              backgroundColor: '#1e1e1e',
+              maxHeight: 'calc(100vh - 200px)',
+              scrollbarWidth: 'thin',
+              scrollbarColor: '#888 #f1f1f1'
+            }}>
+              <pre style={{ 
+                margin: 0, 
+                fontSize: '12px', 
+                fontFamily: 'monospace', 
+                whiteSpace: 'pre-wrap',
+                overflowWrap: 'break-word',
+                wordBreak: 'break-all',
+                color: '#e0e0e0'
+              }}>
+                {networkMetrics}
+              </pre>
+            </div>
+          </j-box>
+        </j-modal>
+      )}
+
+      {showAgentInfos && (
+        <j-modal
+          size="fullscreen"
+          open={showAgentInfos}
+          onToggle={(e: any) => setShowAgentInfos(e.target.open)}
+        >
+          <j-box px="400" py="600" style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+            <j-box pb="500">
+              <j-text nomargin size="600" color="black" weight="600">
+                Holochain Agent Infos
+              </j-text>
+            </j-box>
+            <j-box pb="500">
+              <j-button 
+                onClick={() => {
+                  navigator.clipboard.writeText(agentInfos);
+                  alert('Agent infos copied to clipboard!');
+                }}
+                variant="primary"
+              >
+                <j-icon size="sm" slot="start" name="clipboard"></j-icon>
+                Copy to Clipboard
+              </j-button>
+            </j-box>
+            <div style={{ 
+              flex: 1, 
+              overflow: 'auto', 
+              border: '1px solid #ccc', 
+              padding: '10px', 
+              backgroundColor: '#1e1e1e',
+              maxHeight: 'calc(100vh - 200px)',
+              scrollbarWidth: 'thin',
+              scrollbarColor: '#888 #f1f1f1'
+            }}>
+              <pre style={{ 
+                margin: 0, 
+                fontSize: '12px', 
+                fontFamily: 'monospace', 
+                whiteSpace: 'pre-wrap',
+                overflowWrap: 'break-word',
+                wordBreak: 'break-all',
+                color: '#e0e0e0'
+              }}>
+                {agentInfos}
+              </pre>
+            </div>
           </j-box>
         </j-modal>
       )}
