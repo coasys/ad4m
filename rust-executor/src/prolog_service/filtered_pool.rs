@@ -549,7 +549,7 @@ impl FilteredPrologPool {
         );
 
         // Set a timeout to prevent infinite loops
-        let query_timeout = tokio::time::Duration::from_secs(10); // 10 second timeout
+        let query_timeout = tokio::time::Duration::from_secs(180); // 3 minutes timeout
         let result = tokio::time::timeout(query_timeout, engine.run_query(reachable_query)).await;
 
         let reachability_duration = reachability_start.elapsed();
