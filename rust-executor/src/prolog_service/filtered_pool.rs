@@ -508,7 +508,10 @@ impl FilteredPrologPool {
                 if let Some(first_match) = matches.first() {
                     if let Some(triples_term) = first_match.bindings.get("Triples") {
                         match triples_term {
-                            Term::List(list) => Ok(list.into_iter().map(|t| term_to_string(t.clone())).collect()),
+                            Term::List(list) => Ok(list
+                                .into_iter()
+                                .map(|t| term_to_string(t.clone()))
+                                .collect()),
                             _ => Ok(vec![]), // Not a list, return empty vector
                         }
                     } else {
