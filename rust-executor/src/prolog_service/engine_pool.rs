@@ -21,21 +21,21 @@ use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
 /// Prolog Engine Pool with Filtered Sub-pools
-/// 
+///
 /// This module provides a complete Prolog engine pool that can create and manage
 /// filtered sub-pools for performance optimization. The pool includes:
-/// 
+///
 /// - Complete pool with all data for general queries
 /// - SDNA pool for subject class queries (optimized)
 /// - Filtered pools for subscription queries (source-specific)
 /// - Periodic state logging every 10 seconds showing pool status
-/// 
+///
 /// ## State Logging
 /// Every 10 seconds, the pool logs its state including:
 /// - Total links in complete pool
 /// - Number of filtered sub-pools
 /// - For each filtered pool: link count, reference count, status, last access time
-/// 
+///
 /// Example log output:
 /// ```
 /// 📊 POOL STATE: Complete pool has 15000 total links
@@ -428,7 +428,7 @@ impl PrologEnginePool {
             }
 
             let results = join_all(update_futures).await;
-            
+
             // 🛡️ CRITICAL: Verify ALL engines populated successfully before setting current_all_links
             let mut failed_engines = Vec::new();
             for (i, result) in results.into_iter().enumerate() {
@@ -455,8 +455,11 @@ impl PrologEnginePool {
             // ✅ SUCCESS: All engines populated successfully - now set current_all_links
             pool_state.current_all_links = Some(all_links);
             pool_state.current_neighbourhood_author = neighbourhood_author;
-            
-            log::info!("📊 POOL POPULATION: All {} engines populated successfully", pool_state.engines.len());
+
+            log::info!(
+                "📊 POOL POPULATION: All {} engines populated successfully",
+                pool_state.engines.len()
+            );
         }
 
         // Update any filtered sub-pools managed by this complete pool
@@ -917,13 +920,19 @@ impl PrologEnginePool {
             .map(|links| links.len())
             .unwrap_or(0);
 
-        log::info!("📊 POOL STATE: Complete pool has {} total links", total_links);
+        log::info!(
+            "📊 POOL STATE: Complete pool has {} total links",
+            total_links
+        );
 
         // Sort pools by source filter for consistent logging
         let mut sorted_pools: Vec<_> = pools_read.iter().collect();
         sorted_pools.sort_by_key(|(source_filter, _)| source_filter.as_str());
 
-        log::info!("📊 POOL STATE: {} filtered sub-pools exist:", sorted_pools.len());
+        log::info!(
+            "📊 POOL STATE: {} filtered sub-pools exist:",
+            sorted_pools.len()
+        );
 
         for (source_filter, entry) in sorted_pools {
             let reference_count = entry.reference_count.load(Ordering::Relaxed);
@@ -3709,18 +3718,21 @@ mod tests {
         let user2_count = user2_pool.get_filtered_link_count().await.unwrap();
 
         // Should have at least 1 link each (the has_child links)
-        assert!(user1_count >= 1, "User1 filtered pool should have at least 1 link");
-        assert!(user2_count >= 1, "User2 filtered pool should have at least 1 link");
+        assert!(
+            user1_count >= 1,
+            "User1 filtered pool should have at least 1 link"
+        );
+        assert!(
+            user2_count >= 1,
+            "User2 filtered pool should have at least 1 link"
+        );
 
         println!("✅ User1 filtered pool has {} links", user1_count);
         println!("✅ User2 filtered pool has {} links", user2_count);
 
         // Test manual state logging (simulate what the periodic task does)
-        PrologEnginePool::log_filtered_pool_state(
-            &pool.filtered_pools,
-            &pool.engine_pool_state,
-        )
-        .await;
+        PrologEnginePool::log_filtered_pool_state(&pool.filtered_pools, &pool.engine_pool_state)
+            .await;
 
         println!("✅ Filtered pool state logging test passed!");
         println!("✅ Link counting works correctly");

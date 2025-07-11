@@ -462,7 +462,7 @@ impl FilteredPrologPool {
     pub async fn get_filtered_link_count(&self) -> Result<usize, Error> {
         // Count triple facts that represent links in this filtered pool
         let count_query = "findall(_, triple(Source, Predicate, Target), Triples).".to_string();
-        
+
         let result = self.run_query(count_query).await?;
         match result {
             Ok(QueryResolution::Matches(matches)) => {
