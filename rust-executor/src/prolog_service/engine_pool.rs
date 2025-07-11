@@ -965,27 +965,6 @@ impl PrologEnginePool {
     }
 }
 
-impl Drop for PrologEnginePool {
-    fn drop(&mut self) {
-        // Cancel the cleanup task to prevent resource leak
-        if let Ok(mut handle_guard) = self.cleanup_task_handle.try_lock() {
-            if let Some(handle) = handle_guard.take() {
-                handle.abort();
-                log::debug!("🧹 POOL DROP: Aborted cleanup task for PrologEnginePool");
-            }
-        } else {
-            // If we can't acquire the lock immediately, spawn a task to clean up
-            let handle_clone = self.cleanup_task_handle.clone();
-            tokio::spawn(async move {
-                if let Some(handle) = handle_clone.lock().await.take() {
-                    handle.abort();
-                    log::debug!("🧹 POOL DROP: Aborted cleanup task for PrologEnginePool (async)");
-                }
-            });
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     //! Tests for Complete Prolog Engine Pool
