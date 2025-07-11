@@ -960,6 +960,10 @@ impl PrologEnginePool {
                 status,
                 inactive_duration.as_secs()
             );
+
+            if filtered_link_count < 1000 {
+                let filtered_links = entry.pool.get_filtered_links().await;
+                log::info!("🚨 ALL FILTERED LINKS: \n{}", filtered_links.iter().join("\n"));
         }
     }
 }

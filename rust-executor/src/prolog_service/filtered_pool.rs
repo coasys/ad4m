@@ -492,6 +492,40 @@ impl FilteredPrologPool {
         }
     }
 
+    /// Get all the links in this filtered pool
+    /// This is used for monitoring and debugging purposes
+    pub async fn get_filtered_links(&self) -> Result<Vec<String>, Error> {
+        let count_query = "findall(_, triple(Source, Predicate, Target), Triples).".to_string();
+
+        let result = self.run_query(count_query).await?;
+        match result {
+            Ok(QueryResolution::Matches(matches)) => {
+                if matches.is_empty() {
+                    return Ok(0);
+                }
+                // The first match should contain the Triples list
+                if let Some(first_match) = matches.first() {
+                    if let Some(triples_term) = first_match.bindings.get("Triples") {
+                        match triples_term {
+                            Term::List(list) => Ok(list.iter().map(|t| t.to_string())),
+                            _ => Ok(vec![]), // Not a list, return empty vector
+                        }
+                    } else {
+                        Ok(vec![])
+                    }
+                } else {
+                    Ok(vec![])
+                }
+            }
+            Ok(QueryResolution::True) => {
+                // If it returns True, we can't get the count easily, so estimate
+                Ok(0)
+            }
+            Ok(QueryResolution::False) => Ok(0),
+            Err(e) => Err(anyhow!("Failed to count links in filtered pool: {}", e)),
+        }
+    }
+
     /// Query the complete pool engine for reachable nodes from the source filter
     async fn query_reachable_nodes(
         &self,
