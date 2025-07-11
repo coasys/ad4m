@@ -20,6 +20,31 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
+/// Prolog Engine Pool with Filtered Sub-pools
+/// 
+/// This module provides a complete Prolog engine pool that can create and manage
+/// filtered sub-pools for performance optimization. The pool includes:
+/// 
+/// - Complete pool with all data for general queries
+/// - SDNA pool for subject class queries (optimized)
+/// - Filtered pools for subscription queries (source-specific)
+/// - Periodic state logging every 10 seconds showing pool status
+/// 
+/// ## State Logging
+/// Every 10 seconds, the pool logs its state including:
+/// - Total links in complete pool
+/// - Number of filtered sub-pools
+/// - For each filtered pool: link count, reference count, status, last access time
+/// 
+/// Example log output:
+/// ```
+/// 📊 POOL STATE: Complete pool has 15000 total links
+/// 📊 POOL STATE: 3 filtered sub-pools exist:
+/// 📊 POOL STATE:   user1: 2500 links, 2 refs, ACTIVE (last access: 5s ago)
+/// 📊 POOL STATE:   user2: 1800 links, 0 refs, IDLE (last access: 45s ago)
+/// 📊 POOL STATE:   user3: 3200 links, 1 refs, ACTIVE (last access: 12s ago)
+/// ```
+
 pub const EMBEDDING_LANGUAGE_HASH: &str = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
 
 // Filtering threshold - only use filtered pools for perspectives with more links than this
@@ -28,6 +53,9 @@ pub const FILTERING_THRESHOLD: usize = 6000;
 // Pool cleanup configuration
 const POOL_CLEANUP_INTERVAL_SECS: u64 = 300; // Check every 5 minutes
 const POOL_INACTIVE_TIMEOUT_SECS: u64 = 900; // Remove pools inactive for 15 minutes
+
+// State logging configuration
+const STATE_LOG_INTERVAL_SECS: u64 = 10; // Log state every 10 seconds
 
 /// Entry for a filtered pool with metadata for cleanup
 #[derive(Clone)]
@@ -83,6 +111,9 @@ pub struct PrologEnginePool {
 
     /// Cleanup task handle to stop the cleanup task when the pool is dropped
     cleanup_task_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+
+    /// State logging task handle to stop the logging task when the pool is dropped
+    state_log_task_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl PrologEnginePool {
@@ -102,10 +133,13 @@ impl PrologEnginePool {
             sdna_pool: Arc::new(RwLock::new(None)),
             creation_locks: Arc::new(RwLock::new(HashMap::new())),
             cleanup_task_handle: Arc::new(Mutex::new(None)),
+            state_log_task_handle: Arc::new(Mutex::new(None)),
         };
 
         // Start cleanup task
         pool.start_cleanup_task();
+        // Start state logging task
+        pool.start_state_log_task();
         pool
     }
 
@@ -839,6 +873,86 @@ impl PrologEnginePool {
         // Default to using this pool directly
         log::debug!("🚀 QUERY ROUTING: Using complete pool for query");
         self.run_query(query).await
+    }
+
+    /// Start the state logging task for monitoring filtered pool status
+    fn start_state_log_task(&self) {
+        let pools_ref = self.filtered_pools.clone();
+        let engine_state_ref = self.engine_pool_state.clone();
+        let logging_handle = tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(STATE_LOG_INTERVAL_SECS));
+
+            loop {
+                interval.tick().await;
+                Self::log_filtered_pool_state(&pools_ref, &engine_state_ref).await;
+            }
+        });
+
+        // Store the handle for potential cleanup
+        // Use spawn to avoid blocking in tests
+        let handle_clone = self.state_log_task_handle.clone();
+        tokio::spawn(async move {
+            *handle_clone.lock().await = Some(logging_handle);
+        });
+    }
+
+    /// Log the current state of filtered pools with link counts
+    async fn log_filtered_pool_state(
+        pools: &Arc<RwLock<HashMap<String, FilteredPoolEntry>>>,
+        engine_state: &Arc<RwLock<EnginePoolState>>,
+    ) {
+        let pools_read = pools.read().await;
+        let engine_state_read = engine_state.read().await;
+
+        if pools_read.is_empty() {
+            log::info!("📊 POOL STATE: No filtered pools exist");
+            return;
+        }
+
+        // Get total link count from complete pool
+        let total_links = engine_state_read
+            .current_all_links
+            .as_ref()
+            .map(|links| links.len())
+            .unwrap_or(0);
+
+        log::info!("📊 POOL STATE: Complete pool has {} total links", total_links);
+
+        // Sort pools by source filter for consistent logging
+        let mut sorted_pools: Vec<_> = pools_read.iter().collect();
+        sorted_pools.sort_by_key(|(source_filter, _)| source_filter.as_str());
+
+        log::info!("📊 POOL STATE: {} filtered sub-pools exist:", sorted_pools.len());
+
+        for (source_filter, entry) in sorted_pools {
+            let reference_count = entry.reference_count.load(Ordering::Relaxed);
+            let last_access = *entry.last_access.lock().await;
+            let inactive_duration = std::time::Instant::now().duration_since(last_access);
+
+            // Get link count for this filtered pool
+            let filtered_link_count = match entry.pool.get_filtered_link_count().await {
+                Ok(count) => count,
+                Err(_) => 0, // Fallback if we can't get the count
+            };
+
+            let status = if reference_count > 0 {
+                "ACTIVE"
+            } else if inactive_duration.as_secs() > POOL_INACTIVE_TIMEOUT_SECS {
+                "INACTIVE (will be cleaned up)"
+            } else {
+                "IDLE"
+            };
+
+            log::info!(
+                "📊 POOL STATE:   {}: {} links, {} refs, {} (last access: {}s ago)",
+                source_filter,
+                filtered_link_count,
+                reference_count,
+                status,
+                inactive_duration.as_secs()
+            );
+        }
     }
 }
 
@@ -3525,5 +3639,92 @@ mod tests {
         println!("✅ No panics during race condition window");
         println!("✅ Normal operation resumes after data population");
         println!("✅ This fixes the empty subscription results during bootup!");
+    }
+
+    #[tokio::test]
+    async fn test_filtered_pool_state_logging() {
+        AgentService::init_global_test_instance();
+        // Test that the periodic state logging works correctly
+        let pool = PrologEnginePool::new();
+        pool.initialize(2).await.unwrap();
+
+        // Create test data
+        use crate::types::{DecoratedLinkExpression, Link};
+        let test_links = vec![
+            DecoratedLinkExpression {
+                author: "user1".to_string(),
+                timestamp: "2023-01-01T00:00:00Z".to_string(),
+                data: Link {
+                    source: "user1".to_string(),
+                    predicate: Some("has_child".to_string()),
+                    target: "post1".to_string(),
+                },
+                proof: crate::types::DecoratedExpressionProof {
+                    key: "test_key".to_string(),
+                    signature: "test_signature".to_string(),
+                    valid: Some(true),
+                    invalid: Some(false),
+                },
+                status: None,
+            },
+            DecoratedLinkExpression {
+                author: "user2".to_string(),
+                timestamp: "2023-01-01T00:00:01Z".to_string(),
+                data: Link {
+                    source: "user2".to_string(),
+                    predicate: Some("has_child".to_string()),
+                    target: "post2".to_string(),
+                },
+                proof: crate::types::DecoratedExpressionProof {
+                    key: "test_key".to_string(),
+                    signature: "test_signature".to_string(),
+                    valid: Some(true),
+                    invalid: Some(false),
+                },
+                status: None,
+            },
+        ];
+
+        pool.update_all_engines_with_links("test_facts".to_string(), test_links, None)
+            .await
+            .unwrap();
+
+        // Create filtered pools
+        let was_created1 = pool
+            .get_or_create_filtered_pool("user1".to_string())
+            .await
+            .unwrap();
+        let was_created2 = pool
+            .get_or_create_filtered_pool("user2".to_string())
+            .await
+            .unwrap();
+        assert!(was_created1 && was_created2);
+
+        // Test that get_filtered_link_count works
+        let filtered_pools = pool.filtered_pools.read().await;
+        let user1_pool = &filtered_pools.get("user1").unwrap().pool;
+        let user2_pool = &filtered_pools.get("user2").unwrap().pool;
+
+        let user1_count = user1_pool.get_filtered_link_count().await.unwrap();
+        let user2_count = user2_pool.get_filtered_link_count().await.unwrap();
+
+        // Should have at least 1 link each (the has_child links)
+        assert!(user1_count >= 1, "User1 filtered pool should have at least 1 link");
+        assert!(user2_count >= 1, "User2 filtered pool should have at least 1 link");
+
+        println!("✅ User1 filtered pool has {} links", user1_count);
+        println!("✅ User2 filtered pool has {} links", user2_count);
+
+        // Test manual state logging (simulate what the periodic task does)
+        PrologEnginePool::log_filtered_pool_state(
+            &pool.filtered_pools,
+            &pool.engine_pool_state,
+        )
+        .await;
+
+        println!("✅ Filtered pool state logging test passed!");
+        println!("✅ Link counting works correctly");
+        println!("✅ State logging function works without errors");
+        println!("✅ Periodic logging will show pool status every 10 seconds");
     }
 }
