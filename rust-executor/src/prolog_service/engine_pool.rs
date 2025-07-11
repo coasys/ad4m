@@ -386,10 +386,6 @@ impl PrologEnginePool {
                 PoolUtils::preprocess_program_lines(facts_to_load.clone(), &self.embedding_cache)
                     .await;
 
-            // Store current state for reuse in filtered pools
-            pool_state.current_all_links = Some(all_links);
-            pool_state.current_neighbourhood_author = neighbourhood_author;
-
             // Update all engines with facts using references to avoid cloning
             let mut update_futures = Vec::new();
             for engine in pool_state.engines.iter().filter_map(|e| e.as_ref()) {
@@ -398,11 +394,35 @@ impl PrologEnginePool {
             }
 
             let results = join_all(update_futures).await;
+            
+            // 🛡️ CRITICAL: Verify ALL engines populated successfully before setting current_all_links
+            let mut failed_engines = Vec::new();
             for (i, result) in results.into_iter().enumerate() {
                 if let Err(e) = result {
-                    log::error!("Failed to update Prolog engine {}: {}", i, e);
+                    failed_engines.push((i, e));
                 }
             }
+
+            if !failed_engines.is_empty() {
+                // Log all failures and fail the operation
+                for (i, e) in &failed_engines {
+                    log::error!("Failed to update Prolog engine {}: {}", i, e);
+                }
+                return Err(anyhow!(
+                    "🚨 POOL POPULATION FAILED: {} out of {} engines failed to populate. \
+                     Cannot mark pool as ready with inconsistent engine state. \
+                     Failed engines: {:?}",
+                    failed_engines.len(),
+                    pool_state.engines.len(),
+                    failed_engines.iter().map(|(i, _)| *i).collect::<Vec<_>>()
+                ));
+            }
+
+            // ✅ SUCCESS: All engines populated successfully - now set current_all_links
+            pool_state.current_all_links = Some(all_links);
+            pool_state.current_neighbourhood_author = neighbourhood_author;
+            
+            log::info!("📊 POOL POPULATION: All {} engines populated successfully", pool_state.engines.len());
         }
 
         // Update any filtered sub-pools managed by this complete pool
