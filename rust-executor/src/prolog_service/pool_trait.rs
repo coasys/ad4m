@@ -66,6 +66,7 @@ pub struct EnginePoolState {
     pub engines: Vec<Option<PrologEngine>>,
     pub current_all_links: Option<Vec<DecoratedLinkExpression>>,
     pub current_neighbourhood_author: Option<String>,
+    pub initial_population_complete: bool,
 }
 
 impl EnginePoolState {
@@ -74,6 +75,7 @@ impl EnginePoolState {
             engines: Vec::new(),
             current_all_links: None,
             current_neighbourhood_author: None,
+            initial_population_complete: false,
         }
     }
 }

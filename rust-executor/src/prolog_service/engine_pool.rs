@@ -451,6 +451,8 @@ impl PrologEnginePool {
                 "📊 POOL POPULATION: All {} engines populated successfully",
                 pool_state.engines.len()
             );
+
+            pool_state.initial_population_complete = true;
         }
 
         // Update any filtered sub-pools managed by this complete pool
@@ -783,7 +785,12 @@ impl PrologEnginePool {
         // Only use filtered pools for large perspectives (above threshold)
         let should_use_filtering = {
             let engine_state = self.engine_pool_state.read().await;
-            if let Some(ref all_links) = engine_state.current_all_links {
+            if !engine_state.initial_population_complete {
+                log::debug!(
+                    "📊 FILTERING CHECK: Initial population not complete - filtering DISABLED"
+                );
+                false
+            } else if let Some(ref all_links) = engine_state.current_all_links {
                 let link_count = all_links.len();
                 let should_filter = link_count > FILTERING_THRESHOLD;
                 log::debug!(
