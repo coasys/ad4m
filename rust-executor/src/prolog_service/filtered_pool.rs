@@ -496,31 +496,35 @@ impl FilteredPrologPool {
     /// Get all the links in this filtered pool
     /// This is used for monitoring and debugging purposes
     pub async fn get_filtered_links(&self) -> Result<Vec<String>, Error> {
-        let count_query = "findall(_, triple(Source, Predicate, Target), Triples).".to_string();
+        let count_query = "triple(Source, Predicate, Target).".to_string();
 
         let result = self.run_query(count_query).await?;
         match result {
-            Ok(QueryResolution::Matches(matches)) => {
-                if matches.is_empty() {
-                    return Ok(vec![]);
-                }
-                // The first match should contain the Triples list
-                if let Some(first_match) = matches.first() {
-                    if let Some(triples_term) = first_match.bindings.get("Triples") {
-                        match triples_term {
-                            Term::List(list) => Ok(list
-                                .into_iter()
-                                .map(|t| term_to_string(t.clone()))
-                                .collect()),
-                            _ => Ok(vec![]), // Not a list, return empty vector
-                        }
+            Ok(QueryResolution::Matches(matches)) => Ok(matches
+                .into_iter()
+                .map(|m| {
+                    let source = m
+                        .bindings
+                        .get("Source")
+                        .map(|t| term_to_string(t.clone()))
+                        .unwrap_or(String::from("<unknown>"));
+                    let predicate = m
+                        .bindings
+                        .get("Predicate")
+                        .map(|t| term_to_string(t.clone()));
+                    let target = m
+                        .bindings
+                        .get("Target")
+                        .map(|t| term_to_string(t.clone()))
+                        .unwrap_or(String::from("<unknown>"));
+
+                    if let Some(predicate) = predicate {
+                        format!("{} --{}--> {}", source, predicate, target)
                     } else {
-                        Ok(vec![])
+                        format!("{} --> {}", source, target)
                     }
-                } else {
-                    Ok(vec![])
-                }
-            }
+                })
+                .collect()),
             Ok(QueryResolution::True) => Ok(vec![]),
             Ok(QueryResolution::False) => Ok(vec![]),
             Err(e) => Err(anyhow!("Failed to count links in filtered pool: {}", e)),
