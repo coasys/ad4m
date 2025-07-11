@@ -35,15 +35,6 @@ use tokio::sync::{Mutex, RwLock};
 /// - Total links in complete pool
 /// - Number of filtered sub-pools
 /// - For each filtered pool: link count, reference count, status, last access time
-///
-/// Log output example:
-/// ```
-/// 📊 POOL STATE: Complete pool has 15000 total links
-/// 📊 POOL STATE: 3 filtered sub-pools exist:
-/// 📊 POOL STATE:   user1: 2500 links, 2 refs, ACTIVE (last access: 5s ago)
-/// 📊 POOL STATE:   user2: 1800 links, 0 refs, IDLE (last access: 45s ago)
-/// 📊 POOL STATE:   user3: 3200 links, 1 refs, ACTIVE (last access: 12s ago)
-/// ```
 
 pub const EMBEDDING_LANGUAGE_HASH: &str = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
 
