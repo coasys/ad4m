@@ -129,8 +129,11 @@ impl PrologEnginePool {
 
         // Start cleanup task
         pool.start_cleanup_task();
-        // Start state logging task
-        pool.start_state_log_task();
+
+        // Only start state logging task if debug logging is enabled
+        if log::log_enabled!(log::Level::Debug) {
+            pool.start_state_log_task();
+        }
         pool
     }
 
@@ -959,13 +962,16 @@ impl PrologEnginePool {
                 inactive_duration.as_secs()
             );
 
-            if filtered_link_count < 1000 {
-                match entry.pool.get_filtered_links().await {
-                    Ok(filtered_links) => {
-                        log::debug!("🚨 ALL FILTERED LINKS: \n{}", filtered_links.join("\n"));
-                    }
-                    Err(e) => {
-                        log::error!("🚨 ERROR GETTING FILTERED LINKS: {}", e);
+            // Only log filtered links if trace logging is enabled
+            if log::log_enabled!(log::Level::Trace) {
+                if filtered_link_count < 1000 {
+                    match entry.pool.get_filtered_links().await {
+                        Ok(filtered_links) => {
+                            log::trace!("🚨 ALL FILTERED LINKS: \n{}", filtered_links.join("\n"));
+                        }
+                        Err(e) => {
+                            log::error!("🚨 ERROR GETTING FILTERED LINKS: {}", e);
+                        }
                     }
                 }
             }
