@@ -909,7 +909,6 @@ impl PrologEnginePool {
         let engine_state_read = engine_state.read().await;
 
         if pools_read.is_empty() {
-            log::info!("📊 POOL STATE: No filtered pools exist");
             return;
         }
 
