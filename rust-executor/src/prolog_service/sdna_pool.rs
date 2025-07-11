@@ -73,12 +73,12 @@ impl FilteredPool for SdnaPrologPool {
     }
 
     async fn populate_from_complete_data(&self) -> Result<(), Error> {
-        log::info!("📊 SDNA POPULATION: Starting population for SDNA-only pool");
+        log::debug!("📊 SDNA POPULATION: Starting population for SDNA-only pool");
 
         // Create SDNA-only facts (infrastructure + SDNA, no link data)
         let facts = self.create_sdna_only_facts().await?;
 
-        log::info!(
+        log::debug!(
             "📊 SDNA UPDATE: Pool updating engines with {} facts",
             facts.len()
         );
@@ -112,7 +112,7 @@ impl FilteredPool for SdnaPrologPool {
             }
         }
 
-        log::info!("📊 SDNA POPULATION: Successfully populated SDNA-only pool");
+        log::debug!("📊 SDNA POPULATION: Successfully populated SDNA-only pool");
         Ok(())
     }
 
@@ -186,7 +186,7 @@ impl FilteredPool for SdnaPrologPool {
         for result in results {
             match result? {
                 Ok(QueryResolution::True) => continue,
-                Ok(other) => log::info!("SDNA pool unexpected query result: {:?}", other),
+                Ok(other) => log::warn!("SDNA pool unexpected query result: {:?}", other),
                 Err(e) => errors.push(e),
             }
         }
@@ -279,7 +279,7 @@ impl SdnaPrologPool {
             has_subject_class_predicates && !has_link_data_predicates && !has_instance_predicates;
 
         if is_subject_class {
-            log::info!("🎯 SDNA ROUTING: Detected subject class query: {}", query);
+            log::trace!("🎯 SDNA ROUTING: Detected subject class query: {}", query);
         }
 
         is_subject_class
@@ -287,7 +287,7 @@ impl SdnaPrologPool {
 
     /// Create SDNA-only facts (infrastructure + SDNA, no link data)
     async fn create_sdna_only_facts(&self) -> Result<Vec<String>, Error> {
-        log::info!("📊 SDNA FACT CREATION: Creating SDNA-only facts");
+        log::debug!("📊 SDNA FACT CREATION: Creating SDNA-only facts");
 
         // Always include infrastructure facts
         let mut sdna_lines = get_static_infrastructure_facts();
@@ -307,7 +307,7 @@ impl SdnaPrologPool {
         // Add SDNA facts (subject class definitions, constructors, setters, etc.)
         let sdna_facts = get_sdna_facts(&all_links, neighbourhood_author.clone())?;
 
-        log::info!(
+        log::trace!(
             "📊 SDNA FACT CREATION: Infrastructure facts: {}, SDNA facts: {}",
             sdna_lines.len(),
             sdna_facts.len()
@@ -315,9 +315,9 @@ impl SdnaPrologPool {
 
         // Log sample SDNA facts for debugging
         if !sdna_facts.is_empty() {
-            log::info!("📊 SDNA FACT CREATION: Sample SDNA facts (first 5):");
+            log::trace!("📊 SDNA FACT CREATION: Sample SDNA facts (first 5):");
             for (i, fact) in sdna_facts.iter().take(5).enumerate() {
-                log::info!("  {}. {}", i + 1, fact);
+                log::trace!("  {}. {}", i + 1, fact);
             }
         } else {
             log::warn!("📊 SDNA FACT CREATION: No SDNA facts found");
@@ -325,7 +325,7 @@ impl SdnaPrologPool {
 
         sdna_lines.extend(sdna_facts);
 
-        log::info!(
+        log::trace!(
             "📊 SDNA FACT CREATION: Total SDNA-only facts: {} (no link data included)",
             sdna_lines.len()
         );

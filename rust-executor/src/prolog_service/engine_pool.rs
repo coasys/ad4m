@@ -158,13 +158,13 @@ impl PrologEnginePool {
             };
 
             if parent_pool_ready {
-                log::debug!(
+                log::trace!(
                     "🎯 DIRECT SDNA: Running query directly on SDNA pool: {}",
                     query
                 );
                 sdna_pool.run_query(query).await
             } else {
-                log::info!(
+                log::warn!(
                     "🎯 DIRECT SDNA: SDNA pool not ready (race condition), falling back to complete pool for query: {}",
                     query
                 );
@@ -192,7 +192,7 @@ impl PrologEnginePool {
         let mut sdna_pool_guard = self.sdna_pool.write().await;
         *sdna_pool_guard = Some(sdna_pool);
 
-        log::info!("📊 POOL INITIALIZATION: Complete pool and SDNA pool both initialized");
+        log::debug!("📊 POOL INITIALIZATION: Complete pool and SDNA pool both initialized");
         Ok(())
     }
 
@@ -253,7 +253,7 @@ impl PrologEnginePool {
         for result in results {
             match result? {
                 Ok(QueryResolution::True) => continue,
-                Ok(other) => log::info!("Unexpected query result: {:?}", other),
+                Ok(other) => log::warn!("Unexpected query result: {:?}", other),
                 Err(e) => errors.push(e),
             }
         }
@@ -270,23 +270,23 @@ impl PrologEnginePool {
         }
 
         // Since this is a complete pool, check if we need to update filtered pools for assert queries
-        log::info!(
+        log::debug!(
             "🔄 DEBUG: Checking assert query: is_assert={}, query='{}'",
             assert_utils::is_assert_query(&query),
             query
         );
 
         if assert_utils::is_assert_query(&query) {
-            log::info!("🔄 INCREMENTAL UPDATE: Detected assert query on complete pool, updating filtered pools");
+            log::debug!("🔄 INCREMENTAL UPDATE: Detected assert query on complete pool, updating filtered pools");
             if let Err(e) = self.update_filtered_pools_from_assert_query(&query).await {
-                log::info!(
+                log::warn!(
                     "🔄 INCREMENTAL UPDATE: Failed to update filtered pools: {}",
                     e
                 );
                 // Don't fail the main query - just log the error
             }
         } else {
-            log::info!("🔄 DEBUG: Not updating filtered pools - not an assert query");
+            log::debug!("🔄 DEBUG: Not updating filtered pools - not an assert query");
         }
 
         Ok(())
@@ -296,24 +296,24 @@ impl PrologEnginePool {
     async fn update_filtered_pools_from_assert_query(&self, query: &str) -> Result<(), Error> {
         let filtered_pools = self.filtered_pools.read().await;
         if filtered_pools.is_empty() {
-            println!("🔄 INCREMENTAL UPDATE: No filtered pools to update");
+            log::debug!("🔄 INCREMENTAL UPDATE: No filtered pools to update");
             return Ok(());
         }
 
-        log::info!(
+        log::debug!(
             "🔄 INCREMENTAL UPDATE: Delegating assert updates to {} filtered pools",
             filtered_pools.len()
         );
-        log::info!("🔄 INCREMENTAL UPDATE: Original query: {}", query);
+        log::debug!("🔄 INCREMENTAL UPDATE: Original query: {}", query);
 
         // Extract assert statements from the query
         let assert_statements = assert_utils::extract_assert_statements(query);
         if assert_statements.is_empty() {
-            log::info!("🔄 INCREMENTAL UPDATE: No assert statements found in query");
+            log::debug!("🔄 INCREMENTAL UPDATE: No assert statements found in query");
             return Ok(());
         }
 
-        log::info!(
+        log::debug!(
             "🔄 INCREMENTAL UPDATE: Found {} assert statements to delegate: {:?}",
             assert_statements.len(),
             assert_statements
@@ -328,7 +328,7 @@ impl PrologEnginePool {
             let assert_statements_clone = assert_statements.clone();
 
             let update_future = async move {
-                log::info!(
+                log::debug!(
                     "🔄 INCREMENTAL UPDATE: Delegating incremental update to pool '{}'",
                     pool_clone.pool_description()
                 );
@@ -344,7 +344,7 @@ impl PrologEnginePool {
         // Execute all filtered pool updates in parallel
         if !update_futures.is_empty() {
             let total_updates = update_futures.len();
-            log::info!(
+            log::debug!(
                 "🔄 INCREMENTAL UPDATE: Executing {} parallel pool updates",
                 total_updates
             );
@@ -353,7 +353,7 @@ impl PrologEnginePool {
 
             for (i, result) in results.into_iter().enumerate() {
                 if let Err(e) = result {
-                    log::info!(
+                    log::error!(
                         "🔄 INCREMENTAL UPDATE: Failed to update filtered pool {}: {}",
                         i,
                         e
@@ -363,19 +363,19 @@ impl PrologEnginePool {
             }
 
             if failed_updates > 0 {
-                log::info!(
+                log::warn!(
                     "🔄 INCREMENTAL UPDATE: {} out of {} filtered pool updates failed",
                     failed_updates,
                     total_updates
                 );
             } else {
-                log::info!(
+                log::debug!(
                     "🔄 INCREMENTAL UPDATE: Successfully updated all {} filtered pools",
                     total_updates
                 );
             }
         } else {
-            log::info!("🔄 INCREMENTAL UPDATE: No filtered pool updates to execute");
+            log::debug!("🔄 INCREMENTAL UPDATE: No filtered pool updates to execute");
         }
 
         Ok(())
@@ -447,7 +447,7 @@ impl PrologEnginePool {
             pool_state.current_all_links = Some(all_links);
             pool_state.current_neighbourhood_author = neighbourhood_author;
 
-            log::info!(
+            log::debug!(
                 "📊 POOL POPULATION: All {} engines populated successfully",
                 pool_state.engines.len()
             );
@@ -459,7 +459,7 @@ impl PrologEnginePool {
         // Each filtered pool is responsible for its own filtering logic
         {
             let filtered_pools = self.filtered_pools.read().await;
-            log::info!(
+            log::debug!(
                 "📊 POOL UPDATE: Complete pool delegating updates to {} filtered sub-pools",
                 filtered_pools.len()
             );
@@ -483,7 +483,7 @@ impl PrologEnginePool {
                 if let Err(e) = result {
                     log::error!("Failed to update filtered Prolog pool {}: {}", i, e);
                 } else {
-                    log::info!("📊 POOL UPDATE: Successfully updated filtered pool {}", i);
+                    log::debug!("📊 POOL UPDATE: Successfully updated filtered pool {}", i);
                 }
             }
         }
@@ -492,14 +492,14 @@ impl PrologEnginePool {
         {
             let sdna_pool_guard = self.sdna_pool.read().await;
             if let Some(ref sdna_pool) = *sdna_pool_guard {
-                log::info!("📊 SDNA POOL UPDATE: Updating SDNA pool with new data");
+                log::debug!("📊 SDNA POOL UPDATE: Updating SDNA pool with new data");
 
                 let sdna_pool_clone = sdna_pool.clone();
 
                 let result = sdna_pool_clone.populate_from_complete_data().await;
                 match result {
                     Ok(()) => {
-                        log::info!("📊 SDNA POOL UPDATE: Successfully updated SDNA pool");
+                        log::debug!("📊 SDNA POOL UPDATE: Successfully updated SDNA pool");
                     }
                     Err(e) => {
                         log::error!("Failed to update SDNA pool: {}", e);
@@ -589,8 +589,8 @@ impl PrologEnginePool {
             }
         }
 
-        log::info!(
-            "📊 POOL CREATION: Creating and populating new filtered pool for source: '{}'",
+        log::debug!(
+            "📊 PROLOG POOL CREATION: Creating and populating new filtered pool for source: '{}'",
             source_filter
         );
 
@@ -640,7 +640,7 @@ impl PrologEnginePool {
         }
 
         log::info!(
-            "📊 POOL CREATION: New filtered pool created and populated for source: '{}'",
+            "📊 Prolog POOL CREATION: New filtered pool created and populated for source: '{}'",
             source_filter
         );
 
@@ -696,7 +696,7 @@ impl PrologEnginePool {
                 if let Some(entry) = pools_write.remove(source_filter) {
                     // Clean up the pool
                     let _ = entry.pool.drop_all().await;
-                    log::info!(
+                    log::debug!(
                         "🧹 POOL CLEANUP: Removed inactive filtered pool for source: '{}'",
                         source_filter
                     );
@@ -746,7 +746,7 @@ impl PrologEnginePool {
         query: String,
         is_subscription: bool,
     ) -> Result<QueryResult, Error> {
-        log::debug!(
+        log::trace!(
             "🚀 QUERY ROUTING: is_subscription={}, query={}",
             is_subscription,
             query
@@ -765,13 +765,13 @@ impl PrologEnginePool {
                     };
 
                     if parent_pool_ready {
-                        log::info!(
+                        log::debug!(
                             "🎯 SDNA ROUTING: Routing subject class query to SDNA pool: {}",
                             query
                         );
                         return sdna_pool.run_query(query).await;
                     } else {
-                        log::info!(
+                        log::warn!(
                             "🎯 SDNA ROUTING: SDNA pool not ready (race condition), falling back to complete pool for query: {}",
                             query
                         );
@@ -811,7 +811,7 @@ impl PrologEnginePool {
         if should_use_filtering {
             if let Some(source_filter) = source_filtering::extract_source_filter(&query) {
                 if is_subscription {
-                    log::info!("🚀 QUERY ROUTING: Routing subscription query to filtered pool for source: '{}'", source_filter);
+                    log::debug!("🚀 QUERY ROUTING: Routing subscription query to filtered pool for source: '{}'", source_filter);
 
                     // For subscription queries, ensure filtered pool exists (creation will automatically populate it)
                     match self
@@ -826,7 +826,7 @@ impl PrologEnginePool {
                                 *entry.last_access.lock().await = Instant::now();
                                 entry.reference_count.fetch_add(1, Ordering::Relaxed);
 
-                                log::info!("🚀 QUERY ROUTING: Successfully routing to filtered pool for source: '{}'", source_filter);
+                                log::trace!("🚀 QUERY ROUTING: Successfully routing to filtered pool for source: '{}'", source_filter);
                                 let result = entry.pool.run_query(query).await;
 
                                 // Decrement reference after query completes
@@ -839,7 +839,7 @@ impl PrologEnginePool {
                         Err(e) => {
                             // Check if this is a race condition error - these are expected and should not be logged as errors
                             if e.to_string().contains("RACE CONDITION PREVENTED") {
-                                log::info!("🚀 QUERY ROUTING: Race condition prevented filtered pool creation for source '{}', safely falling back to complete pool: {}", source_filter, e);
+                                log::warn!("🚀 QUERY ROUTING: Race condition prevented filtered pool creation for source '{}', safely falling back to complete pool: {}", source_filter, e);
                             } else {
                                 log::warn!("🚀 QUERY ROUTING: Failed to create filtered pool for source '{}', falling back to complete pool: {}", source_filter, e);
                             }
@@ -854,7 +854,7 @@ impl PrologEnginePool {
                         // Update access time for regular queries too
                         *entry.last_access.lock().await = Instant::now();
 
-                        log::info!("🚀 QUERY ROUTING: Using existing filtered pool for regular query with source: '{}'", source_filter);
+                        log::debug!("🚀 QUERY ROUTING: Using existing filtered pool for regular query with source: '{}'", source_filter);
                         return entry.pool.run_query(query).await;
                     } else {
                         log::debug!("🚀 QUERY ROUTING: No existing filtered pool for source '{}', using complete pool", source_filter);
@@ -917,7 +917,7 @@ impl PrologEnginePool {
             .map(|links| links.len())
             .unwrap_or(0);
 
-        log::info!(
+        log::debug!(
             "📊 POOL STATE: Complete pool has {} total links",
             total_links
         );
@@ -926,7 +926,7 @@ impl PrologEnginePool {
         let mut sorted_pools: Vec<_> = pools_read.iter().collect();
         sorted_pools.sort_by_key(|(source_filter, _)| source_filter.as_str());
 
-        log::info!(
+        log::debug!(
             "📊 POOL STATE: {} filtered sub-pools exist:",
             sorted_pools.len()
         );
@@ -950,7 +950,7 @@ impl PrologEnginePool {
                 "IDLE"
             };
 
-            log::info!(
+            log::debug!(
                 "📊 POOL STATE:   {}: {} links, {} refs, {} (last access: {}s ago)",
                 source_filter,
                 filtered_link_count,
@@ -962,7 +962,7 @@ impl PrologEnginePool {
             if filtered_link_count < 1000 {
                 match entry.pool.get_filtered_links().await {
                     Ok(filtered_links) => {
-                        log::info!("🚨 ALL FILTERED LINKS: \n{}", filtered_links.join("\n"));
+                        log::debug!("🚨 ALL FILTERED LINKS: \n{}", filtered_links.join("\n"));
                     }
                     Err(e) => {
                         log::error!("🚨 ERROR GETTING FILTERED LINKS: {}", e);
@@ -1550,7 +1550,7 @@ mod tests {
 
         // Run a multi-statement assert query affecting multiple users
         let multi_assert_query = "assert_link_and_triple(\"user1\", \"follows\", \"user2\", \"123\", \"author1\"), assert_link_and_triple(\"user2\", \"follows\", \"user3\", \"124\", \"author2\").";
-        log::info!(
+        println!(
             "🧪 TEST: Running multi-user assert query: {}",
             multi_assert_query
         );
@@ -1769,7 +1769,7 @@ mod tests {
 
         // Now add a connection that makes other_item reachable from root via assertion
         let bridging_assert = "assert_link_and_triple(\"item2\", \"connects_to\", \"other_user\", \"12345\", \"bridge_author\").";
-        log::info!("🧪 TEST: Adding bridge connection: {}", bridging_assert);
+        println!("🧪 TEST: Adding bridge connection: {}", bridging_assert);
 
         let result = pool.run_query_all(bridging_assert.to_string()).await;
         assert!(result.is_ok(), "Bridge assert should succeed");
@@ -1815,7 +1815,7 @@ mod tests {
 
         // Use large dataset to trigger filtering
         let mut test_links = create_large_test_dataset();
-        log::info!(
+        println!(
             "🧪 TEST: Using {} links to trigger filtering (threshold: {})",
             test_links.len(),
             FILTERING_THRESHOLD
@@ -1847,7 +1847,7 @@ mod tests {
 
         // Test subscription query that should create and use a filtered pool
         let subscription_query = r#"triple("user1", "ad4m://has_child", Target)"#;
-        log::info!(
+        println!(
             "🧪 TEST: Running subscription query: {}",
             subscription_query
         );
@@ -1861,16 +1861,16 @@ mod tests {
         // Should find the initial post1
         match initial_result {
             Ok(QueryResolution::Matches(matches)) => {
-                log::info!("🧪 Initial matches: {:?}", matches);
+                println!("🧪 Initial matches: {:?}", matches);
                 // Could be 0 matches if exact predicate doesn't match, that's OK for this test
             }
             Ok(QueryResolution::False) => {
-                log::info!(
+                println!(
                     "🧪 Initial query returned false, which is acceptable for this test setup"
                 );
             }
             other => {
-                log::info!("🧪 Initial query result: {:?}", other);
+                println!("🧪 Initial query result: {:?}", other);
             }
         }
 
@@ -1885,7 +1885,7 @@ mod tests {
 
         // Add new data via assertion that should appear in the filtered pool
         let new_data_assert = "assert_link_and_triple(\"user1\", \"ad4m://has_child\", \"new_post\", \"67890\", \"author1\").";
-        log::info!("🧪 TEST: Adding new data: {}", new_data_assert);
+        println!("🧪 TEST: Adding new data: {}", new_data_assert);
 
         let result = pool.run_query_all(new_data_assert.to_string()).await;
         assert!(result.is_ok(), "New data assert should succeed");
@@ -1898,7 +1898,7 @@ mod tests {
 
         match updated_result {
             Ok(QueryResolution::Matches(matches)) => {
-                log::info!("🧪 Updated matches: {:?}", matches);
+                println!("🧪 Updated matches: {:?}", matches);
                 // Should have at least the new post
                 assert!(
                     !matches.is_empty(),
@@ -1906,10 +1906,10 @@ mod tests {
                 );
             }
             Ok(QueryResolution::True) => {
-                log::info!("🧪 Query now returns True after update");
+                println!("🧪 Query now returns True after update");
             }
             other => {
-                log::info!("🧪 Updated query result: {:?}", other);
+                println!("🧪 Updated query result: {:?}", other);
             }
         }
 
@@ -1939,7 +1939,7 @@ mod tests {
 
         // Use large dataset to trigger filtering
         let mut test_links = create_large_test_dataset();
-        log::info!(
+        println!(
             "🧪 INTEGRATION: Using {} links to trigger filtering (threshold: {})",
             test_links.len(),
             FILTERING_THRESHOLD
@@ -1982,7 +1982,7 @@ mod tests {
             },
         ]);
 
-        log::info!("🧪 INTEGRATION: Setting up initial facts like perspective instance");
+        println!("🧪 INTEGRATION: Setting up initial facts like perspective instance");
         // Use the PRODUCTION method that properly sets up the pool state
         pool.update_all_engines_with_links("facts".to_string(), test_links, None)
             .await
@@ -1990,7 +1990,7 @@ mod tests {
 
         // Simulate subscription query from perspective instance
         let subscription_query = r#"triple("user1", "ad4m://has_child", Target)"#;
-        log::info!(
+        println!(
             "🧪 INTEGRATION: Starting subscription query: {}",
             subscription_query
         );
@@ -2000,7 +2000,7 @@ mod tests {
             .run_query_smart(subscription_query.to_string(), true)
             .await
             .unwrap();
-        log::info!(
+        println!(
             "🧪 INTEGRATION: Initial subscription result: {:?}",
             initial_result
         );
@@ -2036,7 +2036,7 @@ mod tests {
         );
 
         // Simulate new link addition via assertion (like perspective instance does)
-        log::info!("🧪 INTEGRATION: Adding new link via assertion...");
+        println!("🧪 INTEGRATION: Adding new link via assertion...");
         let new_link_assertion = "assert_link_and_triple(\"user1\", \"ad4m://has_child\", \"new_post\", \"67890\", \"user1\").";
 
         // This should update both complete and filtered pools
@@ -2072,7 +2072,7 @@ mod tests {
             .unwrap();
         match updated_subscription_result {
             Ok(QueryResolution::Matches(matches)) => {
-                log::info!(
+                println!(
                     "🧪 INTEGRATION: Updated subscription matches: {:?}",
                     matches
                 );
@@ -2110,7 +2110,7 @@ mod tests {
         }
 
         // Test multiple assertions in sequence
-        log::info!("🧪 INTEGRATION: Testing multiple sequential assertions...");
+        println!("🧪 INTEGRATION: Testing multiple sequential assertions...");
         for i in 1..=3 {
             let seq_assertion = format!("assert_link_and_triple(\"user1\", \"ad4m://has_child\", \"seq_post_{}\", \"{}\", \"user1\").", i, 70000 + i);
             pool.run_query_all(seq_assertion.clone()).await.unwrap();
@@ -2138,13 +2138,13 @@ mod tests {
             .unwrap();
         match final_subscription_result {
             Ok(QueryResolution::Matches(matches)) => {
-                log::info!(
+                println!(
                     "🧪 INTEGRATION: Final subscription matches count: {}",
                     matches.len()
                 );
                 // Should have at least: post1 + new_post + 3 seq_posts = 5
                 if matches.len() >= 5 {
-                    log::info!("🧪 INTEGRATION: ✅ All expected matches found");
+                    println!("🧪 INTEGRATION: ✅ All expected matches found");
                 } else {
                     log::warn!(
                         "🧪 INTEGRATION: ⚠️  Only found {} matches, expected at least 5",
@@ -2160,7 +2160,7 @@ mod tests {
         }
 
         // Test that assert updates don't break future queries
-        log::info!("🧪 INTEGRATION: Testing query stability after multiple updates...");
+        println!("🧪 INTEGRATION: Testing query stability after multiple updates...");
         let stability_check = user1_pool
             .run_query("triple(\"user1\", \"ad4m://has_child\", \"post1\").".to_string())
             .await

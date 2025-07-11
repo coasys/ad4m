@@ -95,7 +95,7 @@ pub fn filter_assert_statements_for_source(
         return Vec::new();
     }
 
-    log::info!(
+    log::debug!(
         "🔄 BATCH FILTERING: Analyzing {} statements for source filter '{}'",
         statements.len(),
         source_filter
@@ -105,7 +105,7 @@ pub fn filter_assert_statements_for_source(
     let mut statement_relationships = Vec::new();
     for (idx, statement) in statements.iter().enumerate() {
         if let Some((source, target)) = extract_source_target_from_statement(statement) {
-            log::info!(
+            log::trace!(
                 "🔄 BATCH FILTERING: Statement {}: {} -> {}",
                 idx,
                 source,
@@ -146,7 +146,7 @@ pub fn filter_assert_statements_for_source(
                 // Add both source and target to reachable set for next iteration
                 if reachable_nodes.insert(source.clone()) {
                     changed = true;
-                    log::info!(
+                    log::trace!(
                         "🔄 BATCH FILTERING: Added '{}' to reachable set via statement {}",
                         source,
                         idx
@@ -154,7 +154,7 @@ pub fn filter_assert_statements_for_source(
                 }
                 if reachable_nodes.insert(target.clone()) {
                     changed = true;
-                    log::info!(
+                    log::trace!(
                         "🔄 BATCH FILTERING: Added '{}' to reachable set via statement {}",
                         target,
                         idx
@@ -171,13 +171,13 @@ pub fn filter_assert_statements_for_source(
         .map(|(_, statement)| statement)
         .collect();
 
-    log::info!(
+    log::debug!(
         "🔄 BATCH FILTERING: Result: {} out of {} statements are relevant",
         result.len(),
         statements.len()
     );
     for (i, stmt) in result.iter().enumerate() {
-        log::info!("🔄 BATCH FILTERING: Keeping statement {}: {}", i, stmt);
+        log::trace!("🔄 BATCH FILTERING: Keeping statement {}: {}", i, stmt);
     }
 
     result
@@ -185,7 +185,7 @@ pub fn filter_assert_statements_for_source(
 
 /// Helper method for sequential regex filtering
 pub fn filter_facts_sequential_regex(all_facts: Vec<String>, regex: &regex::Regex) -> Vec<String> {
-    log::info!(
+    log::debug!(
         "🔍 FILTERING: Using sequential regex processing for {} facts",
         all_facts.len()
     );
@@ -216,7 +216,7 @@ pub fn filter_facts_sequential_regex(all_facts: Vec<String>, regex: &regex::Rege
         })
         .collect();
 
-    log::info!(
+    log::debug!(
         "🔍 FILTERING: Sequential regex completed - {} kept, {} dropped",
         kept_count,
         dropped_count
@@ -230,7 +230,7 @@ pub fn filter_facts_parallel_regex(all_facts: Vec<String>, regex: &regex::Regex)
     let kept_count = AtomicUsize::new(0);
     let dropped_count = AtomicUsize::new(0);
 
-    log::info!(
+    log::debug!(
         "🔍 FILTERING: Using memory-efficient parallel regex processing for {} facts",
         all_facts.len()
     );
@@ -284,7 +284,7 @@ pub fn filter_facts_parallel_regex(all_facts: Vec<String>, regex: &regex::Regex)
 
     let final_kept = kept_count.load(Ordering::Relaxed);
     let final_dropped = dropped_count.load(Ordering::Relaxed);
-    log::info!(
+    log::debug!(
         "🔍 FILTERING: Memory-efficient parallel regex completed - {} kept, {} dropped",
         final_kept,
         final_dropped
@@ -298,7 +298,7 @@ pub fn filter_facts_sequential_chunked_regex(
     all_facts: Vec<String>,
     regex_chunks: &[regex::Regex],
 ) -> Vec<String> {
-    log::info!(
+    log::debug!(
         "🔍 FILTERING: Using sequential chunked regex processing for {} facts with {} chunks",
         all_facts.len(),
         regex_chunks.len()
@@ -331,7 +331,7 @@ pub fn filter_facts_sequential_chunked_regex(
         })
         .collect();
 
-    log::info!(
+    log::debug!(
         "🔍 FILTERING: Sequential chunked regex completed - {} kept, {} dropped",
         kept_count,
         dropped_count
@@ -348,7 +348,7 @@ pub fn filter_facts_parallel_chunked_regex(
     let kept_count = AtomicUsize::new(0);
     let dropped_count = AtomicUsize::new(0);
 
-    log::info!(
+    log::debug!(
         "🔍 FILTERING: Using memory-efficient parallel chunked regex processing for {} facts with {} chunks",
         all_facts.len(),
         regex_chunks.len()
@@ -400,7 +400,7 @@ pub fn filter_facts_parallel_chunked_regex(
 
     let final_kept = kept_count.load(Ordering::Relaxed);
     let final_dropped = dropped_count.load(Ordering::Relaxed);
-    log::info!(
+    log::debug!(
         "🔍 FILTERING: Memory-efficient parallel chunked regex completed - {} kept, {} dropped",
         final_kept,
         final_dropped

@@ -133,7 +133,7 @@ impl PrologService {
         let result = pool.run_query_smart(query.clone(), false).await;
         match &result {
             Ok(Ok(query_result)) => {
-                log::info!("⚡ SMART Query succeeded with result: {:?}", query_result);
+                log::debug!("⚡ SMART Query succeeded with result: {:?}", query_result);
             }
             Ok(Err(error)) => {
                 log::warn!("⚡ SMART Query failed with error: {}", error);
@@ -173,7 +173,7 @@ impl PrologService {
         match &result {
             Ok(Ok(_query_result)) => {
                 //log::info!("🔔 SUBSCRIPTION: Query succeeded with result: {:?}", query_result);
-                log::info!("🔔 SUBSCRIPTION: Query succeeded [result omitted]");
+                log::debug!("🔔 SUBSCRIPTION: Query succeeded [result omitted]");
             }
             Ok(Err(error)) => {
                 log::warn!("🔔 SUBSCRIPTION: Query failed with error: {}", error);
@@ -215,7 +215,7 @@ impl PrologService {
 
     pub async fn run_query_all(&self, perspective_id: String, query: String) -> Result<(), Error> {
         let service_start = std::time::Instant::now();
-        log::info!(
+        log::debug!(
             "⚡ PROLOG SERVICE: Starting run_query_all for perspective '{}' - query: {} chars",
             perspective_id,
             query.len()
@@ -229,7 +229,7 @@ impl PrologService {
                 .get(&perspective_id)
                 .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
                 .clone(); // Clone the Arc<> to release the lock
-            log::info!(
+            log::trace!(
                 "⚡ PROLOG SERVICE: Pool lookup took {:?}",
                 pool_lookup_start.elapsed()
             );
@@ -241,7 +241,7 @@ impl PrologService {
 
         match &result {
             Ok(()) => {
-                log::info!(
+                log::debug!(
                     "⚡ PROLOG SERVICE: run_query_all completed successfully in {:?} (total: {:?})",
                     query_execution_start.elapsed(),
                     service_start.elapsed()
@@ -271,7 +271,7 @@ impl PrologService {
         neighbourhood_author: Option<String>,
     ) -> Result<(), Error> {
         let service_start = std::time::Instant::now();
-        log::info!("🔗 PROLOG SERVICE: Starting update_perspective_links for perspective '{}' - {} links, module: {}", 
+        log::debug!("🔗 PROLOG SERVICE: Starting update_perspective_links for perspective '{}' - {} links, module: {}", 
             perspective_id, all_links.len(), module_name);
 
         // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
@@ -282,7 +282,7 @@ impl PrologService {
                 .get(&perspective_id)
                 .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
                 .clone(); // Clone the Arc<> to release the lock
-            log::info!(
+            log::trace!(
                 "🔗 PROLOG SERVICE: Pool lookup took {:?}",
                 pool_lookup_start.elapsed()
             );
@@ -296,7 +296,7 @@ impl PrologService {
 
         match &result {
             Ok(()) => {
-                log::info!("🔗 PROLOG SERVICE: update_perspective_links completed successfully in {:?} (total: {:?})", 
+                log::debug!("🔗 PROLOG SERVICE: update_perspective_links completed successfully in {:?} (total: {:?})", 
                     update_start.elapsed(), service_start.elapsed());
             }
             Err(e) => {

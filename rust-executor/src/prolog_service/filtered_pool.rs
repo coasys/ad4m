@@ -79,7 +79,7 @@ impl FilteredPool for FilteredPrologPool {
     }
 
     async fn populate_from_complete_data(&self) -> Result<(), Error> {
-        log::info!(
+        log::debug!(
             "📊 FILTERED POPULATION: Starting population for pool '{}'",
             self.source_filter
         );
@@ -89,7 +89,7 @@ impl FilteredPool for FilteredPrologPool {
 
         // Update all engines with the filtered facts
 
-        log::info!(
+        log::debug!(
             "📊 FILTERED UPDATE: Pool '{}' updating engines with {} facts",
             self.source_filter,
             facts.len()
@@ -129,7 +129,7 @@ impl FilteredPool for FilteredPrologPool {
             }
         }
 
-        log::info!(
+        log::debug!(
             "📊 FILTERED POPULATION: Successfully populated pool '{}'",
             self.source_filter
         );
@@ -144,7 +144,7 @@ impl FilteredPool for FilteredPrologPool {
         );
 
         if !relevant_assertions.is_empty() {
-            log::info!(
+            log::debug!(
                 "🔄 INCREMENTAL UPDATE: Pool '{}' - applying {} filtered assertions: {:?}",
                 self.source_filter,
                 relevant_assertions.len(),
@@ -152,7 +152,7 @@ impl FilteredPool for FilteredPrologPool {
             );
 
             let filtered_query = format!("{}.", relevant_assertions.join(","));
-            log::info!(
+            log::debug!(
                 "🔄 INCREMENTAL UPDATE: Pool '{}' - executing query: {}",
                 self.source_filter,
                 filtered_query
@@ -160,11 +160,11 @@ impl FilteredPool for FilteredPrologPool {
 
             let result = self.run_query_all(filtered_query).await;
             match &result {
-                Ok(()) => log::info!(
+                Ok(()) => log::debug!(
                     "🔄 INCREMENTAL UPDATE: Pool '{}' - assertion execution successful",
                     self.source_filter
                 ),
-                Err(e) => log::info!(
+                Err(e) => log::error!(
                     "🔄 INCREMENTAL UPDATE: Pool '{}' - assertion execution failed: {}",
                     self.source_filter,
                     e
@@ -172,7 +172,7 @@ impl FilteredPool for FilteredPrologPool {
             }
             result
         } else {
-            log::info!(
+            log::debug!(
                 "🔄 INCREMENTAL UPDATE: No relevant assertions for filtered pool '{}'",
                 self.source_filter
             );
@@ -255,7 +255,7 @@ impl FilteredPool for FilteredPrologPool {
         for result in results {
             match result? {
                 Ok(QueryResolution::True) => continue,
-                Ok(other) => log::info!(
+                Ok(other) => log::warn!(
                     "Filtered pool '{}' unexpected query result: {:?}",
                     self.source_filter,
                     other
@@ -323,7 +323,7 @@ impl FilteredPrologPool {
 
     /// Create filtered facts for this specific source filter
     async fn create_filtered_facts(&self) -> Result<Vec<String>, Error> {
-        log::info!(
+        log::debug!(
             "📊 FACT CREATION: Creating filtered facts for source: '{}'",
             self.source_filter
         );
@@ -343,7 +343,7 @@ impl FilteredPrologPool {
             get_sdna_facts(all_links, neighbourhood_author)?
         };
 
-        log::info!(
+        log::debug!(
             "📊 FACT CREATION: Infrastructure facts: {}, SDNA facts: {}",
             filtered_lines.len(),
             sdna_facts.len()
@@ -351,9 +351,9 @@ impl FilteredPrologPool {
 
         // Log sample SDNA facts for debugging
         if !sdna_facts.is_empty() {
-            log::info!("📊 FACT CREATION: Sample SDNA facts (first 5):");
+            log::debug!("📊 FACT CREATION: Sample SDNA facts (first 5):");
             for (i, fact) in sdna_facts.iter().take(5).enumerate() {
-                log::info!("  {}. {}", i + 1, fact);
+                log::debug!("  {}. {}", i + 1, fact);
             }
         } else {
             log::warn!(
@@ -369,9 +369,9 @@ impl FilteredPrologPool {
 
         // Log sample of final facts for debugging
         if !filtered_lines.is_empty() {
-            log::info!("📊 FACT CREATION: Sample final facts (first 10):");
+            log::debug!("📊 FACT CREATION: Sample final facts (first 10):");
             for (i, fact) in filtered_lines.iter().take(10).enumerate() {
-                log::info!("  {}. {}", i + 1, fact);
+                log::debug!("  {}. {}", i + 1, fact);
             }
         }
 
@@ -381,7 +381,7 @@ impl FilteredPrologPool {
     /// Get filtered data facts for this source using reachable query from the complete pool
     async fn get_filtered_data_facts(&self) -> Result<Vec<String>, Error> {
         let start_time = Instant::now();
-        log::info!(
+        log::debug!(
             "🔍 FILTERING: Starting get_filtered_data_facts for source: '{}'",
             self.source_filter
         );
@@ -399,13 +399,13 @@ impl FilteredPrologPool {
                  This indicates filtered pool creation happened before parent pool data population.",
                 self.source_filter
             ))?;
-        log::info!("🔍 FILTERING: Total links provided: {}", all_links.len());
+        log::debug!("🔍 FILTERING: Total links provided: {}", all_links.len());
 
         // Get all data facts that we want to filter
         let facts_start = Instant::now();
         let all_data_facts = get_data_facts(all_links.as_ref());
         let facts_duration = facts_start.elapsed();
-        log::info!(
+        log::debug!(
             "🔍 FILTERING: Generated {} data facts in {:?}",
             all_data_facts.len(),
             facts_duration
@@ -425,33 +425,33 @@ impl FilteredPrologPool {
         let total_duration = start_time.elapsed();
 
         // Performance summary
-        log::info!(
+        log::trace!(
             "🔍 FILTERING: ⚡ PERFORMANCE SUMMARY for source '{}':",
             self.source_filter
         );
-        log::info!("🔍 FILTERING:   📊 Data generation: {:?}", facts_duration);
-        log::info!(
+        log::trace!("🔍 FILTERING:   📊 Data generation: {:?}", facts_duration);
+        log::trace!(
             "🔍 FILTERING:   🔍 Reachability query: {:?}",
             reachability_duration
         );
-        log::info!(
+        log::trace!(
             "🔍 FILTERING:   🔧 Pattern formatting: {:?}",
             formatting_duration
         );
-        log::info!(
+        log::trace!(
             "🔍 FILTERING:   ⚡ Facts filtering: {:?}",
             filtering_duration
         );
-        log::info!(
+        log::trace!(
             "🔍 FILTERING:   🎯 Total filtering time: {:?}",
             total_duration
         );
 
         // Log sample of filtered facts (only first few)
         if !filtered_data_facts.is_empty() {
-            log::info!("🔍 FILTERING: Sample of filtered facts (first 5):");
+            log::trace!("🔍 FILTERING: Sample of filtered facts (first 5):");
             for (i, fact) in filtered_data_facts.iter().take(5).enumerate() {
-                log::info!("  {}. {}", i + 1, fact);
+                log::trace!("  {}. {}", i + 1, fact);
             }
         }
 
@@ -543,7 +543,7 @@ impl FilteredPrologPool {
             r#"findall(Target, reachable("{}", Target), Targets)."#,
             self.source_filter
         );
-        log::info!(
+        log::debug!(
             "🔍 FILTERING: Running optimized findall reachable query: {}",
             reachable_query
         );
@@ -557,7 +557,7 @@ impl FilteredPrologPool {
 
         match result {
             Ok(Ok(Ok(QueryResolution::Matches(matches)))) => {
-                log::info!(
+                log::debug!(
                     "🔍 FILTERING: Found {} findall matches in {:?}",
                     matches.len(),
                     reachability_duration
@@ -586,7 +586,7 @@ impl FilteredPrologPool {
                                 reachable_nodes.push(target_str);
                             }
                         }
-                        log::info!(
+                        log::debug!(
                             "🔍 FILTERING: Deduplicated to {} unique targets",
                             seen.len()
                         );
@@ -610,11 +610,11 @@ impl FilteredPrologPool {
             }
         }
 
-        log::info!(
+        log::debug!(
             "🔍 FILTERING: Total reachable nodes: {}",
             reachable_nodes.len()
         );
-        log::info!(
+        log::trace!(
             "🔍 FILTERING: Reachability query took: {:?}",
             reachability_duration
         );
@@ -664,7 +664,7 @@ impl FilteredPrologPool {
         };
 
         let formatting_duration = formatting_start.elapsed();
-        log::info!(
+        log::trace!(
             "🔍 FILTERING: Compiled {} regex chunks for {} patterns in {:?}",
             regex_chunks.len(),
             pattern_count,
@@ -684,7 +684,7 @@ impl FilteredPrologPool {
         let original_facts_count = all_data_facts.len();
 
         let filtered_data_facts: Vec<String> = if regex_chunks.is_empty() {
-            log::info!("🔍 FILTERING: No patterns - returning empty filtered facts");
+            log::warn!("🔍 FILTERING: No patterns - returning empty filtered facts");
             Vec::new()
         } else if regex_chunks.len() == 1 {
             // Single regex chunk - use optimized single regex path
@@ -708,7 +708,7 @@ impl FilteredPrologPool {
 
         let filtering_duration = filtering_start.elapsed();
 
-        log::info!(
+        log::trace!(
             "🔍 FILTERING: Results: {} → {} facts ({:.1}% reduction, {} facts/sec)",
             original_facts_count,
             filtered_data_facts.len(),
