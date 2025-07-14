@@ -61,7 +61,10 @@ pub fn init_cli_logging(log_level: Option<LogLevel>) {
     
     let mut initialized = LOGGER_INITIALIZED.lock().unwrap();
     if !*initialized {
-        let _ = env_logger::try_init();
+        // Use parse_default_env() to respect RUST_LOG environment variable
+        Builder::new()
+            .parse_default_env()
+            .init();
         *initialized = true;
     }
 }
@@ -88,14 +91,9 @@ pub fn init_launcher_logging<W: Write + Send + 'static>(
         return reinitialize_launcher_logging(target, log_level);
     }
     
-    let main_level = level.to_level_filter();
-    
     Builder::new()
         .target(Target::Pipe(target))
-        .filter(Some("holochain"), LevelFilter::Warn)
-        .filter(Some("wasmer_compiler_cranelift"), LevelFilter::Warn)
-        .filter(Some("rust_executor"), main_level)
-        .filter(Some("warp::server"), LevelFilter::Debug)
+        .parse_default_env()  // This reads RUST_LOG environment variable
         .format(|buf, record| {
             let level = match record.level() {
                 log::Level::Error => record.level().as_str().red(),
@@ -145,15 +143,10 @@ pub fn reinitialize_launcher_logging<W: Write + Send + 'static>(
         env::set_var("RUST_LOG", &rust_log);
     }
     
-    let main_level = level.to_level_filter();
-    
     // Create a new logger with the updated configuration
     Builder::new()
         .target(Target::Pipe(target))
-        .filter(Some("holochain"), LevelFilter::Warn)
-        .filter(Some("wasmer_compiler_cranelift"), LevelFilter::Warn)
-        .filter(Some("rust_executor"), main_level)
-        .filter(Some("warp::server"), LevelFilter::Debug)
+        .parse_default_env()  // This reads RUST_LOG environment variable
         .format(|buf, record| {
             let level = match record.level() {
                 log::Level::Error => record.level().as_str().red(),
