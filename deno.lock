@@ -764,7 +764,7 @@
             "npm:run-script-os@^1.1.6",
             "npm:sinon@*",
             "npm:ts-mocha@*",
-            "npm:ts-node@10.9.1",
+            "npm:ts-node@^10.9.2",
             "npm:typescript@^4.6.2",
             "npm:unzipper@~0.10.11",
             "npm:uuid@*",
