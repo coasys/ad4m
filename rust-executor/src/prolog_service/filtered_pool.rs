@@ -548,8 +548,11 @@ impl FilteredPrologPool {
             reachable_query
         );
 
+        const REACHABLE_QUERY_TIMEOUT: u64 = 180; // 3 minutes timeout
+        const MAX_REACHABLE_NODES: usize = 25000; // Conservative limit
+
         // Set a timeout to prevent infinite loops
-        let query_timeout = tokio::time::Duration::from_secs(180); // 3 minutes timeout
+        let query_timeout = tokio::time::Duration::from_secs(REACHABLE_QUERY_TIMEOUT); // 3 minutes timeout
         let result = tokio::time::timeout(query_timeout, engine.run_query(reachable_query)).await;
 
         let reachability_duration = reachability_start.elapsed();
@@ -568,7 +571,6 @@ impl FilteredPrologPool {
                     if let Some(Term::List(targets)) = m.bindings.get("Targets") {
                         // Use HashSet for deduplication and apply size limits
                         let mut seen = HashSet::new();
-                        const MAX_REACHABLE_NODES: usize = 5000; // Conservative limit
 
                         for target in targets {
                             if seen.len() >= MAX_REACHABLE_NODES {
@@ -604,7 +606,7 @@ impl FilteredPrologPool {
                 log::warn!("🔍 FILTERING: Engine error during reachable query (parent pool may not be fully populated): {}", e);
             }
             Err(_) => {
-                log::error!("🔍 FILTERING: Reachable query timed out after 10 seconds! Using source-only fallback. This may indicate parent pool is not fully populated or system is overloaded.");
+                log::error!("🔍 FILTERING: Reachable query timed out after {} seconds! Using source-only fallback. This may indicate parent pool is not fully populated or system is overloaded.", REACHABLE_QUERY_TIMEOUT);
                 // Don't try any more reachability queries - just use the source node itself
                 // This prevents the system from hanging completely
             }
