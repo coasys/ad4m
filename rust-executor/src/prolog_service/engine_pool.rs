@@ -552,7 +552,7 @@ impl PrologEnginePool {
         Ok(())
     }
 
-    /// Get or create a filtered pool for subscription queries with the given source filter
+    /// Create a filtered pool (if it doesn't already exist) with the given source filter
     ///
     /// This creates a new `FilteredPrologPool` that points back to this complete pool for data access.
     /// The filtered pool will contain only data reachable from the specified source filter.
@@ -569,7 +569,7 @@ impl PrologEnginePool {
     /// a filtered pool for a specific source filter at a time. Multiple threads requesting
     /// the same source filter will be serialized, while different source filters can be
     /// created concurrently.
-    pub async fn get_or_create_filtered_pool(&self, source_filter: String) -> Result<bool, Error> {
+    pub async fn ensure_filtered_pool(&self, source_filter: String) -> Result<bool, Error> {
         // Fast path: check if pool already exists with read lock
         {
             let filtered_pools = self.filtered_pools.read().await;
@@ -835,10 +835,10 @@ impl PrologEnginePool {
 
                     // For subscription queries, ensure filtered pool exists (creation will automatically populate it)
                     match self
-                        .get_or_create_filtered_pool(source_filter.clone())
+                        .ensure_filtered_pool(source_filter.clone())
                         .await
                     {
-                        Ok(_was_created) => {
+                        Ok(_) => {
                             // Get the filtered pool and run query on it
                             let filtered_pools = self.filtered_pools.read().await;
                             if let Some(entry) = filtered_pools.get(&source_filter) {
@@ -1351,7 +1351,7 @@ mod tests {
 
         // Create a filtered pool for user1 and populate it
         let was_created = pool
-            .get_or_create_filtered_pool("user1".to_string())
+            .ensure_filtered_pool("user1".to_string())
             .await
             .unwrap();
         assert!(was_created);
@@ -1549,15 +1549,15 @@ mod tests {
 
         // Create filtered pools for multiple users
         let was_created1 = pool
-            .get_or_create_filtered_pool("user1".to_string())
+            .ensure_filtered_pool("user1".to_string())
             .await
             .unwrap();
         let was_created2 = pool
-            .get_or_create_filtered_pool("user2".to_string())
+            .ensure_filtered_pool("user2".to_string())
             .await
             .unwrap();
         let was_created3 = pool
-            .get_or_create_filtered_pool("user3".to_string())
+            .ensure_filtered_pool("user3".to_string())
             .await
             .unwrap();
         assert!(was_created1 && was_created2 && was_created3);
@@ -1687,7 +1687,7 @@ mod tests {
 
         // Create a filtered pool for "root" source
         let was_created = pool
-            .get_or_create_filtered_pool("root".to_string())
+            .ensure_filtered_pool("root".to_string())
             .await
             .unwrap();
         assert!(was_created);
@@ -2235,7 +2235,7 @@ mod tests {
 
         // Create filtered pool for the source
         let was_created = pool
-            .get_or_create_filtered_pool("filter_source".to_string())
+            .ensure_filtered_pool("filter_source".to_string())
             .await
             .unwrap();
         assert!(was_created);
@@ -2573,7 +2573,7 @@ mod tests {
 
                 // Test filtered pools
                 let was_created = pool2
-                    .get_or_create_filtered_pool("user1".to_string())
+                    .ensure_filtered_pool("user1".to_string())
                     .await
                     .unwrap();
                 assert!(was_created);
@@ -2855,7 +2855,7 @@ mod tests {
         for i in 1..=5 {
             let user_id = format!("user{}", i);
             let was_created = pool
-                .get_or_create_filtered_pool(user_id.clone())
+                .ensure_filtered_pool(user_id.clone())
                 .await
                 .unwrap();
             assert!(was_created);
@@ -3139,7 +3139,7 @@ mod tests {
 
             let handle = tokio::spawn(async move {
                 let result = pool_clone
-                    .get_or_create_filtered_pool(source_filter_clone)
+                    .ensure_filtered_pool(source_filter_clone)
                     .await;
                 (i, result)
             });
@@ -3235,7 +3235,7 @@ mod tests {
         }
 
         // Attempt to create filtered pool - should fail with race condition prevention
-        let result = pool.get_or_create_filtered_pool("user1".to_string()).await;
+        let result = pool.ensure_filtered_pool("user1".to_string()).await;
 
         assert!(result.is_err());
         let error_msg = result.unwrap_err().to_string();
@@ -3308,7 +3308,7 @@ mod tests {
         assert!(query_result.is_ok());
 
         // Step 5: Now try creating filtered pool - should succeed
-        let create_result = pool.get_or_create_filtered_pool("user1".to_string()).await;
+        let create_result = pool.ensure_filtered_pool("user1".to_string()).await;
         assert!(create_result.is_ok());
         assert_eq!(create_result.unwrap(), true); // New pool created
 
@@ -3340,11 +3340,11 @@ mod tests {
 
         // Create some filtered pools
         let user1_created = pool
-            .get_or_create_filtered_pool("cleanup_user1".to_string())
+            .ensure_filtered_pool("cleanup_user1".to_string())
             .await
             .unwrap();
         let user2_created = pool
-            .get_or_create_filtered_pool("cleanup_user2".to_string())
+            .ensure_filtered_pool("cleanup_user2".to_string())
             .await
             .unwrap();
         assert!(user1_created && user2_created);
@@ -3426,11 +3426,11 @@ mod tests {
 
         // Create some filtered pools
         let user1_created = pool
-            .get_or_create_filtered_pool("preserve_user1".to_string())
+            .ensure_filtered_pool("preserve_user1".to_string())
             .await
             .unwrap();
         let user2_created = pool
-            .get_or_create_filtered_pool("preserve_user2".to_string())
+            .ensure_filtered_pool("preserve_user2".to_string())
             .await
             .unwrap();
         assert!(user1_created && user2_created);
@@ -3710,11 +3710,11 @@ mod tests {
 
         // Create filtered pools
         let was_created1 = pool
-            .get_or_create_filtered_pool("user1".to_string())
+            .ensure_filtered_pool("user1".to_string())
             .await
             .unwrap();
         let was_created2 = pool
-            .get_or_create_filtered_pool("user2".to_string())
+            .ensure_filtered_pool("user2".to_string())
             .await
             .unwrap();
         assert!(was_created1 && was_created2);
