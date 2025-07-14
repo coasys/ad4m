@@ -18,7 +18,7 @@
     "prepare-test:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/build-test-language.ps1 && powershell -ExecutionPolicy Bypass -File ./scripts/prepareTestDirectory.ps1 && deno run --allow-all scripts/get-builtin-test-langs.js && pnpm run inject-language-language && pnpm run publish-test-languages && pnpm run inject-publishing-agent",
     "inject-language-language": "node scripts/injectLanguageLanguageBundle.js",
     "inject-publishing-agent": "node scripts/injectPublishingAgent.js",
-    "publish-test-languages": "node --no-warnings=ExperimentalWarning --experimental-specifier-resolution=node --loader ts-node/esm ./utils/publishTestLangs.ts",
+    "publish-test-languages": "node --no-warnings=ExperimentalWarning --experimental-specifier-resolution=node --loader ts-node/esm/transpile-only ./utils/publishTestLangs.ts",
     "test-single-prepare": "node scripts/cleanTestingData.js && pnpm run prepare-test && node scripts/cleanup.js"
   },
   "devDependencies": {
@@ -56,7 +56,7 @@
     "run-script-os": "^1.1.6",
     "sinon": "*",
     "ts-mocha": "*",
-    "ts-node": "10.9.1",
+    "ts-node": "^10.9.2",
     "typescript": "^4.6.2",
     "unzipper": "^0.10.11",
     "ws": "8.13.0"
