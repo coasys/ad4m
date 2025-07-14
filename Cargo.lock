@@ -84,6 +84,7 @@ dependencies = [
  "coasys_juniper_graphql_transport_ws",
  "coasys_juniper_subscriptions",
  "coasys_juniper_warp",
+ "colored",
  "crypto_box",
  "deflate 1.0.0",
  "deno_core",

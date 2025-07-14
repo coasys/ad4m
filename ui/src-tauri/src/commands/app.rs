@@ -2,6 +2,8 @@ extern crate remove_dir_all;
 use crate::app_state::{AgentConfigDir, LauncherState};
 use crate::util::create_tray_message_windows;
 use crate::{config::data_path, get_main_window};
+use rust_executor::logging::{LogLevel, build_rust_log_from_config};
+use std::collections::HashMap;
 
 use remove_dir_all::*;
 
@@ -126,4 +128,51 @@ pub fn open_dapp() {
     if webbrowser::open("http://localhost:8080/").is_err() {
         println!("Failed to open URL");
     }
+}
+
+#[tauri::command]
+pub fn get_log_config() -> HashMap<String, String> {
+    let state = LauncherState::load().ok();
+    if let Some(state) = state {
+        if let Some(config) = state.log_config {
+            return config;
+        }
+    }
+    
+    // Default log configuration
+    let mut default_config = HashMap::new();
+    default_config.insert("holochain".to_string(), "warn".to_string());
+    default_config.insert("wasmer_compiler_cranelift".to_string(), "warn".to_string());
+    default_config.insert("rust_executor".to_string(), "info".to_string());
+    default_config.insert("warp".to_string(), "warn".to_string());
+    default_config.insert("warp::server".to_string(), "warn".to_string());
+    default_config.insert("warp::filters".to_string(), "warn".to_string());
+    default_config
+}
+
+#[tauri::command]
+pub fn set_log_config(config: HashMap<String, String>) -> Result<(), String> {
+    // Validate the log levels
+    for (crate_name, level) in &config {
+        LogLevel::from_string(level)
+            .ok_or_else(|| format!("Invalid log level '{}' for crate '{}'", level, crate_name))?;
+    }
+    
+    // Load current state
+    let mut state = LauncherState::load()
+        .map_err(|e| format!("Failed to load launcher state: {}", e))?;
+    
+    // Update the log config in state
+    state.log_config = Some(config.clone());
+    
+    // Save the updated state
+    state.save()
+        .map_err(|e| format!("Failed to save launcher state: {}", e))?;
+    
+    // Update RUST_LOG environment variable for current session
+    let rust_log = build_rust_log_from_config(&config);
+    std::env::set_var("RUST_LOG", &rust_log);
+    
+    // Note: Full effect requires restart since env_logger doesn't support runtime reconfiguration
+    Ok(())
 }
