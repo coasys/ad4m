@@ -384,7 +384,6 @@ impl PrologEnginePool {
         Ok(())
     }
 
-
     // This updates all of the pools own engines with the given links,
     // but not the child pools.
     async fn update_all_engines_with_links_internal(
@@ -411,8 +410,7 @@ impl PrologEnginePool {
 
         // Preprocess the facts to handle embeddings ONCE
         let processed_facts =
-            PoolUtils::preprocess_program_lines(facts_to_load.clone(), &self.embedding_cache)
-                .await;
+            PoolUtils::preprocess_program_lines(facts_to_load.clone(), &self.embedding_cache).await;
 
         // Update all engines with facts using references to avoid cloning
         let mut update_futures = Vec::new();
@@ -515,7 +513,9 @@ impl PrologEnginePool {
                 }
             }
         } else {
-            log::error!("📊 SDNA POOL UPDATE: SDNA pool should always exist but was None - this is a bug!");
+            log::error!(
+                "📊 SDNA POOL UPDATE: SDNA pool should always exist but was None - this is a bug!"
+            );
         }
 
         Ok(())
@@ -527,7 +527,8 @@ impl PrologEnginePool {
         all_links: Vec<DecoratedLinkExpression>,
         neighbourhood_author: Option<String>,
     ) -> Result<(), Error> {
-        self.update_all_engines_with_links_internal(module_name, all_links, neighbourhood_author).await?;
+        self.update_all_engines_with_links_internal(module_name, all_links, neighbourhood_author)
+            .await?;
         self.update_filtered_pools_with_links_internal().await?;
         self.update_sdna_pool_with_links_internal().await?;
         Ok(())
@@ -834,10 +835,7 @@ impl PrologEnginePool {
                     log::debug!("🚀 QUERY ROUTING: Routing subscription query to filtered pool for source: '{}'", source_filter);
 
                     // For subscription queries, ensure filtered pool exists (creation will automatically populate it)
-                    match self
-                        .ensure_filtered_pool(source_filter.clone())
-                        .await
-                    {
+                    match self.ensure_filtered_pool(source_filter.clone()).await {
                         Ok(_) => {
                             // Get the filtered pool and run query on it
                             let filtered_pools = self.filtered_pools.read().await;
@@ -1686,10 +1684,7 @@ mod tests {
         // pool.update_all_engines("test_facts".to_string(), initial_facts).await.unwrap();
 
         // Create a filtered pool for "root" source
-        let was_created = pool
-            .ensure_filtered_pool("root".to_string())
-            .await
-            .unwrap();
+        let was_created = pool.ensure_filtered_pool("root".to_string()).await.unwrap();
         assert!(was_created);
 
         // Create link data for the test
@@ -2854,10 +2849,7 @@ mod tests {
         // Create multiple filtered pools to simulate production scenario
         for i in 1..=5 {
             let user_id = format!("user{}", i);
-            let was_created = pool
-                .ensure_filtered_pool(user_id.clone())
-                .await
-                .unwrap();
+            let was_created = pool.ensure_filtered_pool(user_id.clone()).await.unwrap();
             assert!(was_created);
             // Filtered pool is automatically populated when created
         }
@@ -3138,9 +3130,7 @@ mod tests {
             let source_filter_clone = source_filter.clone();
 
             let handle = tokio::spawn(async move {
-                let result = pool_clone
-                    .ensure_filtered_pool(source_filter_clone)
-                    .await;
+                let result = pool_clone.ensure_filtered_pool(source_filter_clone).await;
                 (i, result)
             });
             handles.push(handle);
