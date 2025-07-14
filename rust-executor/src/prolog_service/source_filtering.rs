@@ -2,29 +2,31 @@
 /// Handles pattern recognition, reachability analysis, and filtered fact generation
 use rayon::prelude::*; // For parallel processing
 
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref AD4M_CHILD_PATTERN: regex::Regex = regex::Regex::new(
+        // Look for the primary Ad4mModel pattern: triple("source", "ad4m://has_child", Base)
+        r#"triple\s*\(\s*"([^"]+)"\s*,\s*"ad4m://has_child"\s*,\s*[A-Z_][a-zA-Z0-9_]*\s*\)"#,
+    ).expect("Invalid AD4M child pattern regex");
+
+    // General triple patterns with literal sources
+    static ref TRIPLE_PATTERN: regex::Regex = regex::Regex::new(r#"triple\s*\(\s*"([^"]+)"\s*,"#).expect("Invalid triple pattern regex");
+    // Link patterns with literal sources
+    static ref LINK_PATTERN: regex::Regex = regex::Regex::new(r#"link\s*\(\s*"([^"]+)"\s*,"#).expect("Invalid link pattern regex");
+    // Reachable patterns with literal sources
+    static ref REACHABLE_PATTERN: regex::Regex = regex::Regex::new(r#"reachable\s*\(\s*"([^"]+)"\s*,"#).expect("Invalid reachable pattern regex");
+}
+
 /// Extract source filter from a Prolog query if it exists
 pub fn extract_source_filter(query: &str) -> Option<String> {
-    // Look for the primary Ad4mModel pattern: triple("source", "ad4m://has_child", Base)
-    let ad4m_child_pattern = regex::Regex::new(
-        r#"triple\s*\(\s*"([^"]+)"\s*,\s*"ad4m://has_child"\s*,\s*[A-Z_][a-zA-Z0-9_]*\s*\)"#,
-    )
-    .unwrap();
-
-    if let Some(captures) = ad4m_child_pattern.captures(query) {
+    if let Some(captures) = AD4M_CHILD_PATTERN.captures(query) {
         if let Some(source) = captures.get(1) {
             return Some(source.as_str().to_string());
         }
     }
 
-    // Also look for other common patterns where source is a literal (not a variable)
-    let patterns = [
-        // General triple patterns with literal sources
-        regex::Regex::new(r#"triple\s*\(\s*"([^"]+)"\s*,"#).unwrap(),
-        // Link patterns with literal sources
-        regex::Regex::new(r#"link\s*\(\s*"([^"]+)"\s*,"#).unwrap(),
-        // Reachable patterns with literal sources
-        regex::Regex::new(r#"reachable\s*\(\s*"([^"]+)"\s*,"#).unwrap(),
-    ];
+    let patterns = [&*TRIPLE_PATTERN, &*LINK_PATTERN, &*REACHABLE_PATTERN];
 
     for pattern in &patterns {
         if let Some(captures) = pattern.captures(query) {
