@@ -57,11 +57,15 @@ pub fn extract_source_target_from_statement(statement: &str) -> Option<(String, 
 
             for ch in args.chars() {
                 if escape_next {
-                    current.push(ch);
                     escape_next = false;
+                    if ch == '"' || ch == '\\' || ch == ',' {
+                        current.push(ch);
+                    } else {
+                        current.push('\\');
+                        current.push(ch);
+                    }
                 } else if ch == '\\' {
                     escape_next = true;
-                    current.push(ch);
                 } else if ch == '"' {
                     in_quotes = !in_quotes;
                     current.push(ch);
