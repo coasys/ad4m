@@ -1545,7 +1545,7 @@ impl Mutation {
         // Feed each stream individually
         for stream_id in &stream_ids {
             if let Err(e) = service
-                .feed_transcription_stream(&stream_id, audio_f32.clone())
+                .feed_transcription_stream(stream_id, audio_f32.clone())
                 .await
             {
                 log::warn!("Error feeding stream {}: {}", stream_id, e);

@@ -36,7 +36,7 @@ fn agent_create_signed_expression(
     let sorted_json = sort_json_value(&data);
     let signed_expression =
         create_signed_expression(sorted_json).map_err(AnyhowWrapperError::from)?;
-    Ok(serde_json::to_value(signed_expression).map_err(AnyhowWrapperError::from)?)
+    serde_json::to_value(signed_expression).map_err(AnyhowWrapperError::from)
 }
 
 #[op2]

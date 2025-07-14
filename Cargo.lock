@@ -125,6 +125,7 @@ dependencies = [
  "os_info",
  "portpicker",
  "rand 0.8.5",
+ "rayon",
  "regex",
  "reqwest 0.11.20",
  "rocket",
