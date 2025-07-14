@@ -1040,7 +1040,7 @@ importers:
         specifier: 3.7.10
         version: 3.7.10(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@17.0.2))(react@17.0.2)
       '@coasys/ad4m':
-        specifier: link:../../core
+        specifier: workspace:*
         version: link:../../core
       '@peculiar/webcrypto':
         specifier: ^1.1.7

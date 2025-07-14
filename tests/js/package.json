@@ -18,12 +18,12 @@
     "prepare-test:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/build-test-language.ps1 && powershell -ExecutionPolicy Bypass -File ./scripts/prepareTestDirectory.ps1 && deno run --allow-all scripts/get-builtin-test-langs.js && pnpm run inject-language-language && pnpm run publish-test-languages && pnpm run inject-publishing-agent",
     "inject-language-language": "node scripts/injectLanguageLanguageBundle.js",
     "inject-publishing-agent": "node scripts/injectPublishingAgent.js",
-    "publish-test-languages": "node --no-warnings=ExperimentalWarning --experimental-specifier-resolution=node --loader ts-node/esm/transpile-only ./utils/publishTestLangs.ts",
+    "publish-test-languages": "node --no-warnings=ExperimentalWarning --experimental-specifier-resolution=node --loader ts-node/esm ./utils/publishTestLangs.ts",
     "test-single-prepare": "node scripts/cleanTestingData.js && pnpm run prepare-test && node scripts/cleanup.js"
   },
   "devDependencies": {
     "@apollo/client": "3.7.10",
-    "@coasys/ad4m": "link:../../core",
+    "@coasys/ad4m": "workspace:*",
     "@peculiar/webcrypto": "^1.1.7",
     "@types/chai": "*",
     "@types/chai-as-promised": "*",
