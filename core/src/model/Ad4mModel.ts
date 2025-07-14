@@ -345,11 +345,7 @@ export class Ad4mModel {
     return this.#perspective;
   }
 
-  public static async assignValuesToInstance(
-    perspective: PerspectiveProxy,
-    instance: Ad4mModel,
-    values: ValueTuple[]
-  ) {
+  public static async assignValuesToInstance(perspective: PerspectiveProxy, instance: Ad4mModel, values: ValueTuple[]) {
     // Map properties to object
     const propsObject = Object.fromEntries(
       await Promise.all(
@@ -359,7 +355,13 @@ export class Ad4mModel {
           if (resolve) {
             let resolvedExpression = await perspective.getExpression(value);
             if (resolvedExpression) {
-              finalValue = resolvedExpression.data;
+              try {
+                // Attempt to parse the data as JSON
+                finalValue = JSON.parse(resolvedExpression.data);
+              } catch (error) {
+                // If parsing fails, keep the original data
+                finalValue = resolvedExpression.data;
+              }
             }
           }
           // Apply transform function if it exists
