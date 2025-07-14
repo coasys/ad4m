@@ -52,19 +52,17 @@ impl LogLevel {
 /// Initialize logging for CLI (stdout)
 pub fn init_cli_logging(log_level: Option<LogLevel>) {
     let level = log_level.as_ref().unwrap_or(&LogLevel::Info);
-    
+
     // Only set RUST_LOG if it's not already set in environment
     if env::var("RUST_LOG").is_err() {
         let rust_log = build_rust_log_string(level);
         env::set_var("RUST_LOG", &rust_log);
     }
-    
+
     let mut initialized = LOGGER_INITIALIZED.lock().unwrap();
     if !*initialized {
         // Use parse_default_env() to respect RUST_LOG environment variable
-        Builder::new()
-            .parse_default_env()
-            .init();
+        Builder::new().parse_default_env().init();
         *initialized = true;
     }
 }
@@ -76,24 +74,24 @@ pub fn init_launcher_logging<W: Write + Send + 'static>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use chrono::Local;
     use colored::Colorize;
-    
+
     let level = log_level.as_ref().unwrap_or(&LogLevel::Info);
-    
+
     // Only set RUST_LOG if it's not already set in environment
     if env::var("RUST_LOG").is_err() {
         let rust_log = build_rust_log_string(level);
         env::set_var("RUST_LOG", &rust_log);
     }
-    
+
     let mut initialized = LOGGER_INITIALIZED.lock().unwrap();
     if *initialized {
         // Logger is already initialized, we need to reinitialize it
         return reinitialize_launcher_logging(target, log_level);
     }
-    
+
     Builder::new()
         .target(Target::Pipe(target))
-        .parse_default_env()  // This reads RUST_LOG environment variable
+        .parse_default_env() // This reads RUST_LOG environment variable
         .format(|buf, record| {
             let level = match record.level() {
                 log::Level::Error => record.level().as_str().red(),
@@ -122,7 +120,7 @@ pub fn init_launcher_logging<W: Write + Send + 'static>(
             )
         })
         .init();
-    
+
     *initialized = true;
     Ok(())
 }
@@ -134,19 +132,19 @@ pub fn reinitialize_launcher_logging<W: Write + Send + 'static>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use chrono::Local;
     use colored::Colorize;
-    
+
     let level = log_level.as_ref().unwrap_or(&LogLevel::Info);
-    
+
     // Only set RUST_LOG if it's not already set in environment
     if env::var("RUST_LOG").is_err() {
         let rust_log = build_rust_log_string(level);
         env::set_var("RUST_LOG", &rust_log);
     }
-    
+
     // Create a new logger with the updated configuration
     Builder::new()
         .target(Target::Pipe(target))
-        .parse_default_env()  // This reads RUST_LOG environment variable
+        .parse_default_env() // This reads RUST_LOG environment variable
         .format(|buf, record| {
             let level = match record.level() {
                 log::Level::Error => record.level().as_str().red(),
@@ -175,10 +173,10 @@ pub fn reinitialize_launcher_logging<W: Write + Send + 'static>(
             )
         })
         .init();
-    
+
     // Note: env_logger doesn't support runtime reconfiguration well
     // Runtime changes will require process restart or different approach
-    
+
     Ok(())
 }
 
@@ -203,12 +201,14 @@ fn build_rust_log_string(level: &LogLevel) -> String {
 }
 
 /// Build RUST_LOG string from a HashMap of crate -> log level
-pub fn build_rust_log_from_config(log_config: &std::collections::HashMap<String, String>) -> String {
+pub fn build_rust_log_from_config(
+    log_config: &std::collections::HashMap<String, String>,
+) -> String {
     if log_config.is_empty() {
         // Default configuration if none specified
         return "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp=warn,warp::server=warn,warp::filters=warn".to_string();
     }
-    
+
     let mut parts = Vec::new();
     for (crate_name, level) in log_config {
         parts.push(format!("{}={}", crate_name, level));
@@ -225,4 +225,4 @@ fn extract_rust_executor_level(rust_log: &str) -> Option<LogLevel> {
         }
     }
     None
-} 
+}

@@ -7,9 +7,9 @@ extern crate env_logger;
 #[cfg(not(target_os = "windows"))]
 use libc::{rlimit, setrlimit, RLIMIT_NOFILE};
 use log::{debug, error, info};
+use rust_executor::logging::{build_rust_log_from_config, init_launcher_logging};
 use rust_executor::utils::find_port;
 use rust_executor::Ad4mConfig;
-use rust_executor::logging::{init_launcher_logging, build_rust_log_from_config};
 use std::env;
 use std::fs;
 use std::fs::File;
