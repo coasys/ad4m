@@ -461,6 +461,29 @@ impl Query {
         Ok(metrics)
     }
 
+    async fn runtime_debug_strings(
+        &self,
+        context: &RequestContext,
+        language_address: Option<String>,
+    ) -> FieldResult<Vec<crate::graphql::graphql_types::DebugStringEntry>> {
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY,
+        )?;
+
+        let debug_strings = RuntimeService::get_debug_strings(language_address);
+        let graphql_entries = debug_strings
+            .into_iter()
+            .map(|entry| crate::graphql::graphql_types::DebugStringEntry {
+                language_address: entry.language_address,
+                debug_string: entry.debug_string,
+                operation: entry.operation,
+                timestamp: entry.timestamp.to_rfc3339(),
+            })
+            .collect();
+        Ok(graphql_entries)
+    }
+
     async fn runtime_info(&self, _context: &RequestContext) -> FieldResult<RuntimeInfo> {
         AgentService::with_global_instance(|agent_service| {
             agent_service

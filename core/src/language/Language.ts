@@ -148,8 +148,9 @@ export interface GetAllAdapter {
     getAll(filter: any, count: number, page: number): Promise<Expression[] | null>;
 }
 
-export type PerspectiveDiffObserver = (diff: PerspectiveDiff)=>void;
-export type SyncStateChangeObserver = (state: PerspectiveState)=>void;
+export type PerspectiveDiffObserver = (diff: PerspectiveDiff) => void;
+export type SyncStateChangeObserver = (state: PerspectiveState) => void;
+export type DebugStringObserver = (debugString: string, operation: string) => void;
 
 /** Interface for "Link Languages" that facilitate the synchronization
  * between agents' local Perspectives inside a Neighbourhood.
@@ -187,6 +188,9 @@ export interface LinkSyncAdapter {
 
     /** Add a sync state callback method */
     addSyncStateChangeCallback(callback: SyncStateChangeObserver);
+
+    /** Add a debug string callback method for capturing internal debug information */
+    addDebugStringCallback?(callback: DebugStringObserver);
 }
 
 export type MessageCallback = (message: PerspectiveExpression) => void;

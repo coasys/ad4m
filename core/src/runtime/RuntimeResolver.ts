@@ -139,6 +139,21 @@ export class TriggeredNotification {
 }
 
 @ObjectType()
+export class DebugStringEntry {
+    @Field()
+    languageAddress: string;
+
+    @Field()
+    debugString: string;
+
+    @Field()
+    operation: string;
+
+    @Field()
+    timestamp: string;
+}
+
+@ObjectType()
 export class ImportStats {
     @Field()
     total: number;
@@ -237,6 +252,17 @@ export default class RuntimeResolver {
     @Query(returns => [String])
     runtimeKnownLinkLanguageTemplates(): string[] {
         return ["Qm12345abcdef"]
+    }
+
+    @Query(returns => [DebugStringEntry])
+    runtimeDebugStrings(@Arg("languageAddress", type => String, {nullable: true}) languageAddress?: string): DebugStringEntry[] {
+        // Mock data for testing - in real implementation this would come from stored debug strings
+        return [{
+            languageAddress: "Qm123example",
+            debugString: "Debug string content",
+            operation: "merge",
+            timestamp: new Date().toISOString()
+        }]
     }
 
     @Mutation(returns => [String])

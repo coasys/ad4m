@@ -11,6 +11,7 @@ import { Ad4minContext } from "../context/Ad4minContext";
 import { nanoid } from "nanoid";
 import ActionButton from "./ActionButton";
 import { open, save, confirm } from '@tauri-apps/plugin-dialog';
+import DebugStrings from "./DebugStrings";
 
 type Props = {
   opened: boolean;
@@ -96,6 +97,7 @@ const Perspectives = (props: Props) => {
   const [linkLanguage, setLinkLanguage] = useState("");
   const [linkLanguages, setLinkLanguages] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [debugModalsOpen, setDebugModalsOpen] = useState<Set<string>>(new Set());
 
   const fetchPerspective = async () => {
     const perspectives = await client!.perspective.all();
@@ -242,6 +244,8 @@ const Perspectives = (props: Props) => {
 
       <div style={listStyle}>
         {perspectives.map((e, i) => {
+          const linkLanguageAddress = e?.neighbourhood?.data.linkLanguage;
+
           return (
             <div
               key={`perspectice-${e?.name}`}
@@ -290,6 +294,32 @@ const Perspectives = (props: Props) => {
                     </j-button>
                   </j-input>
                 </>
+              )}
+
+              {e?.neighbourhood && (
+                <j-box pt="300">
+                  <j-button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setDebugModalsOpen(prev => new Set([...prev, e.uuid]))}
+                    full
+                  >
+                    <j-icon name="bug" size="sm"></j-icon>
+                    Debug Strings
+                  </j-button>
+                </j-box>
+              )}
+
+              {debugModalsOpen.has(e!.uuid) && linkLanguageAddress && (
+                <DebugStrings
+                  languageAddress={linkLanguageAddress}
+                  onClose={() => setDebugModalsOpen(prev => {
+                    const newSet = new Set(prev);
+                    newSet.delete(e!.uuid);
+                    return newSet;
+                  })}
+                  open={debugModalsOpen.has(e!.uuid)}
+                />
               )}
 
               <div style={{ position: "absolute", top: 10, right: 10 }}>

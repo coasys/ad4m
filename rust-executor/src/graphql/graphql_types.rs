@@ -457,6 +457,7 @@ impl PerspectiveExpression {
 }
 
 #[derive(GraphQLEnum, Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[graphql(rename_all = "camelCase")]
 pub enum PerspectiveState {
     #[default]
     Private,
@@ -1072,6 +1073,17 @@ impl ImportResult {
 pub struct QuerySubscription {
     pub subscription_id: String,
     pub result: String,
+}
+
+#[derive(GraphQLObject, Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugStringEntry {
+    #[graphql(name = "languageAddress")]
+    pub language_address: String,
+    #[graphql(name = "debugString")]
+    pub debug_string: String,
+    pub operation: String,
+    pub timestamp: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]

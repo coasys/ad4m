@@ -33,7 +33,7 @@ export default async function create(context: LanguageContext): Promise<Language
     }],
     async (signal) => { 
       //@ts-ignore
-      if (signal.payload.reference || (signal.payload.additions && signal.payload.removals)) {
+      if (signal.payload.reference || (signal.payload.additions && signal.payload.removals) || signal.payload.type === "debug_string") {
         await linksAdapter.handleHolochainSignal(signal)
       } else {
         for (const callback of telepresenceAdapter.signalCallbacks) {

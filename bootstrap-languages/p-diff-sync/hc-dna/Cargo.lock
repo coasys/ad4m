@@ -776,6 +776,7 @@ dependencies = [
  "perspective_diff_sync_integrity",
  "petgraph",
  "serde",
+ "serde_json",
  "sha2",
  "thiserror 1.0.50",
 ]

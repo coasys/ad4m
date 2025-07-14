@@ -23,7 +23,7 @@
   },
   "devDependencies": {
     "@apollo/client": "3.7.10",
-    "@coasys/ad4m": "link:../../core",
+    "@coasys/ad4m": "workspace:*",
     "@peculiar/webcrypto": "^1.1.7",
     "@types/chai": "*",
     "@types/chai-as-promised": "*",
@@ -56,7 +56,7 @@
     "run-script-os": "^1.1.6",
     "sinon": "*",
     "ts-mocha": "*",
-    "ts-node": "10.9.1",
+    "ts-node": "^10.9.2",
     "typescript": "^4.6.2",
     "unzipper": "^0.10.11",
     "ws": "8.13.0"

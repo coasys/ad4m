@@ -4,6 +4,7 @@ import { Ad4minContext } from "../context/Ad4minContext";
 import { isSystemLanguage } from "../util";
 import ActionButton from "./ActionButton";
 import { cardStyle, listStyle } from "./styles";
+import DebugStrings from "./DebugStrings";
 
 type Props = {
   opened: boolean;
@@ -32,6 +33,7 @@ const Language = (props: Props) => {
   const [languageSourceLink, setLanguageSourceLink] = useState("");
   const [languageBundlePath, setLanguageBundlePath] = useState("");
   const [data, setData] = useState<any[]>([]);
+  const [debugModalsOpen, setDebugModalsOpen] = useState<Set<string>>(new Set());
 
   const publishLanguage = async () => {
     setLoading(true);
@@ -93,10 +95,6 @@ const Language = (props: Props) => {
         if (p.neighbourhood) {
           if (p.neighbourhood.linkLanguage === lang.address) {
             return true;
-          } else {
-            return p.neighbourhood.meta.links
-              .filter((l) => l.data.predicate === "language")
-              .find((l) => l.data.target === lang.address);
           }
         }
 
@@ -163,6 +161,30 @@ const Language = (props: Props) => {
                   </j-button>
                 </j-input>
               </j-box>
+
+              <j-box pt="300">
+                <j-button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setDebugModalsOpen(prev => new Set([...prev, language?.address]))}
+                  full
+                >
+                  <j-icon name="bug" size="sm"></j-icon>
+                  Debug Strings
+                </j-button>
+              </j-box>
+
+              {debugModalsOpen.has(language?.address) && language?.address && (
+                <DebugStrings
+                  languageAddress={language.address}
+                  onClose={() => setDebugModalsOpen(prev => {
+                    const newSet = new Set(prev);
+                    newSet.delete(language?.address);
+                    return newSet;
+                  })}
+                  open={debugModalsOpen.has(language?.address)}
+                />
+              )}
             </div>
           );
         })}
