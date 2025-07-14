@@ -384,7 +384,142 @@ impl PrologEnginePool {
         Ok(())
     }
 
-    // Note: update_all_engines() removed - use update_all_engines_with_links() for production code
+
+    // This updates all of the pools own engines with the given links,
+    // but not the child pools.
+    async fn update_all_engines_with_links_internal(
+        &self,
+        module_name: String,
+        all_links: Vec<DecoratedLinkExpression>,
+        neighbourhood_author: Option<String>,
+    ) -> Result<(), Error> {
+        let mut pool_state = self.engine_pool_state.write().await;
+
+        // Reinitialize any invalid engines
+        for engine_slot in pool_state.engines.iter_mut() {
+            if engine_slot.is_none() {
+                let mut new_engine = PrologEngine::new();
+                new_engine.spawn().await?;
+                *engine_slot = Some(new_engine);
+            }
+        }
+
+        // For complete pools, use all facts (infrastructure + data + SDNA)
+        let mut facts_to_load = get_static_infrastructure_facts();
+        facts_to_load.extend(get_data_facts(&all_links));
+        facts_to_load.extend(get_sdna_facts(&all_links, neighbourhood_author.clone())?);
+
+        // Preprocess the facts to handle embeddings ONCE
+        let processed_facts =
+            PoolUtils::preprocess_program_lines(facts_to_load.clone(), &self.embedding_cache)
+                .await;
+
+        // Update all engines with facts using references to avoid cloning
+        let mut update_futures = Vec::new();
+        for engine in pool_state.engines.iter().filter_map(|e| e.as_ref()) {
+            let update_future = engine.load_module_string(&module_name, &processed_facts);
+            update_futures.push(update_future);
+        }
+
+        let results = join_all(update_futures).await;
+
+        // 🛡️ CRITICAL: Verify ALL engines populated successfully before setting current_all_links
+        let mut failed_engines = Vec::new();
+        for (i, result) in results.into_iter().enumerate() {
+            if let Err(e) = result {
+                failed_engines.push((i, e));
+            }
+        }
+
+        if !failed_engines.is_empty() {
+            // Log all failures and fail the operation
+            for (i, e) in &failed_engines {
+                log::error!("Failed to update Prolog engine {}: {}", i, e);
+            }
+            return Err(anyhow!(
+                "🚨 POOL POPULATION FAILED: {} out of {} engines failed to populate. \
+                 Cannot mark pool as ready with inconsistent engine state. \
+                 Failed engines: {:?}",
+                failed_engines.len(),
+                pool_state.engines.len(),
+                failed_engines.iter().map(|(i, _)| *i).collect::<Vec<_>>()
+            ));
+        }
+
+        // ✅ SUCCESS: All engines populated successfully - now set current_all_links
+        pool_state.current_all_links = Some(all_links);
+        pool_state.current_neighbourhood_author = neighbourhood_author;
+
+        log::debug!(
+            "📊 POOL POPULATION: All {} engines populated successfully",
+            pool_state.engines.len()
+        );
+
+        pool_state.initial_population_complete = true;
+
+        Ok(())
+    }
+
+    // Update any filtered sub-pools managed by this complete pool
+    // Gets all links from the complete pool.
+    // Each filtered pool is responsible for its own filtering logic
+    async fn update_filtered_pools_with_links_internal(&self) -> Result<(), Error> {
+        let filtered_pools = self.filtered_pools.read().await;
+        log::debug!(
+            "📊 POOL UPDATE: Complete pool delegating updates to {} filtered sub-pools",
+            filtered_pools.len()
+        );
+
+        let mut update_futures = Vec::new();
+        for entry in filtered_pools.values() {
+            let pool_clone = entry.pool.clone();
+            let last_access = entry.last_access.clone();
+
+            let update_future = async move {
+                // Update access time since pool is being updated with new data
+                *last_access.lock().await = Instant::now();
+                // Each filtered pool handles its own filtering and population
+                pool_clone.populate_from_complete_data().await
+            };
+            update_futures.push(update_future);
+        }
+
+        let results = join_all(update_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            if let Err(e) = result {
+                log::error!("Failed to update filtered Prolog pool {}: {}", i, e);
+            } else {
+                log::debug!("📊 POOL UPDATE: Successfully updated filtered pool {}", i);
+            }
+        }
+
+        Ok(())
+    }
+
+    // Update the SDNA pool, which is always present.
+    // Gets all links from the complete pool.
+    async fn update_sdna_pool_with_links_internal(&self) -> Result<(), Error> {
+        let sdna_pool_guard = self.sdna_pool.read().await;
+        if let Some(ref sdna_pool) = *sdna_pool_guard {
+            log::debug!("📊 SDNA POOL UPDATE: Updating SDNA pool with new data");
+
+            let sdna_pool_clone = sdna_pool.clone();
+
+            let result = sdna_pool_clone.populate_from_complete_data().await;
+            match result {
+                Ok(()) => {
+                    log::debug!("📊 SDNA POOL UPDATE: Successfully updated SDNA pool");
+                }
+                Err(e) => {
+                    log::error!("Failed to update SDNA pool: {}", e);
+                }
+            }
+        } else {
+            log::error!("📊 SDNA POOL UPDATE: SDNA pool should always exist but was None - this is a bug!");
+        }
+
+        Ok(())
+    }
 
     pub async fn update_all_engines_with_links(
         &self,
@@ -392,127 +527,9 @@ impl PrologEnginePool {
         all_links: Vec<DecoratedLinkExpression>,
         neighbourhood_author: Option<String>,
     ) -> Result<(), Error> {
-        {
-            let mut pool_state = self.engine_pool_state.write().await;
-
-            // Reinitialize any invalid engines
-            for engine_slot in pool_state.engines.iter_mut() {
-                if engine_slot.is_none() {
-                    let mut new_engine = PrologEngine::new();
-                    new_engine.spawn().await?;
-                    *engine_slot = Some(new_engine);
-                }
-            }
-
-            // For complete pools, use all facts (infrastructure + data + SDNA)
-            let mut facts_to_load = get_static_infrastructure_facts();
-            facts_to_load.extend(get_data_facts(&all_links));
-            facts_to_load.extend(get_sdna_facts(&all_links, neighbourhood_author.clone())?);
-
-            // Preprocess the facts to handle embeddings ONCE
-            let processed_facts =
-                PoolUtils::preprocess_program_lines(facts_to_load.clone(), &self.embedding_cache)
-                    .await;
-
-            // Update all engines with facts using references to avoid cloning
-            let mut update_futures = Vec::new();
-            for engine in pool_state.engines.iter().filter_map(|e| e.as_ref()) {
-                let update_future = engine.load_module_string(&module_name, &processed_facts);
-                update_futures.push(update_future);
-            }
-
-            let results = join_all(update_futures).await;
-
-            // 🛡️ CRITICAL: Verify ALL engines populated successfully before setting current_all_links
-            let mut failed_engines = Vec::new();
-            for (i, result) in results.into_iter().enumerate() {
-                if let Err(e) = result {
-                    failed_engines.push((i, e));
-                }
-            }
-
-            if !failed_engines.is_empty() {
-                // Log all failures and fail the operation
-                for (i, e) in &failed_engines {
-                    log::error!("Failed to update Prolog engine {}: {}", i, e);
-                }
-                return Err(anyhow!(
-                    "🚨 POOL POPULATION FAILED: {} out of {} engines failed to populate. \
-                     Cannot mark pool as ready with inconsistent engine state. \
-                     Failed engines: {:?}",
-                    failed_engines.len(),
-                    pool_state.engines.len(),
-                    failed_engines.iter().map(|(i, _)| *i).collect::<Vec<_>>()
-                ));
-            }
-
-            // ✅ SUCCESS: All engines populated successfully - now set current_all_links
-            pool_state.current_all_links = Some(all_links);
-            pool_state.current_neighbourhood_author = neighbourhood_author;
-
-            log::debug!(
-                "📊 POOL POPULATION: All {} engines populated successfully",
-                pool_state.engines.len()
-            );
-
-            pool_state.initial_population_complete = true;
-        }
-
-        // Update any filtered sub-pools managed by this complete pool
-        // Each filtered pool is responsible for its own filtering logic
-        {
-            let filtered_pools = self.filtered_pools.read().await;
-            log::debug!(
-                "📊 POOL UPDATE: Complete pool delegating updates to {} filtered sub-pools",
-                filtered_pools.len()
-            );
-
-            let mut update_futures = Vec::new();
-            for entry in filtered_pools.values() {
-                let pool_clone = entry.pool.clone();
-                let last_access = entry.last_access.clone();
-
-                let update_future = async move {
-                    // Update access time since pool is being updated with new data
-                    *last_access.lock().await = Instant::now();
-                    // Each filtered pool handles its own filtering and population
-                    pool_clone.populate_from_complete_data().await
-                };
-                update_futures.push(update_future);
-            }
-
-            let results = join_all(update_futures).await;
-            for (i, result) in results.into_iter().enumerate() {
-                if let Err(e) = result {
-                    log::error!("Failed to update filtered Prolog pool {}: {}", i, e);
-                } else {
-                    log::debug!("📊 POOL UPDATE: Successfully updated filtered pool {}", i);
-                }
-            }
-        }
-
-        // Update the SDNA pool (always exists)
-        {
-            let sdna_pool_guard = self.sdna_pool.read().await;
-            if let Some(ref sdna_pool) = *sdna_pool_guard {
-                log::debug!("📊 SDNA POOL UPDATE: Updating SDNA pool with new data");
-
-                let sdna_pool_clone = sdna_pool.clone();
-
-                let result = sdna_pool_clone.populate_from_complete_data().await;
-                match result {
-                    Ok(()) => {
-                        log::debug!("📊 SDNA POOL UPDATE: Successfully updated SDNA pool");
-                    }
-                    Err(e) => {
-                        log::error!("Failed to update SDNA pool: {}", e);
-                    }
-                }
-            } else {
-                log::error!("📊 SDNA POOL UPDATE: SDNA pool should always exist but was None - this is a bug!");
-            }
-        }
-
+        self.update_all_engines_with_links_internal(module_name, all_links, neighbourhood_author).await?;
+        self.update_filtered_pools_with_links_internal().await?;
+        self.update_sdna_pool_with_links_internal().await?;
         Ok(())
     }
 
