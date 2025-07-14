@@ -15,6 +15,7 @@ use crate::languages::LanguageController;
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
 use crate::prolog_service::get_prolog_service;
 use crate::prolog_service::types::{QueryMatch, QueryResolution};
+use crate::prolog_service::PrologService;
 use crate::prolog_service::{
     engine_pool::FILTERING_THRESHOLD, DEFAULT_POOL_SIZE, DEFAULT_POOL_SIZE_WITH_FILTERING,
 };
@@ -34,6 +35,7 @@ use json5;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
@@ -1281,8 +1283,18 @@ impl PerspectiveInstance {
         Ok(())
     }
 
-    /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
-    pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
+    /// Common helper for executing prolog queries with configurable pool, lock, and executor
+    async fn prolog_query_helper<F, Fut>(
+        &self,
+        query: String,
+        use_lock: bool,
+        pool_provider: impl FnOnce(&String) -> String,
+        executor: F,
+    ) -> Result<QueryResolution, AnyError>
+    where
+        F: FnOnce(Arc<PrologService>, String, String) -> Fut,
+        Fut: Future<Output = Result<Result<QueryResolution, String>, AnyError>> + Send,
+    {
         //let prolog_start = std::time::Instant::now();
         //log::info!("🔍 PROLOG QUERY: Starting query: {} (chars: {})",
         //    query.chars().take(100).collect::<String>(), query.len());
@@ -1302,10 +1314,7 @@ impl PerspectiveInstance {
         let service = get_prolog_service().await;
         //log::info!("🔍 PROLOG QUERY: Service retrieved in {:?}", service_start.elapsed());
 
-        //let lock_start = std::time::Instant::now();
-        //log::info!("🔍 PROLOG QUERY: Waiting for prolog_update_mutex read lock...");
-        let _read_lock = self.prolog_update_mutex.read().await;
-        //log::info!("🔍 PROLOG QUERY: Acquired prolog_update_mutex read lock in {:?}", lock_start.elapsed());
+        let pool_name = pool_provider(&uuid);
 
         let query = if !query.ends_with('.') {
             query + "."
@@ -1313,11 +1322,22 @@ impl PerspectiveInstance {
             query
         };
 
+        let _read_lock = if use_lock {
+            //log::info!("🔍 PROLOG QUERY: Waiting for prolog_update_mutex read lock...");
+            let guard = self.prolog_update_mutex.read().await;
+            //log::info!("🔍 PROLOG QUERY: Acquired prolog_update_mutex read lock in {:?}", lock_start.elapsed());
+            Some(guard)
+        } else {
+            None
+        };
+
         // ⚠️ CRITICAL: This might be blocked waiting for prolog_update_mutex!
         //let query_start = std::time::Instant::now();
         //log::info!("🔍 PROLOG QUERY: About to execute query...");
 
-        let result = service.run_query_smart(uuid, query.clone()).await?;
+        let service = Arc::new(service);
+        let result: Result<Result<QueryResolution, String>, AnyError> =
+            executor(service, pool_name, query).await;
 
         //log::info!("🔍 PROLOG QUERY: Query executed in {:?} (total: {:?})",
         //    query_start.elapsed(), prolog_start.elapsed());
@@ -1327,39 +1347,37 @@ impl PerspectiveInstance {
                 // Engine error is handled at pool level now
                 Err(anyhow!(e))
             }
-            Ok(resolution) => Ok(resolution),
+            Ok(resolution) => resolution.map_err(|e| anyhow!(e)),
         }
     }
 
-    /// Executes a Prolog subscription query with optimized routing to filtered engines
+    /// Executes a Prolog query against the perspective's main pool
+    /// locks the prolog_update_mutex
+    /// uses run_query_smart
+    pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
+        self.prolog_query_helper(
+            query,
+            true,
+            |uuid| uuid.clone(),
+            |service, pool, q| async move { service.run_query_smart(pool, q).await },
+        )
+        .await
+    }
+
+    /// Executes a Prolog subscription query against the perspective's main pool
+    /// locks the prolog_update_mutex
+    /// uses run_query_subscription
     pub async fn prolog_query_subscription(
         &self,
         query: String,
     ) -> Result<QueryResolution, AnyError> {
-        // Get service reference before any locks
-        let service = get_prolog_service().await;
-        let uuid = self.persisted.lock().await.uuid.clone();
-
-        // Ensure pool exists
-        self.ensure_prolog_engine_pool().await?;
-
-        let _read_lock = self.prolog_update_mutex.read().await;
-
-        let query = if !query.ends_with('.') {
-            query + "."
-        } else {
-            query
-        };
-
-        let result = service.run_query_subscription(uuid, query).await?;
-
-        match result {
-            Err(e) => {
-                // Engine error is handled at pool level now
-                Err(anyhow!(e))
-            }
-            Ok(resolution) => Ok(resolution),
-        }
+        self.prolog_query_helper(
+            query,
+            true,
+            |uuid| uuid.clone(),
+            |service, pool, q| async move { service.run_query_subscription(pool, q).await },
+        )
+        .await
     }
 
     /// Executes a Prolog query directly on the SDNA pool for maximum performance
@@ -1367,91 +1385,33 @@ impl PerspectiveInstance {
     /// This bypasses all smart routing logic and goes directly to the SDNA pool.
     /// Use this for subject class queries during create_subject flow for best performance.
     /// Only use this for queries that you KNOW should be handled by the SDNA pool.
+    ///
+    /// does not lock the prolog_update_mutex
+    /// uses run_query_sdna
     pub async fn prolog_query_sdna(&self, query: String) -> Result<QueryResolution, AnyError> {
-        // let prolog_start = std::time::Instant::now();
-        // log::info!("🎯 DIRECT SDNA QUERY: Starting query: {} (chars: {})",
-        //     query.chars().take(100).collect::<String>(), query.len());
-
-        // let ensure_start = std::time::Instant::now();
-        self.ensure_prolog_engine_pool().await?;
-        //log::info!("🎯 DIRECT SDNA QUERY: Engine pool ensured in {:?}", ensure_start.elapsed());
-
-        // let uuid_start = std::time::Instant::now();
-        let uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
-        // log::info!("🎯 DIRECT SDNA QUERY: UUID retrieved in {:?}", uuid_start.elapsed());
-
-        // let service_start = std::time::Instant::now();
-        let service = get_prolog_service().await;
-        // log::info!("🎯 DIRECT SDNA QUERY: Service retrieved in {:?}", service_start.elapsed());
-
-        let query = if !query.ends_with('.') {
-            query + "."
-        } else {
-            query
-        };
-
-        // let query_start = std::time::Instant::now();
-        // log::info!("🎯 DIRECT SDNA QUERY: About to execute query directly on SDNA pool...");
-
-        let result = service.run_query_sdna(uuid, query.clone()).await?;
-
-        // log::info!("🎯 DIRECT SDNA QUERY: Query executed in {:?} (total: {:?})",
-        //     query_start.elapsed(), prolog_start.elapsed());
-
-        match result {
-            Err(e) => {
-                // Engine error is handled at pool level now
-                Err(anyhow!(e))
-            }
-            Ok(resolution) => Ok(resolution),
-        }
+        self.prolog_query_helper(
+            query,
+            false,
+            |uuid| uuid.clone(),
+            |service, pool, q| async move { service.run_query_sdna(pool, q).await },
+        )
+        .await
     }
 
-    /// Executes a Prolog query against the engine, spawning and initializing the engine if necessary.
+    /// Executes a Prolog query against the notification pool
+    /// does not lock the prolog_update_mutex
+    /// uses run_query_smart
     pub async fn prolog_query_notification(
         &self,
         query: String,
     ) -> Result<QueryResolution, AnyError> {
-        //let prolog_start = std::time::Instant::now();
-        // log::info!("🔔 NOTIFICATIONS PROLOG QUERY: Starting query: {} (chars: {})",
-        //     query.chars().take(100).collect::<String>(), query.len());
-
-        self.ensure_prolog_engine_pool().await?;
-
-        let uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
-
-        let service = get_prolog_service().await;
-
-        let query = if !query.ends_with('.') {
-            query + "."
-        } else {
-            query
-        };
-
-        // ⚠️ CRITICAL: This might be blocked waiting for prolog_update_mutex!
-        //let query_start = std::time::Instant::now();
-        //log::info!("🔔 NOTIFICATIONS PROLOG QUERY: About to execute query...");
-
-        let result = service
-            .run_query_smart(notification_pool_name(&uuid), query.clone())
-            .await?;
-
-        //log::info!("🔔 NOTIFICATIONS PROLOG QUERY: Query executed in {:?} (total: {:?})",
-        //    query_start.elapsed(), prolog_start.elapsed());
-
-        match result {
-            Err(e) => {
-                // Engine error is handled at pool level now
-                Err(anyhow!(e))
-            }
-            Ok(resolution) => Ok(resolution),
-        }
+        self.prolog_query_helper(
+            query,
+            false,
+            |uuid| notification_pool_name(uuid),
+            |service, pool, q| async move { service.run_query_smart(pool, q).await },
+        )
+        .await
     }
 
     fn spawn_prolog_facts_update(
