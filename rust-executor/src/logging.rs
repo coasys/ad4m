@@ -84,7 +84,11 @@ pub fn build_rust_log_from_config(
         if ALLOWED_LEVELS.contains(&level.as_str()) {
             parts.push(format!("{}={}", crate_name, level));
         } else {
-            log::warn!("Invalid log level '{}' for crate '{}', skipping.", level, crate_name);
+            log::warn!(
+                "Invalid log level '{}' for crate '{}', skipping.",
+                level,
+                crate_name
+            );
         }
     }
     parts.join(",")
@@ -175,4 +179,3 @@ pub fn init_launcher_logging<W: Write + Send + 'static>(
     *initialized = true;
     Ok(())
 }
-
