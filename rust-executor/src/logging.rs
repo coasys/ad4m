@@ -103,10 +103,9 @@ pub fn init_cli_logging(log_config: Option<&std::collections::HashMap<String, St
     let mut initialized = LOGGER_INITIALIZED.lock().unwrap();
     if !*initialized {
         // Use parse_default_env() to respect RUST_LOG environment variable
-        env_logger::Builder::new()
-            .parse_default_env()
-            .try_init()
-            .ok();
+        if let Err(e) = env_logger::Builder::new().parse_default_env().try_init() {
+            eprintln!("Failed to initialize CLI logger: {}", e);
+        }
         *initialized = true;
     }
 }
@@ -169,7 +168,9 @@ pub fn init_launcher_logging<W: Write + Send + 'static>(
         return Ok(());
     }
 
-    create_launcher_logger_builder(target).init();
+    if let Err(e) = create_launcher_logger_builder(target).try_init() {
+        eprintln!("Failed to initialize launcher logger: {}", e);
+    }
 
     *initialized = true;
     Ok(())
