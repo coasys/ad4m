@@ -68,13 +68,13 @@ pub fn build_rust_log_from_config(
         // If empty, use defaults
         return build_rust_log_from_config(&get_default_log_config());
     }
-    
+
     // Start with defaults, then apply user overrides
     let mut final_config = get_default_log_config();
     for (crate_name, level) in log_config {
         final_config.insert(crate_name.clone(), level.clone());
     }
-    
+
     // Build the final string
     let mut parts = Vec::new();
     for (crate_name, level) in final_config {
@@ -96,7 +96,10 @@ pub fn init_cli_logging(log_config: Option<&std::collections::HashMap<String, St
     let mut initialized = LOGGER_INITIALIZED.lock().unwrap();
     if !*initialized {
         // Use parse_default_env() to respect RUST_LOG environment variable
-        env_logger::Builder::new().parse_default_env().try_init().ok();
+        env_logger::Builder::new()
+            .parse_default_env()
+            .try_init()
+            .ok();
         *initialized = true;
     }
 }

@@ -137,16 +137,16 @@ pub fn get_log_config() -> HashMap<String, String> {
         if let Some(user_config) = state.log_config {
             // Start with defaults, then apply user overrides
             let mut final_config = get_default_log_config();
-            
+
             // Apply user overrides
             for (crate_name, level) in user_config {
                 final_config.insert(crate_name, level);
             }
-            
+
             return final_config;
         }
     }
-    
+
     // Default log configuration
     get_default_log_config()
 }
