@@ -75,10 +75,17 @@ pub fn build_rust_log_from_config(
         final_config.insert(crate_name.clone(), level.clone());
     }
 
-    // Build the final string
+    // Allowed log levels
+    const ALLOWED_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
+
+    // Build the final string, skipping invalid levels
     let mut parts = Vec::new();
     for (crate_name, level) in final_config {
-        parts.push(format!("{}={}", crate_name, level));
+        if ALLOWED_LEVELS.contains(&level.as_str()) {
+            parts.push(format!("{}={}", crate_name, level));
+        } else {
+            log::warn!("Invalid log level '{}' for crate '{}', skipping.", level, crate_name);
+        }
     }
     parts.join(",")
 }
