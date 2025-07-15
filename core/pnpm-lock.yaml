@@ -6,7 +6,7 @@ settings:
 
 patchedDependencies:
   graphql@15.7.2:
-    hash: g4ubilmxli6fuk7eusupjbkdjm
+    hash: 52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d
     path: patches/graphql@15.7.2.patch
 
 importers:
@@ -15,7 +15,7 @@ importers:
     dependencies:
       '@apollo/client':
         specifier: 3.7.10
-        version: 3.7.10(graphql-ws@5.12.0)(graphql@15.7.2)(react-dom@18.3.1)(react@18.3.1)
+        version: 3.7.10(graphql-ws@5.12.0(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)))(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@holochain/client':
         specifier: 0.16.0
         version: 0.16.0
@@ -33,20 +33,17 @@ importers:
         version: 4.18.2
       graphql:
         specifier: 15.7.2
-        version: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+        version: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
       pako:
         specifier: '*'
         version: 2.1.0
       reflect-metadata:
         specifier: ^0.1.13
         version: 0.1.14
-      type-graphql:
-        specifier: 1.1.1
-        version: 1.1.1(class-validator@0.13.2)(graphql@15.7.2)
     devDependencies:
       '@apollo/server':
         specifier: ^4.9.4
-        version: 4.10.0(graphql@15.7.2)
+        version: 4.10.0(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
       '@rollup/plugin-alias':
         specifier: ^3.1.5
         version: 3.1.9(rollup@2.79.1)
@@ -70,7 +67,7 @@ importers:
         version: 3.1.8
       graphql-ws:
         specifier: 5.12.0
-        version: 5.12.0(graphql@15.7.2)
+        version: 5.12.0(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
       honkit:
         specifier: ^4.0.0
         version: 4.0.8
@@ -92,6 +89,9 @@ importers:
       ts-jest:
         specifier: ^26.5.6
         version: 26.5.6(jest@26.6.3)(typescript@4.9.5)
+      type-graphql:
+        specifier: 1.1.1
+        version: 1.1.1(class-validator@0.13.2)(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
       typescript:
         specifier: ^4.6.2
         version: 4.9.5
@@ -3481,29 +3481,30 @@ snapshots:
       '@jridgewell/gen-mapping': 0.3.3
       '@jridgewell/trace-mapping': 0.3.22
 
-  '@apollo/cache-control-types@1.0.3(graphql@15.7.2)':
+  '@apollo/cache-control-types@1.0.3(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))':
     dependencies:
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
 
-  '@apollo/client@3.7.10(graphql-ws@5.12.0)(graphql@15.7.2)(react-dom@18.3.1)(react@18.3.1)':
+  '@apollo/client@3.7.10(graphql-ws@5.12.0(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)))(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
     dependencies:
-      '@graphql-typed-document-node/core': 3.2.0(graphql@15.7.2)
+      '@graphql-typed-document-node/core': 3.2.0(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
       '@wry/context': 0.7.4
       '@wry/equality': 0.5.7
       '@wry/trie': 0.3.2
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
-      graphql-tag: 2.12.6(graphql@15.7.2)
-      graphql-ws: 5.12.0(graphql@15.7.2)
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
+      graphql-tag: 2.12.6(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
       hoist-non-react-statics: 3.3.2
       optimism: 0.16.2
       prop-types: 15.8.1
-      react: 18.3.1
-      react-dom: 18.3.1(react@18.3.1)
       response-iterator: 0.2.6
       symbol-observable: 4.0.0
       ts-invariant: 0.10.3
       tslib: 2.6.2
       zen-observable-ts: 1.2.5
+    optionalDependencies:
+      graphql-ws: 5.12.0(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
+      react: 18.3.1
+      react-dom: 18.3.1(react@18.3.1)
 
   '@apollo/protobufjs@1.2.7':
     dependencies:
@@ -3520,27 +3521,27 @@ snapshots:
       '@types/long': 4.0.2
       long: 4.0.0
 
-  '@apollo/server-gateway-interface@1.1.1(graphql@15.7.2)':
+  '@apollo/server-gateway-interface@1.1.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))':
     dependencies:
       '@apollo/usage-reporting-protobuf': 4.1.1
       '@apollo/utils.fetcher': 2.0.1
       '@apollo/utils.keyvaluecache': 2.1.1
       '@apollo/utils.logger': 2.0.1
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
 
-  '@apollo/server@4.10.0(graphql@15.7.2)':
+  '@apollo/server@4.10.0(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))':
     dependencies:
-      '@apollo/cache-control-types': 1.0.3(graphql@15.7.2)
-      '@apollo/server-gateway-interface': 1.1.1(graphql@15.7.2)
+      '@apollo/cache-control-types': 1.0.3(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
+      '@apollo/server-gateway-interface': 1.1.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
       '@apollo/usage-reporting-protobuf': 4.1.1
       '@apollo/utils.createhash': 2.0.1
       '@apollo/utils.fetcher': 2.0.1
       '@apollo/utils.isnodelike': 2.0.1
       '@apollo/utils.keyvaluecache': 2.1.1
       '@apollo/utils.logger': 2.0.1
-      '@apollo/utils.usagereporting': 2.1.0(graphql@15.7.2)
+      '@apollo/utils.usagereporting': 2.1.0(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
       '@apollo/utils.withrequired': 2.0.1
-      '@graphql-tools/schema': 9.0.19(graphql@15.7.2)
+      '@graphql-tools/schema': 9.0.19(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
       '@josephg/resolvable': 1.0.1
       '@types/express': 4.17.21
       '@types/express-serve-static-core': 4.17.42
@@ -3548,7 +3549,7 @@ snapshots:
       async-retry: 1.3.3
       cors: 2.8.5
       express: 4.18.2
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
       loglevel: 1.9.1
       lru-cache: 7.18.3
       negotiator: 0.6.3
@@ -3569,9 +3570,9 @@ snapshots:
       '@apollo/utils.isnodelike': 2.0.1
       sha.js: 2.4.11
 
-  '@apollo/utils.dropunuseddefinitions@2.0.1(graphql@15.7.2)':
+  '@apollo/utils.dropunuseddefinitions@2.0.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))':
     dependencies:
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
 
   '@apollo/utils.fetcher@2.0.1': {}
 
@@ -3584,32 +3585,32 @@ snapshots:
 
   '@apollo/utils.logger@2.0.1': {}
 
-  '@apollo/utils.printwithreducedwhitespace@2.0.1(graphql@15.7.2)':
+  '@apollo/utils.printwithreducedwhitespace@2.0.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))':
     dependencies:
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
 
-  '@apollo/utils.removealiases@2.0.1(graphql@15.7.2)':
+  '@apollo/utils.removealiases@2.0.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))':
     dependencies:
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
 
-  '@apollo/utils.sortast@2.0.1(graphql@15.7.2)':
+  '@apollo/utils.sortast@2.0.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))':
     dependencies:
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
       lodash.sortby: 4.7.0
 
-  '@apollo/utils.stripsensitiveliterals@2.0.1(graphql@15.7.2)':
+  '@apollo/utils.stripsensitiveliterals@2.0.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))':
     dependencies:
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
 
-  '@apollo/utils.usagereporting@2.1.0(graphql@15.7.2)':
+  '@apollo/utils.usagereporting@2.1.0(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))':
     dependencies:
       '@apollo/usage-reporting-protobuf': 4.1.1
-      '@apollo/utils.dropunuseddefinitions': 2.0.1(graphql@15.7.2)
-      '@apollo/utils.printwithreducedwhitespace': 2.0.1(graphql@15.7.2)
-      '@apollo/utils.removealiases': 2.0.1(graphql@15.7.2)
-      '@apollo/utils.sortast': 2.0.1(graphql@15.7.2)
-      '@apollo/utils.stripsensitiveliterals': 2.0.1(graphql@15.7.2)
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      '@apollo/utils.dropunuseddefinitions': 2.0.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
+      '@apollo/utils.printwithreducedwhitespace': 2.0.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
+      '@apollo/utils.removealiases': 2.0.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
+      '@apollo/utils.sortast': 2.0.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
+      '@apollo/utils.stripsensitiveliterals': 2.0.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
 
   '@apollo/utils.withrequired@2.0.1': {}
 
@@ -3817,29 +3818,29 @@ snapshots:
       exec-sh: 0.3.6
       minimist: 1.2.8
 
-  '@graphql-tools/merge@8.4.2(graphql@15.7.2)':
+  '@graphql-tools/merge@8.4.2(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))':
     dependencies:
-      '@graphql-tools/utils': 9.2.1(graphql@15.7.2)
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      '@graphql-tools/utils': 9.2.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
       tslib: 2.6.2
 
-  '@graphql-tools/schema@9.0.19(graphql@15.7.2)':
+  '@graphql-tools/schema@9.0.19(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))':
     dependencies:
-      '@graphql-tools/merge': 8.4.2(graphql@15.7.2)
-      '@graphql-tools/utils': 9.2.1(graphql@15.7.2)
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      '@graphql-tools/merge': 8.4.2(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
+      '@graphql-tools/utils': 9.2.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
       tslib: 2.6.2
       value-or-promise: 1.0.12
 
-  '@graphql-tools/utils@9.2.1(graphql@15.7.2)':
+  '@graphql-tools/utils@9.2.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))':
     dependencies:
-      '@graphql-typed-document-node/core': 3.2.0(graphql@15.7.2)
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      '@graphql-typed-document-node/core': 3.2.0(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
       tslib: 2.6.2
 
-  '@graphql-typed-document-node/core@3.2.0(graphql@15.7.2)':
+  '@graphql-typed-document-node/core@3.2.0(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))':
     dependencies:
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
 
   '@holochain/client@0.16.0':
     dependencies:
@@ -5323,26 +5324,26 @@ snapshots:
 
   graceful-fs@4.2.11: {}
 
-  graphql-query-complexity@0.7.2(graphql@15.7.2):
+  graphql-query-complexity@0.7.2(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)):
     dependencies:
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
       lodash.get: 4.4.2
 
-  graphql-subscriptions@1.2.1(graphql@15.7.2):
+  graphql-subscriptions@1.2.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)):
     dependencies:
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
       iterall: 1.3.0
 
-  graphql-tag@2.12.6(graphql@15.7.2):
+  graphql-tag@2.12.6(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)):
     dependencies:
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
       tslib: 2.6.2
 
-  graphql-ws@5.12.0(graphql@15.7.2):
+  graphql-ws@5.12.0(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)):
     dependencies:
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
 
-  graphql@15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm): {}
+  graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d): {}
 
   growly@1.3.0:
     optional: true
@@ -5860,11 +5861,7 @@ snapshots:
       pretty-format: 26.6.2
       throat: 5.0.0
     transitivePeerDependencies:
-      - bufferutil
-      - canvas
       - supports-color
-      - ts-node
-      - utf-8-validate
 
   jest-leak-detector@26.6.2:
     dependencies:
@@ -5896,7 +5893,7 @@ snapshots:
       '@types/node': 20.11.7
 
   jest-pnp-resolver@1.2.3(jest-resolve@26.6.2):
-    dependencies:
+    optionalDependencies:
       jest-resolve: 26.6.2
 
   jest-regex-util@26.0.0: {}
@@ -6533,8 +6530,9 @@ snapshots:
     dependencies:
       a-sync-waterfall: 1.0.1
       asap: 2.0.6
-      chokidar: 3.5.3
       commander: 5.1.0
+    optionalDependencies:
+      chokidar: 3.5.3
 
   nwsapi@2.2.7: {}
 
@@ -7253,16 +7251,16 @@ snapshots:
 
   type-fest@0.8.1: {}
 
-  type-graphql@1.1.1(class-validator@0.13.2)(graphql@15.7.2):
+  type-graphql@1.1.1(class-validator@0.13.2)(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)):
     dependencies:
       '@types/glob': 7.2.0
       '@types/node': 20.11.7
       '@types/semver': 7.5.6
       class-validator: 0.13.2
       glob: 7.2.3
-      graphql: 15.7.2(patch_hash=g4ubilmxli6fuk7eusupjbkdjm)
-      graphql-query-complexity: 0.7.2(graphql@15.7.2)
-      graphql-subscriptions: 1.2.1(graphql@15.7.2)
+      graphql: 15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d)
+      graphql-query-complexity: 0.7.2(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
+      graphql-subscriptions: 1.2.1(graphql@15.7.2(patch_hash=52d6a562c0ce9ed553aeccce9e4179268061a077b1733805c35ddf22d00cb18d))
       semver: 7.5.4
       tslib: 2.6.2
 
