@@ -2,7 +2,7 @@ extern crate remove_dir_all;
 use crate::app_state::{AgentConfigDir, LauncherState};
 use crate::util::create_tray_message_windows;
 use crate::{config::data_path, get_main_window};
-use rust_executor::logging::{build_rust_log_from_config, LogLevel};
+use rust_executor::logging::{build_rust_log_from_config, get_default_log_config, LogLevel};
 use std::collections::HashMap;
 
 use remove_dir_all::*;
@@ -134,20 +134,21 @@ pub fn open_dapp() {
 pub fn get_log_config() -> HashMap<String, String> {
     let state = LauncherState::load().ok();
     if let Some(state) = state {
-        if let Some(config) = state.log_config {
-            return config;
+        if let Some(user_config) = state.log_config {
+            // Start with defaults, then apply user overrides
+            let mut final_config = get_default_log_config();
+            
+            // Apply user overrides
+            for (crate_name, level) in user_config {
+                final_config.insert(crate_name, level);
+            }
+            
+            return final_config;
         }
     }
-
+    
     // Default log configuration
-    let mut default_config = HashMap::new();
-    default_config.insert("holochain".to_string(), "warn".to_string());
-    default_config.insert("wasmer_compiler_cranelift".to_string(), "warn".to_string());
-    default_config.insert("rust_executor".to_string(), "info".to_string());
-    default_config.insert("warp".to_string(), "warn".to_string());
-    default_config.insert("warp::server".to_string(), "warn".to_string());
-    default_config.insert("warp::filters".to_string(), "warn".to_string());
-    default_config
+    get_default_log_config()
 }
 
 #[tauri::command]

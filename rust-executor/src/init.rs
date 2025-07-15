@@ -12,8 +12,8 @@ pub fn init(
     data_path: Option<String>,
     network_bootstrap_seed: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
-    // Initialize CLI logging with default info level
-    crate::logging::init_cli_logging(Some(crate::logging::LogLevel::Info));
+    // Initialize CLI logging with default configuration
+    crate::logging::init_cli_logging(None);
 
     //Get the default data path if none is provided
     let app_data_path = match data_path {

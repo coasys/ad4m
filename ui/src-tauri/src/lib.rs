@@ -7,7 +7,7 @@ extern crate env_logger;
 #[cfg(not(target_os = "windows"))]
 use libc::{rlimit, setrlimit, RLIMIT_NOFILE};
 use log::{debug, error, info};
-use rust_executor::logging::{build_rust_log_from_config, init_launcher_logging};
+use rust_executor::logging::{get_default_log_config, init_launcher_logging};
 use rust_executor::utils::find_port;
 use rust_executor::Ad4mConfig;
 use std::env;
@@ -130,16 +130,19 @@ pub fn run() {
 
     let target = Box::new(File::create(log_path()).expect("Can't create file"));
 
-    // Set up logging configuration
-    if env::var("RUST_LOG").is_err() {
-        // Only set RUST_LOG if it's not already set in environment
-        if let Some(log_config) = &state.log_config {
-            let rust_log = build_rust_log_from_config(log_config);
-            env::set_var("RUST_LOG", &rust_log);
+    // Set up logging configuration and pass it to the logger
+    let log_config = if let Some(user_config) = &state.log_config {
+        // Start with defaults, then apply user overrides
+        let mut final_config = get_default_log_config();
+        for (crate_name, level) in user_config {
+            final_config.insert(crate_name.clone(), level.clone());
         }
-    }
+        Some(final_config)
+    } else {
+        None
+    };
 
-    init_launcher_logging(target, None).expect("Failed to initialize logging");
+    init_launcher_logging(target, log_config.as_ref()).expect("Failed to initialize logging");
 
     let format = format::debug_fn(move |writer, _field, value| {
         debug!("TRACE: {:?}", value);
