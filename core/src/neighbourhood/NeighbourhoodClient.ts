@@ -273,9 +273,6 @@ export class NeighbourhoodClient {
             const index = handlersForPerspective.indexOf(handler)
             if (index > -1) {
                 handlersForPerspective.splice(index, 1)
-                if (!handlersForPerspective.length) {
-                    this.#signalHandlers.delete(perspectiveUUID)
-                }
             }
         }
     }
