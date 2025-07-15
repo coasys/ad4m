@@ -100,6 +100,7 @@ const Profile = (props: Props) => {
   const [logConfig, setLogConfig] = useState<Record<string, string>>({});
   const [newCrateName, setNewCrateName] = useState<string>("");
   const [newCrateLevel, setNewCrateLevel] = useState<string>("info");
+  const [crateNameError, setCrateNameError] = useState<string>("");
 
   // Load current log config on component mount
   useEffect(() => {
@@ -129,13 +130,65 @@ const Profile = (props: Props) => {
     handleLogConfigChange(newConfig);
   };
 
-  const addNewCrate = () => {
-    if (newCrateName.trim()) {
-      const newConfig = { ...logConfig, [newCrateName.trim()]: newCrateLevel };
-      handleLogConfigChange(newConfig);
-      setNewCrateName("");
-      setNewCrateLevel("info");
+  const validateCrateName = (name: string): string | null => {
+    const trimmed = name.trim();
+    
+    // Check if empty
+    if (!trimmed) {
+      return "Crate name cannot be empty";
     }
+    
+    // Check if already exists
+    if (trimmed in logConfig) {
+      return "Crate name already exists";
+    }
+    
+    // Check Rust crate naming conventions
+    // Must start with letter or underscore
+    if (!/^[a-zA-Z_]/.test(trimmed)) {
+      return "Crate name must start with a letter or underscore";
+    }
+    
+    // Only lowercase letters, numbers, hyphens, and underscores allowed
+    if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+      return "Crate name can only contain letters, numbers, hyphens, and underscores";
+    }
+    
+    // Cannot end with hyphen
+    if (trimmed.endsWith("-")) {
+      return "Crate name cannot end with a hyphen";
+    }
+    
+    // No double hyphens
+    if (trimmed.includes("--")) {
+      return "Crate name cannot contain consecutive hyphens";
+    }
+    
+    // Convert to lowercase for consistency with Rust conventions
+    if (trimmed !== trimmed.toLowerCase()) {
+      return "Crate name should be lowercase (will be converted automatically)";
+    }
+    
+    return null;
+  };
+
+  const addNewCrate = () => {
+    const trimmedName = newCrateName.trim().toLowerCase();
+    const error = validateCrateName(trimmedName);
+    
+    if (error) {
+      setCrateNameError(error);
+      return;
+    }
+    
+    // Clear any previous error
+    setCrateNameError("");
+    
+    // Add the new crate
+    const newConfig = { ...logConfig, [trimmedName]: newCrateLevel };
+    handleLogConfigChange(newConfig);
+    setNewCrateName("");
+    setNewCrateLevel("info");
   };
 
   const removeCrate = (crateName: string) => {
@@ -618,11 +671,25 @@ const Profile = (props: Props) => {
             </j-text>
           </j-box>
 
+          {crateNameError && (
+            <j-box px="500" my="200">
+              <j-text size="300" color="danger-500">
+                {crateNameError}
+              </j-text>
+            </j-box>
+          )}
+
           <j-box px="500" my="300">
             <j-flex a="center" gap="300">
               <j-input
                 value={newCrateName}
-                onChange={(e) => setNewCrateName((e.target as HTMLInputElement).value)}
+                onChange={(e) => {
+                  setNewCrateName((e.target as HTMLInputElement).value);
+                  // Clear error when user starts typing
+                  if (crateNameError) {
+                    setCrateNameError("");
+                  }
+                }}
                 placeholder="Crate name (e.g., tokio)"
                 style={{ minWidth: "200px" }}
               />
