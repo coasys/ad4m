@@ -54,12 +54,10 @@ impl From<Vec<LeafAnswer>> for QueryResolution {
 
         if found_true {
             QueryResolution::True
+        } else if matches.is_empty() {
+            QueryResolution::False
         } else {
-            if matches.is_empty() {
-                QueryResolution::False
-            } else {
-                QueryResolution::Matches(matches)
-            }
+            QueryResolution::Matches(matches)
         }
     }
 }
@@ -67,9 +65,7 @@ impl From<Vec<LeafAnswer>> for QueryResolution {
 pub type QueryResult = Result<QueryResolution, String>;
 
 pub fn query_result_from_leaf_answer(result: Result<Vec<LeafAnswer>, Term>) -> QueryResult {
-    result
-        .map(QueryResolution::from)
-        .map_err(|e| term_to_string(e))
+    result.map(QueryResolution::from).map_err(term_to_string)
 }
 
 pub fn term_to_string(value: Term) -> String {
@@ -78,7 +74,7 @@ pub fn term_to_string(value: Term) -> String {
         Term::Float(f) => format!("{}", f),
         Term::Rational(r) => format!("{}", r),
         Term::Atom(a) => format!("'{}'", a),
-        Term::String(s) => format!("{}", s),
+        Term::String(s) => s.to_string(),
         Term::List(l) => {
             let mut string_result = "[".to_string();
             for (i, v) in l.iter().enumerate() {

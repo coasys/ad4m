@@ -30,7 +30,13 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Install missing language during expression get [PR#594](https://github.com/coasys/ad4m/pull/594)
 - Fix expression content escaping issue that happened with Flux messages with URLs and mentions [PR#597](https://github.com/coasys/ad4m/pull/597)
 - Fix handling of wrong passphrase during unlock (was frozen) [PR#596](https://github.com/coasys/ad4m/pull/596)
-
+- Fix open buttons not working on Linux by using Tauri's opener plugin [PR#599](https://github.com/coasys/ad4m/pull/599)
+- Harden setup of query subscriptions with delayed init handshakes in all cases and resubscribing after timeout [PR#601](https://github.com/coasys/ad4m/pull/601)
+- Fix crash when default ports are used by other processes [PR#602](https://github.com/coasys/ad4m/pull/602)
+- Fix Ad4mModel usage without subclass and improve cache handling for class names [PR#603](https://github.com/coasys/ad4m/pull/603)
+- Fix race condition in prolog query subscriptions and resolve deadlock issues [PR#607](https://github.com/coasys/ad4m/pull/607)
+- Fix expression content parsing in Ad4mModel by attempting JSON parsing of resolved expression data [PR#614](https://github.com/coasys/ad4m/pull/614)
+  
 ### Added
 - Prolog predicates needed in new Flux mention notification trigger:
  - agent_did/1
@@ -66,6 +72,9 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Atomic batch processing of perspective mutations (used in all Ad4mModel methods) [PR#587](https://github.com/coasys/ad4m/pull/587)
 - Enable feeding two audio transcription streams at once with same data, and clean-up streams after inactivity [PR#590](https://github.com/coasys/ad4m/pull/590)
 - Cache-Map for large embedding vector URLs regard Prolog to prevent performance degradation of Prolog queries in Perspectives that include a lot of large embedding vectors [PR#595](https://github.com/coasys/ad4m/pull/595)
+- Holochain debugging features: network metrics retrieval and Holochain restart capability [PR#610](https://github.com/coasys/ad4m/pull/610)
+- Scoped Prolog engine-pools for fast inference inside a channel, ignoring other channels' data for better performance isolation [PR#613](https://github.com/coasys/ad4m/pull/613)
+- Runtime Log Level Configuration with UI in launcher [PR#616](https://github.com/coasys/ad4m/pull/616)
 
 ### Changed
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
@@ -83,6 +92,12 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Documentation at https://docs.ad4m.dev vastly improved [PR#582](https://github.com/coasys/ad4m/pull/582)
 - useSubjects hook changed to useModel hook, using new and faster Ad4mModel query subscriptions under the hood [PR#588](https://github.com/coasys/ad4m/pull/588)
 - Password entry during setup flow improved with reentry and better explanatory text [PR#596](https://github.com/coasys/ad4m/pull/596)
+- Extended subscription initialization delays from 1-10 seconds to 1-25 seconds for better connection reliability [PR#604](https://github.com/coasys/ad4m/pull/604)
+- Upgraded Deno to 2.12.0 and Holochain to 0.5.2 with extensive changes to bootstrap languages, CI configuration, and build processes [PR#605](https://github.com/coasys/ad4m/pull/605)
+- Changed Holochain bootstrap server to relay.ad4m.dev:4433 and improved CUDA/Metal device support for AI services [PR#606](https://github.com/coasys/ad4m/pull/606)
+- P-Diff-Sync now merges perspective diffs directly into refs instead of separate entries, reducing Holochain entries per commit and improving performance [PR#608](https://github.com/coasys/ad4m/pull/608)
+- Ad4mModel.save() now uses automatic batch creation and commit for improved performance [PR#609](https://github.com/coasys/ad4m/pull/609)
+- Updated Holochain dependencies to version 0.5.3-rc0 and kitsune2_api to 0.1.9 [PR#612](https://github.com/coasys/ad4m/pull/612)
 
 ## [0.9.0] - 23/03/2024
 

@@ -2,14 +2,14 @@
 extern crate lazy_static;
 
 pub mod config;
-mod entanglement_service;
+pub mod entanglement_service;
 mod globals;
 pub mod graphql;
-mod holochain_service;
-mod js_core;
+pub mod holochain_service;
+pub mod js_core;
 mod prolog_service;
-mod runtime_service;
-mod utils;
+pub mod runtime_service;
+pub mod utils;
 mod wallet;
 
 pub mod agent;
@@ -18,14 +18,16 @@ mod dapp_server;
 mod db;
 pub mod init;
 pub mod languages;
+pub mod logging;
 mod neighbourhoods;
 pub mod perspectives;
 mod pubsub;
+use rustls::crypto::aws_lc_rs;
 #[cfg(test)]
 mod test_utils;
 pub mod types;
 
-use std::{env, thread::JoinHandle};
+use std::thread::JoinHandle;
 
 use log::{error, info, warn};
 
@@ -34,7 +36,7 @@ use js_core::JsCore;
 use crate::{
     agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb,
     languages::LanguageController, prolog_service::init_prolog_service,
-    runtime_service::RuntimeService,
+    runtime_service::RuntimeService, utils::find_port,
 };
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
@@ -43,6 +45,19 @@ use std::ptr;
 
 extern "C" fn handle_sigurg(_: libc::c_int) {
     //println!("Received SIGURG signal, but ignoring it.");
+}
+
+fn find_and_set_port(config_port: &mut Option<u16>, start_port: u16, service_name: &str) {
+    if config_port.is_none() {
+        match find_port(start_port, 40000) {
+            Ok(port) => *config_port = Some(port),
+            Err(e) => {
+                let error_string = format!("Failed to find port for {}: {}", service_name, e);
+                error!("{}", error_string);
+                panic!("{}", error_string);
+            }
+        }
+    }
 }
 
 /// Runs the GraphQL server and the deno core runtime
@@ -58,12 +73,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         }
     }
 
-    env::set_var(
-        "RUST_LOG",
-        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=debug,warp::server",
-    );
-    let _ = env_logger::try_init();
+    // Initialize logging for CLI (stdout)
+    // Respects RUST_LOG environment variable if set
+    crate::logging::init_cli_logging(None);
     config.prepare();
+
+    aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install rustls' aws_lc_rs crypto provider");
 
     info!("Initializing Ad4mDb...");
 
@@ -123,6 +140,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     info!("Initializing Prolog service...");
     init_prolog_service().await;
+
+    find_and_set_port(&mut config.gql_port, 4000, "GraphQL");
+    find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");
+    find_and_set_port(&mut config.hc_app_port, 1337, "Holochain app");
 
     info!("Starting js_core...");
     let mut js_core_handle = JsCore::start(config.clone()).await;

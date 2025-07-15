@@ -2,7 +2,7 @@ import { LinkSyncAdapter, PerspectiveDiffObserver, HolochainLanguageDelegate, La
   LinkExpression, DID, Perspective, PerspectiveState } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import type { SyncStateChangeObserver } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import { Mutex, withTimeout } from "https://esm.sh/async-mutex@0.4.0";
-import { DNA_NICK, ZOME_NAME } from "./build/dna.js";
+import { DNA_ROLE, ZOME_NAME } from "./build/happ.js";
 import { encodeBase64 } from "https://deno.land/std@0.220.1/encoding/base64.ts";
 
 class PeerInfo {
@@ -38,14 +38,14 @@ export class LinkAdapter implements LinkSyncAdapter {
 
   async others(): Promise<DID[]> {
     //@ts-ignore
-    let others = await this.hcDna.call(DNA_NICK, ZOME_NAME, "get_others", null);
+    let others = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "get_others", null);
     console.log("PerspectiveDiffSync.others(); others", others);
     return others as DID[];
   }
 
   async currentRevision(): Promise<string> {
     //@ts-ignore
-    let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "current_revision", null);
+    let res = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "current_revision", null);
     console.log("PerspectiveDiffSync.currentRevision(); res", res);
     return res as string;
   }
@@ -56,7 +56,7 @@ export class LinkAdapter implements LinkSyncAdapter {
     //console.log("PerspectiveDiffSync.sync(); Got lock");
     try {
       //@ts-ignore
-      let current_revision = await this.hcDna.call(DNA_NICK, ZOME_NAME, "sync", null);
+      let current_revision = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "sync", null);
       if (current_revision && current_revision instanceof Uint8Array) {
         this.myCurrentRevision = current_revision; 
       }
@@ -139,7 +139,7 @@ export class LinkAdapter implements LinkSyncAdapter {
         if(!hash) continue
         if (this.myCurrentRevision && (encodeBase64(hash) == encodeBase64(this.myCurrentRevision))) continue;
         
-        let pullResult = await this.hcDna.call(DNA_NICK, ZOME_NAME, "pull", { 
+        let pullResult = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "pull", { 
           hash,
           is_scribe 
         });
@@ -190,7 +190,7 @@ export class LinkAdapter implements LinkSyncAdapter {
 
   async render(): Promise<Perspective> {
     //@ts-ignore
-    let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "render", null);
+    let res = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "render", null);
     return new Perspective(res.links);
   }
 
@@ -210,7 +210,7 @@ export class LinkAdapter implements LinkSyncAdapter {
 
       while (attempts < maxAttempts) {
         try {
-          let res = await this.hcDna.call(DNA_NICK, ZOME_NAME, "commit", prep_diff);
+          let res = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "commit", prep_diff);
           if(!res){
             throw new Error("Got undefined from Holochain commit zome function")
           }          
@@ -251,9 +251,9 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async handleHolochainSignal(signal: any): Promise<void> {
-    const { diff, reference_hash, reference, broadcast_author } = signal.payload;
-    //Check if this signal came from another agent & contains a diff and reference_hash
-    if (diff && reference_hash && reference && broadcast_author) {
+    const { reference_hash, reference, broadcast_author } = signal.payload;
+    //Check if this signal came from another agent & contains a reference and reference_hash
+    if (reference && reference_hash && broadcast_author) {
       // console.log(`PerspectiveDiffSync.handleHolochainSignal: 
       //       diff: ${JSON.stringify(diff)}
       //       reference_hash: ${reference_hash.toString('base64')}
@@ -286,7 +286,7 @@ export class LinkAdapter implements LinkSyncAdapter {
       console.warn("===Perspective-diff-sync: Error tried to add an active agent link but received no hcDna to add the link onto");
     } else {
       return await hcDna.call(
-        DNA_NICK,
+        DNA_ROLE,
         ZOME_NAME,
         "add_active_agent_link",
         //@ts-ignore

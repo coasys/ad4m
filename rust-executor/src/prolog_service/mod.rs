@@ -1,18 +1,27 @@
+use crate::types::DecoratedLinkExpression;
 use deno_core::anyhow::Error;
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+pub mod assert_utils;
 mod embedding_cache;
 pub(crate) mod engine;
 pub(crate) mod engine_pool;
+pub mod filtered_pool;
+pub mod pool_trait;
+pub mod sdna_pool;
+pub mod source_filtering;
 pub mod types;
 
 use self::engine_pool::PrologEnginePool;
 use self::types::QueryResult;
 
-const DEFAULT_POOL_SIZE: usize = 10;
+pub const DEFAULT_POOL_SIZE: usize = 5;
+pub const DEFAULT_POOL_SIZE_WITH_FILTERING: usize = 2;
+const SDNA_POOL_SIZE: usize = 1;
+const FILTERED_POOL_SIZE: usize = 2;
 
 #[derive(Clone)]
 pub struct PrologService {
@@ -26,13 +35,34 @@ impl PrologService {
         }
     }
 
-    pub async fn ensure_perspective_pool(&self, perspective_id: String) -> Result<(), Error> {
-        let mut pools = self.engine_pools.write().await;
-        if !pools.contains_key(&perspective_id) {
-            let pool = PrologEnginePool::new(DEFAULT_POOL_SIZE);
-            pool.initialize(DEFAULT_POOL_SIZE).await?;
-            pools.insert(perspective_id, pool);
+    pub async fn ensure_perspective_pool(
+        &self,
+        perspective_id: String,
+        pool_size: Option<usize>,
+    ) -> Result<(), Error> {
+        // ⚠️ DEADLOCK FIX: Use optimistic locking to avoid race conditions
+        // First check with read lock (fast path)
+        {
+            let pools = self.engine_pools.read().await;
+            if pools.contains_key(&perspective_id) {
+                return Ok(()); // Pool already exists, nothing to do
+            }
         }
+
+        // Pool doesn't exist, acquire write lock to create it
+        let mut pools = self.engine_pools.write().await;
+
+        // Double-check pattern: another task might have created it while we waited for write lock
+        if pools.contains_key(&perspective_id) {
+            return Ok(()); // Someone else created it while we waited
+        }
+
+        // Create and initialize the pool
+        let pool = PrologEnginePool::new();
+        pool.initialize(pool_size.unwrap_or(DEFAULT_POOL_SIZE))
+            .await?;
+        pools.insert(perspective_id, pool);
+
         Ok(())
     }
 
@@ -44,37 +74,238 @@ impl PrologService {
         Ok(())
     }
 
-    pub async fn run_query(
+    // Currently always using smart query
+    pub async fn _run_query(
         &self,
         perspective_id: String,
         query: String,
     ) -> Result<QueryResult, Error> {
-        let pools = self.engine_pools.read().await;
-        let pool = pools
-            .get(&perspective_id)
-            .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?;
+        // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
+        let pool = {
+            let pools = self.engine_pools.read().await;
+            pools
+                .get(&perspective_id)
+                .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
+                .clone() // Clone the Arc<> to release the lock
+        }; // Read lock is released here
+
         pool.run_query(query).await
     }
 
-    pub async fn run_query_all(&self, perspective_id: String, query: String) -> Result<(), Error> {
-        let pools = self.engine_pools.read().await;
-        let pool = pools
-            .get(&perspective_id)
-            .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?;
-        pool.run_query_all(query).await
+    /// Run query directly on the SDNA pool for maximum performance
+    ///
+    /// This bypasses all smart routing logic and goes directly to the SDNA pool.
+    /// Use this for subject class queries during create_subject flow for best performance.
+    pub async fn run_query_sdna(
+        &self,
+        perspective_id: String,
+        query: String,
+    ) -> Result<QueryResult, Error> {
+        // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
+        let pool = {
+            let pools = self.engine_pools.read().await;
+            pools
+                .get(&perspective_id)
+                .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
+                .clone() // Clone the Arc<> to release the lock
+        }; // Read lock is released here
+
+        pool.run_query_sdna(query).await
     }
 
-    pub async fn update_perspective_facts(
+    /// Run query with subscription optimization - uses filtered pools for subscription queries
+    pub async fn run_query_smart(
+        &self,
+        perspective_id: String,
+        query: String,
+    ) -> Result<QueryResult, Error> {
+        // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
+        let pool = {
+            let pools = self.engine_pools.read().await;
+            pools
+                .get(&perspective_id)
+                .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
+                .clone() // Clone the Arc<> to release the lock
+        }; // Read lock is released here
+
+        // The smart routing and population is now handled entirely within the engine pool
+        // This eliminates circular dependencies and potential deadlocks
+        let result = pool.run_query_smart(query.clone(), false).await;
+        match &result {
+            Ok(Ok(query_result)) => {
+                log::debug!("⚡ SMART Query succeeded with result: {:?}", query_result);
+            }
+            Ok(Err(error)) => {
+                log::warn!("⚡ SMART Query failed with error: {}", error);
+            }
+            Err(error) => {
+                log::error!("⚡ SMART Query execution error: {}", error);
+            }
+        }
+        result
+    }
+
+    /// Run query with subscription optimization - uses filtered pools for subscription queries
+    pub async fn run_query_subscription(
+        &self,
+        perspective_id: String,
+        query: String,
+    ) -> Result<QueryResult, Error> {
+        // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
+        let pool = {
+            let pools = self.engine_pools.read().await;
+            pools
+                .get(&perspective_id)
+                .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
+                .clone() // Clone the Arc<> to release the lock
+        }; // Read lock is released here
+
+        // Increment reference count for filtered pools if this query would use one
+        if let Some(source_filter) =
+            crate::prolog_service::source_filtering::extract_source_filter(&query)
+        {
+            pool.increment_pool_reference(&source_filter).await;
+        }
+
+        // The smart routing and population is now handled entirely within the engine pool
+        // This eliminates circular dependencies and potential deadlocks
+        let result = pool.run_query_smart(query.clone(), true).await;
+        match &result {
+            Ok(Ok(_query_result)) => {
+                //log::info!("🔔 SUBSCRIPTION: Query succeeded with result: {:?}", query_result);
+                log::debug!("🔔 SUBSCRIPTION: Query succeeded [result omitted]");
+            }
+            Ok(Err(error)) => {
+                log::warn!("🔔 SUBSCRIPTION: Query failed with error: {}", error);
+            }
+            Err(error) => {
+                log::error!("🔔 SUBSCRIPTION: Query execution error: {}", error);
+            }
+        }
+        result
+    }
+
+    /// Called when a subscription ends - decrements reference count for any associated filtered pool
+    pub async fn subscription_ended(
+        &self,
+        perspective_id: String,
+        query: String,
+    ) -> Result<(), Error> {
+        let pool = {
+            let pools = self.engine_pools.read().await;
+            pools
+                .get(&perspective_id)
+                .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
+                .clone()
+        };
+
+        // Decrement reference count for filtered pools if this query would use one
+        if let Some(source_filter) =
+            crate::prolog_service::source_filtering::extract_source_filter(&query)
+        {
+            pool.decrement_pool_reference(&source_filter).await;
+            log::debug!(
+                "📊 SUBSCRIPTION END: Decremented pool reference for source: '{}'",
+                source_filter
+            );
+        }
+
+        Ok(())
+    }
+
+    pub async fn run_query_all(&self, perspective_id: String, query: String) -> Result<(), Error> {
+        let service_start = std::time::Instant::now();
+        log::debug!(
+            "⚡ PROLOG SERVICE: Starting run_query_all for perspective '{}' - query: {} chars",
+            perspective_id,
+            query.len()
+        );
+
+        // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
+        let pool = {
+            let pool_lookup_start = std::time::Instant::now();
+            let pools = self.engine_pools.read().await;
+            let pool = pools
+                .get(&perspective_id)
+                .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
+                .clone(); // Clone the Arc<> to release the lock
+            log::trace!(
+                "⚡ PROLOG SERVICE: Pool lookup took {:?}",
+                pool_lookup_start.elapsed()
+            );
+            pool
+        }; // Read lock is released here
+
+        let query_execution_start = std::time::Instant::now();
+        let result = pool.run_query_all(query).await;
+
+        match &result {
+            Ok(()) => {
+                log::debug!(
+                    "⚡ PROLOG SERVICE: run_query_all completed successfully in {:?} (total: {:?})",
+                    query_execution_start.elapsed(),
+                    service_start.elapsed()
+                );
+            }
+            Err(e) => {
+                log::error!(
+                    "⚡ PROLOG SERVICE: run_query_all failed after {:?} (total: {:?}): {}",
+                    query_execution_start.elapsed(),
+                    service_start.elapsed(),
+                    e
+                );
+            }
+        }
+
+        result
+    }
+
+    // Note: update_perspective_facts() removed - use update_perspective_links() for production code
+
+    /// Update perspective with link data for optimized filtering
+    pub async fn update_perspective_links(
         &self,
         perspective_id: String,
         module_name: String,
-        program_lines: Vec<String>,
+        all_links: Vec<DecoratedLinkExpression>,
+        neighbourhood_author: Option<String>,
     ) -> Result<(), Error> {
-        let pools = self.engine_pools.read().await;
-        let pool = pools
-            .get(&perspective_id)
-            .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?;
-        pool.update_all_engines(module_name, program_lines).await
+        let service_start = std::time::Instant::now();
+        log::debug!("🔗 PROLOG SERVICE: Starting update_perspective_links for perspective '{}' - {} links, module: {}", 
+            perspective_id, all_links.len(), module_name);
+
+        // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
+        let pool = {
+            let pool_lookup_start = std::time::Instant::now();
+            let pools = self.engine_pools.read().await;
+            let pool = pools
+                .get(&perspective_id)
+                .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
+                .clone(); // Clone the Arc<> to release the lock
+            log::trace!(
+                "🔗 PROLOG SERVICE: Pool lookup took {:?}",
+                pool_lookup_start.elapsed()
+            );
+            pool
+        }; // Read lock is released here
+
+        let update_start = std::time::Instant::now();
+        let result = pool
+            .update_all_engines_with_links(module_name, all_links, neighbourhood_author)
+            .await;
+
+        match &result {
+            Ok(()) => {
+                log::debug!("🔗 PROLOG SERVICE: update_perspective_links completed successfully in {:?} (total: {:?})", 
+                    update_start.elapsed(), service_start.elapsed());
+            }
+            Err(e) => {
+                log::error!("🔗 PROLOG SERVICE: update_perspective_links failed after {:?} (total: {:?}): {}", 
+                    update_start.elapsed(), service_start.elapsed(), e);
+            }
+        }
+
+        result
     }
 
     pub async fn has_perspective_pool(&self, perspective_id: String) -> bool {
@@ -113,28 +344,63 @@ mod prolog_test {
 
         // Ensure pool is created
         assert!(service
-            .ensure_perspective_pool(perspective_id.clone())
+            .ensure_perspective_pool(perspective_id.clone(), None)
             .await
             .is_ok());
 
-        let facts = String::from(
-            r#"
-        triple("a", "p1", "b").
-        triple("a", "p2", "b").
-        "#,
-        );
+        // Use production method with structured link data
+        use crate::types::{DecoratedLinkExpression, Link};
+        let test_links = vec![
+            DecoratedLinkExpression {
+                author: "test_author".to_string(),
+                timestamp: "2023-01-01T00:00:00Z".to_string(),
+                data: Link {
+                    source: "a".to_string(),
+                    predicate: Some("p1".to_string()),
+                    target: "b".to_string(),
+                },
+                proof: crate::types::DecoratedExpressionProof {
+                    key: "test_key".to_string(),
+                    signature: "test_signature".to_string(),
+                    valid: Some(true),
+                    invalid: Some(false),
+                },
+                status: None,
+            },
+            DecoratedLinkExpression {
+                author: "test_author".to_string(),
+                timestamp: "2023-01-01T00:00:00Z".to_string(),
+                data: Link {
+                    source: "a".to_string(),
+                    predicate: Some("p2".to_string()),
+                    target: "b".to_string(),
+                },
+                proof: crate::types::DecoratedExpressionProof {
+                    key: "test_key".to_string(),
+                    signature: "test_signature".to_string(),
+                    valid: Some(true),
+                    invalid: Some(false),
+                },
+                status: None,
+            },
+        ];
 
-        // Load facts into the pool
+        // Load facts into the pool using production method
         let load_facts = service
-            .update_perspective_facts(perspective_id.clone(), "facts".to_string(), vec![facts])
+            .update_perspective_links(
+                perspective_id.clone(),
+                "facts".to_string(),
+                test_links,
+                None,
+            )
             .await;
         assert!(load_facts.is_ok());
 
         let query = String::from("triple(\"a\",P,\"b\").");
         let result = service
-            .run_query(perspective_id.clone(), query)
+            .run_query_smart(perspective_id.clone(), query)
             .await
-            .expect("Error running query");
+            .expect("no error running query");
 
         assert_eq!(
             result,
@@ -150,15 +416,15 @@ mod prolog_test {
 
         let query = String::from("triple(\"a\",\"p1\",\"b\").");
         let result = service
-            .run_query(perspective_id.clone(), query)
+            .run_query_smart(perspective_id.clone(), query)
             .await
-            .expect("Error running query");
+            .expect("no error running query");
 
         assert_eq!(result, Ok(QueryResolution::True));
 
         let query = String::from("non_existant_predicate(\"a\",\"p1\",\"b\").");
         let result = service
-            .run_query(perspective_id.clone(), query)
+            .run_query_smart(perspective_id.clone(), query)
             .await
             .expect("Error running query");
 

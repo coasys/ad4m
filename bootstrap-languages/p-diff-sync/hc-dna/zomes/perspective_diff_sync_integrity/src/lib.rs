@@ -1,8 +1,6 @@
 use chrono::{DateTime, Utc};
 use hdi::prelude::*;
 
-pub mod impls;
-
 #[derive(
     Serialize, Deserialize, Clone, SerializedBytes, Debug, PartialEq, Eq, Hash, Ord, PartialOrd,
 )]
@@ -28,7 +26,7 @@ pub struct LinkExpression {
     pub proof: ExpressionProof,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes, Default, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct PerspectiveDiff {
     pub additions: Vec<LinkExpression>,
     pub removals: Vec<LinkExpression>,
@@ -39,7 +37,6 @@ pub struct PerspectiveDiff {
 pub struct HashBroadcast {
     pub reference_hash: HoloHash<holo_hash::hash_type::Action>,
     pub reference: PerspectiveDiffEntryReference,
-    pub diff: PerspectiveDiff,
     pub broadcast_author: String,
 }
 
@@ -53,9 +50,12 @@ impl PerspectiveDiff {
     pub fn total_diff_number(&self) -> usize {
         self.additions.len() + self.removals.len()
     }
+    
+    pub fn get_sb(self) -> ExternResult<SerializedBytes> {
+        self.try_into()
+            .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))
+    }
 }
-
-app_entry!(PerspectiveDiff);
 
 #[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes)]
 pub struct Snapshot {
@@ -67,7 +67,7 @@ app_entry!(Snapshot);
 
 #[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes, PartialEq, Eq, Hash)]
 pub struct PerspectiveDiffEntryReference {
-    pub diff: HoloHash<holo_hash::hash_type::Action>,
+    pub diff: PerspectiveDiff,
     pub parents: Option<Vec<HoloHash<holo_hash::hash_type::Action>>>,
     pub diffs_since_snapshot: usize,
 }
@@ -141,8 +141,6 @@ pub struct PullResult {
 #[unit_enum(UnitEntryTypes)]
 pub enum EntryTypes {
     #[entry_type(visibility = "public")]
-    PerspectiveDiff(PerspectiveDiff),
-    #[entry_type(visibility = "public")]
     Snapshot(Snapshot),
     #[entry_type(visibility = "public")]
     HashReference(HashReference),
@@ -166,4 +164,71 @@ pub enum LinkTypes {
     TimePath,
     Index,
     DidLink,
+}
+
+impl Anchor {
+    pub fn get_sb(self) -> ExternResult<SerializedBytes> {
+        self.try_into()
+            .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))
+    }
+}
+
+impl PerspectiveExpression {
+    pub fn get_sb(self) -> ExternResult<SerializedBytes> {
+        self.try_into()
+            .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))
+    }
+}
+
+impl HashBroadcast {
+    pub fn get_sb(self) -> ExternResult<SerializedBytes> {
+        self.try_into()
+            .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))
+    }
+}
+
+impl PerspectiveDiffEntryReference {
+    pub fn new(
+        diff: PerspectiveDiff,
+        parents: Option<Vec<HoloHash<holo_hash::hash_type::Action>>>,
+    ) -> Self {
+        Self {
+            diff: diff,
+            parents: parents,
+            diffs_since_snapshot: 0,
+        }
+    }
+
+    /// Backward compatibility method to extract the diff data
+    pub fn to_perspective_diff(&self) -> PerspectiveDiff {
+        self.diff.clone()
+    }
+
+    /// Helper method to get the comparison key for ordering
+    // Compare using tuple ordering: entries with parents come first,
+    // then by parent hashes, then by diffs_since_snapshot, 
+    // then by total diff count, then by diff contents
+    fn comparison_key(&self) -> (bool, &Option<Vec<HoloHash<holo_hash::hash_type::Action>>>, usize, usize, &PerspectiveDiff) {
+        let has_parents = self.parents.is_some();
+        (!has_parents, &self.parents, self.diffs_since_snapshot, self.diff.total_diff_number(), &self.diff)
+    }
+}
+
+impl PartialOrd for PerspectiveDiffEntryReference {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PerspectiveDiffEntryReference {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.comparison_key().cmp(&other.comparison_key())
+    }
+}
+
+impl OnlineAgent {
+    pub fn get_sb(self) -> ExternResult<SerializedBytes> {
+        self.try_into()
+            .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))
+    }
 }

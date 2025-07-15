@@ -155,7 +155,7 @@ export class PerspectiveClient {
         return JSON.parse(perspectiveQueryProlog)
     }
 
-    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult }> {
+    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult, isInit?: boolean }> {
         const { perspectiveSubscribeQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveSubscribeQuery($uuid: String!, $query: String!) {
                 perspectiveSubscribeQuery(uuid: $uuid, query: $query) {
@@ -167,12 +167,17 @@ export class PerspectiveClient {
         }))
         const { subscriptionId, result } = perspectiveSubscribeQuery
         let finalResult = result;
+        let isInit = false;
+        if(finalResult.startsWith("#init#")) {
+            finalResult = finalResult.substring(6)
+            isInit = true;
+        }
         try {
-            finalResult = JSON.parse(result)
+            finalResult = JSON.parse(finalResult)
         } catch (e) {
             console.error('Error parsing perspectiveSubscribeQuery result:', e)
         }
-        return { subscriptionId, result: finalResult }
+        return { subscriptionId, result: finalResult, isInit }
     }
 
     subscribeToQueryUpdates(subscriptionId: string, onData: (result: AllInstancesResult) => void): () => void {
@@ -189,8 +194,16 @@ export class PerspectiveClient {
             next: (result) => {
                 if (result.data && result.data.perspectiveQuerySubscription) {
                     let finalResult = result.data.perspectiveQuerySubscription;
+                    let isInit = false;
+                    if(finalResult.startsWith("#init#")) {
+                        finalResult = finalResult.substring(6)
+                        isInit = true;
+                    }
                     try {
-                        finalResult = JSON.parse(result.data.perspectiveQuerySubscription)
+                        finalResult = JSON.parse(finalResult)
+                        if(isInit && typeof finalResult === 'object') {
+                            finalResult.isInit = true;
+                        }
                     } catch (e) {
                         console.error('Error parsing perspectiveQuerySubscription:', e)
                     }

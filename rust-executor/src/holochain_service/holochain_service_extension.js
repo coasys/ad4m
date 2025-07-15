@@ -1,7 +1,8 @@
 import { 
     start_holochain_conductor, log_dht_status, install_app, get_app_info, 
     call_zome_function, agent_infos, add_agent_infos, remove_app,
-    sign_string, shutdown, get_agent_key, pack_dna, unpack_dna
+    sign_string, shutdown, get_agent_key, pack_dna, unpack_dna,
+    pack_happ, unpack_happ, 
 } from 'ext:core/ops';
 
 ((globalThis) => {
@@ -46,6 +47,12 @@ import {
         },
         unPackDna: async (path) => {
             return unpack_dna(path)
+        },
+        packHapp: async (path) => {
+            return pack_happ(path)
+        },
+        unPackHapp: async (path) => {
+            return unpack_happ(path)
         }
     };
   })(globalThis);

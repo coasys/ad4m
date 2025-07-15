@@ -26,7 +26,7 @@ use crate::{
         add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs,
         sign_device_key,
     },
-    holochain_service::{agent_infos_from_str, get_holochain_service},
+    holochain_service::get_holochain_service,
     pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC},
 };
 use base64::prelude::*;
@@ -1142,8 +1142,21 @@ impl Mutation {
             &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY,
         )?;
 
-        let agent_infos = agent_infos_from_str(agent_infos.as_str())?;
-        log::info!("Adding HC agent infos: {:?}", agent_infos);
+        let agent_infos: Vec<String> = serde_json::from_str(&agent_infos)?;
+
+        for agent_info in agent_infos.iter() {
+            match serde_json::from_str::<serde_json::Value>(agent_info) {
+                Ok(json) => {
+                    log::info!(
+                        "Adding Agent info: {}",
+                        serde_json::to_string_pretty(&json).unwrap()
+                    );
+                }
+                Err(e) => {
+                    log::error!("Failed to parse agent info as JSON: {}", e);
+                }
+            }
+        }
 
         get_holochain_service()
             .await
@@ -1532,7 +1545,7 @@ impl Mutation {
         // Feed each stream individually
         for stream_id in &stream_ids {
             if let Err(e) = service
-                .feed_transcription_stream(&stream_id, audio_f32.clone())
+                .feed_transcription_stream(stream_id, audio_f32.clone())
                 .await
             {
                 log::warn!("Error feeding stream {}: {}", stream_id, e);
@@ -1640,5 +1653,26 @@ impl Mutation {
         )?;
         let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
         Ok(perspective.commit_batch(batch_id).await?)
+    }
+
+    async fn runtime_restart_holochain(&self, context: &RequestContext) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &RUNTIME_QUIT_CAPABILITY)?;
+
+        log::info!("Restarting Holochain service...");
+
+        let interface = get_holochain_service().await;
+
+        // This will shut down the conductor and exit the service thread
+        interface.shutdown().await?;
+
+        // Wait a moment for the service to shut down completely
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // Restart the service with the stored config
+        crate::holochain_service::HolochainService::restart_service().await?;
+
+        log::info!("Holochain service has been restarted successfully.");
+
+        Ok(true)
     }
 }

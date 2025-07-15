@@ -9,7 +9,6 @@ integrity:
     "active_agent_duration_s": 300,
     "enable_signals": true
   }
-  origin_time: 2022-02-11T23:05:19.470323Z
   zomes:
     - name: perspective_diff_sync_integrity
       bundled: ../target/wasm32-unknown-unknown/release/perspective_diff_sync_integrity.wasm

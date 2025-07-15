@@ -1,8 +1,8 @@
 import { Scenario } from "@holochain/tryorama";
-import { sleep, generate_link_expression } from "./utils";
-import { dnas } from "./common";
+import { sleep, generate_link_expression } from "./utils.ts";
+import { dnas } from "./common.ts";
 import test from "tape-promise/tape.js";
-import { resolve } from "path";
+import { resolve } from "node:path";
 
 //@ts-ignore
 export async function signals(t) {

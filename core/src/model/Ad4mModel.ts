@@ -28,7 +28,7 @@ export type Query = {
   count?: boolean;
 };
 
-export type AllInstancesResult = { AllInstances: Ad4mModel[]; TotalCount?: number };
+export type AllInstancesResult = { AllInstances: Ad4mModel[]; TotalCount?: number; isInit?: boolean };
 export type ResultsWithTotalCount<T> = { results: T[]; totalCount?: number };
 export type PaginationResult<T> = { results: T[]; totalCount?: number; pageSize: number; pageNumber: number };
 
@@ -281,6 +281,14 @@ export class Ad4mModel {
   private static classNamesByClass = new WeakMap<typeof Ad4mModel, { [perspectiveId: string]: string }>();
 
   static async getClassName(perspective: PerspectiveProxy) {
+      // Check if this is the Ad4mModel class itself or a subclass
+      const isBaseClass = this === Ad4mModel;
+  
+      // For the base Ad4mModel class, we can't use the cache
+      if (isBaseClass) {
+        return await perspective.stringOrTemplateObjectToSubjectClassName(this);
+      }
+
     // Get or create the cache for this class
     let classCache = this.classNamesByClass.get(this);
     if (!classCache) {
@@ -337,11 +345,7 @@ export class Ad4mModel {
     return this.#perspective;
   }
 
-  public static async assignValuesToInstance(
-    perspective: PerspectiveProxy,
-    instance: Ad4mModel,
-    values: ValueTuple[]
-  ) {
+  public static async assignValuesToInstance(perspective: PerspectiveProxy, instance: Ad4mModel, values: ValueTuple[]) {
     // Map properties to object
     const propsObject = Object.fromEntries(
       await Promise.all(
@@ -351,7 +355,13 @@ export class Ad4mModel {
           if (resolve) {
             let resolvedExpression = await perspective.getExpression(value);
             if (resolvedExpression) {
-              finalValue = resolvedExpression.data;
+              try {
+                // Attempt to parse the data as JSON
+                finalValue = JSON.parse(resolvedExpression.data);
+              } catch (error) {
+                // If parsing fails, keep the original data
+                finalValue = resolvedExpression.data;
+              }
             }
           }
           // Apply transform function if it exists
@@ -690,6 +700,13 @@ export class Ad4mModel {
     // We use createSubject's initialValues to set properties (but not collections)
     // We then later use innerUpdate to set collections
 
+    let batchCreatedHere = false;
+    if(!batchId) {
+      batchId = await this.perspective.createBatch()
+      batchCreatedHere = true;
+    }
+    
+
     // First filter out the properties that are not collections (arrays)
     const initialValues = {};
     for (const [key, value] of Object.entries(this)) {
@@ -716,17 +733,28 @@ export class Ad4mModel {
     // Set collections
     await this.innerUpdate(false, batchId)
 
-    // If we're in batch mode, we don't need to do anything else 
-    // since the instance won't exist until batch commit
-    if (batchId) {
-      return;
+    // If we got a batchId passed in, we let the caller decide when to commit.
+    // But then we can call getData() since the instance won't exist in the perspective
+    // until the bacht is committedl
+    if (batchCreatedHere) {
+      await this.perspective.commitBatch(batchId)
+      await this.getData();
     }
+  }
 
-    await this.getData();
+  private cleanCopy() {
+    const cleanCopy = {};
+    const props = Object.entries(this);
+    for (const [key, value] of props) {
+      if (value !== undefined && value !== null && key !== "author" && key !== "timestamp") {
+        cleanCopy[key] = value;
+      }
+    }
+    return cleanCopy;
   }
 
   private async innerUpdate(setProperties: boolean = true, batchId?: string) {
-    this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this);
+    this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this.cleanCopy());
 
     const entries = Object.entries(this);
     for (const [key, value] of entries) {
@@ -795,7 +823,7 @@ export class Ad4mModel {
    * ```
    */
   async get() {
-    this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this);
+    this.#subjectClassName = await this.#perspective.stringOrTemplateObjectToSubjectClassName(this.cleanCopy());
 
     return await this.getData();
   }

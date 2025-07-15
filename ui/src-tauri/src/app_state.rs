@@ -1,5 +1,6 @@
 use dirs::home_dir;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::prelude::*;
 use std::path::PathBuf;
@@ -17,6 +18,7 @@ pub struct AgentConfigDir {
 pub struct LauncherState {
     pub agent_list: Vec<AgentConfigDir>,
     pub selected_agent: Option<AgentConfigDir>,
+    pub log_config: Option<HashMap<String, String>>,
 }
 
 fn file_path() -> PathBuf {
@@ -56,6 +58,7 @@ impl LauncherState {
                 LauncherState {
                     agent_list: vec![{ agent.clone() }],
                     selected_agent: Some(agent),
+                    log_config: None,
                 }
             }
         };

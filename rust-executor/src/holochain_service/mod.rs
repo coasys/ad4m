@@ -1,28 +1,25 @@
-use base64::prelude::*;
 use chrono::Duration;
 use crypto_box::rand_core::OsRng;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
+use lazy_static::lazy_static;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
-use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo, ZomeCall};
-use holochain::conductor::config::ConductorConfig;
+use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo};
+use holochain::conductor::config::{ConductorConfig, NetworkConfig};
 use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
-use holochain::prelude::agent_store::AgentInfoSigned;
 use holochain::prelude::hash_type::Agent;
 use holochain::prelude::{
-    ExternIO, HoloHash, InstallAppPayload, Signal, Signature, Timestamp, ZomeCallResponse,
-    ZomeCallUnsigned,
+    AppManifest, ExternIO, HoloHash, InstallAppPayload, Kitsune2NetworkMetricsRequest, Signal,
+    Signature, Timestamp, ZomeCallParams, ZomeCallResponse,
 };
 use holochain::test_utils::itertools::Either;
 
 use holochain_types::dna::ValidatedDnaManifest;
 use holochain_types::websocket::AllowedOrigins;
-use kitsune_p2p_types::config::{
-    KitsuneP2pConfig, KitsuneP2pTuningParams, NetworkType, TransportConfig,
-};
 use kitsune_p2p_types::dependencies::url2::Url2;
 use log::{error, info};
 use rand::Rng;
@@ -34,7 +31,7 @@ use tokio::time::timeout;
 
 use tokio_stream::StreamExt;
 
-pub(crate) mod holochain_service_extension;
+pub mod holochain_service_extension;
 pub(crate) mod interface;
 
 pub(crate) use interface::{
@@ -44,23 +41,13 @@ pub(crate) use interface::{
 
 use self::interface::set_holochain_service;
 
-const COASYS_BOOTSTRAP_AGENT_INFO: &str = r#" ["g6VhZ2VudMQkeWyy+u7ziOZEejqRGCHVSjWuNDGCkHSFWpkp/DsXJFVDyWYdqXNpZ25hdHVyZcRAlYaUoegA0DB+U8F2cONLcoORjqz7WqW4dBSfvWyQ4AixLLB3h0jsvqGUo0UfowjUP1ntBhMjA8xo/oQateooDaphZ2VudF9pbmZvxPuGpXNwYWNlxCReuo1fprVD9jjsQWRglwEzVlWFiYB+4BEA7BQIwOpYgUgezPGlYWdlbnTEJHlssvru84jmRHo6kRgh1Uo1rjQxgpB0hVqZKfw7FyRVQ8lmHaR1cmxzkdlJd3NzOi8vc2lnbmFsLmhvbG8uaG9zdC90eDUtd3MvNEFNaGNWNHhpdFdPMHI2YUR1NjFwcW5jMW5LNjBmdkRfYTRyZUJmUFdTMKxzaWduZWRfYXRfbXPPAAABk/NOnPewZXhwaXJlc19hZnRlcl9tc84AEk+AqW1ldGFfaW5mb8QZgahhcnFfc2l6ZYKlcG93ZXIRpWNvdW50CA=="]"#;
-
-pub fn agent_infos_from_str(agent_infos: &str) -> Result<Vec<AgentInfoSigned>, AnyError> {
-    let agent_infos: Vec<String> = serde_json::from_str(agent_infos)?;
-    let agent_infos: Vec<AgentInfoSigned> = agent_infos
-        .into_iter()
-        .map(|encoded_info| {
-            let info_bytes = BASE64_STANDARD
-                .decode(encoded_info)
-                .expect("Failed to decode base64 AgentInfoSigned");
-            AgentInfoSigned::decode(&info_bytes).expect("Failed to decode AgentInfoSigned")
-        })
-        .collect();
-
-    Ok(agent_infos)
+// Store the config globally so we can restart with the same configuration
+lazy_static! {
+    static ref HOLOCHAIN_CONFIG: Arc<RwLock<Option<LocalConductorConfig>>> =
+        Arc::new(RwLock::new(None));
 }
 
+const COASYS_BOOTSTRAP_AGENT_INFO: &str = r#" ["g6VhZ2VudMQkeWyy+u7ziOZEejqRGCHVSjWuNDGCkHSFWpkp/DsXJFVDyWYdqXNpZ25hdHVyZcRAlYaUoegA0DB+U8F2cONLcoORjqz7WqW4dBSfvWyQ4AixLLB3h0jsvqGUo0UfowjUP1ntBhMjA8xo/oQateooDaphZ2VudF9pbmZvxPuGpXNwYWNlxCReuo1fprVD9jjsQWRglwEzVlWFiYB+4BEA7BQIwOpYgUgezPGlYWdlbnTEJHlssvru84jmRHo6kRgh1Uo1rjQxgpB0hVqZKfw7FyRVQ8lmHaR1cmxzkdlJd3NzOi8vc2lnbmFsLmhvbG8uaG9zdC90eDUtd3MvNEFNaGNWNHhpdFdPMHI2YUR1NjFwcW5jMW5LNjBmdkRfYTRyZUJmUFdTMKxzaWduZWRfYXRfbXPPAAABk/NOnPewZXhwaXJlc19hZnRlcl9tc84AEk+AqW1ldGFfaW5mb8QZgahhcnFfc2l6ZYKlcG93ZXIRpWNvdW50CA=="]"#;
 #[derive(Clone)]
 pub struct HolochainService {
     pub conductor: ConductorHandle,
@@ -83,6 +70,12 @@ pub struct LocalConductorConfig {
 
 impl HolochainService {
     pub async fn init(local_config: LocalConductorConfig) -> Result<(), AnyError> {
+        // Store the config for potential restarts
+        {
+            let mut config_lock = HOLOCHAIN_CONFIG.write().await;
+            *config_lock = Some(local_config.clone());
+        }
+
         let (sender, mut receiver) = mpsc::unbounded_channel::<HolochainServiceRequest>();
         let (stream_sender, stream_receiver) = mpsc::unbounded_channel::<Signal>();
         let (new_app_ids_sender, mut new_app_ids_receiver) = mpsc::unbounded_channel::<AppInfo>();
@@ -167,7 +160,7 @@ impl HolochainService {
                                     response,
                                 } => {
                                     match timeout(
-                                        std::time::Duration::from_secs(5),
+                                        std::time::Duration::from_secs(90),
                                         service.call_zome_function(app_id, cell_name, zome_name, fn_name, payload)
                                     ).await.map_err(|_| anyhow!("Timeout error; Call Zome Function")) {
                                         Ok(result) => {
@@ -242,6 +235,7 @@ impl HolochainService {
                                             let _ = response_tx.send(HolochainServiceResponse::Shutdown(Err(err)));
                                         },
                                     }
+                                    break;
                                 }
                                 HolochainServiceRequest::GetAgentKey(response_tx) => {
                                     match timeout(
@@ -282,6 +276,19 @@ impl HolochainService {
                                         },
                                     }
                                 }
+                                HolochainServiceRequest::GetNetworkMetrics(response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(3),
+                                        service.get_network_metrics()
+                                    ).await.map_err(|_| anyhow!("Timeout error; GetNetworkMetrics")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(Err(err)));
+                                        },
+                                    }
+                                }
                                 HolochainServiceRequest::PackDna(path, response_tx) => {
                                     match timeout(
                                         std::time::Duration::from_secs(3),
@@ -308,6 +315,32 @@ impl HolochainService {
                                         },
                                     }
                                 }
+                                HolochainServiceRequest::PackHapp(path, response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(3),
+                                        HolochainService::pack_happ(path)
+                                    ).await.map_err(|_| anyhow!("Timeout error; PackHapp")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::PackHapp(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::PackHapp(Err(err)));
+                                        },
+                                    }
+                                }
+                                HolochainServiceRequest::UnPackHapp(path, response_tx) => {
+                                    match timeout(
+                                        std::time::Duration::from_secs(3),
+                                        HolochainService::unpack_happ(path)
+                                    ).await.map_err(|_| anyhow!("Timeout error; UnPackHapp")) {
+                                        Ok(result) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::UnPackHapp(result));
+                                        },
+                                        Err(err) => {
+                                            let _ = response_tx.send(HolochainServiceResponse::UnPackHapp(Err(err)));
+                                        },
+                                    }
+                                }
                             };
                         };
                         error!("Holochain service receiver closed");
@@ -328,16 +361,35 @@ impl HolochainService {
             _ => unreachable!(),
         };
 
-        inteface
-            .add_agent_infos(
-                agent_infos_from_str(COASYS_BOOTSTRAP_AGENT_INFO)
-                    .expect("Couldn't deserialize hard-wired AgentInfo"),
-            )
-            .await?;
+        let agent_infos: Vec<String> = serde_json::from_str(COASYS_BOOTSTRAP_AGENT_INFO)?;
+        info!("Adding agent infos: {:?}", agent_infos);
+        if let Err(e) = inteface.add_agent_infos(agent_infos).await {
+            error!("Error adding agent infos: {:?}", e);
+        }
 
         set_holochain_service(inteface).await;
 
         Ok(())
+    }
+
+    pub async fn restart_service() -> Result<(), AnyError> {
+        log::info!("Restarting Holochain service...");
+
+        // Get the stored config
+        let config = {
+            let config_lock = HOLOCHAIN_CONFIG.read().await;
+            config_lock
+                .clone()
+                .ok_or_else(|| anyhow!("No Holochain config stored for restart"))?
+        };
+
+        // Restart the service with the stored config
+        Self::init(config).await
+    }
+
+    pub async fn get_stored_config() -> Option<LocalConductorConfig> {
+        let config_lock = HOLOCHAIN_CONFIG.read().await;
+        config_lock.clone()
     }
 
     pub async fn new(local_config: LocalConductorConfig) -> Result<HolochainService, AnyError> {
@@ -352,58 +404,54 @@ impl HolochainService {
             config.data_root_path = Some(data_root_path);
             config.admin_interfaces = None;
 
-            let mut kitsune_config = KitsuneP2pConfig::default();
-            let tuning_params = KitsuneP2pTuningParams::default().as_ref().clone();
-
-            // How long should we hold off talking to a peer
-            // we've previously gotten errors speaking to.
-            // [Default: 5 minute; now updated to 2 minutes]
-            // tuning_params.gossip_peer_on_error_next_gossip_delay_ms = 1000 * 60 * 2;
-
-            // How often should we update and publish our agent info?
-            // [Default: 5 minutes; now updated to 2 minutes]
-            // tuning_params.gossip_agent_info_update_interval_ms = 1000 * 60 * 2;
-
-            kitsune_config.tuning_params = Arc::new(tuning_params);
+            let mut network_config = NetworkConfig::default();
 
             if local_config.use_bootstrap {
-                // prod - https://bootstrap.holo.host
-                // staging - https://bootstrap-staging.holo.host
-                // dev - https://bootstrap-dev.holohost.workers.dev
-                // own - http://207.148.16.17:38245
-                kitsune_config.bootstrap_service = Some(Url2::parse(local_config.bootstrap_url));
+                network_config.bootstrap_url = Url2::parse(local_config.bootstrap_url.as_str());
             } else {
-                kitsune_config.bootstrap_service = None;
+                network_config.bootstrap_url = Url2::parse("http://relay.ad4m.dev:4433");
             }
-            if local_config.use_mdns {
-                kitsune_config.network_type = NetworkType::QuicMdns;
-            } else {
-                kitsune_config.network_type = NetworkType::QuicBootstrap;
-            }
+
             if local_config.use_proxy {
-                kitsune_config.transport_pool = vec![TransportConfig::WebRTC {
-                    // prod - wss://signal.holo.host
-                    // dev - wss://signal.holotest.net
-                    // our - ws://207.148.16.17:42697
-                    signal_url: local_config.proxy_url,
-                }];
+                network_config.signal_url = Url2::parse(local_config.proxy_url.as_str());
             } else {
-                kitsune_config.transport_pool = vec![
-                    TransportConfig::Mem {},
-                    TransportConfig::WebRTC {
-                        signal_url: local_config.proxy_url,
-                    },
-                ];
+                network_config.signal_url = Url2::parse("ws://relay.ad4m.dev:4433");
             }
-            config.network = kitsune_config;
+
+            //if local_config.use_local_proxy {
+            network_config.advanced = Some(serde_json::json!({
+                "tx5Transport": {
+                    "signalAllowPlainText": true,
+                }
+            }));
+            //}
+
+            network_config.webrtc_config = Some(serde_json::json!({
+                "iceServers": [
+                    {"urls": ["stun:stun.cloudflare.com:3478"]},
+                    {"urls": ["stun:stun.l.google.com:19302"]},
+                    {
+                        "urls": [
+                            "stun:relay.ad4m.dev:3478",
+                        ],
+                        "username": "openrelay",
+                        "credential": "openrelay",
+                    }
+                ]
+            }));
+
+            config.network = network_config;
 
             config
         };
 
         info!("Starting holochain conductor with config: {:#?}", config);
+        let passphrase_locked_array =
+            sodoken::LockedArray::from(local_config.passphrase.as_bytes().to_vec());
+        let passphrase = Arc::new(std::sync::Mutex::new(passphrase_locked_array));
         let conductor = ConductorBuilder::new()
             .config(config)
-            .passphrase(Some(local_config.passphrase.as_bytes().into()))
+            .passphrase(Some(passphrase))
             .build()
             .await;
 
@@ -489,7 +537,7 @@ impl HolochainService {
 
         let app_info = app_info.unwrap();
 
-        let cell_entry = app_info.cell_info.get(&format!("{}-{}", app_id, cell_name));
+        let cell_entry = app_info.cell_info.get(&cell_name);
 
         if cell_entry.is_none() {
             return Err(anyhow!(
@@ -530,7 +578,7 @@ impl HolochainService {
             None => ExternIO::encode(()).unwrap(),
         };
 
-        let zome_call_unsigned = ZomeCallUnsigned {
+        let zome_call_params = ZomeCallParams {
             cell_id,
             zome_name: zome_name.into(),
             fn_name: fn_name.into(),
@@ -543,12 +591,12 @@ impl HolochainService {
                 .unwrap(),
         };
 
-        let keystore = self.conductor.keystore();
-        let signed_zome_call = ZomeCall::try_from_unsigned_zome_call(keystore, zome_call_unsigned)
-            .await
-            .map_err(|err| anyhow!("Could not sign zome call: {:?}", err))?;
+        //let keystore = self.conductor.keystore();
+        //let signed_zome_call = ZomeCall::try_from_unsigned_zome_call(keystore, zome_call_unsigned)
+        //    .await
+        //    .map_err(|err| anyhow!("Could not sign zome call: {:?}", err))?;
 
-        let result = self.conductor.call_zome(signed_zome_call).await??;
+        let result = self.conductor.call_zome(zome_call_params).await??;
 
         Ok(result)
     }
@@ -563,7 +611,7 @@ impl HolochainService {
 
         self.conductor
             .clone()
-            .uninstall_app(&app_id)
+            .uninstall_app(&app_id, true)
             .await
             .map_err(|e| anyhow!("Could not remove app: {:?}", e))?;
 
@@ -571,11 +619,17 @@ impl HolochainService {
         Ok(())
     }
 
-    pub async fn agent_infos(&self) -> Result<Vec<AgentInfoSigned>, AnyError> {
-        Ok(self.conductor.get_agent_infos(None).await?)
+    pub async fn agent_infos(&self) -> Result<Vec<String>, AnyError> {
+        Ok(self
+            .conductor
+            .get_agent_infos(None)
+            .await?
+            .into_iter()
+            .map(|arc| (*arc).encode())
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub async fn add_agent_infos(&self, agent_infos: Vec<AgentInfoSigned>) -> Result<(), AnyError> {
+    pub async fn add_agent_infos(&self, agent_infos: Vec<String>) -> Result<(), AnyError> {
         Ok(self.conductor.add_agent_infos(agent_infos).await?)
     }
 
@@ -614,13 +668,60 @@ impl HolochainService {
     }
 
     pub async fn log_network_metrics(&self) -> Result<(), AnyError> {
-        let metrics = self.conductor.dump_network_metrics(None).await?;
-        info!("Network metrics: {}", metrics);
+        let metrics = self
+            .conductor
+            .dump_network_metrics(Kitsune2NetworkMetricsRequest {
+                dna_hash: None,
+                include_dht_summary: true,
+            })
+            .await?;
+        info!("Network metrics: {:?}", metrics);
 
         let stats = self.conductor.dump_network_stats().await?;
-        info!("Network stats: {}", stats);
+        info!("Network stats: {:?}", stats);
 
         Ok(())
+    }
+
+    pub async fn get_network_metrics(&self) -> Result<String, AnyError> {
+        let metrics = self
+            .conductor
+            .dump_network_metrics(Kitsune2NetworkMetricsRequest {
+                dna_hash: None,
+                include_dht_summary: true,
+            })
+            .await?;
+
+        let stats = self.conductor.dump_network_stats().await?;
+
+        // Convert HoloHash<Dna> keys to strings for JSON serialization
+        let metrics_with_string_keys: std::collections::HashMap<String, _> = metrics
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+
+        let combined_metrics = serde_json::json!({
+            "metrics": metrics_with_string_keys,
+            "stats": stats
+        });
+
+        Ok(serde_json::to_string(&combined_metrics)?)
+    }
+
+    pub async fn pack_happ(path: String) -> Result<String, AnyError> {
+        let path = PathBuf::from(path);
+        let name = holochain_cli_bundle::get_app_name(&path).await?;
+        info!("Got hApp name: {:?}", name);
+        let pack = holochain_cli_bundle::pack::<AppManifest>(&path, None, name, false).await?;
+        info!("Packed hApp at path: {:#?}", pack.0);
+        Ok(pack.0.to_str().unwrap().to_string())
+    }
+
+    pub async fn unpack_happ(path: String) -> Result<String, AnyError> {
+        let path = PathBuf::from(path);
+        let pack = holochain_cli_bundle::unpack::<AppManifest>("happ", &path, None, true).await?;
+        info!("UnPacked hApp at path: {:#?}", pack);
+        Ok(pack.to_str().unwrap().to_string())
     }
 
     pub async fn pack_dna(path: String) -> Result<String, AnyError> {

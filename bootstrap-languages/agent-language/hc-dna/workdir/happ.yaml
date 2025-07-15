@@ -1,0 +1,11 @@
+manifest_version: '1'
+name: ad4m-agent-language
+description: Core bootstrap network for ad4m storing AgentExpressions per DID
+roles:
+- name: agent-store
+  provisioning:
+    strategy: create
+    deferred: false
+  dna:
+    bundled: ./agent-store.dna
+    

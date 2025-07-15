@@ -75,11 +75,13 @@ fs.writeFileSync('ad4m-hooks/helpers/package.json', JSON.stringify(hookHelpers, 
 const reactHooks = JSON.parse(fs.readFileSync('ad4m-hooks/react/package.json', 'utf8'))
 console.log("Ad4m React hook version: " + reactHooks.version + " -> " + VERSION)
 reactHooks.version = VERSION
+reactHooks.dependencies["@coasys/ad4m"] = 'workspace:'+VERSION
 fs.writeFileSync('ad4m-hooks/react/package.json', JSON.stringify(reactHooks, null, 2) + '\n')
 
 const vueHooks = JSON.parse(fs.readFileSync('ad4m-hooks/vue/package.json', 'utf8'))
 console.log("Ad4m Vue hook version: " + vueHooks.version + " -> " + VERSION)
 vueHooks.version = VERSION
+vueHooks.dependencies["@coasys/ad4m"] = 'workspace:'+VERSION
 fs.writeFileSync('ad4m-hooks/vue/package.json', JSON.stringify(vueHooks, null, 2) + '\n')
 
 const executor = JSON.parse(fs.readFileSync('executor/package.json', 'utf8'))

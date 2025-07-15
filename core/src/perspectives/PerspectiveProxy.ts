@@ -61,7 +61,7 @@ export class QuerySubscriptionProxy {
     #callbacks: Set<QueryCallback>;
     #keepaliveTimer: number;
     #unsubscribe?: () => void;
-    #latestResult: AllInstancesResult;
+    #latestResult: AllInstancesResult|null;
     #disposed: boolean = false;
     #initialized: Promise<boolean>;
     #initTimeoutId?: NodeJS.Timeout;
@@ -77,6 +77,7 @@ export class QuerySubscriptionProxy {
         this.#query = query;
         this.#client = client;
         this.#callbacks = new Set();
+        this.#latestResult = null;
     }
 
     async subscribe() {
@@ -87,7 +88,8 @@ export class QuerySubscriptionProxy {
         this.#initialized = new Promise<boolean>((resolve, reject) => {
             // Add timeout to prevent hanging promises
             this.#initTimeoutId = setTimeout(() => {
-                reject(new Error('Subscription initialization timed out after 30 seconds'));
+                reject(new Error('Subscription initialization timed out after 30 seconds. Resubscribing...'));
+                this.subscribe();
             }, 30000); // 30 seconds timeout
             
             // Subscribe to query updates
@@ -99,6 +101,15 @@ export class QuerySubscriptionProxy {
                         this.#initTimeoutId = undefined;
                     }
                     resolve(true);
+
+                    // if the result is one of those repeated initialization results
+                    // and we got a result before, we don't notify the callbacks
+                    // so they don't get confused (we could have gotten another 
+                    // more recent result in between)
+                    if(result.isInit && this.#latestResult) {
+                        return
+                    }
+
                     this.#latestResult = result;
                     this.#notifyCallbacks(result);
                 }

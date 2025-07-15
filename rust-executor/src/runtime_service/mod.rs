@@ -1,6 +1,6 @@
 use std::io::Read;
 use std::{fs::File, sync::Mutex};
-pub(crate) mod runtime_service_extension;
+pub mod runtime_service_extension;
 use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize)]

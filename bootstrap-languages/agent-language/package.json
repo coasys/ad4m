@@ -19,7 +19,7 @@
   "license": "ISC",
   "devDependencies": {
     "@coasys/ad4m": "*",
-    "@perspect3vism/rollup-plugin-dna": "^0.0.2",
+    "@coasys/rollup-plugin-holochain": "^0.0.3",
     "@rollup/plugin-commonjs": "^17.0.0",
     "@rollup/plugin-json": "^4.1.0",
     "@rollup/plugin-node-resolve": "^8.0.0",
@@ -44,5 +44,5 @@
     "md5": "^2.3.0",
     "postcss": "^8.2.1"
   },
-  "version": "0.10.1-release-candidate-3"
+  "version": "0.10.1-release-candidate-4"
 }

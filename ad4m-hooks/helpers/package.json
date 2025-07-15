@@ -18,5 +18,5 @@
     "@coasys/ad4m-connect": "*",
     "uuid": "*"
   },
-  "version": "0.10.1-release-candidate-3"
+  "version": "0.10.1-release-candidate-4"
 }

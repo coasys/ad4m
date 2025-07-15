@@ -135,6 +135,18 @@ impl AgentService {
         *agent_instance = Some(AgentService::new(app_path));
     }
 
+    pub fn init_global_test_instance() {
+        let mut agent_instance = AGENT_SERVICE.lock().unwrap();
+        *agent_instance = Some(AgentService {
+            did: Some("did:key:z6Mkq9o619876543210".to_string()),
+            did_document: None,
+            file: "test".to_string(),
+            file_profile: "test".to_string(),
+            agent: None,
+            signing_key_id: Some("did:key:z6Mkq9o619876543210".to_string()),
+        });
+    }
+
     pub fn new(app_path: String) -> AgentService {
         let agent_path = format!("{}/ad4m/agent.json", app_path);
         let agent_profile_path = format!("{}/ad4m/agentProfile.json", app_path);

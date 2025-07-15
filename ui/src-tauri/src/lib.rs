@@ -4,18 +4,16 @@
 )]
 
 extern crate env_logger;
-use chrono::Local;
-use colored::Colorize;
 #[cfg(not(target_os = "windows"))]
 use libc::{rlimit, setrlimit, RLIMIT_NOFILE};
-use log::LevelFilter;
 use log::{debug, error, info};
+use rust_executor::logging::{get_default_log_config, init_launcher_logging};
+use rust_executor::utils::find_port;
 use rust_executor::Ad4mConfig;
 use std::env;
 use std::fs;
 use std::fs::File;
 use std::io;
-use std::io::Write;
 use std::sync::Mutex;
 use tauri::{Emitter, Listener, WebviewWindow};
 //use tauri::Size;
@@ -41,15 +39,14 @@ mod util;
 use crate::app_state::LauncherState;
 use crate::commands::app::{
     add_app_agent_state, clear_state, close_application, close_main_window, get_app_agent_list,
-    open_dapp, open_tray, open_tray_message, remove_app_agent_state, set_selected_agent,
-    show_main_window,
+    get_data_path, get_log_config, open_dapp, open_tray, open_tray_message, remove_app_agent_state,
+    set_log_config, set_selected_agent, show_main_window,
 };
 use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
 use crate::config::log_path;
 
-use crate::menu::open_logs_folder;
-use crate::util::find_port;
+use crate::menu::reveal_log_file;
 use crate::util::{create_main_window, save_executor_port};
 use tauri::Manager;
 
@@ -114,11 +111,6 @@ fn rlim_execute() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env::set_var(
-        "RUST_LOG",
-        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp=warn,warp::server=warn,warp::filters=warn",
-    );
-
     let state = LauncherState::load().unwrap();
 
     let selected_agent = state.selected_agent.clone().unwrap();
@@ -138,40 +130,19 @@ pub fn run() {
 
     let target = Box::new(File::create(log_path()).expect("Can't create file"));
 
-    env_logger::Builder::new()
-        .target(env_logger::Target::Pipe(target))
-        .filter(Some("holochain"), LevelFilter::Warn)
-        .filter(Some("wasmer_compiler_cranelift"), LevelFilter::Warn)
-        .filter(Some("rust_executor"), LevelFilter::Debug)
-        .filter(Some("warp::server"), LevelFilter::Debug)
-        .format(|buf, record| {
-            let level = match record.level() {
-                log::Level::Error => record.level().as_str().red(),
-                log::Level::Warn => record.level().as_str().yellow(),
-                log::Level::Info => record.level().as_str().green(),
-                log::Level::Debug => record.level().as_str().blue(),
-                log::Level::Trace => record.level().as_str().purple(),
-            };
-            writeln!(
-                buf,
-                "[{} {} {}:{}] {}",
-                Local::now()
-                    .format("%Y-%m-%d %H:%M:%S%.3f")
-                    .to_string()
-                    .as_str()
-                    .dimmed(),
-                level,
-                record
-                    .file()
-                    .unwrap_or("unknown")
-                    .to_string()
-                    .as_str()
-                    .dimmed(),
-                record.line().unwrap_or(0).to_string().as_str().dimmed(),
-                record.args().to_string().as_str().bold(),
-            )
-        })
-        .init();
+    // Set up logging configuration and pass it to the logger
+    let log_config = if let Some(user_config) = &state.log_config {
+        // Start with defaults, then apply user overrides
+        let mut final_config = get_default_log_config();
+        for (crate_name, level) in user_config {
+            final_config.insert(crate_name.clone(), level.clone());
+        }
+        Some(final_config)
+    } else {
+        None
+    };
+
+    init_launcher_logging(target, log_config.as_ref()).expect("Failed to initialize logging");
 
     let format = format::debug_fn(move |writer, _field, value| {
         debug!("TRACE: {:?}", value);
@@ -187,7 +158,11 @@ pub fn run() {
 
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 
-    let free_port = find_port(12000, 13000);
+    let free_port = find_port(12000, 13000).unwrap_or_else(|e| {
+        let error_string = format!("Failed to find free main executor interface port: {}", e);
+        error!("{}", error_string);
+        panic!("{}", error_string);
+    });
 
     info!("Free port: {:?}", free_port);
 
@@ -214,6 +189,7 @@ pub fn run() {
     };
 
     let builder_result = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_positioner::init())
@@ -237,7 +213,10 @@ pub fn run() {
             add_app_agent_state,
             get_app_agent_list,
             set_selected_agent,
-            remove_app_agent_state
+            remove_app_agent_state,
+            get_data_path,
+            get_log_config,
+            set_log_config
         ])
         .setup(move |app| {
             // Hides the dock icon
@@ -246,14 +225,15 @@ pub fn run() {
 
             let splashscreen = app.get_webview_window("splashscreen").unwrap();
 
-            let _id = splashscreen.listen("copyLogs", |event| {
+            let app_handle = app.handle().clone();
+            let _id = splashscreen.listen("revealLogFile", move |event| {
                 info!(
                     "got window event-name with payload {:?} {:?}",
                     event,
                     event.payload()
                 );
 
-                open_logs_folder();
+                reveal_log_file(&app_handle);
             });
 
             build_menu(app.handle())?;
