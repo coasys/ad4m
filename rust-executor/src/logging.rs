@@ -176,24 +176,3 @@ pub fn init_launcher_logging<W: Write + Send + 'static>(
     Ok(())
 }
 
-/// Get the current log level from environment or return default
-pub fn get_current_log_level() -> LogLevel {
-    if let Ok(rust_log) = env::var("RUST_LOG") {
-        // Parse the RUST_LOG string to extract the rust_executor log level
-        if let Some(level) = extract_rust_executor_level(&rust_log) {
-            return level;
-        }
-    }
-    LogLevel::Info // Default
-}
-
-/// Extract the rust_executor log level from RUST_LOG string
-fn extract_rust_executor_level(rust_log: &str) -> Option<LogLevel> {
-    for part in rust_log.split(',') {
-        if part.trim().starts_with("rust_executor=") {
-            let level_str = part.trim().split('=').nth(1)?;
-            return LogLevel::from_string(level_str);
-        }
-    }
-    None
-}
