@@ -74,6 +74,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Cache-Map for large embedding vector URLs regard Prolog to prevent performance degradation of Prolog queries in Perspectives that include a lot of large embedding vectors [PR#595](https://github.com/coasys/ad4m/pull/595)
 - Holochain debugging features: network metrics retrieval and Holochain restart capability [PR#610](https://github.com/coasys/ad4m/pull/610)
 - Scoped Prolog engine-pools for fast inference inside a channel, ignoring other channels' data for better performance isolation [PR#613](https://github.com/coasys/ad4m/pull/613)
+- Runtime Log Level Configuration with UI in launcher [PR#616](https://github.com/coasys/ad4m/pull/616)
 
 ### Changed
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)

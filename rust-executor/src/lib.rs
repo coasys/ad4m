@@ -18,6 +18,7 @@ mod dapp_server;
 mod db;
 pub mod init;
 pub mod languages;
+pub mod logging;
 mod neighbourhoods;
 pub mod perspectives;
 mod pubsub;
@@ -26,7 +27,7 @@ use rustls::crypto::aws_lc_rs;
 mod test_utils;
 pub mod types;
 
-use std::{env, thread::JoinHandle};
+use std::thread::JoinHandle;
 
 use log::{error, info, warn};
 
@@ -72,11 +73,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         }
     }
 
-    env::set_var(
-        "RUST_LOG",
-        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=debug,warp::server",
-    );
-    let _ = env_logger::try_init();
+    // Initialize logging for CLI (stdout)
+    // Respects RUST_LOG environment variable if set
+    crate::logging::init_cli_logging(None);
     config.prepare();
 
     aws_lc_rs::default_provider()

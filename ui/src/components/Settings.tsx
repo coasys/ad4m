@@ -96,6 +96,106 @@ const Profile = (props: Props) => {
   const [showAgentInfos, setShowAgentInfos] = useState(false);
 
   const [restartingHolochain, setRestartingHolochain] = useState(false);
+  
+  const [logConfig, setLogConfig] = useState<Record<string, string>>({});
+  const [newCrateName, setNewCrateName] = useState<string>("");
+  const [newCrateLevel, setNewCrateLevel] = useState<string>("info");
+  const [crateNameError, setCrateNameError] = useState<string>("");
+
+  // Load current log config on component mount
+  useEffect(() => {
+    const loadLogConfig = async () => {
+      try {
+        const currentConfig = await invoke<Record<string, string>>("get_log_config");
+        setLogConfig(currentConfig);
+      } catch (error) {
+        console.error("Failed to load log config:", error);
+      }
+    };
+    loadLogConfig();
+  }, []);
+
+  const handleLogConfigChange = async (newConfig: Record<string, string>) => {
+    try {
+      await invoke<void>("set_log_config", { config: newConfig });
+      setLogConfig(newConfig);
+    } catch (error) {
+      console.error("Failed to set log config:", error);
+      alert("Failed to set log config. Check console for details.");
+    }
+  };
+
+  const updateCrateLevel = (crateName: string, level: string) => {
+    const newConfig = { ...logConfig, [crateName]: level };
+    handleLogConfigChange(newConfig);
+  };
+
+  const validateCrateName = (name: string): string | null => {
+    const trimmed = name.trim();
+    
+    // Check if empty
+    if (!trimmed) {
+      return "Crate name cannot be empty";
+    }
+    
+    // Check if already exists
+    if (trimmed in logConfig) {
+      return "Crate name already exists";
+    }
+    
+    // Check Rust crate naming conventions
+    // Must start with letter or underscore
+    if (!/^[a-zA-Z_]/.test(trimmed)) {
+      return "Crate name must start with a letter or underscore";
+    }
+    
+    // Only lowercase letters, numbers, hyphens, and underscores allowed
+    if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+      return "Crate name can only contain letters, numbers, hyphens, and underscores";
+    }
+    
+    // Cannot end with hyphen
+    if (trimmed.endsWith("-")) {
+      return "Crate name cannot end with a hyphen";
+    }
+    
+    // No double hyphens
+    if (trimmed.includes("--")) {
+      return "Crate name cannot contain consecutive hyphens";
+    }
+    
+    // Convert to lowercase for consistency with Rust conventions
+    if (trimmed !== trimmed.toLowerCase()) {
+      return "Crate name should be lowercase (will be converted automatically)";
+    }
+    
+    return null;
+  };
+
+  const addNewCrate = () => {
+    const trimmedName = newCrateName.trim().toLowerCase();
+    const error = validateCrateName(trimmedName);
+    
+    if (error) {
+      setCrateNameError(error);
+      return;
+    }
+    
+    // Clear any previous error
+    setCrateNameError("");
+    
+    // Add the new crate
+    const newConfig = { ...logConfig, [trimmedName]: newCrateLevel };
+    handleLogConfigChange(newConfig);
+    setNewCrateName("");
+    setNewCrateLevel("info");
+  };
+
+  const removeCrate = (crateName: string) => {
+    const newConfig = { ...logConfig };
+    delete newConfig[crateName];
+    handleLogConfigChange(newConfig);
+  };
 
   async function openLogs() {
     let dataPath = await invoke("get_data_path") as string;
@@ -381,6 +481,8 @@ const Profile = (props: Props) => {
         </j-button>
       </j-box>
 
+
+
       <j-box px="500" my="500">
         <j-button onClick={() => setShowAgentSelection(true)} full variant="secondary">
           <j-icon size="sm" slot="start" name="server"></j-icon>
@@ -396,6 +498,11 @@ const Profile = (props: Props) => {
 
       {expertMode && (
         <div>
+          <j-box px="500" my="500">
+            <j-text size="600" weight="600" color="black">
+              Advanced Settings
+            </j-text>
+          </j-box>
           <j-box px="500" my="500">
             <j-button onClick={handleExport} full variant="ghost">
               <j-icon size="sm" slot="start" name="download"></j-icon>
@@ -515,6 +622,108 @@ const Profile = (props: Props) => {
               <j-icon size="sm" slot="start" name="arrow-clockwise"></j-icon>
               Restart Holochain
             </j-button>
+          </j-box>
+
+          <j-box px="500" my="500">
+            <j-text size="600" weight="600" color="black">
+              Logging Configuration
+            </j-text>
+          </j-box>
+
+          <j-box px="500" my="500">
+            <j-text size="500" color="ui-500">
+              Configure log levels for different crates. Changes take effect after restart.
+            </j-text>
+          </j-box>
+
+          {Object.entries(logConfig)
+            .sort(([a], [b]) => {
+              // Put rust_executor first, then alphabetical
+              if (a === "rust_executor") return -1;
+              if (b === "rust_executor") return 1;
+              return a.localeCompare(b);
+            })
+            .map(([crateName, level]) => (
+              <j-box key={crateName} px="500" my="300">
+                <j-box mb="200">
+                  <j-flex a="center" j="between">
+                    <j-text size="500" weight="500" color="black">
+                      {crateName === "rust_executor" ? "ad4m" : crateName}
+                    </j-text>
+                    <j-button
+                      onClick={() => removeCrate(crateName)}
+                      variant="ghost"
+                      size="sm"
+                    >
+                      <j-icon name="trash" size="sm"></j-icon>
+                    </j-button>
+                  </j-flex>
+                </j-box>
+                <j-flex gap="200">
+                  {["error", "warn", "info", "debug", "trace"].map((lvl) => (
+                    <j-button
+                      key={lvl}
+                      onClick={() => updateCrateLevel(crateName, lvl)}
+                      variant={level === lvl ? "primary" : "ghost"}
+                      size="sm"
+                    >
+                      {lvl}
+                    </j-button>
+                  ))}
+                </j-flex>
+              </j-box>
+            ))}
+
+          <j-box px="500" my="500">
+            <j-text size="500" weight="600" color="black">
+              Add New Crate
+            </j-text>
+          </j-box>
+
+          {crateNameError && (
+            <j-box px="500" my="200">
+              <j-text size="300" color="danger-500">
+                {crateNameError}
+              </j-text>
+            </j-box>
+          )}
+
+          <j-box px="500" my="300">
+            <j-box mb="200">
+              <j-flex a="center" j="between">
+                <j-input
+                  value={newCrateName}
+                  onChange={(e) => {
+                    setNewCrateName((e.target as HTMLInputElement).value);
+                    // Clear error when user starts typing
+                    if (crateNameError) {
+                      setCrateNameError("");
+                    }
+                  }}
+                  placeholder="Crate name (e.g., tokio)"
+                  style={{ flexGrow: "1", marginRight: "10px" }}
+                />
+                <j-button
+                  onClick={addNewCrate}
+                  variant="primary"
+                  size="sm"
+                >
+                  Add
+                </j-button>
+              </j-flex>
+            </j-box>
+            <j-flex gap="200">
+              {["error", "warn", "info", "debug", "trace"].map((lvl) => (
+                <j-button
+                  key={lvl}
+                  onClick={() => setNewCrateLevel(lvl)}
+                  variant={newCrateLevel === lvl ? "primary" : "ghost"}
+                  size="sm"
+                >
+                  {lvl}
+                </j-button>
+              ))}
+            </j-flex>
           </j-box>
         </div>
       )}
