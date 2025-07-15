@@ -636,12 +636,29 @@ const Profile = (props: Props) => {
             </j-text>
           </j-box>
 
-          {Object.entries(logConfig).map(([crateName, level]) => (
-            <j-box key={crateName} px="500" my="300">
-              <j-flex a="center" gap="300">
-                <j-text size="500" style={{ minWidth: "200px" }}>
-                  {crateName}
-                </j-text>
+          {Object.entries(logConfig)
+            .sort(([a], [b]) => {
+              // Put rust_executor first, then alphabetical
+              if (a === "rust_executor") return -1;
+              if (b === "rust_executor") return 1;
+              return a.localeCompare(b);
+            })
+            .map(([crateName, level]) => (
+              <j-box key={crateName} px="500" my="300">
+                <j-box mb="200">
+                  <j-flex a="center" j="between">
+                    <j-text size="500" weight="500" color="black">
+                      {crateName === "rust_executor" ? "ad4m" : crateName}
+                    </j-text>
+                    <j-button
+                      onClick={() => removeCrate(crateName)}
+                      variant="ghost"
+                      size="sm"
+                    >
+                      <j-icon name="trash" size="sm"></j-icon>
+                    </j-button>
+                  </j-flex>
+                </j-box>
                 <j-flex gap="200">
                   {["error", "warn", "info", "debug", "trace"].map((lvl) => (
                     <j-button
@@ -654,16 +671,8 @@ const Profile = (props: Props) => {
                     </j-button>
                   ))}
                 </j-flex>
-                <j-button
-                  onClick={() => removeCrate(crateName)}
-                  variant="ghost"
-                  size="sm"
-                >
-                  <j-icon name="trash" size="sm"></j-icon>
-                </j-button>
-              </j-flex>
-            </j-box>
-          ))}
+              </j-box>
+            ))}
 
           <j-box px="500" my="500">
             <j-text size="500" weight="600" color="black">
@@ -680,38 +689,40 @@ const Profile = (props: Props) => {
           )}
 
           <j-box px="500" my="300">
-            <j-flex a="center" gap="300">
-              <j-input
-                value={newCrateName}
-                onChange={(e) => {
-                  setNewCrateName((e.target as HTMLInputElement).value);
-                  // Clear error when user starts typing
-                  if (crateNameError) {
-                    setCrateNameError("");
-                  }
-                }}
-                placeholder="Crate name (e.g., tokio)"
-                style={{ minWidth: "200px" }}
-              />
-              <j-flex gap="200">
-                {["error", "warn", "info", "debug", "trace"].map((lvl) => (
-                  <j-button
-                    key={lvl}
-                    onClick={() => setNewCrateLevel(lvl)}
-                    variant={newCrateLevel === lvl ? "primary" : "ghost"}
-                    size="sm"
-                  >
-                    {lvl}
-                  </j-button>
-                ))}
+            <j-box mb="200">
+              <j-flex a="center" j="between">
+                <j-input
+                  value={newCrateName}
+                  onChange={(e) => {
+                    setNewCrateName((e.target as HTMLInputElement).value);
+                    // Clear error when user starts typing
+                    if (crateNameError) {
+                      setCrateNameError("");
+                    }
+                  }}
+                  placeholder="Crate name (e.g., tokio)"
+                  style={{ flexGrow: "1", marginRight: "10px" }}
+                />
+                <j-button
+                  onClick={addNewCrate}
+                  variant="primary"
+                  size="sm"
+                >
+                  Add
+                </j-button>
               </j-flex>
-              <j-button
-                onClick={addNewCrate}
-                variant="primary"
-                size="sm"
-              >
-                Add
-              </j-button>
+            </j-box>
+            <j-flex gap="200">
+              {["error", "warn", "info", "debug", "trace"].map((lvl) => (
+                <j-button
+                  key={lvl}
+                  onClick={() => setNewCrateLevel(lvl)}
+                  variant={newCrateLevel === lvl ? "primary" : "ghost"}
+                  size="sm"
+                >
+                  {lvl}
+                </j-button>
+              ))}
             </j-flex>
           </j-box>
         </div>
