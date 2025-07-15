@@ -155,35 +155,13 @@ pub fn init_launcher_logging<W: Write + Send + 'static>(
 
     let mut initialized = LOGGER_INITIALIZED.lock().unwrap();
     if *initialized {
-        // Logger is already initialized, we need to reinitialize it
-        return reinitialize_launcher_logging(target, log_config);
+        // Logger is already initialized, cannot reinitialize env_logger
+        return Ok(());
     }
 
     create_launcher_logger_builder(target).init();
 
     *initialized = true;
-    Ok(())
-}
-
-/// Reinitialize logging for launcher (file output) - this is the key function for runtime changes
-pub fn reinitialize_launcher_logging<W: Write + Send + 'static>(
-    target: Box<W>,
-    log_config: Option<&std::collections::HashMap<String, String>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Only set RUST_LOG if it's not already set in environment
-    if env::var("RUST_LOG").is_err() {
-        let default_config = get_default_log_config();
-        let config = log_config.unwrap_or(&default_config);
-        let rust_log = build_rust_log_from_config(config);
-        env::set_var("RUST_LOG", &rust_log);
-    }
-
-    // Create a new logger with the updated configuration
-    create_launcher_logger_builder(target).init();
-
-    // Note: env_logger doesn't support runtime reconfiguration well
-    // Runtime changes will require process restart or different approach
-
     Ok(())
 }
 
