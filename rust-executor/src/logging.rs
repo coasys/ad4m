@@ -195,7 +195,7 @@ pub fn get_current_log_level() -> LogLevel {
 fn build_rust_log_string(level: &LogLevel) -> String {
     let level_str = level.to_string();
     format!(
-        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor={},warp=warn,warp::server=warn,warp::filters=warn",
+        "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor={},warp=info,warp::server=info",
         level_str
     )
 }
@@ -206,7 +206,7 @@ pub fn build_rust_log_from_config(
 ) -> String {
     if log_config.is_empty() {
         // Default configuration if none specified
-        return "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp=warn,warp::server=warn,warp::filters=warn".to_string();
+        return "holochain=warn,wasmer_compiler_cranelift=warn,rust_executor=info,warp=info,warp::server=info".to_string();
     }
 
     let mut parts = Vec::new();
