@@ -6193,8 +6193,8 @@ checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
 
 [[package]]
 name = "fixt"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "holochain_serialized_bytes",
  "lazy_static",
@@ -7531,8 +7531,8 @@ dependencies = [
 
 [[package]]
 name = "hc_deepkey_sdk"
-version = "0.8.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.8.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "hc_deepkey_types",
  "hdk",
@@ -7543,8 +7543,8 @@ dependencies = [
 
 [[package]]
 name = "hc_deepkey_types"
-version = "0.9.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.9.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "hdi",
  "holo_hash",
@@ -7596,8 +7596,8 @@ dependencies = [
 
 [[package]]
 name = "hdi"
-version = "0.6.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.6.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "getrandom 0.2.15",
  "hdk_derive",
@@ -7614,8 +7614,8 @@ dependencies = [
 
 [[package]]
 name = "hdk"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "getrandom 0.2.15",
  "hdi",
@@ -7633,8 +7633,8 @@ dependencies = [
 
 [[package]]
 name = "hdk_derive"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "darling 0.14.4",
  "heck 0.5.0",
@@ -7966,8 +7966,8 @@ dependencies = [
 
 [[package]]
 name = "holo_hash"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "base64 0.22.1",
  "blake2b_simd",
@@ -7976,7 +7976,7 @@ dependencies = [
  "fixt",
  "futures",
  "holochain_serialized_bytes",
- "holochain_util 0.5.4",
+ "holochain_util 0.5.5",
  "holochain_wasmer_common",
  "kitsune2_api",
  "must_future",
@@ -7992,8 +7992,8 @@ dependencies = [
 
 [[package]]
 name = "holochain"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -8030,9 +8030,9 @@ dependencies = [
  "holochain_state",
  "holochain_test_wasm_common",
  "holochain_timestamp",
- "holochain_trace 0.5.4",
+ "holochain_trace 0.5.5",
  "holochain_types",
- "holochain_util 0.5.4",
+ "holochain_util 0.5.5",
  "holochain_wasm_test_utils",
  "holochain_wasmer_host",
  "holochain_websocket",
@@ -8093,8 +8093,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_cascade"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "async-trait",
  "fixt",
@@ -8106,9 +8106,9 @@ dependencies = [
  "holochain_serialized_bytes",
  "holochain_sqlite",
  "holochain_state",
- "holochain_trace 0.5.4",
+ "holochain_trace 0.5.5",
  "holochain_types",
- "holochain_util 0.5.4",
+ "holochain_util 0.5.5",
  "holochain_zome_types",
  "kitsune2_api",
  "mockall",
@@ -8121,8 +8121,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_chc"
-version = "0.2.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.2.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "async-trait",
  "derive_more 0.99.18",
@@ -8147,15 +8147,15 @@ dependencies = [
 
 [[package]]
 name = "holochain_cli_bundle"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "anyhow",
  "clap 4.5.38",
  "futures",
  "holochain_serialized_bytes",
  "holochain_types",
- "holochain_util 0.5.4",
+ "holochain_util 0.5.5",
  "holochain_wasmer_host",
  "mr_bundle",
  "serde_yaml",
@@ -8183,8 +8183,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_conductor_api"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "cfg-if 1.0.0",
  "derive_more 0.99.18",
@@ -8193,7 +8193,7 @@ dependencies = [
  "holochain_serialized_bytes",
  "holochain_state_types",
  "holochain_types",
- "holochain_util 0.5.4",
+ "holochain_util 0.5.5",
  "holochain_zome_types",
  "indexmap 2.9.0",
  "kitsune2_api",
@@ -8210,14 +8210,14 @@ dependencies = [
 
 [[package]]
 name = "holochain_conductor_config"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "ansi_term",
  "anyhow",
  "holochain_conductor_api",
  "holochain_types",
- "holochain_util 0.5.4",
+ "holochain_util 0.5.5",
  "nanoid",
  "serde",
  "serde_yaml",
@@ -8227,8 +8227,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_conductor_services"
-version = "0.4.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.4.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8238,7 +8238,7 @@ dependencies = [
  "holochain_keystore",
  "holochain_serialized_bytes",
  "holochain_types",
- "holochain_util 0.5.4",
+ "holochain_util 0.5.5",
  "mockall",
  "must_future",
  "nanoid",
@@ -8257,15 +8257,15 @@ checksum = "be0aa773b74c40ef5e4e02f414d8cbfc4e92520a93511055a3fbccc12d2dd045"
 
 [[package]]
 name = "holochain_integrity_types"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "derive_builder",
  "holo_hash",
  "holochain_secure_primitive",
  "holochain_serialized_bytes",
  "holochain_timestamp",
- "holochain_util 0.5.4",
+ "holochain_util 0.5.5",
  "proptest",
  "proptest-derive",
  "serde",
@@ -8277,8 +8277,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_keystore"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "base64 0.22.1",
  "derive_more 0.99.18",
@@ -8286,7 +8286,7 @@ dependencies = [
  "holo_hash",
  "holochain_secure_primitive",
  "holochain_serialized_bytes",
- "holochain_util 0.5.4",
+ "holochain_util 0.5.5",
  "holochain_zome_types",
  "lair_keystore",
  "must_future",
@@ -8306,8 +8306,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_metrics"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "influxive",
  "opentelemetry_api",
@@ -8316,8 +8316,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_nonce"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "getrandom 0.2.15",
  "holochain_secure_primitive",
@@ -8326,8 +8326,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_p2p"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "async-trait",
  "blake2b_simd",
@@ -8343,7 +8343,7 @@ dependencies = [
  "holochain_sqlite",
  "holochain_state",
  "holochain_timestamp",
- "holochain_trace 0.5.4",
+ "holochain_trace 0.5.5",
  "holochain_types",
  "holochain_zome_types",
  "kitsune2",
@@ -8366,8 +8366,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_secure_primitive"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "paste",
  "serde",
@@ -8404,8 +8404,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_sqlite"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8420,7 +8420,7 @@ dependencies = [
  "holochain_nonce",
  "holochain_serialized_bytes",
  "holochain_timestamp",
- "holochain_util 0.5.4",
+ "holochain_util 0.5.5",
  "holochain_zome_types",
  "kitsune2_api",
  "nanoid",
@@ -8447,8 +8447,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_state"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "async-recursion",
  "base64 0.22.1",
@@ -8482,8 +8482,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_state_types"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "holo_hash",
  "holochain_integrity_types",
@@ -8492,8 +8492,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_test_wasm_common"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "hdk",
  "holochain_serialized_bytes",
@@ -8502,8 +8502,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_timestamp"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -8530,8 +8530,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_trace"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "chrono",
  "derive_more 0.99.18",
@@ -8547,8 +8547,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_types"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8570,8 +8570,8 @@ dependencies = [
  "holochain_serialized_bytes",
  "holochain_sqlite",
  "holochain_timestamp",
- "holochain_trace 0.5.4",
- "holochain_util 0.5.4",
+ "holochain_trace 0.5.5",
+ "holochain_util 0.5.5",
  "holochain_zome_types",
  "indexmap 2.9.0",
  "isotest",
@@ -8619,8 +8619,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_util"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "backtrace",
  "cfg-if 1.0.0",
@@ -8636,11 +8636,11 @@ dependencies = [
 
 [[package]]
 name = "holochain_wasm_test_utils"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "holochain_types",
- "holochain_util 0.5.4",
+ "holochain_util 0.5.5",
  "strum 0.18.0",
  "strum_macros 0.18.0",
  "toml 0.8.19",
@@ -8693,8 +8693,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_websocket"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "async-trait",
  "futures",
@@ -8710,8 +8710,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_zome_types"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "contrafact",
  "derive_builder",
@@ -10206,9 +10206,9 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kitsune2"
-version = "0.1.9"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c14dd77af270de5a0626fa92d34b5b04779a142b18ff9a2efddf59d4555f3700"
+checksum = "c2ffb97ea47c67c87cd8ee6c8806c1a23f0d07ee98b4a071544f32af1fea2309"
 dependencies = [
  "bytes",
  "kitsune2_api",
@@ -10219,9 +10219,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune2_api"
-version = "0.1.9"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4225a83ee1b3650efb7f92b774542d98f8eb5b8468e5c3aa3a1b3adaeaf95aa"
+checksum = "e0c7a101efbfb88604cad334e2e2444d1dc8e23c92b38c706fc3fab6e61ae4cf"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -10249,9 +10249,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune2_bootstrap_srv"
-version = "0.1.8"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d8c70c01719985f521b2de5d1b3a1f09557581f04ee00a5a6a02a242f407c1a"
+checksum = "b01914a8b9b7b618c699600c0cafaff60ba6dff0b81318202125c97387f4cc97"
 dependencies = [
  "async-channel",
  "axum",
@@ -10276,9 +10276,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune2_core"
-version = "0.1.9"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf6c3595681261053e8b5098607abcc2b6c5ff52892fddafc7453b53c244a804"
+checksum = "4a97f6d17c6f32a49aee74269692fbfd74ce5af2d43b780c402406a9c1bf3f2d"
 dependencies = [
  "backon",
  "bytes",
@@ -10309,9 +10309,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune2_gossip"
-version = "0.1.9"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd29ea42fd3c0a672f271368feb50023b5d067b449b01c0abe55a67f498d4901"
+checksum = "be8b788c1dc7166b05c34e26d13eade153db73fc37608d337c2b8399be45caac"
 dependencies = [
  "bytes",
  "futures",
@@ -10329,9 +10329,9 @@ dependencies = [
 
 [[package]]
 name = "kitsune2_transport_tx5"
-version = "0.1.9"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6be22bd2b647010ee1e2701fefcca78d89a34a32279f9e607834371513dfce4b"
+checksum = "7efda8b614d07e8406726073b35c62e0db5e536d5a9b9ed248e077c03c1cc17c"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -11642,13 +11642,13 @@ checksum = "7843ec2de400bcbc6a6328c958dc38e5359da6e93e72e37bc5246bf1ae776389"
 
 [[package]]
 name = "mr_bundle"
-version = "0.5.4"
-source = "git+https://github.com/coasys/holochain.git?branch=0.5.4-coasys#54a462183067cb4542c0c8423e40cfe0eab83526"
+version = "0.5.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.5.5-coasys#578c6651726d327aba9fd446248e0b8046265bdc"
 dependencies = [
  "derive_more 0.99.18",
  "flate2",
  "futures",
- "holochain_util 0.5.4",
+ "holochain_util 0.5.5",
  "proptest",
  "proptest-derive",
  "reqwest 0.12.9",
@@ -19640,9 +19640,9 @@ dependencies = [
 
 [[package]]
 name = "tx5"
-version = "0.3.4"
+version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "243f2f2815e826b2c79e1cf10093f77afda339ef0e0dd4a2d619d57cbc4ef40a"
+checksum = "a31ed1528a9ee8c869d64b21f956ec6fb14500c2e729f1fe5c4bf7d9fa6077f7"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -19658,9 +19658,9 @@ dependencies = [
 
 [[package]]
 name = "tx5-connection"
-version = "0.3.4"
+version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa4792c1810c269c5775fc4646f5f958fdb10b81fde97763244ef8d106f7bf49"
+checksum = "57d8df60ad540a9f285cade403cf84b25a4ed8e8aeb30e55279856f9b68bc022"
 dependencies = [
  "bit_field",
  "datachannel",
@@ -19675,9 +19675,9 @@ dependencies = [
 
 [[package]]
 name = "tx5-core"
-version = "0.3.4"
+version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad25f7c4aa26e6eec448eebb76aa7e845587c10a636e026919ff44a76cdcefbb"
+checksum = "c522fb70ab1702ee31677e999b954e5bcf544ad1e6d79ccd6d54da7a8d4c9483"
 dependencies = [
  "app_dirs2",
  "base64 0.22.1",
@@ -19693,9 +19693,9 @@ dependencies = [
 
 [[package]]
 name = "tx5-signal"
-version = "0.3.4"
+version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c213e14cadd6e0c8f70bbc34e7103b82c6453aa53493e2f8a39d17797d282f6f"
+checksum = "0da597849a6877e5e4118c729f8f0dbadab8c8f7312dff9f164a4ca2919a54ad"
 dependencies = [
  "rand 0.8.5",
  "sbd-e2e-crypto-client",
