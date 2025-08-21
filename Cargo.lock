@@ -13053,13 +13053,36 @@ checksum = "e2355d85b9a3786f481747ced0e0ff2ba35213a1f9bd406ed906554d7af805a1"
 
 [[package]]
 name = "ouroboros"
+version = "0.15.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1358bd1558bd2a083fed428ffeda486fbfb323e698cdda7794259d592ca72db"
+dependencies = [
+ "aliasable",
+ "ouroboros_macro 0.15.6",
+]
+
+[[package]]
+name = "ouroboros"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e0f050db9c44b97a94723127e6be766ac5c340c48f2c4bb3ffa11713744be59"
 dependencies = [
  "aliasable",
- "ouroboros_macro",
+ "ouroboros_macro 0.18.5",
  "static_assertions",
+]
+
+[[package]]
+name = "ouroboros_macro"
+version = "0.15.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f7d21ccd03305a674437ee1248f3ab5d4b1db095cf1caf49f1713ddf61956b7"
+dependencies = [
+ "Inflector",
+ "proc-macro-error",
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -16156,7 +16179,7 @@ dependencies = [
  "native-tls",
  "num-order",
  "ordered-float 5.0.0",
- "ouroboros",
+ "ouroboros 0.18.5",
  "phf 0.11.2",
  "proc-macro2",
  "quote",
@@ -19670,6 +19693,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tx5-core",
+ "tx5-go-pion",
  "tx5-signal",
 ]
 
@@ -19689,6 +19713,36 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "tx5-go-pion"
+version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ca373f98a8ff67ed9bc95331ebd0a7bad28fbed6a573fbb427043623763f6a4"
+dependencies = [
+ "futures",
+ "tokio",
+ "tracing",
+ "tx5-go-pion-sys",
+]
+
+[[package]]
+name = "tx5-go-pion-sys"
+version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9848cbcb082af6ab8f07f9066df04a9830734bc5ef0ed53520641f4a3e88257"
+dependencies = [
+ "Inflector",
+ "base64 0.22.1",
+ "libc",
+ "libloading 0.8.5",
+ "once_cell",
+ "ouroboros 0.15.6",
+ "sha2 0.10.8",
+ "tracing",
+ "tx5-core",
+ "zip 0.6.6",
 ]
 
 [[package]]
