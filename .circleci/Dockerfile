@@ -8,7 +8,7 @@ RUN apt-get update && sudo apt-get install -y \
     libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake gobjc clang gnustep-devel libobjc4 libgnustep-base-dev libasound2-dev pkg-config fuse libfuse2 mesa-utils mesa-vulkan-drivers
 
 # Install Go
-ENV GO_VERSION 1.22.0
+ENV GO_VERSION 1.24.0
 RUN wget https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz -O go.tar.gz \
     && tar -C /usr/local -xzf go.tar.gz \
     && rm go.tar.gz
