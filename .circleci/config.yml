@@ -1,4 +1,6 @@
 version: 2.1
+references:
+  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:654fee9ee2a36fec192a4a08c611ef99d9ad57c6d1a4e5bd51d899871b908b03
 
 orbs:
   node: circleci/node@5.2.0
@@ -8,7 +10,7 @@ orbs:
 jobs:
   build-and-test:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:37bfc739e9bdde495053bd250a31ce8a2cd445336d3efb31a85fa732988170b7
+      - image: *ad4m_image
     resource_class: xlarge
     steps:
       - checkout
@@ -71,7 +73,7 @@ jobs:
 
   integration-tests-js:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:37bfc739e9bdde495053bd250a31ce8a2cd445336d3efb31a85fa732988170b7
+      - image: *ad4m_image
     resource_class: xlarge
     steps:
       - checkout
@@ -139,7 +141,7 @@ jobs:
 
   integration-tests-cli:
     docker:
-      - image: coasys/ad4m-ci-linux:latest@sha256:7008f587d355d1adeb58553f52f99e1812822b4d21dc78d69bc96040d5e57e82
+      - image: *ad4m_image
     steps:
       - checkout
       - attach_workspace:
