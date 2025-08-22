@@ -8,7 +8,7 @@ RUN apt-get update && sudo apt-get install -y \
     libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake gobjc clang gnustep-devel libobjc4 libgnustep-base-dev libasound2-dev pkg-config fuse libfuse2 mesa-utils mesa-vulkan-drivers
 
 # Install Go
-ENV GO_VERSION 1.22.0
+ENV GO_VERSION 1.24.6
 RUN wget https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz -O go.tar.gz \
     && tar -C /usr/local -xzf go.tar.gz \
     && rm go.tar.gz
@@ -34,7 +34,7 @@ RUN ~/.cargo/bin/rustup default 1.86
 RUN ~/.cargo/bin/rustup target add wasm32-unknown-unknown
 
 # Install hc
-RUN ~/.cargo/bin/cargo install holochain_cli@0.5.2
+RUN ~/.cargo/bin/cargo install holochain_cli@0.5.5
 RUN ~/.cargo/bin/cargo install kitsune2_bootstrap_srv@0.2.7
 
 # Install Deno

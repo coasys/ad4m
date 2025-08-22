@@ -1,5 +1,5 @@
-import { ref, Ref, watch, shallowRef, ComputedRef } from "vue";
-import { PerspectiveProxy, Ad4mModel, Query, PaginationResult, ModelQueryBuilder } from "@coasys/ad4m";
+import { Ad4mModel, ModelQueryBuilder, PaginationResult, PerspectiveProxy, Query } from "@coasys/ad4m";
+import { ComputedRef, ref, Ref, shallowRef, watch } from "vue";
 
 type Props<T extends Ad4mModel> = {
   perspective: PerspectiveProxy | ComputedRef<PerspectiveProxy | null>;
@@ -24,7 +24,7 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
   const error = ref<string>("");
   const pageNumber = ref(1);
   const totalCount = ref(0);
-  let modelQuery: ModelQueryBuilder<T|Ad4mModel> | null = null;
+  let modelQuery: ModelQueryBuilder<T | Ad4mModel> | null = null;
 
   // Handle perspective as a ref/computed or direct value
   const isPerspectiveRef = perspective && typeof perspective === "object" && "value" in perspective;
@@ -43,8 +43,15 @@ export function useModel<T extends Ad4mModel>(props: Props<T>): Result<T> {
   }
 
   function includeBaseExpressions(entries: T[]): T[] {
+    // Makes the baseExpression on each entry enumerable (while preserving the original instance)
     return entries.map((entry) => {
-      return { ...entry, baseExpression: entry.baseExpression };
+      if (entry.baseExpression !== undefined) {
+        Object.defineProperty(entry, "baseExpression", {
+          value: entry.baseExpression,
+          enumerable: true,
+        });
+      }
+      return entry;
     });
   }
 
