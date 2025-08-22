@@ -6,6 +6,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Fixed
+- Entry instances preserved in useModel hook when making the base expression [PR#617](https://github.com/coasys/ad4m/pull/617)
 - Prolog engine gets respawned when a query caused an error to clean the machine state [PR#483](https://github.com/coasys/ad4m/pull/483)
 - Catch panics in Scryer and handle as error instead of killing the engine thread which caused `channel closed` error in future queries [PR#483](https://github.com/coasys/ad4m/pull/483)
 - Bootstrap seed creation working with cli: `ad4m dev generate-bootstrap` [PR#247](https://github.com/perspect3vism/ad4m/pull/496)
@@ -98,6 +99,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - P-Diff-Sync now merges perspective diffs directly into refs instead of separate entries, reducing Holochain entries per commit and improving performance [PR#608](https://github.com/coasys/ad4m/pull/608)
 - Ad4mModel.save() now uses automatic batch creation and commit for improved performance [PR#609](https://github.com/coasys/ad4m/pull/609)
 - Updated Holochain dependencies to version 0.5.3-rc0 and kitsune2_api to 0.1.9 [PR#612](https://github.com/coasys/ad4m/pull/612)
+- Upgraded Holochain to version 0.5.5 [PR#618](https://github.com/coasys/ad4m/pull/618)
 
 ## [0.9.0] - 23/03/2024
 
