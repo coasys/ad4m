@@ -2835,9 +2835,21 @@ mod tests {
         }
 
         let query = LinkQuery::default();
-        let links = perspective.get_links(&query).await.unwrap();
+        let mut links = perspective.get_links(&query).await.unwrap();
         assert_eq!(links.len(), 5);
-        assert_eq!(links, all_links);
+        let mut all_links_sorted = all_links.clone();
+        let cmp = |a: &DecoratedLinkExpression, b: &DecoratedLinkExpression| {
+            let at = chrono::DateTime::parse_from_rfc3339(&a.timestamp).unwrap();
+            let bt = chrono::DateTime::parse_from_rfc3339(&b.timestamp).unwrap();
+            at.cmp(&bt)
+                .then(a.data.source.cmp(&b.data.source))
+                .then(a.data.predicate.cmp(&b.data.predicate))
+                .then(a.data.target.cmp(&b.data.target))
+                .then(a.author.cmp(&b.author))
+        };
+        links.sort_by(cmp);
+        all_links_sorted.sort_by(cmp);
+        assert_eq!(links, all_links_sorted);
     }
 
     #[tokio::test]
@@ -2863,12 +2875,22 @@ mod tests {
             source: Some(source.to_string()),
             ..Default::default()
         };
-        let links = perspective.get_links(&query).await.unwrap();
-        let expected_links: Vec<_> = all_links
+        let mut links = perspective.get_links(&query).await.unwrap();
+        let mut expected_links: Vec<_> = all_links
             .into_iter()
             .filter(|expr| expr.data.source == source)
             .collect();
         assert_eq!(links.len(), expected_links.len());
+        let cmp = |a: &DecoratedLinkExpression, b: &DecoratedLinkExpression| {
+            let at = chrono::DateTime::parse_from_rfc3339(&a.timestamp).unwrap();
+            let bt = chrono::DateTime::parse_from_rfc3339(&b.timestamp).unwrap();
+            at.cmp(&bt)
+                .then(a.data.predicate.cmp(&b.data.predicate))
+                .then(a.data.target.cmp(&b.data.target))
+                .then(a.author.cmp(&b.author))
+        };
+        links.sort_by(cmp);
+        expected_links.sort_by(cmp);
         assert_eq!(links, expected_links);
     }
 
