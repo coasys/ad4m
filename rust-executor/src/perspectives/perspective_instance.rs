@@ -593,16 +593,50 @@ impl PerspectiveInstance {
 
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) {
         let handle = self.persisted.lock().await.clone();
-        if !diff.additions.is_empty() {
+
+        // Deduplicate by (author, timestamp, source, predicate, target)
+        let mut seen_add: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut unique_additions: Vec<LinkExpression> = Vec::new();
+        for link in diff.additions.iter() {
+            let key = format!(
+                "{}|{}|{}|{}|{}",
+                link.author,
+                link.timestamp,
+                link.data.source,
+                link.data.predicate.clone().unwrap_or_default(),
+                link.data.target
+            );
+            if seen_add.insert(key) {
+                unique_additions.push(link.clone());
+            }
+        }
+
+        let mut seen_rem: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut unique_removals: Vec<LinkExpression> = Vec::new();
+        for link in diff.removals.iter() {
+            let key = format!(
+                "{}|{}|{}|{}|{}",
+                link.author,
+                link.timestamp,
+                link.data.source,
+                link.data.predicate.clone().unwrap_or_default(),
+                link.data.target
+            );
+            if seen_rem.insert(key) {
+                unique_removals.push(link.clone());
+            }
+        }
+
+        if !unique_additions.is_empty() {
             Ad4mDb::with_global_instance(|db| {
-                db.add_many_links(&handle.uuid, diff.additions.clone(), &LinkStatus::Shared)
+                db.add_many_links(&handle.uuid, unique_additions.clone(), &LinkStatus::Shared)
             })
             .expect("Failed to add many links");
         }
 
-        if !diff.removals.is_empty() {
+        if !unique_removals.is_empty() {
             Ad4mDb::with_global_instance(|db| {
-                for link in &diff.removals {
+                for link in &unique_removals {
                     db.remove_link(&handle.uuid, link)
                         .expect("Failed to remove link");
                 }
@@ -610,13 +644,11 @@ impl PerspectiveInstance {
         }
 
         let decorated_diff = DecoratedPerspectiveDiff {
-            additions: diff
-                .additions
+            additions: unique_additions
                 .iter()
                 .map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared)))
                 .collect(),
-            removals: diff
-                .removals
+            removals: unique_removals
                 .iter()
                 .map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared)))
                 .collect(),
