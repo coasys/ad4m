@@ -351,6 +351,27 @@ export class Ad4mModel {
       await Promise.all(
         values.map(async ([name, value, resolve]) => {
           let finalValue = value;
+
+          // Handle UTF-8 byte sequences from Prolog URL decoding
+          if (!resolve && typeof value === 'string') {
+            // Check if this string contains UTF-8 encoded bytes that need reconstruction
+            // Prolog url_decode returns individual UTF-8 bytes as characters
+            try {
+              // Convert string to byte array and then decode as UTF-8
+              const bytes = new Uint8Array(Array.from(value).map(char => char.charCodeAt(0)));
+              const decoder = new TextDecoder('utf-8', { fatal: false });
+              const decoded = decoder.decode(bytes);
+              
+              // Only use the decoded version if it's different and valid
+              if (decoded !== value && !decoded.includes('\uFFFD')) {
+                finalValue = decoded;
+              }
+            } catch (error) {
+              // If UTF-8 conversion fails, keep the original value
+              console.warn('UTF-8 byte reconstruction failed for value:', value, error);
+            }
+          }
+
           // Resolve the value if necessary
           if (resolve) {
             let resolvedExpression = await perspective.getExpression(value);
