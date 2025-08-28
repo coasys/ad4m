@@ -17,6 +17,7 @@ import runtimeTests from "./runtime";
 import directMessageTests from "./direct-messages";
 import agentLanguageTests from "./agent-language";
 import socialDNATests from "./social-dna-flow";
+import emojiSupportTests from "./emoji-support";
 import fetch from "node-fetch";
 
 //@ts-ignore
@@ -134,6 +135,7 @@ describe("Integration tests", function () {
     describe('Expression', expressionTests(testContext))
     describe('Perspective', perspectiveTests(testContext))
     describe('Social DNA', socialDNATests(testContext))
+    describe('Emoji and UTF-8 Support', emojiSupportTests(testContext))
 
     describe('with Alice and Bob', () => {
         let bobExecutorProcess: ChildProcess | null = null
