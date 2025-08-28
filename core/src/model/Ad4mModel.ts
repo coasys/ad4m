@@ -354,21 +354,20 @@ export class Ad4mModel {
 
           // Handle UTF-8 byte sequences from Prolog URL decoding
           if (!resolve && typeof value === 'string') {
-            // Check if this string contains UTF-8 encoded bytes that need reconstruction
-            // Prolog url_decode returns individual UTF-8 bytes as characters
-            try {
-              // Convert string to byte array and then decode as UTF-8
-              const bytes = new Uint8Array(Array.from(value).map(char => char.charCodeAt(0)));
-              const decoder = new TextDecoder('utf-8', { fatal: false });
-              const decoded = decoder.decode(bytes);
-              
-              // Only use the decoded version if it's different and valid
-              if (decoded !== value && !decoded.includes('\uFFFD')) {
-                finalValue = decoded;
+            // Only attempt reconstruction if the string looks like a byte string (all code points <= 0xFF)
+            // and contains at least one high byte (>= 0x80). This avoids mangling valid Unicode.
+            const codePoints = Array.from(value, ch => ch.codePointAt(0)!);
+            const looksByteString = codePoints.every(cp => cp <= 0xFF);
+            const hasHighByte = codePoints.some(cp => cp >= 0x80);
+            if (looksByteString && hasHighByte) {
+              try {
+                const bytes = Uint8Array.from(codePoints);
+                const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+                if (decoded !== value) finalValue = decoded;
+              } catch (error) {
+                // If UTF-8 conversion fails, keep the original value
+                console.warn(`UTF-8 byte reconstruction failed for property "${name}"`, { value, error });
               }
-            } catch (error) {
-              // If UTF-8 conversion fails, keep the original value
-              console.warn('UTF-8 byte reconstruction failed for value:', value, error);
             }
           }
 
