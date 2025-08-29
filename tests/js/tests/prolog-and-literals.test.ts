@@ -2387,10 +2387,159 @@ describe("Prolog + Literals", () => {
                         expect(pageCallback.callCount).to.equal(count);
                     });
                 });
+
+                describe("Emoji and Special Character Handling", () => {
+                    @ModelOptions({
+                        name: "Message"
+                    })
+                    class Message extends Ad4mModel {
+                        @Flag({
+                            through: "ad4m://entry_type",
+                            value: "flux://message"
+                        })
+                        type: string = ""
+
+                        @Property({
+                            through: "flux://body",
+                            writable: true,
+                            resolveLanguage: "literal"
+                        })
+                        body: string = ""
+                    }
+
+                    before(async () => {
+                        // Register the Message class using ensureSDNASubjectClass
+                        await perspective!.ensureSDNASubjectClass(Message);
+                    });
+
+                    it("should correctly create and retrieve messages with emoji content", async () => {
+                        // Create a message with emoji content using Active Record
+                        const emojiMessage = new Message(perspective!);
+                        emojiMessage.body = "<p>👋</p>";
+                        await emojiMessage.save();
+
+                        // Retrieve using findAll to test the full Prolog → Ad4mModel pipeline
+                        const messages = await Message.findAll(perspective!);
+                        const retrievedMessage = messages.find((m: Message) => m.body === "<p>👋</p>");
+
+                        expect(retrievedMessage).to.not.be.undefined;
+                        expect(retrievedMessage!.body).to.equal("<p>👋</p>");
+                    });
+
+                    it("should handle complex emoji sequences in Active Record properties", async () => {
+                        // Test with complex emoji sequences
+                        const complexMessage = new Message(perspective!);
+                        complexMessage.body = "<p>🏳️‍🌈 Complex emoji with modifiers 👨‍👩‍👧‍👦</p>";
+                        await complexMessage.save();
+
+                        // Test retrieval with findAll
+                        const messages = await Message.findAll(perspective!);
+                        const foundMessage = messages.find((m: Message) => m.body === "<p>🏳️‍🌈 Complex emoji with modifiers 👨‍👩‍👧‍👦</p>");
+                        
+                        expect(foundMessage).to.not.be.undefined;
+                        expect(foundMessage!.body).to.equal("<p>🏳️‍🌈 Complex emoji with modifiers 👨‍👩‍👧‍👦</p>");
+                    });
+
+                    it("should correctly handle special characters and Unicode", async () => {
+                        // Test with various special characters that could break URL encoding
+                        const specialMessage = new Message(perspective!);
+                        specialMessage.body = "<p>Special chars: àáâãäåæçèéêë ñ © ® ™ €</p>";
+                        await specialMessage.save();
+
+                        // Verify retrieval through findAll
+                        const messages = await Message.findAll(perspective!);
+                        const special = messages.find((m: Message) => m.body === "<p>Special chars: àáâãäåæçèéêë ñ © ® ™ €</p>");
+                        
+                        expect(special).to.not.be.undefined;
+                        expect(special!.body).to.equal("<p>Special chars: àáâãäåæçèéêë ñ © ® ™ €</p>");
+                    });
+
+                    it("should handle mixed content with emojis and HTML entities", async () => {
+                        // Test HTML entities mixed with emojis
+                        const mixedMessage = new Message(perspective!);
+                        mixedMessage.body = "<p>Mixed: &lt;emoji&gt; 😊 &amp; &quot;quotes&quot; 🎉</p>";
+                        await mixedMessage.save();
+
+                        // Test direct property access after save/reload cycle
+                        const allMessages = await Message.findAll(perspective!);
+                        const mixedMsg = allMessages.find((m: Message) => m.body === "<p>Mixed: &lt;emoji&gt; 😊 &amp; &quot;quotes&quot; 🎉</p>");
+                        
+                        expect(mixedMsg).to.not.be.undefined;
+                        expect(mixedMsg!.body).to.equal("<p>Mixed: &lt;emoji&gt; 😊 &amp; &quot;quotes&quot; 🎉</p>");
+                    });
+
+                    it("should preserve UTF-8 byte sequences through Prolog query system", async () => {
+                        // Test edge case UTF-8 sequences that previously caused issues
+                        const utf8Message = new Message(perspective!);
+                        utf8Message.body = "UTF-8 test: 🌍🌎🌏 💫⭐✨ 🔥💯🚀 with metadata: {\"tags\": [\"🏷️\", \"📝\"], \"priority\": \"🔴\"}";
+                        await utf8Message.save();
+
+                        // Query using findAll to test the exact pipeline that was broken
+                        const messages = await Message.findAll(perspective!);
+                        const testMsg = messages.find((m: Message) => m.body === "UTF-8 test: 🌍🌎🌏 💫⭐✨ 🔥💯🚀 with metadata: {\"tags\": [\"🏷️\", \"📝\"], \"priority\": \"🔴\"}");
+                        
+                        expect(testMsg).to.not.be.undefined;
+                        // These assertions test the exact issue that was fixed:
+                        // Previously these would return undefined due to Prolog URL decoding issues
+                        expect(testMsg!.body).to.not.be.undefined;
+                        expect(testMsg!.body).to.equal("UTF-8 test: 🌍🌎🌏 💫⭐✨ 🔥💯🚀 with metadata: {\"tags\": [\"🏷️\", \"📝\"], \"priority\": \"🔴\"}");
+                    });
+
+                    it("should handle subscription-based queries with emoji content", async () => {
+                        // Clear any previous messages
+                        let existingMessages = await Message.findAll(perspective!);
+                        for (const msg of existingMessages) await msg.delete();
+
+                        // Set up subscription for emoji content
+                        let updateCount = 0;
+                        let subscriptionResults: Message[] = [];
+                        const initialResults = await Message
+                            .query(perspective!)
+                            .subscribe((messages: Message[]) => {
+                                subscriptionResults = messages;
+                                updateCount++;
+                            });
+
+                        // Initially no results
+                        expect(initialResults.length).to.equal(0);
+                        expect(updateCount).to.equal(0);
+
+                        // Create a message after setting up subscription - should trigger callback
+                        const subscriptionMessage = new Message(perspective!);
+                        subscriptionMessage.body = "Subscription test with emoji: 🎯✅";
+                        await subscriptionMessage.save();
+
+                        // Give time for subscription to process
+                        await sleep(1000);
+
+                        // Verify subscription callback was called
+                        expect(updateCount).to.equal(1);
+                        expect(subscriptionResults.length).to.equal(1);
+                        expect(subscriptionResults[0].body).to.equal("Subscription test with emoji: 🎯✅");
+
+                        // Add another message with emojis - should trigger subscription again
+                        const secondMessage = new Message(perspective!);
+                        secondMessage.body = "Another emoji message: 🚀💯";
+                        await secondMessage.save();
+
+                        await sleep(1000);
+
+                        // Verify subscription was called again
+                        expect(updateCount).to.equal(2);
+                        expect(subscriptionResults.length).to.equal(2);
+                        const foundSecond = subscriptionResults.find(m => m.body === "Another emoji message: 🚀💯");
+                        expect(foundSecond).to.not.be.undefined;
+
+                        // Also verify the message exists through direct query
+                        const messages = await Message.findAll(perspective!);
+                        const found = messages.find((m: Message) => m.body === "Subscription test with emoji: 🎯✅");
+                        expect(found).to.not.be.undefined;
+                        expect(found!.body).to.equal("Subscription test with emoji: 🎯✅");
+                    });
+                });
             })
         })
     })
-
 
     describe("Smart Literal", () => {
         let perspective: PerspectiveProxy | null = null
