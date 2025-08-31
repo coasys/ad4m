@@ -336,44 +336,69 @@ scheme(number) --> "number".
 scheme(boolean) --> "boolean".
 scheme(json) --> "json".
 
+% Simple URL decoder with cuts to prevent infinite loops
 url_decode([]) --> [].
 url_decode([H|T]) --> url_decode_char(H), url_decode(T).
 
-url_decode_char(' ') --> "%20".
-url_decode_char('!') --> "%21".
-url_decode_char('"') --> "%22".
-url_decode_char('#') --> "%23".
-url_decode_char('$') --> "%24".
-url_decode_char('%') --> "%25".
-url_decode_char('&') --> "%26".
-url_decode_char('\'') --> "%27".
-url_decode_char('(') --> "%28".
-url_decode_char(')') --> "%29".
-url_decode_char('*') --> "%2A".
-url_decode_char('+') --> "%2B".
-url_decode_char(',') --> "%2C".
-url_decode_char('/') --> "%2F".
-url_decode_char(':') --> "%3A".
-url_decode_char(';') --> "%3B".
-url_decode_char('=') --> "%3D".
-url_decode_char('?') --> "%3F".
-url_decode_char('@') --> "%40".
-url_decode_char('[') --> "%5B".
-url_decode_char(']') --> "%5D".
-url_decode_char('{') --> "%7B".
-url_decode_char('}') --> "%7D".
-url_decode_char('<') --> "%3C".
-url_decode_char('>') --> "%3E".
-url_decode_char('\\') --> "%5C".
-url_decode_char('^') --> "%5E".
-url_decode_char('_') --> "%5F".
-url_decode_char('|') --> "%7C".
-url_decode_char('~') --> "%7E".
-url_decode_char('`') --> "%60".
-url_decode_char('-') --> "%2D".
-url_decode_char('.') --> "%2E".
+% Specific ASCII characters first (with cuts to prevent backtracking)
+url_decode_char(' ') --> "%20", !.
+url_decode_char('!') --> "%21", !.
+url_decode_char('"') --> "%22", !.
+url_decode_char('#') --> "%23", !.
+url_decode_char('$') --> "%24", !.
+url_decode_char('%') --> "%25", !.
+url_decode_char('&') --> "%26", !.
+url_decode_char('\'') --> "%27", !.
+url_decode_char('(') --> "%28", !.
+url_decode_char(')') --> "%29", !.
+url_decode_char('*') --> "%2A", !.
+url_decode_char('+') --> "%2B", !.
+url_decode_char(',') --> "%2C", !.
+url_decode_char('-') --> "%2D", !.
+url_decode_char('.') --> "%2E", !.
+url_decode_char('/') --> "%2F", !.
+url_decode_char(':') --> "%3A", !.
+url_decode_char(';') --> "%3B", !.
+url_decode_char('=') --> "%3D", !.
+url_decode_char('?') --> "%3F", !.
+url_decode_char('@') --> "%40", !.
+url_decode_char('[') --> "%5B", !.
+url_decode_char(']') --> "%5D", !.
+url_decode_char('\\') --> "%5C", !.
+url_decode_char('^') --> "%5E", !.
+url_decode_char('_') --> "%5F", !.
+url_decode_char('`') --> "%60", !.
+url_decode_char('{') --> "%7B", !.
+url_decode_char('|') --> "%7C", !.
+url_decode_char('}') --> "%7D", !.
+url_decode_char('~') --> "%7E", !.
+url_decode_char('<') --> "%3C", !.
+url_decode_char('>') --> "%3E", !.
 
-url_decode_char(Char) --> [Char], { \+ member(Char, "%") }.
+% General percent-encoded character handler for UTF-8 and other bytes (with cut)
+url_decode_char(Char) --> 
+    "%", hex_digit(H1), hex_digit(H2), !,
+    { 
+        hex_digit_value(H1, V1), hex_digit_value(H2, V2),
+        Byte is V1 * 16 + V2,
+        Byte >= 0, Byte =< 255,
+        char_code(Char, Byte)
+    }.
+
+% Fast path: non-percent characters pass through unchanged (with cut)
+url_decode_char(Char) --> [Char], !.
+
+% Helper predicates for hex digit parsing
+hex_digit(D) --> [D], { member(D, "0123456789ABCDEFabcdef") }.
+
+hex_digit_value('0', 0). hex_digit_value('1', 1). hex_digit_value('2', 2).
+hex_digit_value('3', 3). hex_digit_value('4', 4). hex_digit_value('5', 5).
+hex_digit_value('6', 6). hex_digit_value('7', 7). hex_digit_value('8', 8).
+hex_digit_value('9', 9). hex_digit_value('A', 10). hex_digit_value('B', 11).
+hex_digit_value('C', 12). hex_digit_value('D', 13). hex_digit_value('E', 14).
+hex_digit_value('F', 15). hex_digit_value('a', 10). hex_digit_value('b', 11).
+hex_digit_value('c', 12). hex_digit_value('d', 13). hex_digit_value('e', 14).
+hex_digit_value('f', 15).
     "#;
 
     lines.extend(
