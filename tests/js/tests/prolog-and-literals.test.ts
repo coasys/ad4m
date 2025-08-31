@@ -2414,7 +2414,7 @@ describe("Prolog + Literals", () => {
                     @ModelOptions({
                         name: "Message"
                     })
-                    class Message extends Ad4mModel {
+                    class EmojiMessage extends Ad4mModel {
                         @Flag({
                             through: "ad4m://entry_type",
                             value: "flux://message"
@@ -2433,11 +2433,11 @@ describe("Prolog + Literals", () => {
                         // Add a small delay to ensure Prolog engine is stable
                         await sleep(2000);
                         
-                        // Register the Message class using ensureSDNASubjectClass
-                        await perspective!.ensureSDNASubjectClass(Message);
+                        // Register the EmojiMessage class using ensureSDNASubjectClass
+                        await perspective!.ensureSDNASubjectClass(EmojiMessage);
                         
-                        // Clear any existing Message instances to start fresh
-                        const existingMessages = await Message.findAll(perspective!);
+                        // Clear any existing EmojiMessage instances to start fresh
+                        const existingMessages = await EmojiMessage.findAll(perspective!);
                         for (const msg of existingMessages) {
                             await msg.delete();
                         }
@@ -2445,7 +2445,7 @@ describe("Prolog + Literals", () => {
 
                     beforeEach(async () => {
                         // Clean up any messages from previous tests
-                        const existingMessages = await Message.findAll(perspective!);
+                        const existingMessages = await EmojiMessage.findAll(perspective!);
                         for (const msg of existingMessages) {
                             await msg.delete();
                         }
@@ -2453,13 +2453,13 @@ describe("Prolog + Literals", () => {
 
                     it("should correctly create and retrieve messages with emoji content", async () => {
                         // Create a message with emoji content using Active Record
-                        const emojiMessage = new Message(perspective!);
+                        const emojiMessage = new EmojiMessage(perspective!);
                         emojiMessage.body = "<p>👋</p>";
                         await emojiMessage.save();
 
                         // Retrieve using findAll to test the full Prolog → Ad4mModel pipeline
-                        const messages = await Message.findAll(perspective!);
-                        const retrievedMessage = messages.find((m: Message) => m.body === "<p>👋</p>");
+                        const messages = await EmojiMessage.findAll(perspective!);
+                        const retrievedMessage = messages.find((m: EmojiMessage) => m.body === "<p>👋</p>");
 
                         expect(retrievedMessage).to.not.be.undefined;
                         expect(retrievedMessage!.body).to.equal("<p>👋</p>");
@@ -2467,13 +2467,13 @@ describe("Prolog + Literals", () => {
 
                     it("should handle complex emoji sequences in Active Record properties", async () => {
                         // Test with complex emoji sequences
-                        const complexMessage = new Message(perspective!);
+                        const complexMessage = new EmojiMessage(perspective!);
                         complexMessage.body = "<p>🏳️‍🌈 Complex emoji with modifiers 👨‍👩‍👧‍👦</p>";
                         await complexMessage.save();
 
                         // Test retrieval with findAll
-                        const messages = await Message.findAll(perspective!);
-                        const foundMessage = messages.find((m: Message) => m.body === "<p>🏳️‍🌈 Complex emoji with modifiers 👨‍👩‍👧‍👦</p>");
+                        const messages = await EmojiMessage.findAll(perspective!);
+                        const foundMessage = messages.find((m: EmojiMessage) => m.body === "<p>🏳️‍🌈 Complex emoji with modifiers 👨‍👩‍👧‍👦</p>");
                         
                         expect(foundMessage).to.not.be.undefined;
                         expect(foundMessage!.body).to.equal("<p>🏳️‍🌈 Complex emoji with modifiers 👨‍👩‍👧‍👦</p>");
@@ -2481,13 +2481,13 @@ describe("Prolog + Literals", () => {
 
                     it("should correctly handle special characters and Unicode", async () => {
                         // Test with various special characters that could break URL encoding
-                        const specialMessage = new Message(perspective!);
+                        const specialMessage = new EmojiMessage(perspective!);
                         specialMessage.body = "<p>Special chars: àáâãäåæçèéêë ñ © ® ™ €</p>";
                         await specialMessage.save();
 
                         // Verify retrieval through findAll
-                        const messages = await Message.findAll(perspective!);
-                        const special = messages.find((m: Message) => m.body === "<p>Special chars: àáâãäåæçèéêë ñ © ® ™ €</p>");
+                        const messages = await EmojiMessage.findAll(perspective!);
+                        const special = messages.find((m: EmojiMessage) => m.body === "<p>Special chars: àáâãäåæçèéêë ñ © ® ™ €</p>");
                         
                         expect(special).to.not.be.undefined;
                         expect(special!.body).to.equal("<p>Special chars: àáâãäåæçèéêë ñ © ® ™ €</p>");
@@ -2495,13 +2495,13 @@ describe("Prolog + Literals", () => {
 
                     it("should handle mixed content with emojis and HTML entities", async () => {
                         // Test HTML entities mixed with emojis
-                        const mixedMessage = new Message(perspective!);
+                        const mixedMessage = new EmojiMessage(perspective!);
                         mixedMessage.body = "<p>Mixed: &lt;emoji&gt; 😊 &amp; &quot;quotes&quot; 🎉</p>";
                         await mixedMessage.save();
 
                         // Test direct property access after save/reload cycle
-                        const allMessages = await Message.findAll(perspective!);
-                        const mixedMsg = allMessages.find((m: Message) => m.body === "<p>Mixed: &lt;emoji&gt; 😊 &amp; &quot;quotes&quot; 🎉</p>");
+                        const allMessages = await EmojiMessage.findAll(perspective!);
+                        const mixedMsg = allMessages.find((m: EmojiMessage) => m.body === "<p>Mixed: &lt;emoji&gt; 😊 &amp; &quot;quotes&quot; 🎉</p>");
                         
                         expect(mixedMsg).to.not.be.undefined;
                         expect(mixedMsg!.body).to.equal("<p>Mixed: &lt;emoji&gt; 😊 &amp; &quot;quotes&quot; 🎉</p>");
@@ -2509,13 +2509,13 @@ describe("Prolog + Literals", () => {
 
                     // it("should preserve UTF-8 byte sequences through Prolog query system", async () => {
                     //     // Test edge case UTF-8 sequences that previously caused issues
-                    //     const utf8Message = new Message(perspective!);
+                    //     const utf8Message = new EmojiMessage(perspective!);
                     //     utf8Message.body = "UTF-8 test: 🌍🌎🌏 💫⭐✨ 🔥💯🚀 with metadata: {\"tags\": [\"🏷️\", \"📝\"], \"priority\": \"🔴\"}";
                     //     await utf8Message.save();
 
                     //     // Query using findAll to test the exact pipeline that was broken
-                    //     const messages = await Message.findAll(perspective!);
-                    //     const testMsg = messages.find((m: Message) => m.body === "UTF-8 test: 🌍🌎🌏 💫⭐✨ 🔥💯🚀 with metadata: {\"tags\": [\"🏷️\", \"📝\"], \"priority\": \"🔴\"}");
+                    //     const messages = await EmojiMessage.findAll(perspective!);
+                    //     const testMsg = messages.find((m: EmojiMessage) => m.body === "UTF-8 test: 🌍🌎🌏 💫⭐✨ 🔥💯🚀 with metadata: {\"tags\": [\"🏷️\", \"📝\"], \"priority\": \"🔴\"}");
                         
                     //     expect(testMsg).to.not.be.undefined;
                     //     // These assertions test the exact issue that was fixed:
@@ -2526,14 +2526,14 @@ describe("Prolog + Literals", () => {
 
                     it("should handle subscription-based queries with emoji content", async () => {
                         // Clear any previous messages
-                        let existingMessages = await Message.findAll(perspective!);
+                        let existingMessages = await EmojiMessage.findAll(perspective!);
                         for (const msg of existingMessages) await msg.delete();
 
                         // Set up subscription for emoji content
                         let updateCount = 0;
-                        let subscriptionResults: Message[] = [];
-                        const builder = Message.query(perspective!);
-                        const initialResults = await builder.subscribe((messages: Message[]) => {
+                        let subscriptionResults: EmojiMessage[] = [];
+                        const builder = EmojiMessage.query(perspective!);
+                        const initialResults = await builder.subscribe((messages: EmojiMessage[]) => {
                             subscriptionResults = messages;
                             updateCount++;
                         });
@@ -2543,7 +2543,7 @@ describe("Prolog + Literals", () => {
                         expect(updateCount).to.equal(0);
 
                         // Create a message after setting up subscription - should trigger callback
-                        const subscriptionMessage = new Message(perspective!);
+                        const subscriptionMessage = new EmojiMessage(perspective!);
                         subscriptionMessage.body = "Subscription test with emoji: 🎯✅";
                         await subscriptionMessage.save();
 
@@ -2556,7 +2556,7 @@ describe("Prolog + Literals", () => {
                         expect(subscriptionResults[0].body).to.equal("Subscription test with emoji: 🎯✅");
 
                         // Add another message with emojis - should trigger subscription again
-                        const secondMessage = new Message(perspective!);
+                        const secondMessage = new EmojiMessage(perspective!);
                         secondMessage.body = "Another emoji message: 🚀💯";
                         await secondMessage.save();
 
@@ -2569,8 +2569,8 @@ describe("Prolog + Literals", () => {
                         expect(foundSecond).to.not.be.undefined;
 
                         // Also verify the message exists through direct query
-                        const messages = await Message.findAll(perspective!);
-                        const found = messages.find((m: Message) => m.body === "Subscription test with emoji: 🎯✅");
+                        const messages = await EmojiMessage.findAll(perspective!);
+                        const found = messages.find((m: EmojiMessage) => m.body === "Subscription test with emoji: 🎯✅");
                         expect(found).to.not.be.undefined;
                         expect(found!.body).to.equal("Subscription test with emoji: 🎯✅");
 
