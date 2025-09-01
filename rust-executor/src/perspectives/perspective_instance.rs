@@ -3,7 +3,7 @@ use super::update_perspective;
 use super::utils::{
     prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string,
 };
-use crate::agent::{create_signed_expression};
+use crate::agent::create_signed_expression;
 use crate::graphql::graphql_types::{
     DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery,
     LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle,
@@ -1169,8 +1169,6 @@ impl PerspectiveInstance {
             .to_url()
             .expect("just initialized Literal couldn't be turned into URL");
 
-        
-
         let mut sdna_links: Vec<Link> = Vec::new();
 
         if (Literal::from_url(sdna_code.clone())).is_err() {
@@ -1208,7 +1206,7 @@ impl PerspectiveInstance {
         });
 
         self.add_links(sdna_links, LinkStatus::Shared, None).await?;
-            //added = true;
+        //added = true;
         //}
         // Mutex guard is automatically dropped here
         Ok(true)
