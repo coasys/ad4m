@@ -3,7 +3,7 @@ use super::update_perspective;
 use super::utils::{
     prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string,
 };
-use crate::agent::{self, create_signed_expression};
+use crate::agent::create_signed_expression;
 use crate::graphql::graphql_types::{
     DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery,
     LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle,
@@ -1194,7 +1194,7 @@ impl PerspectiveInstance {
         mut sdna_code: String,
         sdna_type: SdnaType,
     ) -> Result<bool, AnyError> {
-        let mut added = false;
+        //let mut added = false;
         let mutex = self.sdna_change_mutex.clone();
         let _guard = mutex.lock().await;
 
@@ -1208,25 +1208,7 @@ impl PerspectiveInstance {
             .to_url()
             .expect("just initialized Literal couldn't be turned into URL");
 
-        let links = self
-            .get_links(&LinkQuery {
-                source: Some("ad4m://self".to_string()),
-                predicate: Some(predicate.to_string()),
-                target: Some(literal_name.clone()),
-                from_date: None,
-                until_date: None,
-                limit: None,
-            })
-            .await?;
-
-        let author = agent::did();
-
         let mut sdna_links: Vec<Link> = Vec::new();
-
-        let links = links
-            .into_iter()
-            .filter(|l| l.author == author)
-            .collect::<Vec<DecoratedLinkExpression>>();
 
         if (Literal::from_url(sdna_code.clone())).is_err() {
             sdna_code = Literal::from_string(sdna_code)
@@ -1234,24 +1216,39 @@ impl PerspectiveInstance {
                 .expect("just initialized Literal couldn't be turned into URL");
         }
 
-        if links.is_empty() {
-            sdna_links.push(Link {
-                source: "ad4m://self".to_string(),
-                predicate: Some(predicate.to_string()),
-                target: literal_name.clone(),
-            });
+        // let links = self
+        //     .get_links(&LinkQuery {
+        //         source: Some("ad4m://self".to_string()),
+        //         predicate: Some(predicate.to_string()),
+        //         target: Some(literal_name.clone()),
+        //         from_date: None,
+        //         until_date: None,
+        //         limit: None,
+        //     })
+        //     .await?;
+        // let author = agent::did();
+        // let links = links
+        //     .into_iter()
+        //     .filter(|l| l.author == author)
+        //     .collect::<Vec<DecoratedLinkExpression>>();
+        //if links.is_empty() {
+        sdna_links.push(Link {
+            source: "ad4m://self".to_string(),
+            predicate: Some(predicate.to_string()),
+            target: literal_name.clone(),
+        });
 
-            sdna_links.push(Link {
-                source: literal_name.clone(),
-                predicate: Some("ad4m://sdna".to_string()),
-                target: sdna_code,
-            });
+        sdna_links.push(Link {
+            source: literal_name.clone(),
+            predicate: Some("ad4m://sdna".to_string()),
+            target: sdna_code,
+        });
 
-            self.add_links(sdna_links, LinkStatus::Shared, None).await?;
-            added = true;
-        }
+        self.add_links(sdna_links, LinkStatus::Shared, None).await?;
+        //added = true;
+        //}
         // Mutex guard is automatically dropped here
-        Ok(added)
+        Ok(true)
     }
 
     async fn ensure_prolog_engine_pool(&self) -> Result<(), AnyError> {
