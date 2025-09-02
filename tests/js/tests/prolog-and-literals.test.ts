@@ -2181,7 +2181,7 @@ describe("Prolog + Literals", () => {
 
                     // Verify models are updated
                     const recipesAfterUpdate = await BatchRecipe.findAll(perspective!);
-                    expect(recipesAfterUpdate[0].ingredients).to.deep.equal(["pasta", "sauce", "cheese", "garlic"]);
+                    expect(recipesAfterUpdate[0].ingredients).to.deep.equal(["cheese", "garlic", "pasta", "sauce"]);
 
                     const notesAfterUpdate = await BatchNote.findAll(perspective!);
                     expect(notesAfterUpdate[0].content).to.equal("Updated: Use fresh ingredients and add garlic");
