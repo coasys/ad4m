@@ -891,7 +891,7 @@ impl Ad4mDb {
         perspective_uuid: &str,
     ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1",
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 ORDER BY timestamp, source, predicate, target, author",
         )?;
         let link_iter = stmt.query_map(params![perspective_uuid], |row| {
             let status: LinkStatus =
@@ -928,7 +928,7 @@ impl Ad4mDb {
         source: &str,
     ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND source = ?2",
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND source = ?2 ORDER BY timestamp, predicate, target, author",
         )?;
         let link_iter = stmt.query_map(params![perspective_uuid, source], |row| {
             let status: LinkStatus =
@@ -965,7 +965,7 @@ impl Ad4mDb {
         target: &str,
     ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND target = ?2",
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND target = ?2 ORDER BY timestamp, source, predicate, author",
         )?;
         let link_iter = stmt.query_map(params![perspective_uuid, target], |row| {
             let status: LinkStatus =
