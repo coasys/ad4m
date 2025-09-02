@@ -595,17 +595,21 @@ impl PerspectiveInstance {
         let handle = self.persisted.lock().await.clone();
 
         // Deduplicate by (author, timestamp, source, predicate, target)
+        // Use structured keys to avoid delimiter collision issues
         let mut seen_add: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut unique_additions: Vec<LinkExpression> = Vec::new();
         for link in diff.additions.iter() {
-            let key = format!(
-                "{}|{}|{}|{}|{}",
-                link.author,
-                link.timestamp,
-                link.data.source,
-                link.data.predicate.clone().unwrap_or_default(),
-                link.data.target
+            let key_tuple = (
+                &link.author,
+                &link.timestamp,
+                &link.data.source,
+                link.data.predicate.as_deref().unwrap_or(""),
+                &link.data.target,
             );
+            let key = serde_json::to_string(&key_tuple).unwrap_or_else(|_| {
+                // Fallback to a simple hash if serialization fails
+                format!("{:?}", key_tuple)
+            });
             if seen_add.insert(key) {
                 unique_additions.push(link.clone());
             }
@@ -614,14 +618,17 @@ impl PerspectiveInstance {
         let mut seen_rem: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut unique_removals: Vec<LinkExpression> = Vec::new();
         for link in diff.removals.iter() {
-            let key = format!(
-                "{}|{}|{}|{}|{}",
-                link.author,
-                link.timestamp,
-                link.data.source,
-                link.data.predicate.clone().unwrap_or_default(),
-                link.data.target
+            let key_tuple = (
+                &link.author,
+                &link.timestamp,
+                &link.data.source,
+                link.data.predicate.as_deref().unwrap_or(""),
+                &link.data.target,
             );
+            let key = serde_json::to_string(&key_tuple).unwrap_or_else(|_| {
+                // Fallback to a simple hash if serialization fails
+                format!("{:?}", key_tuple)
+            });
             if seen_rem.insert(key) {
                 unique_removals.push(link.clone());
             }
