@@ -593,16 +593,57 @@ impl PerspectiveInstance {
 
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) {
         let handle = self.persisted.lock().await.clone();
-        if !diff.additions.is_empty() {
+
+        // Deduplicate by (author, timestamp, source, predicate, target)
+        // Use structured keys to avoid delimiter collision issues
+        let mut seen_add: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut unique_additions: Vec<LinkExpression> = Vec::new();
+        for link in diff.additions.iter() {
+            let key_tuple = (
+                &link.author,
+                &link.timestamp,
+                &link.data.source,
+                link.data.predicate.as_deref().unwrap_or(""),
+                &link.data.target,
+            );
+            let key = serde_json::to_string(&key_tuple).unwrap_or_else(|_| {
+                // Fallback to a simple hash if serialization fails
+                format!("{:?}", key_tuple)
+            });
+            if seen_add.insert(key) {
+                unique_additions.push(link.clone());
+            }
+        }
+
+        let mut seen_rem: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut unique_removals: Vec<LinkExpression> = Vec::new();
+        for link in diff.removals.iter() {
+            let key_tuple = (
+                &link.author,
+                &link.timestamp,
+                &link.data.source,
+                link.data.predicate.as_deref().unwrap_or(""),
+                &link.data.target,
+            );
+            let key = serde_json::to_string(&key_tuple).unwrap_or_else(|_| {
+                // Fallback to a simple hash if serialization fails
+                format!("{:?}", key_tuple)
+            });
+            if seen_rem.insert(key) {
+                unique_removals.push(link.clone());
+            }
+        }
+
+        if !unique_additions.is_empty() {
             Ad4mDb::with_global_instance(|db| {
-                db.add_many_links(&handle.uuid, diff.additions.clone(), &LinkStatus::Shared)
+                db.add_many_links(&handle.uuid, unique_additions.clone(), &LinkStatus::Shared)
             })
             .expect("Failed to add many links");
         }
 
-        if !diff.removals.is_empty() {
+        if !unique_removals.is_empty() {
             Ad4mDb::with_global_instance(|db| {
-                for link in &diff.removals {
+                for link in &unique_removals {
                     db.remove_link(&handle.uuid, link)
                         .expect("Failed to remove link");
                 }
@@ -610,13 +651,11 @@ impl PerspectiveInstance {
         }
 
         let decorated_diff = DecoratedPerspectiveDiff {
-            additions: diff
-                .additions
+            additions: unique_additions
                 .iter()
                 .map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared)))
                 .collect(),
-            removals: diff
-                .removals
+            removals: unique_removals
                 .iter()
                 .map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared)))
                 .collect(),
@@ -2800,9 +2839,21 @@ mod tests {
         }
 
         let query = LinkQuery::default();
-        let links = perspective.get_links(&query).await.unwrap();
+        let mut links = perspective.get_links(&query).await.unwrap();
         assert_eq!(links.len(), 5);
-        assert_eq!(links, all_links);
+        let mut all_links_sorted = all_links.clone();
+        let cmp = |a: &DecoratedLinkExpression, b: &DecoratedLinkExpression| {
+            let at = chrono::DateTime::parse_from_rfc3339(&a.timestamp).unwrap();
+            let bt = chrono::DateTime::parse_from_rfc3339(&b.timestamp).unwrap();
+            at.cmp(&bt)
+                .then(a.data.source.cmp(&b.data.source))
+                .then(a.data.predicate.cmp(&b.data.predicate))
+                .then(a.data.target.cmp(&b.data.target))
+                .then(a.author.cmp(&b.author))
+        };
+        links.sort_by(cmp);
+        all_links_sorted.sort_by(cmp);
+        assert_eq!(links, all_links_sorted);
     }
 
     #[tokio::test]
@@ -2828,12 +2879,22 @@ mod tests {
             source: Some(source.to_string()),
             ..Default::default()
         };
-        let links = perspective.get_links(&query).await.unwrap();
-        let expected_links: Vec<_> = all_links
+        let mut links = perspective.get_links(&query).await.unwrap();
+        let mut expected_links: Vec<_> = all_links
             .into_iter()
             .filter(|expr| expr.data.source == source)
             .collect();
         assert_eq!(links.len(), expected_links.len());
+        let cmp = |a: &DecoratedLinkExpression, b: &DecoratedLinkExpression| {
+            let at = chrono::DateTime::parse_from_rfc3339(&a.timestamp).unwrap();
+            let bt = chrono::DateTime::parse_from_rfc3339(&b.timestamp).unwrap();
+            at.cmp(&bt)
+                .then(a.data.predicate.cmp(&b.data.predicate))
+                .then(a.data.target.cmp(&b.data.target))
+                .then(a.author.cmp(&b.author))
+        };
+        links.sort_by(cmp);
+        expected_links.sort_by(cmp);
         assert_eq!(links, expected_links);
     }
 
