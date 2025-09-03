@@ -117,6 +117,34 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
             Err(e) => println!("Error getting dna: {}", e),
         }
         true
+    } else if line.starts_with("sdna ") {
+        // sdna <class> - show SDNA for a specific class
+        let class_name = line[5..].trim();
+        match perspective.get_dna_for_class(class_name).await {
+            Ok(Some(sdna_code)) => {
+                // Load these once at the start of your program
+                let ps = SyntaxSet::load_defaults_newlines();
+                let ts = ThemeSet::load_defaults();
+
+                let syntax = ps.find_syntax_by_extension("pl").unwrap();
+                let mut h = HighlightLines::new(syntax, &ts.themes["Solarized (light)"]);
+
+                println!("\x1b[97m================");
+                println!("\x1b[36mSDNA for class: \x1b[97m{}", class_name);
+                println!("\x1b[97m================");
+                for line in LinesWithEndings::from(&sdna_code) {
+                    let ranges: Vec<(Style, &str)> = h.highlight_line(line, &ps).unwrap();
+                    let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
+                    print!("{}", escaped);
+                }
+                println!("\x1b[97m================");
+            }
+            Ok(None) => {
+                println!("\x1b[91mNo SDNA found for class: \x1b[97m{}", class_name);
+            }
+            Err(e) => println!("Error getting dna for class {}: {}", class_name, e),
+        }
+        true
     } else {
         false
     }
