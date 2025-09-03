@@ -98,42 +98,48 @@ export function reactToWebComponent<P extends object>(
   class ReactCustomElement extends HTMLElement {
     private _root!: ReturnType<ReactDOMLike["createRoot"]>;
     private _mount!: HTMLElement;
+    private _host!: ShadowRoot | HTMLElement;
     private _props: Record<string, any> = {};
     private _observer?: MutationObserver;
     private _renderQueued = false;
+    private _isMounted = false;
 
     constructor() {
       super();
 
       // Where React renders
-      let host: ShadowRoot | HTMLElement;
       if (shadow) {
         const init: ShadowRootInit =
           typeof shadow === "object" ? shadow : { mode: "open" };
-        host = this.attachShadow(init);
+        this._host = this.attachShadow(init);
         // Inject styles
         if (styles) {
           if (
             Array.isArray(styles) &&
-            (host as any).adoptedStyleSheets !== undefined
+            (this._host as any).adoptedStyleSheets !== undefined
           ) {
-            (host as any).adoptedStyleSheets = [
-              ...(host as any).adoptedStyleSheets,
+            (this._host as any).adoptedStyleSheets = [
+              ...(this._host as any).adoptedStyleSheets,
               ...styles,
             ];
           } else {
             const styleEl = document.createElement("style");
             styleEl.textContent = Array.isArray(styles) ? "" : String(styles);
-            host.appendChild(styleEl);
+            this._host.appendChild(styleEl);
           }
         }
       } else {
-        host = this;
+        // For light DOM, set host now but defer creating children until connectedCallback
+        this._host = this;
       }
 
-      this._mount = document.createElement("div");
-      host.appendChild(this._mount);
-      this._root = ReactDOM.createRoot(this._mount);
+      // Only create and append mount point immediately when using shadow DOM
+      if (shadow) {
+        this._mount = document.createElement("div");
+        this._host.appendChild(this._mount);
+        this._root = ReactDOM.createRoot(this._mount);
+        this._isMounted = true;
+      }
 
       // Initialize props
       this._props = { ...initialProps };
@@ -207,17 +213,24 @@ export function reactToWebComponent<P extends object>(
     }
 
     connectedCallback() {
-      // Kick initial render
-      enqueueRender(this);
+      // For light DOM, create mount/root on first connect to avoid constructor DOM mutations
+      if (!this._isMounted) {
+        this._mount = document.createElement("div");
+        this._host.appendChild(this._mount);
+        this._root = ReactDOM.createRoot(this._mount);
+        this._isMounted = true;
+      }
+      enqueueRender(this); // Kick initial render
     }
 
     disconnectedCallback() {
       this._observer?.disconnect();
-      this._root.unmount();
+      if (this._root) this._root.unmount();
     }
 
     // Render React with <slot/> as children (works in shadow and light DOM)
     private _render() {
+      if (!this._root) return; // Not ready yet (light DOM before connected)
       const element = React.createElement(ReactComponent as any, {
         ...this._props,
         host: this,
