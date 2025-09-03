@@ -227,6 +227,21 @@ classes
 sdna <class>
 ```
 
+#### System Commands
+```
+# Show help
+help
+
+# Clear the screen
+clear
+
+# Show version information
+version
+
+# Exit the REPL
+exit
+```
+
 #### Prolog Queries
 The REPL also functions as a Prolog shell where you can run any valid Prolog query against the perspective's knowledge base.
 

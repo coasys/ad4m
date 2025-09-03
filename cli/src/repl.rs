@@ -81,7 +81,7 @@ async fn link_query(perspective: &PerspectiveProxy, line: &str) -> bool {
 }
 
 async fn subject_classes(perspective: &PerspectiveProxy, line: &String) -> bool {
-    if line == "subject.classes" {
+    if line == "classes" {
         if let Ok(classes) = perspective.subject_classes().await {
             for class in classes {
                 println!("\x1b[36mSubject Class: \x1b[97m{}", class);
@@ -90,6 +90,101 @@ async fn subject_classes(perspective: &PerspectiveProxy, line: &String) -> bool 
         true
     } else {
         false
+    }
+}
+
+async fn help_command(_perspective: &PerspectiveProxy, line: &String) -> bool {
+    if line == "help" || line == "?" {
+        println!("\x1b[97m================");
+        println!("\x1b[36mAD4M Perspective REPL Commands");
+        println!("\x1b[97m================");
+        println!();
+        
+        println!("\x1b[36m📚 Link Management:");
+        println!("\x1b[97m  add <source> <predicate> <target>");
+        println!("\x1b[90m    Add a new link to the perspective");
+        println!();
+        println!("\x1b[97m  query(<source>, <predicate>, <target>)");
+        println!("\x1b[90m    Query links with optional variables (use _ for any value)");
+        println!();
+        
+        println!("\x1b[36m🧬 SDNA & Subject Classes:");
+        println!("\x1b[97m  classes");
+        println!("\x1b[90m    List all available subject classes");
+        println!();
+        println!("\x1b[97m  sdna");
+        println!("\x1b[90m    Show all SDNA code in the perspective");
+        println!();
+        println!("\x1b[97m  sdna <class>");
+        println!("\x1b[90m    Show SDNA code for a specific class");
+        println!();
+        
+        println!("\x1b[36m🏗️  Subject Management:");
+        println!("\x1b[97m  new <class>(<base>)");
+        println!("\x1b[90m    Create a new subject instance of the given class");
+        println!();
+        println!("\x1b[97m  subject(<base>)[<property>] = <value>");
+        println!("\x1b[90m    Set a property value on a subject");
+        println!();
+        println!("\x1b[97m  subject(<base>)[<collection>] <= <value>");
+        println!("\x1b[90m    Add a value to a collection property");
+        println!();
+        println!("\x1b[97m  subject(<base>)");
+        println!("\x1b[90m    Display all properties and collections of a subject");
+        println!();
+        
+        println!("\x1b[36m🔍 Prolog Queries:");
+        println!("\x1b[97m  <prolog_query>");
+        println!("\x1b[90m    Run any valid Prolog query against the perspective");
+        println!("\x1b[90m    Examples:");
+        println!("\x1b[90m      subject(X, 'Person')");
+        println!("\x1b[90m      hasProperty(Subject, 'name', Name)");
+        println!("\x1b[90m      friend(X, Y), hobby(Y, 'coding')");
+        println!();
+        
+        println!("\x1b[36m🚪 System:");
+        println!("\x1b[97m  help, ?");
+        println!("\x1b[90m    Show this help message");
+        println!();
+        println!("\x1b[97m  clear");
+        println!("\x1b[90m    Clear the screen");
+        println!();
+        println!("\x1b[97m  version");
+        println!("\x1b[90m    Show detailed version and build information");
+        println!();
+        println!("\x1b[97m  exit");
+        println!("\x1b[90m    Exit the REPL");
+        println!();
+        
+        println!("\x1b[97m================");
+        println!("\x1b[90mTip: Use uppercase letters for variables in Prolog queries");
+        println!("\x1b[90mExample: ?Person knows Bob");
+        println!("\x1b[97m================");
+        true
+    } else {
+        false
+    }
+}
+
+async fn system_commands(_perspective: &PerspectiveProxy, line: &String) -> bool {
+    match line.as_str() {
+        "clear" => {
+            // Clear the screen by printing multiple newlines
+            for _ in 0..50 {
+                println!();
+            }
+            true
+        }
+        "version" => {
+            println!("\x1b[36mAD4M CLI Version: \x1b[97m{}", env!("CARGO_PKG_VERSION"));
+            println!("\x1b[36mPackage: \x1b[97m{}", env!("CARGO_PKG_NAME"));
+            println!("\x1b[36mGit Commit: \x1b[97m{} ({})", env!("GIT_COMMIT_HASH"), env!("GIT_DIRTY"));
+            println!("\x1b[36mHomepage: \x1b[97m{}", env!("CARGO_PKG_HOMEPAGE"));
+            println!("\x1b[36mRepository: \x1b[97m{}", env!("CARGO_PKG_REPOSITORY"));
+            println!("\x1b[36mLicense: \x1b[97m{}", env!("CARGO_PKG_LICENSE"));
+            true
+        }
+        _ => false
     }
 }
 
@@ -337,6 +432,16 @@ async fn subject_print(perspective: &PerspectiveProxy, line: &str) -> Result<boo
 
 pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
     let mut rl = Editor::<()>::new()?;
+    
+    // Welcome message
+    println!("\x1b[97m================");
+    println!("\x1b[36mWelcome to AD4M Perspective REPL!");
+    println!("\x1b[90mType 'help' or '?' to see available commands");
+    println!("\x1b[90mUse ↑/↓ arrows to navigate command history");
+    println!("\x1b[90mType 'exit' to quit");
+    println!("\x1b[97m================");
+    println!();
+    
     loop {
         let line = rl.readline("\x1b[97m> ")?;
         rl.add_history_entry(line.as_str());
@@ -354,6 +459,14 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
         }
 
         if subject_classes(&perspective, &line).await {
+            continue;
+        }
+
+        if help_command(&perspective, &line).await {
+            continue;
+        }
+
+        if system_commands(&perspective, &line).await {
             continue;
         }
 
