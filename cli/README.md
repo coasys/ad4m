@@ -225,6 +225,9 @@ classes
 
 # Show DNA/schema of a class
 sdna <class>
+
+# Show SDNA authorship information (debugging)
+sdna-authors
 ```
 
 #### System Commands

@@ -117,7 +117,7 @@ impl PerspectiveProxy {
         Ok(())
     }
 
-    pub async fn get_dna(&self) -> Result<Vec<String>> {
+    pub async fn get_dna(&self) -> Result<Vec<(String, String, Vec<String>, Vec<String>)>> {
         // First, find all the name literals that are linked from ad4m://self with SDNA predicates
         let sdna_predicates = vec![
             "ad4m://has_subject_class",
@@ -142,6 +142,16 @@ impl PerspectiveProxy {
             // For each name literal found, get the actual SDNA code
             for link in links {
                 let name_literal = link.data.target.clone();
+                let name_author = link.author.clone();
+                
+                // Extract the class name from the literal
+                let class_name = match Literal::from_url(name_literal.clone()) {
+                    Ok(literal) => match literal.get() {
+                        Ok(LiteralValue::String(name)) => name,
+                        _ => continue,
+                    },
+                    Err(_) => continue,
+                };
                 
                 // Now find the SDNA code linked from this name with predicate "ad4m://sdna"
                 let sdna_links = self
@@ -155,12 +165,18 @@ impl PerspectiveProxy {
                     )
                     .await?;
                 
-                // Extract the SDNA code from each link
+                // Collect all unique authors for this SDNA code
+                let mut code_authors = Vec::new();
+                let mut sdna_codes = Vec::new();
+                
                 for sdna_link in sdna_links {
-                    let literal = Literal::from_url(sdna_link.data.target)?;
+                    let literal = Literal::from_url(sdna_link.data.target.clone())?;
                     match literal.get() {
                         Ok(LiteralValue::String(string)) => {
-                            all_sdna_code.push(string);
+                            sdna_codes.push(string);
+                            if !code_authors.contains(&sdna_link.author) {
+                                code_authors.push(sdna_link.author.clone());
+                            }
                         },
                         _ => {
                             // Skip non-string literals
@@ -168,13 +184,18 @@ impl PerspectiveProxy {
                         }
                     }
                 }
+                
+                // Add each unique SDNA code with its authorship information
+                for sdna_code in sdna_codes {
+                    all_sdna_code.push((class_name.clone(), sdna_code, vec![name_author.clone()], code_authors.clone()));
+                }
             }
         }
         
         Ok(all_sdna_code)
     }
 
-    pub async fn get_dna_for_class(&self, class_name: &str) -> Result<Option<String>> {
+    pub async fn get_dna_for_class(&self, class_name: &str) -> Result<Option<(String, String, Vec<String>, Vec<String>)>> {
         // First, find the name literal for this class that is linked from ad4m://self
         let name_literal = Literal::from_string(class_name.to_string());
         
@@ -193,6 +214,14 @@ impl PerspectiveProxy {
             return Ok(None);
         }
         
+        // Collect all unique name authors
+        let mut name_authors = Vec::new();
+        for link in &links {
+            if !name_authors.contains(&link.author) {
+                name_authors.push(link.author.clone());
+            }
+        }
+        
         // Now find the SDNA code linked from this name with predicate "ad4m://sdna"
         let sdna_links = self
             .get(
@@ -209,11 +238,31 @@ impl PerspectiveProxy {
             return Ok(None);
         }
         
-        // Extract the SDNA code from the first link
-        let literal = Literal::from_url(sdna_links[0].data.target.clone())?;
-        match literal.get() {
-            Ok(LiteralValue::String(string)) => Ok(Some(string)),
-            _ => Ok(None),
+        // Collect all unique code authors and find the first SDNA code
+        let mut code_authors = Vec::new();
+        let mut first_sdna_code = None;
+        
+        for sdna_link in sdna_links {
+            if !code_authors.contains(&sdna_link.author) {
+                code_authors.push(sdna_link.author.clone());
+            }
+            
+            // Get the first SDNA code we find
+            if first_sdna_code.is_none() {
+                let literal = Literal::from_url(sdna_link.data.target.clone())?;
+                match literal.get() {
+                    Ok(LiteralValue::String(string)) => {
+                        first_sdna_code = Some(string);
+                    },
+                    _ => continue,
+                }
+            }
+        }
+        
+        if let Some(sdna_code) = first_sdna_code {
+            Ok(Some((class_name.to_string(), sdna_code, name_authors, code_authors)))
+        } else {
+            Ok(None)
         }
     }
 
@@ -441,6 +490,18 @@ impl PerspectiveProxy {
             }
         }
         Ok(())
+    }
+
+    pub async fn get_neighbourhood_author(&self) -> Result<Option<String>> {
+        // This would need to be implemented in the client to get the neighborhood author
+        // For now, we'll return None and implement this later
+        Ok(None)
+    }
+
+    pub async fn get_local_agent_did(&self) -> Result<String> {
+        // This would need to be implemented in the client to get the local agent's DID
+        // For now, we'll return a placeholder
+        Ok("local_agent".to_string())
     }
 }
 

@@ -113,10 +113,16 @@ async fn help_command(_perspective: &PerspectiveProxy, line: &String) -> bool {
         println!("\x1b[90m    List all available subject classes");
         println!();
         println!("\x1b[97m  sdna");
-        println!("\x1b[90m    Show all SDNA code in the perspective");
+        println!("\x1b[90m    Show all SDNA code in the perspective with authorship info");
+        println!("\x1b[90m    Includes class names, code content, and all authors");
         println!();
         println!("\x1b[97m  sdna <class>");
-        println!("\x1b[90m    Show SDNA code for a specific class");
+        println!("\x1b[90m    Show SDNA code for a specific class with authorship info");
+        println!();
+        println!("\x1b[97m  sdna-authors");
+        println!("\x1b[90m    Show authorship information for all SDNA (debugging)");
+        println!("\x1b[90m    Includes class names and author details without code content");
+        println!("\x1b[90m    Useful for troubleshooting SDNA loading issues");
         println!();
         
         println!("\x1b[36m🏗️  Subject Management:");
@@ -199,9 +205,32 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
                 let syntax = ps.find_syntax_by_extension("pl").unwrap();
                 let mut h = HighlightLines::new(syntax, &ts.themes["Solarized (light)"]);
 
-                for zome in dna_zomes {
+                for (i, (class_name, zome, name_authors, code_authors)) in dna_zomes.iter().enumerate() {
                     println!("\x1b[97m================");
-                    for line in LinesWithEndings::from(&zome) {
+                    println!("\x1b[36mSDNA Code {}: \x1b[97m{}", i + 1, class_name);
+                    println!("\x1b[90mName Authors: \x1b[97m{}", name_authors.join(", "));
+                    println!("\x1b[90mCode Authors: \x1b[97m{}", code_authors.join(", "));
+                    
+                    // Show authorship context
+                    let name_set: std::collections::HashSet<_> = name_authors.iter().collect();
+                    let code_set: std::collections::HashSet<_> = code_authors.iter().collect();
+                    
+                    if name_set == code_set {
+                        println!("\x1b[32m✓ Same authors for name and code");
+                    } else {
+                        println!("\x1b[33m⚠ Different authors for name and code");
+                    }
+                    
+                    // Show additional author count information
+                    if name_authors.len() > 1 {
+                        println!("\x1b[35m📝 Multiple name authors: {} agents have defined this class", name_authors.len());
+                    }
+                    if code_authors.len() > 1 {
+                        println!("\x1b[35m📝 Multiple code authors: {} agents have contributed SDNA code", code_authors.len());
+                    }
+                    
+                    println!("\x1b[97m================");
+                    for line in LinesWithEndings::from(zome) {
                         let ranges: Vec<(Style, &str)> = h.highlight_line(line, &ps).unwrap();
                         let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
                         print!("{}", escaped);
@@ -216,7 +245,7 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
         // sdna <class> - show SDNA for a specific class
         let class_name = line[5..].trim();
         match perspective.get_dna_for_class(class_name).await {
-            Ok(Some(sdna_code)) => {
+            Ok(Some((retrieved_class_name, sdna_code, name_authors, code_authors))) => {
                 // Load these once at the start of your program
                 let ps = SyntaxSet::load_defaults_newlines();
                 let ts = ThemeSet::load_defaults();
@@ -225,7 +254,28 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
                 let mut h = HighlightLines::new(syntax, &ts.themes["Solarized (light)"]);
 
                 println!("\x1b[97m================");
-                println!("\x1b[36mSDNA for class: \x1b[97m{}", class_name);
+                println!("\x1b[36mSDNA for class: \x1b[97m{}", retrieved_class_name);
+                println!("\x1b[90mName Authors: \x1b[97m{}", name_authors.join(", "));
+                println!("\x1b[90mCode Authors: \x1b[97m{}", code_authors.join(", "));
+                
+                // Show authorship context
+                let name_set: std::collections::HashSet<_> = name_authors.iter().collect();
+                let code_set: std::collections::HashSet<_> = code_authors.iter().collect();
+                
+                if name_set == code_set {
+                    println!("\x1b[32m✓ Same authors for name and code");
+                } else {
+                    println!("\x1b[33m⚠ Different authors for name and code");
+                }
+                
+                // Show additional author count information
+                if name_authors.len() > 1 {
+                    println!("\x1b[35m📝 Multiple name authors: {} agents have defined this class", name_authors.len());
+                }
+                if code_authors.len() > 1 {
+                    println!("\x1b[35m📝 Multiple code authors: {} agents have contributed SDNA code", code_authors.len());
+                }
+                
                 println!("\x1b[97m================");
                 for line in LinesWithEndings::from(&sdna_code) {
                     let ranges: Vec<(Style, &str)> = h.highlight_line(line, &ps).unwrap();
@@ -238,6 +288,46 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
                 println!("\x1b[91mNo SDNA found for class: \x1b[97m{}", class_name);
             }
             Err(e) => println!("Error getting dna for class {}: {}", class_name, e),
+        }
+        true
+    } else if line == "sdna-authors" {
+        // sdna-authors - show authorship information for all SDNA without code content
+        match perspective.get_dna().await {
+            Ok(dna_zomes) => {
+                println!("\x1b[97m================");
+                println!("\x1b[36mSDNA Authorship Summary");
+                println!("\x1b[97m================");
+                
+                for (i, (class_name, _, name_authors, code_authors)) in dna_zomes.iter().enumerate() {
+                    println!("\x1b[36mSDNA {}: \x1b[97m{}", i + 1, class_name);
+                    println!("\x1b[90m  Name Authors: \x1b[97m{}", name_authors.join(", "));
+                    println!("\x1b[90m  Code Authors: \x1b[97m{}", code_authors.join(", "));
+                    
+                    let name_set: std::collections::HashSet<_> = name_authors.iter().collect();
+                    let code_set: std::collections::HashSet<_> = code_authors.iter().collect();
+                    
+                    if name_set == code_set {
+                        println!("\x1b[32m  ✓ Same authors for name and code");
+                    } else {
+                        println!("\x1b[33m  ⚠ Different authors for name and code");
+                    }
+                    
+                    // Show additional author count information
+                    if name_authors.len() > 1 {
+                        println!("\x1b[35m  📝 Multiple name authors: {} agents have defined this class", name_authors.len());
+                    }
+                    if code_authors.len() > 1 {
+                        println!("\x1b[35m  📝 Multiple code authors: {} agents have contributed SDNA code", code_authors.len());
+                    }
+                    println!();
+                }
+                
+                println!("\x1b[97m================");
+                println!("\x1b[90mNote: This shows authorship information for debugging SDNA loading issues.");
+                println!("\x1b[90mOnly SDNA from local user or neighborhood creator will be loaded into Prolog.");
+                println!("\x1b[97m================");
+            }
+            Err(e) => println!("Error getting dna: {}", e),
         }
         true
     } else {
