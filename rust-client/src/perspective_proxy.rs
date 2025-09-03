@@ -118,17 +118,103 @@ impl PerspectiveProxy {
     }
 
     pub async fn get_dna(&self) -> Result<Vec<String>> {
-        self.get(Some("ad4m://sdna".into()), None, None, None, None, None)
-            .await?
-            .into_iter()
-            .map(|link| {
-                let literal = Literal::from_url(link.data.target)?;
-                match literal.get() {
-                    Ok(LiteralValue::String(string)) => Ok(string),
-                    _ => Err(anyhow::anyhow!("Not a string literal")),
+        // First, find all the name literals that are linked from ad4m://self with SDNA predicates
+        let sdna_predicates = vec![
+            "ad4m://has_subject_class",
+            "ad4m://has_flow", 
+            "ad4m://has_custom_sdna"
+        ];
+        
+        let mut all_sdna_code = Vec::new();
+        
+        for predicate in sdna_predicates {
+            let links = self
+                .get(
+                    Some("ad4m://self".into()),
+                    None,
+                    Some(predicate.into()),
+                    None,
+                    None,
+                    None,
+                )
+                .await?;
+            
+            // For each name literal found, get the actual SDNA code
+            for link in links {
+                let name_literal = link.data.target.clone();
+                
+                // Now find the SDNA code linked from this name with predicate "ad4m://sdna"
+                let sdna_links = self
+                    .get(
+                        Some(name_literal.clone()),
+                        None,
+                        Some("ad4m://sdna".into()),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await?;
+                
+                // Extract the SDNA code from each link
+                for sdna_link in sdna_links {
+                    let literal = Literal::from_url(sdna_link.data.target)?;
+                    match literal.get() {
+                        Ok(LiteralValue::String(string)) => {
+                            all_sdna_code.push(string);
+                        },
+                        _ => {
+                            // Skip non-string literals
+                            continue;
+                        }
+                    }
                 }
-            })
-            .collect()
+            }
+        }
+        
+        Ok(all_sdna_code)
+    }
+
+    pub async fn get_dna_for_class(&self, class_name: &str) -> Result<Option<String>> {
+        // First, find the name literal for this class that is linked from ad4m://self
+        let name_literal = Literal::from_string(class_name.to_string());
+        
+        let links = self
+            .get(
+                Some("ad4m://self".into()),
+                Some(name_literal.to_url().unwrap()),
+                Some("ad4m://has_subject_class".into()),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        
+        if links.is_empty() {
+            return Ok(None);
+        }
+        
+        // Now find the SDNA code linked from this name with predicate "ad4m://sdna"
+        let sdna_links = self
+            .get(
+                Some(name_literal.to_url().unwrap()),
+                None,
+                Some("ad4m://sdna".into()),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        
+        if sdna_links.is_empty() {
+            return Ok(None);
+        }
+        
+        // Extract the SDNA code from the first link
+        let literal = Literal::from_url(sdna_links[0].data.target.clone())?;
+        match literal.get() {
+            Ok(LiteralValue::String(string)) => Ok(Some(string)),
+            _ => Ok(None),
+        }
     }
 
     pub async fn get_single_target(&self, source: String, predicate: String) -> Result<String> {
