@@ -204,7 +204,6 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
                 let ts = ThemeSet::load_defaults();
 
                 let syntax = ps.find_syntax_by_extension("pl").unwrap();
-                let mut h = HighlightLines::new(syntax, &ts.themes["Solarized (light)"]);
 
                 println!("\x1b[97m================");
                 println!("\x1b[36mSDNA Summary (Grouped by Class)");
@@ -268,21 +267,19 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
                         }
                         println!();
                         
-                        // Display the code with different colors based on loading status
+                        // Display the code with different themes based on loading status
                         if is_loaded {
-                            // Loaded code: more saturated/bold colors
+                            // Loaded code: use the bright Solarized theme
+                            let mut h = HighlightLines::new(syntax, &ts.themes["Solarized (light)"]);
                             for line in LinesWithEndings::from(sdna_code) {
                                 let ranges: Vec<(Style, &str)> = h.highlight_line(line, &ps).unwrap();
                                 let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
                                 print!("{}", escaped);
                             }
                         } else {
-                            // Not loaded code: darker/muted colors
+                            // Not loaded code: no syntax highlighting, just dark gray text
                             for line in LinesWithEndings::from(sdna_code) {
-                                let ranges: Vec<(Style, &str)> = h.highlight_line(line, &ps).unwrap();
-                                let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
-                                // Make the output darker by prefixing with dark color
-                                print!("\x1b[90m{}", escaped);
+                                print!("\x1b[90m{}", line);
                             }
                         }
                         println!();
