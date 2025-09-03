@@ -95,9 +95,9 @@ webbrowser = "0.8.12"
 holochain_cli_run_local_services = { version = "0.5.0-dev.12" }
 kitsune_p2p_types = { version = "0.5.0-dev.9" }
 kitsune2_api = "0.1.15"
-holochain = { version = "0.5.5", features = ["test_utils", "default", "backend-go-pion"], git = "https://github.com/coasys/holochain.git", branch = "0.5.5-coasys" }
-holochain_cli_bundle = { version = "0.5.5", git = "https://github.com/coasys/holochain.git", branch = "0.5.5-coasys" }
-holochain_types = { version = "0.5.5", git = "https://github.com/coasys/holochain.git", branch = "0.5.5-coasys" }
+holochain = { version = "0.5.6", features = ["test_utils", "default", "backend-go-pion"], git = "https://github.com/coasys/holochain.git", branch = "0.5.6-coasys" }
+holochain_cli_bundle = { version = "0.5.6", git = "https://github.com/coasys/holochain.git", branch = "0.5.6-coasys" }
+holochain_types = { version = "0.5.6", git = "https://github.com/coasys/holochain.git", branch = "0.5.6-coasys" }
 lair_keystore_api = { version = "0.6.1", git = "https://github.com/coasys/lair.git", branch = "0.6.1-coasys" }
 sodoken = "=0.1.0"
 
