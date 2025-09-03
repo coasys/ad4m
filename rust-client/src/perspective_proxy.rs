@@ -117,6 +117,87 @@ impl PerspectiveProxy {
         Ok(())
     }
 
+    pub async fn is_sdna_loaded(&self, sdna_code: &str) -> Result<bool> {
+        // Extract subject_class facts from the SDNA code using regex
+        use regex::Regex;
+        // Handle both quoted and unquoted ref values, and require it to be the only content on the line
+        let subject_class_regex = Regex::new(r#"^\s*subject_class\("([^"]+)",\s*("([^"]+)"|([^,\s)]+))\)\s*\.\s*$"#).unwrap();
+        
+        let mut subject_class_facts = Vec::new();
+        
+        for line in sdna_code.lines() {
+            let line = line.trim();
+            if let Some(captures) = subject_class_regex.captures(line) {
+                if let Some(class_name) = captures.get(1) {
+                    // Check if ref is quoted (capture group 3) or unquoted (capture group 4)
+                    let ref_value = if let Some(quoted_ref) = captures.get(3) {
+                        quoted_ref.as_str()
+                    } else if let Some(unquoted_ref) = captures.get(4) {
+                        unquoted_ref.as_str()
+                    } else {
+                        continue;
+                    };
+                    
+                    subject_class_facts.push((
+                        class_name.as_str().to_string(),
+                        ref_value.to_string()
+                    ));
+                }
+            }
+        }
+        
+        // If no subject_class facts found, consider it not loaded
+        if subject_class_facts.is_empty() {
+            return Ok(false);
+        }
+        
+        // Test if we can infer the specific facts from this SDNA
+        for (class_name, ref_value) in subject_class_facts {
+            // Use a general query with both variables to check if the fact exists
+            let query = "subject_class(Name, Ref).".to_string();
+            
+            match self.infer(query).await {
+                Ok(results) => {
+                    // Check if any of the results have both Name and Ref matching our expected values
+                    if let Some(array) = results.as_array() {
+                        let mut found_match = false;
+                        for result in array {
+                            // Look for both Name and Ref bindings in this result
+                            if let Some(result_obj) = result.as_object() {
+                                let name_binding = result_obj.get("Name");
+                                let ref_binding = result_obj.get("Ref");
+                                
+                                // Check if both bindings exist and match our expected values
+                                if let (Some(name), Some(ref_val)) = (name_binding, ref_binding) {
+                                    if let (Some(bound_name), Some(bound_ref)) = (name.as_str(), ref_val.as_str()) {
+                                        if bound_name == class_name && bound_ref == ref_value {
+                                            found_match = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if found_match {
+                            continue;
+                        } else {
+                            return Ok(false);
+                        }
+                    } else {
+                        return Ok(false);
+                    }
+                }
+                Err(_) => {
+                    return Ok(false);
+                }
+            }
+        }
+        
+        // All subject_class facts from this SDNA are loaded
+        Ok(true)
+    }
+
     pub async fn get_dna(&self) -> Result<Vec<(String, Vec<(String, String)>, Vec<String>, Vec<String>)>> {
         // First, find all the name literals that are linked from ad4m://self with SDNA predicates
         let sdna_predicates = vec![

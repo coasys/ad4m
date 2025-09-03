@@ -238,6 +238,11 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
                     // Check if there are multiple SDNA code instances
                     if sdna_codes_with_authors.len() > 1 {
                         println!("\x1b[35m📝 Multiple SDNA code instances: {} different code versions", sdna_codes_with_authors.len());
+                        
+                        // Show individual code instance authors
+                        for (i, (_, code_author)) in sdna_codes_with_authors.iter().enumerate() {
+                            println!("\x1b[90m    Code Instance {}: \x1b[97m{}", i + 1, code_author);
+                        }
                     }
                     
                     println!("\x1b[97m================");
@@ -249,13 +254,36 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
                             println!();
                         }
                         
-                        println!("\x1b[90m% Author: \x1b[97m{}", code_author);
+                        // Check if this SDNA code is loaded in Prolog
+                        let is_loaded = match perspective.is_sdna_loaded(sdna_code).await {
+                            Ok(loaded) => loaded,
+                            Err(_) => false, // If check fails, assume not loaded
+                        };
+                        
+                        // Show author and loading status with appropriate colors
+                        if is_loaded {
+                            println!("\x1b[90m% Author: \x1b[97m{} \x1b[32m✓ LOADED", code_author);
+                        } else {
+                            println!("\x1b[90m% Author: \x1b[97m{} \x1b[31m✗ NOT LOADED", code_author);
+                        }
                         println!();
                         
-                        for line in LinesWithEndings::from(sdna_code) {
-                            let ranges: Vec<(Style, &str)> = h.highlight_line(line, &ps).unwrap();
-                            let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
-                            print!("{}", escaped);
+                        // Display the code with different colors based on loading status
+                        if is_loaded {
+                            // Loaded code: more saturated/bold colors
+                            for line in LinesWithEndings::from(sdna_code) {
+                                let ranges: Vec<(Style, &str)> = h.highlight_line(line, &ps).unwrap();
+                                let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
+                                print!("{}", escaped);
+                            }
+                        } else {
+                            // Not loaded code: darker/muted colors
+                            for line in LinesWithEndings::from(sdna_code) {
+                                let ranges: Vec<(Style, &str)> = h.highlight_line(line, &ps).unwrap();
+                                let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
+                                // Make the output darker by prefixing with dark color
+                                print!("\x1b[90m{}", escaped);
+                            }
                         }
                         println!();
                     }
@@ -350,9 +378,17 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
                     if sdna_codes_with_authors.len() > 1 {
                         println!("\x1b[35m  📝 Multiple SDNA code instances: {} different code versions", sdna_codes_with_authors.len());
                         
-                        // Show individual code instance authors
-                        for (i, (_, code_author)) in sdna_codes_with_authors.iter().enumerate() {
-                            println!("\x1b[90m    Code Instance {}: \x1b[97m{}", i + 1, code_author);
+                        // Show individual code instance authors and loading status
+                        for (i, (sdna_code, code_author)) in sdna_codes_with_authors.iter().enumerate() {
+                            let is_loaded = match perspective.is_sdna_loaded(sdna_code).await {
+                                Ok(loaded) => loaded,
+                                Err(_) => false, // If check fails, assume not loaded
+                            };
+                            if is_loaded {
+                                println!("\x1b[90m    Code Instance {}: \x1b[97m{} \x1b[32m✓ LOADED", i + 1, code_author);
+                            } else {
+                                println!("\x1b[90m    Code Instance {}: \x1b[97m{} \x1b[31m✗ NOT LOADED", i + 1, code_author);
+                            }
                         }
                     }
                     
