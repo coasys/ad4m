@@ -199,17 +199,17 @@ ad4m perspectives repl <perspective-UUID>
 add_link(<source>, <predicate>, <status>, <target>)
 # Use _ for any parameter to make it optional
 
-# Query links with optional parameters
-query(<source>, <predicate>, <target>)
-# Call query() with no parameters to get all links
+# Get links with optional parameters
+get_links(<source>, <predicate>, <target>)
+# Call get_links() with no parameters to get all links
 
-# Show all links (same as query())
+# Show all links (same as get_links())
 all-links
 
 # Alternative query syntax
 ?<source> <predicate> <target>
 ```
-Any of the terms can be variables (starting with uppercase letters) or concrete values. Use `_` for any value in the query() function.
+Any of the terms can be variables (starting with uppercase letters) or concrete values. Use `_` for any value in the get_links() function.
 
 #### Subject Management
 ```

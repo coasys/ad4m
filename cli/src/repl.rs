@@ -42,13 +42,14 @@ async fn add_link(perspective: &PerspectiveProxy, line: &str) -> bool {
     }
 }
 
-async fn link_query(perspective: &PerspectiveProxy, line: &str) -> bool {
-    // query(source, predicate, target)
-    let link_query =
-        Regex::new(r"query\(\s*(?P<source>\S+)?(,\s*(?P<predicate>\S+))?(,\s*(?P<target>\S+))?\)")
-            .expect("Error parsing link_query regex");
+async fn get_links(perspective: &PerspectiveProxy, line: &str) -> bool {
+    // get_links(source, predicate, target)
+    let get_links_regex = Regex::new(
+        r"get_links\(\s*(?P<source>\S+)?(,\s*(?P<predicate>\S+))?(,\s*(?P<target>\S+))?\)",
+    )
+    .expect("Error parsing get_links regex");
 
-    let caps = link_query.captures(line);
+    let caps = get_links_regex.captures(line);
     if let Some(caps) = caps {
         let source = caps
             .name("source")
@@ -72,7 +73,7 @@ async fn link_query(perspective: &PerspectiveProxy, line: &str) -> bool {
                     print_link(link.into());
                 }
             }
-            Err(e) => println!("Error querying links: {}", e),
+            Err(e) => println!("Error getting links: {}", e),
         }
         true
     } else {
@@ -122,12 +123,12 @@ async fn help_command(_perspective: &PerspectiveProxy, line: &String) -> bool {
         println!("\x1b[90m    Add a new link to the perspective (status is required)");
         println!("\x1b[90m    Use _ for any parameter to make it optional");
         println!();
-        println!("\x1b[97m  query(<source>, <predicate>, <target>)");
-        println!("\x1b[90m    Query links with optional variables (use _ for any value)");
-        println!("\x1b[90m    Call query() with no parameters to get all links");
+        println!("\x1b[97m  get_links(<source>, <predicate>, <target>)");
+        println!("\x1b[90m    Get links with optional variables (use _ for any value)");
+        println!("\x1b[90m    Call get_links() with no parameters to get all links");
         println!();
         println!("\x1b[97m  all-links");
-        println!("\x1b[90m    Show all links in the perspective (same as query())");
+        println!("\x1b[90m    Show all links in the perspective (same as get_links())");
         println!();
 
         println!("\x1b[36m🧬 SDNA & Subject Classes:");
@@ -699,7 +700,7 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             continue;
         }
 
-        if link_query(&perspective, &line).await {
+        if get_links(&perspective, &line).await {
             continue;
         }
 
