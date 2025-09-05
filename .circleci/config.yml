@@ -5,7 +5,6 @@ references:
 orbs:
   node: circleci/node@5.2.0
   go: circleci/go@1.10.0
-  rust: circleci/rust@1.6.1
 
 jobs:
   build-and-test:
