@@ -75,7 +75,7 @@ impl PerspectiveProxy {
     }
 
     pub async fn add_dna(&self, name: String, dna: String, dna_type: String) -> Result<()> {
-        let mut predicate = "ad4m://has_custom_dna";
+        let mut predicate = "ad4m://has_custom_sdna";
 
         if dna_type == "subject_class" {
             predicate = "ad4m://has_subject_class"
