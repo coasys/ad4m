@@ -357,14 +357,24 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
 
                         // Display the code with different themes based on loading status
                         if is_loaded {
-                            // Loaded code: use the bright Solarized theme
-                            let mut h =
-                                HighlightLines::new(syntax, &ts.themes["Solarized (light)"]);
+                            // Loaded code: use the bright Solarized theme with safe fallback
+                            let theme = ts.themes.get("Solarized (light)")
+                                .or_else(|| ts.themes.get("Solarized"))
+                                .or_else(|| ts.themes.get("default"))
+                                .unwrap_or_else(|| ts.themes.values().next().unwrap());
+                            
+                            let mut h = HighlightLines::new(syntax, theme);
                             for line in LinesWithEndings::from(sdna_code) {
-                                let ranges: Vec<(Style, &str)> =
-                                    h.highlight_line(line, &ps).unwrap();
-                                let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
-                                print!("{}", escaped);
+                                match h.highlight_line(line, &ps) {
+                                    Ok(ranges) => {
+                                        let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
+                                        print!("{}", escaped);
+                                    }
+                                    Err(_) => {
+                                        // Fallback to uncolored text if highlighting fails
+                                        print!("{}", line);
+                                    }
+                                }
                             }
                         } else {
                             // Not loaded code: no syntax highlighting, just dark gray text
