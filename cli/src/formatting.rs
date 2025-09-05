@@ -32,7 +32,13 @@ fn deconstruct_value_object(value: Value) -> Result<String> {
                 Value::String(string) => string,
                 Value::Number(number) => number.to_string(),
                 Value::Bool(boolean) => boolean.to_string(),
-                Value::Array(_) => bail!("Unexpected nested array value"),
+                Value::Array(array) => {
+                    let array_items: Result<Vec<String>> = array
+                        .into_iter()
+                        .map(|item| deconstruct_value(item))
+                        .collect();
+                    format!("[{}]", array_items?.join(", "))
+                }
                 Value::Object(_) => deconstruct_value_object(value)?,
                 Value::Null => "null".to_string(),
             };
@@ -45,6 +51,23 @@ fn deconstruct_value_object(value: Value) -> Result<String> {
     }
 }
 
+fn deconstruct_value(value: Value) -> Result<String> {
+    match value {
+        Value::String(string) => Ok(string),
+        Value::Number(number) => Ok(number.to_string()),
+        Value::Bool(boolean) => Ok(boolean.to_string()),
+        Value::Array(array) => {
+            let array_items: Result<Vec<String>> = array
+                .into_iter()
+                .map(|item| deconstruct_value(item))
+                .collect();
+            Ok(format!("[{}]", array_items?.join(", ")))
+        }
+        Value::Object(_) => deconstruct_value_object(value),
+        Value::Null => Ok("null".to_string()),
+    }
+}
+
 pub fn print_prolog_result(result: Value) -> Result<()> {
     match result {
         Value::Object(map) => {
@@ -53,14 +76,20 @@ pub fn print_prolog_result(result: Value) -> Result<()> {
                     Value::String(string) => string,
                     Value::Number(number) => number.to_string(),
                     Value::Bool(boolean) => boolean.to_string(),
-                    Value::Array(_) => bail!("Unexpected nested array value"),
+                    Value::Array(array) => {
+                        let array_items: Result<Vec<String>> = array
+                            .into_iter()
+                            .map(|item| deconstruct_value(item))
+                            .collect();
+                        format!("[{}]", array_items?.join(", "))
+                    }
                     Value::Object(_) => deconstruct_value_object(value)?,
                     Value::Null => "null".to_string(),
                 };
                 println!("\x1b[36m{}:\x1b[97m {}", key, value);
             }
         }
-        _ => bail!("Unexpected non-obhect value in prolog result: {:?}", result),
+        _ => bail!("Unexpected non-object value in prolog result: {:?}", result),
     }
     Ok(())
 }
