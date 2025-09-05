@@ -1,7 +1,21 @@
-use crate::{formatting::*, repl::repl_loop, util::maybe_parse_datetime};
 use ad4m_client::Ad4mClient;
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
+    Terminal,
+};
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use std::io;
+use crate::{formatting::*, repl::repl_loop, util::maybe_parse_datetime};
 
 #[derive(Args, Debug)]
 pub struct QueryLinksArgs {
@@ -106,37 +120,8 @@ pub enum PerspectiveFunctions {
 
 pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>) -> Result<()> {
     if command.is_none() {
-        let all_perspectives = ad4m_client.perspectives.all().await?;
-        for perspective in all_perspectives {
-            println!("\x1b[36mName: \x1b[97m{}", perspective.name);
-            println!("\x1b[36mID: \x1b[97m{}", perspective.uuid);
-            if perspective.shared_url.is_some() {
-                println!(
-                    "\x1b[36mShared URL: \x1b[97m{}",
-                    perspective.shared_url.unwrap()
-                );
-            } else {
-                println!("\x1b[36mShared URL: \x1b[90m<not shared as Neighbourhood>");
-            }
-
-            if let Some(nh) = perspective.neighbourhood {
-                println!(
-                    "\x1b[36mNeighbourhood Link-Language: \x1b[97m{}",
-                    nh.data.link_language
-                );
-                if nh.data.meta.links.is_empty() {
-                    println!("\x1b[36mNeughbourhood meta: \x1b[90m<empty>");
-                } else {
-                    println!("\x1b[36mNeughbourhood meta:");
-                    for link in nh.data.meta.links {
-                        print_link(link.into());
-                    }
-                }
-            }
-            println!()
-        }
-
-        return Ok(());
+        // Use interactive perspective selector instead of just printing
+        return interactive_perspective_selector(ad4m_client).await;
     }
 
     match command.unwrap() {
@@ -287,4 +272,194 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
         }
     }
     Ok(())
+}
+
+async fn interactive_perspective_selector(ad4m_client: Ad4mClient) -> Result<()> {
+    // Enable raw mode and alternate screen
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    // Get all perspectives
+    let all_perspectives = ad4m_client.perspectives.all().await?;
+    
+    if all_perspectives.is_empty() {
+        // Clean up terminal
+        disable_raw_mode()?;
+        execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )?;
+        terminal.show_cursor()?;
+        
+        println!("\x1b[91mNo perspectives found!");
+        return Ok(());
+    }
+
+    let mut selected = 0;
+    let mut scroll = 0;
+    let list_height = 20; // Maximum visible items
+    let mut list_state = ratatui::widgets::ListState::default();
+    list_state.select(Some(selected));
+
+    loop {
+        terminal.draw(|f| {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .margin(2)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Min(0),
+                    Constraint::Length(2),
+                    Constraint::Length(3),
+                ])
+                .split(f.size());
+
+            // Title
+            let title = Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "AD4M Perspective Selector",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]))
+            .block(Block::default().borders(Borders::ALL));
+            f.render_widget(title, chunks[0]);
+
+            // Perspective list
+            let items: Vec<ListItem> = all_perspectives
+                .iter()
+                .enumerate()
+                .map(|(_i, perspective)| {
+                    let mut spans = vec![
+                        Span::styled(
+                            format!("{}", perspective.name),
+                            Style::default().fg(Color::White),
+                        ),
+                        Span::styled(
+                            format!(" ({})", perspective.uuid),
+                            Style::default().fg(Color::Gray),
+                        ),
+                    ];
+
+                    if let Some(nh) = &perspective.neighbourhood {
+                        spans.push(Span::styled(
+                            format!(" [Neighbourhood: {}]", nh.data.link_language),
+                            Style::default().fg(Color::Yellow),
+                        ));
+                    }
+
+                    if perspective.shared_url.is_some() {
+                        spans.push(Span::styled(
+                            " [Shared]",
+                            Style::default().fg(Color::Green),
+                        ));
+                    }
+
+                    ListItem::new(vec![
+                        Line::from(spans),
+                    ])
+                })
+                .collect();
+
+            let list = List::new(items)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Select a perspective (↑/↓ arrows, Enter to select, q to quit)"),
+                )
+                .highlight_style(
+                    Style::default()
+                        .bg(Color::Cyan)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .highlight_symbol("> ")
+                .highlight_spacing(ratatui::widgets::HighlightSpacing::Always);
+
+            f.render_stateful_widget(list, chunks[1], &mut list_state);
+
+            // Status line showing current selection
+            let status = Paragraph::new(Line::from(vec![
+                Span::styled(
+                    format!("Selection: {} of {}", selected + 1, all_perspectives.len()),
+                    Style::default().fg(Color::Blue),
+                ),
+            ]))
+            .block(Block::default().borders(Borders::ALL));
+            f.render_widget(status, chunks[2]);
+
+            // Instructions
+            let instructions = Paragraph::new(Line::from(vec![
+                Span::styled("Navigation: ", Style::default().fg(Color::Yellow)),
+                Span::styled("↑/↓ arrows, ", Style::default().fg(Color::White)),
+                Span::styled("Enter: ", Style::default().fg(Color::Green)),
+                Span::styled("select perspective, ", Style::default().fg(Color::White)),
+                Span::styled("q: ", Style::default().fg(Color::Red)),
+                Span::styled("quit", Style::default().fg(Color::White)),
+            ]))
+            .block(Block::default().borders(Borders::ALL));
+            f.render_widget(instructions, chunks[3]);
+        })?;
+
+        // Handle input
+        if let Event::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if selected > 0 {
+                        selected -= 1;
+                        if selected < scroll {
+                            scroll = selected;
+                        }
+                        list_state.select(Some(selected));
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if selected < all_perspectives.len() - 1 {
+                        selected += 1;
+                        if selected >= scroll + list_height {
+                            scroll = selected - list_height + 1;
+                        }
+                        list_state.select(Some(selected));
+                    }
+                }
+                KeyCode::Enter => {
+                    // Clean up terminal
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+
+                    // Get the selected perspective and start REPL
+                    let selected_perspective = &all_perspectives[selected];
+                    println!("\x1b[32mSelected perspective: \x1b[97m{}", selected_perspective.name);
+                    println!("\x1b[32mStarting REPL for perspective: \x1b[97m{}", selected_perspective.uuid);
+                    
+                    // Start REPL for the selected perspective
+                    let perspective_proxy = ad4m_client.perspectives.get(selected_perspective.uuid.clone()).await?;
+                    crate::repl::repl_loop(perspective_proxy).await?;
+                    return Ok(());
+                }
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    // Clean up terminal
+                    disable_raw_mode()?;
+                    execute!(
+                        terminal.backend_mut(),
+                        LeaveAlternateScreen,
+                        DisableMouseCapture
+                    )?;
+                    terminal.show_cursor()?;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+    }
 }
