@@ -214,15 +214,11 @@ async fn system_commands(_perspective: &PerspectiveProxy, line: &String) -> bool
                 env!("CARGO_PKG_VERSION")
             );
             println!("\x1b[36mPackage: \x1b[97m{}", env!("CARGO_PKG_NAME"));
-            
+
             let git_commit = option_env!("GIT_COMMIT_HASH").unwrap_or("unknown");
             let git_dirty = option_env!("GIT_DIRTY").unwrap_or("N/A");
-            println!(
-                "\x1b[36mGit Commit: \x1b[97m{} ({})",
-                git_commit,
-                git_dirty
-            );
-            
+            println!("\x1b[36mGit Commit: \x1b[97m{} ({})", git_commit, git_dirty);
+
             println!("\x1b[36mHomepage: \x1b[97m{}", env!("CARGO_PKG_HOMEPAGE"));
             println!(
                 "\x1b[36mRepository: \x1b[97m{}",
@@ -250,12 +246,14 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
                 let ps = SyntaxSet::load_defaults_newlines();
                 let ts = ThemeSet::load_defaults();
 
-                let syntax = ps.find_syntax_by_extension("pl")
+                let syntax = ps
+                    .find_syntax_by_extension("pl")
                     .unwrap_or_else(|| ps.find_syntax_by_name("Plain Text").unwrap());
 
                 // Filter by class name if specified
                 let filtered_zomes: Vec<_> = if let Some(filter_class) = &filter_class {
-                    dna_zomes.iter()
+                    dna_zomes
+                        .iter()
                         .filter(|(class_name, _, _, _)| class_name == filter_class)
                         .collect()
                 } else {
@@ -358,16 +356,19 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
                         // Display the code with different themes based on loading status
                         if is_loaded {
                             // Loaded code: use the bright Solarized theme with safe fallback
-                            let theme = ts.themes.get("Solarized (light)")
+                            let theme = ts
+                                .themes
+                                .get("Solarized (light)")
                                 .or_else(|| ts.themes.get("Solarized"))
                                 .or_else(|| ts.themes.get("default"))
                                 .unwrap_or_else(|| ts.themes.values().next().unwrap());
-                            
+
                             let mut h = HighlightLines::new(syntax, theme);
                             for line in LinesWithEndings::from(sdna_code) {
                                 match h.highlight_line(line, &ps) {
                                     Ok(ranges) => {
-                                        let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
+                                        let escaped =
+                                            as_24_bit_terminal_escaped(&ranges[..], false);
                                         print!("{}", escaped);
                                     }
                                     Err(_) => {
