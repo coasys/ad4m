@@ -198,10 +198,17 @@ ad4m perspectives repl <perspective-UUID>
 # Add a new link
 add <source> <predicate> <target>
 
-# Query links
+# Query links with optional parameters
+query(<source>, <predicate>, <target>)
+# Call query() with no parameters to get all links
+
+# Show all links (same as query())
+all-links
+
+# Alternative query syntax
 ?<source> <predicate> <target>
 ```
-Any of the terms can be variables (starting with uppercase letters) or concrete values.
+Any of the terms can be variables (starting with uppercase letters) or concrete values. Use `_` for any value in the query() function.
 
 #### Subject Management
 ```

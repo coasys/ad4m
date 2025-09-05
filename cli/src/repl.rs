@@ -80,6 +80,23 @@ async fn link_query(perspective: &PerspectiveProxy, line: &str) -> bool {
     }
 }
 
+async fn all_links(perspective: &PerspectiveProxy, line: &String) -> bool {
+    if line == "all-links" {
+        match perspective.get(None, None, None, None, None, None).await {
+            Ok(links) => {
+                println!("\x1b[36mAll links in perspective:\x1b[0m");
+                for link in links {
+                    print_link(link.into());
+                }
+            }
+            Err(e) => println!("Error getting all links: {}", e),
+        }
+        true
+    } else {
+        false
+    }
+}
+
 async fn subject_classes(perspective: &PerspectiveProxy, line: &String) -> bool {
     if line == "classes" {
         if let Ok(classes) = perspective.subject_classes().await {
@@ -106,6 +123,10 @@ async fn help_command(_perspective: &PerspectiveProxy, line: &String) -> bool {
         println!();
         println!("\x1b[97m  query(<source>, <predicate>, <target>)");
         println!("\x1b[90m    Query links with optional variables (use _ for any value)");
+        println!("\x1b[90m    Call query() with no parameters to get all links");
+        println!();
+        println!("\x1b[97m  all-links");
+        println!("\x1b[90m    Show all links in the perspective (same as query())");
         println!();
 
         println!("\x1b[36m🧬 SDNA & Subject Classes:");
@@ -678,6 +699,10 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
         }
 
         if link_query(&perspective, &line).await {
+            continue;
+        }
+
+        if all_links(&perspective, &line).await {
             continue;
         }
 
