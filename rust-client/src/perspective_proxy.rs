@@ -121,10 +121,12 @@ impl PerspectiveProxy {
         // Extract subject_class facts from the SDNA code using regex
         use regex::Regex;
         // Handle both quoted and unquoted ref values, and require it to be the only content on the line
-        let subject_class_regex = Regex::new(r#"^\s*subject_class\("([^"]+)",\s*("([^"]+)"|([^,\s)]+))\)\s*\.\s*$"#).unwrap();
-        
+        let subject_class_regex =
+            Regex::new(r#"^\s*subject_class\("([^"]+)",\s*("([^"]+)"|([^,\s)]+))\)\s*\.\s*$"#)
+                .unwrap();
+
         let mut subject_class_facts = Vec::new();
-        
+
         for line in sdna_code.lines() {
             let line = line.trim();
             if let Some(captures) = subject_class_regex.captures(line) {
@@ -137,25 +139,23 @@ impl PerspectiveProxy {
                     } else {
                         continue;
                     };
-                    
-                    subject_class_facts.push((
-                        class_name.as_str().to_string(),
-                        ref_value.to_string()
-                    ));
+
+                    subject_class_facts
+                        .push((class_name.as_str().to_string(), ref_value.to_string()));
                 }
             }
         }
-        
+
         // If no subject_class facts found, consider it not loaded
         if subject_class_facts.is_empty() {
             return Ok(false);
         }
-        
+
         // Test if we can infer the specific facts from this SDNA
         for (class_name, ref_value) in subject_class_facts {
             // Use a general query with both variables to check if the fact exists
             let query = "subject_class(Name, Ref).".to_string();
-            
+
             match self.infer(query).await {
                 Ok(results) => {
                     // Check if any of the results have both Name and Ref matching our expected values
@@ -166,10 +166,12 @@ impl PerspectiveProxy {
                             if let Some(result_obj) = result.as_object() {
                                 let name_binding = result_obj.get("Name");
                                 let ref_binding = result_obj.get("Ref");
-                                
+
                                 // Check if both bindings exist and match our expected values
                                 if let (Some(name), Some(ref_val)) = (name_binding, ref_binding) {
-                                    if let (Some(bound_name), Some(bound_ref)) = (name.as_str(), ref_val.as_str()) {
+                                    if let (Some(bound_name), Some(bound_ref)) =
+                                        (name.as_str(), ref_val.as_str())
+                                    {
                                         if bound_name == class_name && bound_ref == ref_value {
                                             found_match = true;
                                             break;
@@ -178,7 +180,7 @@ impl PerspectiveProxy {
                                 }
                             }
                         }
-                        
+
                         if found_match {
                             continue;
                         } else {
@@ -193,23 +195,26 @@ impl PerspectiveProxy {
                 }
             }
         }
-        
+
         // All subject_class facts from this SDNA are loaded
         Ok(true)
     }
 
-    pub async fn get_dna(&self) -> Result<Vec<(String, Vec<(String, String)>, Vec<String>, Vec<String>)>> {
+    pub async fn get_dna(
+        &self,
+    ) -> Result<Vec<(String, Vec<(String, String)>, Vec<String>, Vec<String>)>> {
         // First, find all the name literals that are linked from ad4m://self with SDNA predicates
         let sdna_predicates = vec![
             "ad4m://has_subject_class",
-            "ad4m://has_flow", 
-            "ad4m://has_custom_sdna"
+            "ad4m://has_flow",
+            "ad4m://has_custom_sdna",
         ];
-        
+
         // Use a HashMap to group by class name and avoid duplicates
         use std::collections::HashMap;
-        let mut class_groups: HashMap<String, (Vec<String>, Vec<String>, Vec<(String, String)>)> = HashMap::new();
-        
+        let mut class_groups: HashMap<String, (Vec<String>, Vec<String>, Vec<(String, String)>)> =
+            HashMap::new();
+
         for predicate in sdna_predicates {
             let links = self
                 .get(
@@ -221,12 +226,12 @@ impl PerspectiveProxy {
                     None,
                 )
                 .await?;
-            
+
             // For each name literal found, get the actual SDNA code
             for link in links {
                 let name_literal = link.data.target.clone();
                 let name_author = link.author.clone();
-                
+
                 // Extract the class name from the literal
                 let class_name = match Literal::from_url(name_literal.clone()) {
                     Ok(literal) => match literal.get() {
@@ -235,7 +240,7 @@ impl PerspectiveProxy {
                     },
                     Err(_) => continue,
                 };
-                
+
                 // Now find the SDNA code linked from this name with predicate "ad4m://sdna"
                 let sdna_links = self
                     .get(
@@ -247,30 +252,31 @@ impl PerspectiveProxy {
                         None,
                     )
                     .await?;
-                
+
                 // Get or create the entry for this class
                 let (name_authors, code_authors, sdna_codes_with_authors) = class_groups
                     .entry(class_name.clone())
                     .or_insert_with(|| (Vec::new(), Vec::new(), Vec::new()));
-                
+
                 // Add this name author if not already present
                 if !name_authors.contains(&name_author) {
                     name_authors.push(name_author);
                 }
-                
+
                 // Add all unique code authors and SDNA codes from this name link
                 for sdna_link in sdna_links {
                     if !code_authors.contains(&sdna_link.author) {
                         code_authors.push(sdna_link.author.clone());
                     }
-                    
+
                     // Extract the SDNA code and track its author
                     if let Ok(literal) = Literal::from_url(sdna_link.data.target.clone()) {
                         if let Ok(LiteralValue::String(sdna_code)) = literal.get() {
                             // Check if this exact code already exists (to avoid duplicates)
-                            let code_exists = sdna_codes_with_authors.iter()
+                            let code_exists = sdna_codes_with_authors
+                                .iter()
                                 .any(|(existing_code, _)| existing_code == &sdna_code);
-                            
+
                             if !code_exists {
                                 sdna_codes_with_authors.push((sdna_code, sdna_link.author.clone()));
                             }
@@ -279,21 +285,29 @@ impl PerspectiveProxy {
                 }
             }
         }
-        
+
         // Convert to the expected return format
         // For each class, we'll return one entry with all collected information
         let mut result = Vec::new();
         for (class_name, (name_authors, code_authors, sdna_codes_with_authors)) in class_groups {
-            result.push((class_name, sdna_codes_with_authors, name_authors, code_authors));
+            result.push((
+                class_name,
+                sdna_codes_with_authors,
+                name_authors,
+                code_authors,
+            ));
         }
-        
+
         Ok(result)
     }
 
-    pub async fn get_dna_for_class(&self, class_name: &str) -> Result<Option<(String, Vec<String>, Vec<String>)>> {
+    pub async fn get_dna_for_class(
+        &self,
+        class_name: &str,
+    ) -> Result<Option<(String, Vec<String>, Vec<String>)>> {
         // First, find the name literal for this class that is linked from ad4m://self
         let name_literal = Literal::from_string(class_name.to_string());
-        
+
         let links = self
             .get(
                 Some("ad4m://self".into()),
@@ -304,11 +318,11 @@ impl PerspectiveProxy {
                 None,
             )
             .await?;
-        
+
         if links.is_empty() {
             return Ok(None);
         }
-        
+
         // Collect all unique name authors
         let mut name_authors = Vec::new();
         for link in &links {
@@ -316,7 +330,7 @@ impl PerspectiveProxy {
                 name_authors.push(link.author.clone());
             }
         }
-        
+
         // Now find the SDNA code linked from this name with predicate "ad4m://sdna"
         let sdna_links = self
             .get(
@@ -328,32 +342,32 @@ impl PerspectiveProxy {
                 None,
             )
             .await?;
-        
+
         if sdna_links.is_empty() {
             return Ok(None);
         }
-        
+
         // Collect all unique code authors and find the first SDNA code
         let mut code_authors = Vec::new();
         let mut first_sdna_code = None;
-        
+
         for sdna_link in sdna_links {
             if !code_authors.contains(&sdna_link.author) {
                 code_authors.push(sdna_link.author.clone());
             }
-            
+
             // Get the first SDNA code we find
             if first_sdna_code.is_none() {
                 let literal = Literal::from_url(sdna_link.data.target.clone())?;
                 match literal.get() {
                     Ok(LiteralValue::String(string)) => {
                         first_sdna_code = Some(string);
-                    },
+                    }
                     _ => continue,
                 }
             }
         }
-        
+
         if let Some(sdna_code) = first_sdna_code {
             Ok(Some((sdna_code, name_authors, code_authors)))
         } else {
@@ -665,4 +679,3 @@ fn parse_action(action: &str) -> Result<Vec<Command>> {
 
     Ok(commands)
 }
-
