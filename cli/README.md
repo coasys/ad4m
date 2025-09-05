@@ -197,10 +197,10 @@ ad4m perspectives repl <perspective-UUID>
 ```
 # Add a new link (status is required)
 add_link(<source>, <predicate>, <status>, <target>)
-# Use _ for any parameter to make it optional
 
 # Get links with optional parameters
 get_links(<source>, <predicate>, <target>)
+# Use _ for any parameter to make it optional
 # Call get_links() with no parameters to get all links
 
 # Show all links (same as get_links())
