@@ -13,7 +13,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@coasys/ad4m": "workspace:0.10.1-release-candidate-4",
+    "@coasys/ad4m": "workspace:0.10.1-release-candidate-5",
     "@coasys/hooks-helpers": "*"
   },
   "peerDependencies": {
@@ -24,5 +24,5 @@
       "@coasys/ad4m": "*"
     }
   },
-  "version": "0.10.1-release-candidate-4"
+  "version": "0.10.1-release-candidate-5"
 }

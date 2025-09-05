@@ -195,13 +195,16 @@ ad4m perspectives repl <perspective-UUID>
 
 #### Link Management
 ```
-# Add a new link
-add <source> <predicate> <target>
+# Add a new link (status is required)
+add_link(<source>, <predicate>, <status>, <target>)
 
-# Query links
-?<source> <predicate> <target>
-```
-Any of the terms can be variables (starting with uppercase letters) or concrete values.
+# Get links with optional parameters
+get_links(<source>, <predicate>, <target>)
+# Use _ for any parameter to make it optional
+# Call get_links() with no parameters to get all links
+
+# Show all links (same as get_links())
+all-links
 
 #### Subject Management
 ```
@@ -225,6 +228,24 @@ classes
 
 # Show DNA/schema of a class
 sdna <class>
+
+# Show SDNA authorship information (debugging)
+sdna-authors
+```
+
+#### System Commands
+```
+# Show help
+help
+
+# Clear the screen
+clear
+
+# Show version information
+version
+
+# Exit the REPL
+exit
 ```
 
 #### Prolog Queries
