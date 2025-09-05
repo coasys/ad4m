@@ -782,11 +782,75 @@ export class PerspectiveProxy {
      * This will return all SDNA code elements in an array.
      */
     async getSdna(): Promise<string[]> {
-        let links = await this.get(new LinkQuery({
-            predicate: "ad4m://sdna"
-        }))
+        // First, find all the name literals that are linked from ad4m://self with SDNA predicates
+        const sdnaPredicates = [
+            "ad4m://has_subject_class",
+            "ad4m://has_flow",
+            "ad4m://has_custom_sdna"
+        ];
+        
+        const allSdnaCode: string[] = [];
+        
+        for (const predicate of sdnaPredicates) {
+            // Find name literals linked from ad4m://self with this predicate
+            const nameLinks = await this.get(new LinkQuery({
+                source: "ad4m://self",
+                predicate: predicate
+            }));
+            
+            // For each name literal found, get the actual SDNA code
+            for (const nameLink of nameLinks) {
+                const nameLiteral = nameLink.data.target;
+                
+                // Now find the SDNA code linked from this name with predicate "ad4m://sdna"
+                const sdnaLinks = await this.get(new LinkQuery({
+                    source: nameLiteral,
+                    predicate: "ad4m://sdna"
+                }));
+                
+                // Extract the SDNA code from each link
+                for (const sdnaLink of sdnaLinks) {
+                    const code = Literal.fromUrl(sdnaLink.data.target).get();
+                    if (typeof code === 'string') {
+                        allSdnaCode.push(code);
+                    }
+                }
+            }
+        }
+        
+        return allSdnaCode;
+    }
 
-        return links.map(link => link.data.target).map(t => Literal.fromUrl(t).get())
+    /** Returns the Social DNA code for a specific class
+     * This will return the SDNA code for the specified class, or null if not found.
+     */
+    async getSdnaForClass(className: string): Promise<string | null> {
+        // First, find the name literal for this class that is linked from ad4m://self
+        const nameLiteral = Literal.from(className);
+        
+        const links = await this.get(new LinkQuery({
+            source: "ad4m://self",
+            target: nameLiteral.toUrl(),
+            predicate: "ad4m://has_subject_class"
+        }));
+        
+        if (links.length === 0) {
+            return null;
+        }
+        
+        // Now find the SDNA code linked from this name with predicate "ad4m://sdna"
+        const sdnaLinks = await this.get(new LinkQuery({
+            source: nameLiteral.toUrl(),
+            predicate: "ad4m://sdna"
+        }));
+        
+        if (sdnaLinks.length === 0) {
+            return null;
+        }
+        
+        // Extract the SDNA code from the first link
+        const code = Literal.fromUrl(sdnaLinks[0].data.target).get();
+        return typeof code === 'string' ? code : null;
     }
 
     /** Adds the given Social DNA code to the perspective's SDNA code */
@@ -1002,7 +1066,11 @@ export class PerspectiveProxy {
 
             // Collect all collections of the object in a list
             if (Object.getPrototypeOf(obj).__collections) {
-                Object.keys(Object.getPrototypeOf(obj).__collections).filter(key => key !== 'isSubjectInstance').forEach(c => !collections.includes(c) ?? collections.push(c))
+                Object.keys(Object.getPrototypeOf(obj).__collections).filter(key => key !== 'isSubjectInstance').forEach(c => {
+                    if (!collections.includes(c)) {
+                        collections.push(c);
+                    }
+                });
             } else {
                 collections.push(...Object.keys(obj).filter(key => Array.isArray(obj[key])).filter(key => key !== 'isSubjectInstance'))
             }
