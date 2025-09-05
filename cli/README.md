@@ -206,11 +206,6 @@ get_links(<source>, <predicate>, <target>)
 # Show all links (same as get_links())
 all-links
 
-# Alternative query syntax
-?<source> <predicate> <target>
-```
-Any of the terms can be variables (starting with uppercase letters) or concrete values. Use `_` for any value in the get_links() function.
-
 #### Subject Management
 ```
 # Create a new subject
