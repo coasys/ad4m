@@ -1,6 +1,12 @@
+use crate::{formatting::*, repl::repl_loop, util::maybe_parse_datetime};
 use ad4m_client::Ad4mClient;
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -9,13 +15,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Terminal,
 };
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
 use std::io;
-use crate::{formatting::*, repl::repl_loop, util::maybe_parse_datetime};
 
 #[derive(Args, Debug)]
 pub struct QueryLinksArgs {
@@ -284,7 +284,7 @@ async fn interactive_perspective_selector(ad4m_client: Ad4mClient) -> Result<()>
 
     // Get all perspectives
     let all_perspectives = ad4m_client.perspectives.all().await?;
-    
+
     if all_perspectives.is_empty() {
         // Clean up terminal
         disable_raw_mode()?;
@@ -294,7 +294,7 @@ async fn interactive_perspective_selector(ad4m_client: Ad4mClient) -> Result<()>
             DisableMouseCapture
         )?;
         terminal.show_cursor()?;
-        
+
         println!("\x1b[91mNo perspectives found!");
         return Ok(());
     }
@@ -319,14 +319,12 @@ async fn interactive_perspective_selector(ad4m_client: Ad4mClient) -> Result<()>
                 .split(f.size());
 
             // Title
-            let title = Paragraph::new(Line::from(vec![
-                Span::styled(
-                    "AD4M Perspective Selector",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]))
+            let title = Paragraph::new(Line::from(vec![Span::styled(
+                "AD4M Perspective Selector",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )]))
             .block(Block::default().borders(Borders::ALL));
             f.render_widget(title, chunks[0]);
 
@@ -354,15 +352,10 @@ async fn interactive_perspective_selector(ad4m_client: Ad4mClient) -> Result<()>
                     }
 
                     if perspective.shared_url.is_some() {
-                        spans.push(Span::styled(
-                            " [Shared]",
-                            Style::default().fg(Color::Green),
-                        ));
+                        spans.push(Span::styled(" [Shared]", Style::default().fg(Color::Green)));
                     }
 
-                    ListItem::new(vec![
-                        Line::from(spans),
-                    ])
+                    ListItem::new(vec![Line::from(spans)])
                 })
                 .collect();
 
@@ -384,12 +377,10 @@ async fn interactive_perspective_selector(ad4m_client: Ad4mClient) -> Result<()>
             f.render_stateful_widget(list, chunks[1], &mut list_state);
 
             // Status line showing current selection
-            let status = Paragraph::new(Line::from(vec![
-                Span::styled(
-                    format!("Selection: {} of {}", selected + 1, all_perspectives.len()),
-                    Style::default().fg(Color::Blue),
-                ),
-            ]))
+            let status = Paragraph::new(Line::from(vec![Span::styled(
+                format!("Selection: {} of {}", selected + 1, all_perspectives.len()),
+                Style::default().fg(Color::Blue),
+            )]))
             .block(Block::default().borders(Borders::ALL));
             f.render_widget(status, chunks[2]);
 
@@ -439,11 +430,20 @@ async fn interactive_perspective_selector(ad4m_client: Ad4mClient) -> Result<()>
 
                     // Get the selected perspective and start REPL
                     let selected_perspective = &all_perspectives[selected];
-                    println!("\x1b[32mSelected perspective: \x1b[97m{}", selected_perspective.name);
-                    println!("\x1b[32mStarting REPL for perspective: \x1b[97m{}", selected_perspective.uuid);
-                    
+                    println!(
+                        "\x1b[32mSelected perspective: \x1b[97m{}",
+                        selected_perspective.name
+                    );
+                    println!(
+                        "\x1b[32mStarting REPL for perspective: \x1b[97m{}",
+                        selected_perspective.uuid
+                    );
+
                     // Start REPL for the selected perspective
-                    let perspective_proxy = ad4m_client.perspectives.get(selected_perspective.uuid.clone()).await?;
+                    let perspective_proxy = ad4m_client
+                        .perspectives
+                        .get(selected_perspective.uuid.clone())
+                        .await?;
                     crate::repl::repl_loop(perspective_proxy).await?;
                     return Ok(());
                 }

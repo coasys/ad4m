@@ -13,7 +13,7 @@ fn main() {
     if cfg!(target_os = "macos") {
         println!("cargo:rustc-cfg=feature=\"metal\"");
     }
-    
+
     // Capture git commit information
     let git_hash = Command::new("git")
         .args(&["rev-parse", "--short", "HEAD"])
@@ -31,8 +31,11 @@ fn main() {
 
     // Set environment variables for the main code
     println!("cargo:rustc-env=GIT_COMMIT_HASH={}", git_hash);
-    println!("cargo:rustc-env=GIT_DIRTY={}", if git_dirty { "dirty" } else { "clean" });
-    
+    println!(
+        "cargo:rustc-env=GIT_DIRTY={}",
+        if git_dirty { "dirty" } else { "clean" }
+    );
+
     // Re-run if git information changes
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
