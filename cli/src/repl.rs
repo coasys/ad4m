@@ -250,7 +250,8 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
                 let ps = SyntaxSet::load_defaults_newlines();
                 let ts = ThemeSet::load_defaults();
 
-                let syntax = ps.find_syntax_by_extension("pl").unwrap();
+                let syntax = ps.find_syntax_by_extension("pl")
+                    .unwrap_or_else(|| ps.find_syntax_by_name("Plain Text").unwrap());
 
                 // Filter by class name if specified
                 let filtered_zomes: Vec<_> = if let Some(filter_class) = &filter_class {
