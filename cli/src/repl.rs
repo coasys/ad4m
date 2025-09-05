@@ -135,15 +135,14 @@ async fn help_command(_perspective: &PerspectiveProxy, line: &String) -> bool {
         println!("\x1b[97m  classes");
         println!("\x1b[90m    List all available subject classes");
         println!();
-        println!("\x1b[97m  sdna");
-        println!("\x1b[90m    Show all SDNA code in the perspective with authorship info");
+        println!("\x1b[97m  sdna [<class>]");
+        println!("\x1b[90m    Show SDNA code in the perspective with authorship info");
+        println!("\x1b[90m    Without <class>: show all SDNA classes");
+        println!("\x1b[90m    With <class>: show only the specified class");
         println!(
             "\x1b[90m    Classes are grouped to avoid duplication when multiple name links exist"
         );
         println!("\x1b[90m    Each class shows consolidated authorship from all related links");
-        println!();
-        println!("\x1b[97m  sdna <class>");
-        println!("\x1b[90m    Show SDNA code for a specific class with authorship info");
         println!();
         println!("\x1b[97m  sdna-authors");
         println!("\x1b[90m    Show authorship information for all SDNA (debugging)");
@@ -233,7 +232,14 @@ async fn system_commands(_perspective: &PerspectiveProxy, line: &String) -> bool
 }
 
 async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
-    if line == "sdna" {
+    if line == "sdna" || line.starts_with("sdna ") {
+        // Parse the class name if provided
+        let filter_class = if line.starts_with("sdna ") {
+            Some(line[5..].trim().to_string())
+        } else {
+            None
+        };
+
         match perspective.get_dna().await {
             Ok(dna_zomes) => {
                 // Load these once at the start of your program
@@ -242,13 +248,37 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
 
                 let syntax = ps.find_syntax_by_extension("pl").unwrap();
 
+                // Filter by class name if specified
+                let filtered_zomes: Vec<_> = if let Some(filter_class) = &filter_class {
+                    dna_zomes.iter()
+                        .filter(|(class_name, _, _, _)| class_name == filter_class)
+                        .collect()
+                } else {
+                    dna_zomes.iter().collect()
+                };
+
+                if filtered_zomes.is_empty() {
+                    if let Some(filter_class) = &filter_class {
+                        println!("\x1b[31mNo SDNA found for class: \x1b[97m{}", filter_class);
+                    } else {
+                        println!("\x1b[31mNo SDNA found in perspective");
+                    }
+                    return true;
+                }
+
+                let title = if filter_class.is_some() {
+                    format!("SDNA for class: {}", filter_class.as_ref().unwrap())
+                } else {
+                    "SDNA Summary (Grouped by Class)".to_string()
+                };
+
                 println!("\x1b[97m================");
-                println!("\x1b[36mSDNA Summary (Grouped by Class)");
+                println!("\x1b[36m{}", title);
                 println!("\x1b[90mNote: Each class is shown once with consolidated authorship");
                 println!("\x1b[97m================");
 
                 for (class_name, sdna_codes_with_authors, name_authors, code_authors) in
-                    dna_zomes.iter()
+                    filtered_zomes
                 {
                     println!("\x1b[97m================");
                     println!("\x1b[36mSDNA Class: \x1b[97m{}", class_name);
@@ -344,61 +374,6 @@ async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
                 }
             }
             Err(e) => println!("Error getting dna: {}", e),
-        }
-        true
-    } else if line.starts_with("sdna ") {
-        // sdna <class> - show SDNA for a specific class
-        let class_name = line[5..].trim();
-        match perspective.get_dna_for_class(class_name).await {
-            Ok(Some((sdna_code, name_authors, code_authors))) => {
-                // Load these once at the start of your program
-                let ps = SyntaxSet::load_defaults_newlines();
-                let ts = ThemeSet::load_defaults();
-
-                let syntax = ps.find_syntax_by_extension("pl").unwrap();
-                let mut h = HighlightLines::new(syntax, &ts.themes["Solarized (light)"]);
-
-                println!("\x1b[97m================");
-                println!("\x1b[36mSDNA for class: \x1b[97m{}", class_name);
-                println!("\x1b[90mName Authors: \x1b[97m{}", name_authors.join(", "));
-                println!("\x1b[90mCode Authors: \x1b[97m{}", code_authors.join(", "));
-
-                // Show authorship context
-                let name_set: std::collections::HashSet<_> = name_authors.iter().collect();
-                let code_set: std::collections::HashSet<_> = code_authors.iter().collect();
-
-                if name_set == code_set {
-                    println!("\x1b[32m✓ Same authors for name and code");
-                } else {
-                    println!("\x1b[33m⚠ Different authors for name and code");
-                }
-
-                // Show additional author count information
-                if name_authors.len() > 1 {
-                    println!(
-                        "\x1b[35m📝 Multiple name authors: {} agents have defined this class",
-                        name_authors.len()
-                    );
-                }
-                if code_authors.len() > 1 {
-                    println!(
-                        "\x1b[35m📝 Multiple code authors: {} agents have contributed SDNA code",
-                        code_authors.len()
-                    );
-                }
-
-                println!("\x1b[97m================");
-                for line in LinesWithEndings::from(&sdna_code) {
-                    let ranges: Vec<(Style, &str)> = h.highlight_line(line, &ps).unwrap();
-                    let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
-                    print!("{}", escaped);
-                }
-                println!("\x1b[97m================");
-            }
-            Ok(None) => {
-                println!("\x1b[91mNo SDNA found for class: \x1b[97m{}", class_name);
-            }
-            Err(e) => println!("Error getting dna for class {}: {}", class_name, e),
         }
         true
     } else if line == "sdna-authors" {
