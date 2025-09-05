@@ -195,8 +195,9 @@ ad4m perspectives repl <perspective-UUID>
 
 #### Link Management
 ```
-# Add a new link
-add <source> <predicate> <target>
+# Add a new link (status is required)
+add_link(<source>, <predicate>, <status>, <target>)
+# Use _ for any parameter to make it optional
 
 # Query links with optional parameters
 query(<source>, <predicate>, <target>)
