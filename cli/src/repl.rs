@@ -120,8 +120,8 @@ async fn help_command(_perspective: &PerspectiveProxy, line: &String) -> bool {
 
         println!("\x1b[36m📚 Link Management:");
         println!("\x1b[97m  add_link(<source>, <predicate>, <status>, <target>)");
-        println!("\x1b[90m    Add a new link to the perspective (status is required)");
-        println!("\x1b[90m    Use _ for any parameter to make it optional");
+        println!("\x1b[90m    Add a new link to the perspective");
+        println!("\x1b[90m    Use _ to omit predicate or status (source and target are required)");
         println!();
         println!("\x1b[97m  get_links(<source>, <predicate>, <target>)");
         println!("\x1b[90m    Get links with optional variables (use _ for any value)");
