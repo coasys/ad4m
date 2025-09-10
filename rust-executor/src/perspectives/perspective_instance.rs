@@ -416,7 +416,7 @@ impl PerspectiveInstance {
         }
     }
 
-    async fn ensure_public_links_are_shared(&self) {
+    pub async fn ensure_public_links_are_shared(&self) -> bool {
         let uuid = self.persisted.lock().await.uuid.clone();
         let mut link_language_guard = self.link_language.lock().await;
         if let Some(link_language) = link_language_guard.as_mut() {
