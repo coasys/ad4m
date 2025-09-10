@@ -2628,21 +2628,39 @@ impl PerspectiveInstance {
         log::debug!("Starting fallback sync loop for perspective {}", uuid);
 
         while !*self.is_teardown.lock().await {
-            // Get current interval without holding lock during the operation
-            let current_interval = { *self.fallback_sync_interval.lock().await };
-
-            // Check if we should run the fallback sync
+            // Check if we should run the fallback sync (avoid holding multiple locks)
             let should_run = {
-                let handle = self.persisted.lock().await;
-                let last_success = *self.last_successful_fallback_sync.lock().await;
+                // Check perspective state first
+                let is_synced_neighbourhood = {
+                    let handle = self.persisted.lock().await;
+                    let result =
+                        handle.state == PerspectiveState::Synced && handle.neighbourhood.is_some();
+                    drop(handle); // Release lock immediately
+                    result
+                };
 
-                // Only run for synced perspectives that are neighbourhoods
-                handle.state == PerspectiveState::Synced
-                    && handle.neighbourhood.is_some()
-                    && self.link_language.lock().await.is_some()
-                    && // Only run if we haven't had a successful sync recently or it's been a while
-                    (last_success.is_none() ||
-                     last_success.unwrap().elapsed() > current_interval)
+                if !is_synced_neighbourhood {
+                    false
+                } else {
+                    // Check link language availability
+                    let link_lang_available = {
+                        let link_lang = self.link_language.lock().await;
+                        let result = link_lang.is_some();
+                        drop(link_lang); // Release lock immediately
+                        result
+                    };
+
+                    if !link_lang_available {
+                        false
+                    } else {
+                        // Check timing conditions
+                        let last_success = *self.last_successful_fallback_sync.lock().await;
+                        let current_interval = *self.fallback_sync_interval.lock().await;
+
+                        // Only run if we haven't had a successful sync recently or it's been a while
+                        last_success.is_none() || last_success.unwrap().elapsed() > current_interval
+                    }
+                }
             };
 
             if should_run {
@@ -2650,12 +2668,12 @@ impl PerspectiveInstance {
                 let success = self.ensure_public_links_are_shared().await;
 
                 if success {
-                    // Update last successful sync time
-                    *self.last_successful_fallback_sync.lock().await =
-                        Some(tokio::time::Instant::now());
-
-                    // Increase interval to 5 minutes after successful sync
-                    *self.fallback_sync_interval.lock().await = Duration::from_secs(300);
+                    // Update last successful sync time and increase interval
+                    {
+                        *self.last_successful_fallback_sync.lock().await =
+                            Some(tokio::time::Instant::now());
+                        *self.fallback_sync_interval.lock().await = Duration::from_secs(300);
+                    }
                     log::debug!("Fallback sync successful for perspective {}, increasing interval to 5 minutes", uuid);
                 } else {
                     // Reset interval to 30 seconds on failure
@@ -2667,8 +2685,9 @@ impl PerspectiveInstance {
                 }
             }
 
-            // Sleep for the current interval
-            sleep(current_interval).await;
+            // Get fresh interval for sleep (after potential updates)
+            let sleep_interval = *self.fallback_sync_interval.lock().await;
+            sleep(sleep_interval).await;
         }
 
         log::debug!("Fallback sync loop ended for perspective {}", uuid);
