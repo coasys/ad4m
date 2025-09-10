@@ -42,7 +42,20 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(perspective?.neighbourhood).not.to.be.undefined;
                 expect(perspective?.neighbourhood!.data.linkLanguage).to.be.equal(socialContext.address);
                 expect(perspective?.neighbourhood!.data.meta.links.length).to.be.equal(1);
-                expect(perspective?.state).to.be.equal(PerspectiveState.Synced);
+                
+                // The perspective should start in NeighbourhoodCreationInitiated state
+                expect(perspective?.state).to.be.equal(PerspectiveState.NeighboudhoodCreationInitiated);
+                
+                // Wait for the perspective to transition to Synced state
+                let tries = 0;
+                const maxTries = 10;
+                let currentPerspective = perspective;
+                while (currentPerspective?.state !== PerspectiveState.Synced && tries < maxTries) {
+                    await sleep(1000);
+                    currentPerspective = await ad4mClient.perspective.byUUID(create.uuid);
+                    tries++;
+                }
+                expect(currentPerspective?.state).to.be.equal(PerspectiveState.Synced);
             })
 
             it('can be created by Alice and joined by Bob', async () => {
