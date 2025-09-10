@@ -176,6 +176,9 @@ pub struct PerspectiveInstance {
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
     batch_store: Arc<RwLock<HashMap<String, PerspectiveDiff>>>,
+    // Fallback sync tracking for ensure_public_links_are_shared
+    last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
+    fallback_sync_interval: Arc<Mutex<Duration>>,
 }
 
 impl PerspectiveInstance {
@@ -196,6 +199,9 @@ impl PerspectiveInstance {
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
+            // Initialize fallback sync tracking
+            last_successful_fallback_sync: Arc::new(Mutex::new(None)),
+            fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
         }
     }
 
@@ -205,7 +211,8 @@ impl PerspectiveInstance {
             self.notification_check_loop(),
             self.nh_sync_loop(),
             self.pending_diffs_loop(),
-            self.subscribed_queries_loop()
+            self.subscribed_queries_loop(),
+            self.fallback_sync_loop()
         );
     }
 
@@ -451,6 +458,7 @@ impl PerspectiveInstance {
             }
 
             if !links_to_commit.is_empty() {
+                let links_count = links_to_commit.len();
                 let result = link_language
                     .commit(PerspectiveDiff {
                         additions: links_to_commit,
@@ -460,11 +468,15 @@ impl PerspectiveInstance {
 
                 if let Err(e) = result {
                     log::error!("Error calling link language's commit in ensure_public_links_are_shared: {:?}", e);
+                    return false;
                 }
+                log::debug!("Successfully committed {} links to link language in fallback sync", links_count);
             }
 
             //Ad4mDb::with_global_instance(|db| db.add_many_links(&self.persisted.lock().await.uuid, &remote_links)).unwrap(); // Assuming add_many_links takes a reference to a Vec<LinkExpression> and returns Result<(), AnyError>
+            return true;
         }
+        false
     }
 
     pub async fn update_perspective_state(&self, state: PerspectiveState) -> Result<(), AnyError> {
@@ -909,6 +921,8 @@ impl PerspectiveInstance {
 
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
+            // Reset fallback sync interval when new shared links are added
+            self.reset_fallback_sync_interval().await;
         }
         Ok(decorated_diff)
     }
@@ -2604,6 +2618,61 @@ impl PerspectiveInstance {
             }
             sleep(Duration::from_millis(QUERY_SUBSCRIPTION_CHECK_INTERVAL)).await;
         }
+    }
+
+    async fn fallback_sync_loop(&self) {
+        let uuid = self.persisted.lock().await.uuid.clone();
+        log::debug!("Starting fallback sync loop for perspective {}", uuid);
+        
+        while !*self.is_teardown.lock().await {
+            // Get current interval without holding lock during the operation
+            let current_interval = { *self.fallback_sync_interval.lock().await };
+            
+            // Check if we should run the fallback sync
+            let should_run = {
+                let handle = self.persisted.lock().await;
+                let last_success = *self.last_successful_fallback_sync.lock().await;
+                
+                // Only run for synced perspectives that are neighbourhoods
+                handle.state == PerspectiveState::Synced 
+                    && handle.neighbourhood.is_some()
+                    && self.link_language.lock().await.is_some()
+                    && // Only run if we haven't had a successful sync recently or it's been a while
+                    (last_success.is_none() || 
+                     last_success.unwrap().elapsed() > current_interval)
+            };
+
+            if should_run {
+                log::debug!("Running fallback sync for perspective {}", uuid);
+                let success = self.ensure_public_links_are_shared().await;
+                
+                if success {
+                    // Update last successful sync time
+                    *self.last_successful_fallback_sync.lock().await = Some(tokio::time::Instant::now());
+                    
+                    // Increase interval to 5 minutes after successful sync
+                    *self.fallback_sync_interval.lock().await = Duration::from_secs(300);
+                    log::debug!("Fallback sync successful for perspective {}, increasing interval to 5 minutes", uuid);
+                } else {
+                    // Reset interval to 30 seconds on failure
+                    *self.fallback_sync_interval.lock().await = Duration::from_secs(30);
+                    log::debug!("Fallback sync failed for perspective {}, keeping interval at 30 seconds", uuid);
+                }
+            }
+            
+            // Sleep for the current interval
+            sleep(current_interval).await;
+        }
+        
+        log::debug!("Fallback sync loop ended for perspective {}", uuid);
+    }
+
+    /// Reset the fallback sync interval to 30 seconds when new links are added
+    /// This ensures that new links get synced quickly
+    async fn reset_fallback_sync_interval(&self) {
+        *self.fallback_sync_interval.lock().await = Duration::from_secs(30);
+        let uuid = self.persisted.lock().await.uuid.clone();
+        log::debug!("Reset fallback sync interval to 30 seconds for perspective {}", uuid);
     }
 
     pub async fn create_batch(&self) -> String {
