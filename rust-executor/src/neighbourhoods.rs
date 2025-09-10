@@ -35,10 +35,15 @@ pub async fn neighbourhood_publish_from_perspective(
     // Add shared perspective to original perspective and then update controller
     perspective_handle.shared_url = Some(neighbourhood_url.clone());
     perspective_handle.neighbourhood = Some(neighbourhood_exp);
-    perspective_handle.state = PerspectiveState::Synced;
+    perspective_handle.state = PerspectiveState::NeighbourhoodCreationInitiated;
     update_perspective(&perspective_handle)
         .await
         .map_err(|e| anyhow!(e))?;
+
+    // Ensure any existing shared links are committed to the link language
+    // This is critical for early links created before neighbourhood sharing
+    // We need to do this after the neighbourhood is created but before other agents join
+    perspective.ensure_public_links_are_shared().await;
     Ok(neighbourhood_url)
 }
 
