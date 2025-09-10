@@ -2660,7 +2660,7 @@ impl PerspectiveInstance {
                 } else {
                     // Reset interval to 30 seconds on failure
                     *self.fallback_sync_interval.lock().await = Duration::from_secs(30);
-                    log::debug!(
+                    log::warn!(
                         "Fallback sync failed for perspective {}, keeping interval at 30 seconds",
                         uuid
                     );
