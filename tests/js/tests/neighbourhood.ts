@@ -167,12 +167,12 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 }
                 //await Promise.all(linkPromises)
 
-                console.log("wait 10s")
-                await sleep(10000)
+                console.log("wait 15s for initial sync")
+                await sleep(15000)
 
                 let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
                 let tries = 1
-                const maxTries = 120 // 2 minutes with 1 second sleep
+                const maxTries = 180 // 3 minutes with 1 second sleep (increased for fallback sync)
 
                 while(bobLinks.length < 1500 && tries < maxTries) {
                     console.log(`Bob retrying getting links... Got ${bobLinks.length}/1500`);
@@ -199,11 +199,19 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'alice', target: 'test://alice/2'})
                 await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'alice', target: 'test://alice/3'})
 
-                // Wait for sync
-                await sleep(5000)
+                // Wait for sync with retry loop
+                bobLinks = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'alice'}))
+                let bobTries = 1
+                const maxTriesBob = 20 // 20 tries with 2 second sleep = 40 seconds max
+
+                while(bobLinks.length < 3 && bobTries < maxTriesBob) {
+                    console.log(`Bob retrying getting Alice's links... Got ${bobLinks.length}/3`);
+                    await sleep(2000)
+                    bobLinks = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'alice'}))
+                    bobTries++
+                }
 
                 // Verify Bob received Alice's links
-                bobLinks = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'alice'}))
                 expect(bobLinks.length).to.equal(3)
                 expect(bobLinks.some(link => link.data.target === 'test://alice/1')).to.be.true
                 expect(bobLinks.some(link => link.data.target === 'test://alice/2')).to.be.true
@@ -334,10 +342,21 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 })
 
                 it('they see each other in `otherAgents`', async () => {
-                    await sleep(10000);
-                    const aliceAgents = await aliceNH!.otherAgents()
+                    // Wait for agents to discover each other with retry loop
+                    let aliceAgents = await aliceNH!.otherAgents()
+                    let bobAgents = await bobNH!.otherAgents()
+                    let tries = 1
+                    const maxTries = 20 // 20 tries with 1 second sleep = 20 seconds max
+
+                    while ((aliceAgents.length < 1 || bobAgents.length < 1) && tries < maxTries) {
+                        console.log(`Waiting for agents to discover each other... Alice: ${aliceAgents.length}, Bob: ${bobAgents.length}`);
+                        await sleep(1000)
+                        aliceAgents = await aliceNH!.otherAgents()
+                        bobAgents = await bobNH!.otherAgents()
+                        tries++
+                    }
+
                     console.log("alice agents", aliceAgents);
-                    const bobAgents = await bobNH!.otherAgents()
                     console.log("bob agents", bobAgents);
                     expect(aliceAgents.length).to.be.equal(1)
                     expect(aliceAgents[0]).to.be.equal(bobDID)
