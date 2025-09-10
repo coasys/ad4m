@@ -39,7 +39,7 @@ pub async fn neighbourhood_publish_from_perspective(
     update_perspective(&perspective_handle)
         .await
         .map_err(|e| anyhow!(e))?;
-    
+
     // Ensure any existing shared links are committed to the link language
     // This is critical for early links created before neighbourhood sharing
     // We need to do this after the neighbourhood is created but before other agents join

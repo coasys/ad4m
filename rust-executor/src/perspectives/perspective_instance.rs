@@ -470,7 +470,10 @@ impl PerspectiveInstance {
                     log::error!("Error calling link language's commit in ensure_public_links_are_shared: {:?}", e);
                     return false;
                 }
-                log::debug!("Successfully committed {} links to link language in fallback sync", links_count);
+                log::debug!(
+                    "Successfully committed {} links to link language in fallback sync",
+                    links_count
+                );
             }
 
             //Ad4mDb::with_global_instance(|db| db.add_many_links(&self.persisted.lock().await.uuid, &remote_links)).unwrap(); // Assuming add_many_links takes a reference to a Vec<LinkExpression> and returns Result<(), AnyError>
@@ -2623,47 +2626,51 @@ impl PerspectiveInstance {
     async fn fallback_sync_loop(&self) {
         let uuid = self.persisted.lock().await.uuid.clone();
         log::debug!("Starting fallback sync loop for perspective {}", uuid);
-        
+
         while !*self.is_teardown.lock().await {
             // Get current interval without holding lock during the operation
             let current_interval = { *self.fallback_sync_interval.lock().await };
-            
+
             // Check if we should run the fallback sync
             let should_run = {
                 let handle = self.persisted.lock().await;
                 let last_success = *self.last_successful_fallback_sync.lock().await;
-                
+
                 // Only run for synced perspectives that are neighbourhoods
-                handle.state == PerspectiveState::Synced 
+                handle.state == PerspectiveState::Synced
                     && handle.neighbourhood.is_some()
                     && self.link_language.lock().await.is_some()
                     && // Only run if we haven't had a successful sync recently or it's been a while
-                    (last_success.is_none() || 
+                    (last_success.is_none() ||
                      last_success.unwrap().elapsed() > current_interval)
             };
 
             if should_run {
                 log::debug!("Running fallback sync for perspective {}", uuid);
                 let success = self.ensure_public_links_are_shared().await;
-                
+
                 if success {
                     // Update last successful sync time
-                    *self.last_successful_fallback_sync.lock().await = Some(tokio::time::Instant::now());
-                    
+                    *self.last_successful_fallback_sync.lock().await =
+                        Some(tokio::time::Instant::now());
+
                     // Increase interval to 5 minutes after successful sync
                     *self.fallback_sync_interval.lock().await = Duration::from_secs(300);
                     log::debug!("Fallback sync successful for perspective {}, increasing interval to 5 minutes", uuid);
                 } else {
                     // Reset interval to 30 seconds on failure
                     *self.fallback_sync_interval.lock().await = Duration::from_secs(30);
-                    log::debug!("Fallback sync failed for perspective {}, keeping interval at 30 seconds", uuid);
+                    log::debug!(
+                        "Fallback sync failed for perspective {}, keeping interval at 30 seconds",
+                        uuid
+                    );
                 }
             }
-            
+
             // Sleep for the current interval
             sleep(current_interval).await;
         }
-        
+
         log::debug!("Fallback sync loop ended for perspective {}", uuid);
     }
 
@@ -2672,7 +2679,10 @@ impl PerspectiveInstance {
     async fn reset_fallback_sync_interval(&self) {
         *self.fallback_sync_interval.lock().await = Duration::from_secs(30);
         let uuid = self.persisted.lock().await.uuid.clone();
-        log::debug!("Reset fallback sync interval to 30 seconds for perspective {}", uuid);
+        log::debug!(
+            "Reset fallback sync interval to 30 seconds for perspective {}",
+            uuid
+        );
     }
 
     pub async fn create_batch(&self) -> String {
