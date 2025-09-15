@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-executor"
-version = "0.10.1"
+version = "0.10.1-dev"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
 description = "Runtime implementation of AD4M as library - https://ad4m.dev"
@@ -104,7 +104,7 @@ sodoken = "=0.1.0"
 scryer-prolog = { version = "0.9.4", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m-hc-0.5" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
-ad4m-client = { path = "../rust-client", version="0.10.1" }
+ad4m-client = { path = "../rust-client", version="0.10.1-dev" }
 reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
 
 # rusqlite = { version = "0.29.0", git = "https://github.com/coasys/rusqlite.git", rev = "12ec1330bd4b46411ab9895364da4a3e172d0fbb", features = ["bundled"] }
