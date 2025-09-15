@@ -72,7 +72,7 @@ const Apps = () => {
   }, [client]);
 
   function goToFlux() {
-    openUrl("https://fluxsocial-dev.netlify.app/");
+    openUrl("https://app.fluxsocial.io/");
   }
 
   return (
