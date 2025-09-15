@@ -95,5 +95,5 @@
       "safer-buffer@2.1.2": "patches/safer-buffer@2.1.2.patch"
     }
   },
-  "version": "0.10.1-release-candidate-5"
+  "version": "0.10.1"
 }
