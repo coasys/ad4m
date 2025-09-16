@@ -291,3 +291,21 @@ export class AuthInfoInput {
     this.appIconPath = appIconPath;
   }
 }
+
+@ObjectType()
+export class UserCreationResult {
+  @Field()
+  did: string;
+
+  @Field()
+  success: boolean;
+
+  @Field({ nullable: true })
+  error?: string;
+
+  constructor(did: string, success: boolean, error?: string) {
+    this.did = did;
+    this.success = success;
+    this.error = error;
+  }
+}

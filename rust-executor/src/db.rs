@@ -1,6 +1,6 @@
 use crate::graphql::graphql_types::{
     AIModelLoadingStatus, EntanglementProof, ImportResult, LinkStatus, ModelInput,
-    NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage,
+    NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage, User,
 };
 use crate::types::{
     AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
@@ -228,9 +228,24 @@ impl Ad4mDb {
             "CREATE TABLE IF NOT EXISTS default_models (
                 model_type TEXT PRIMARY KEY,
                 model_id TEXT NOT NULL
-            )",
+             )",
             [],
         )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                did TEXT NOT NULL,
+                seed TEXT NOT NULL
+             )",
+            [],
+        )?;
+
+        // Add owner_did column to existing perspective_handle table if it doesn't exist
+        let _ = conn.execute(
+            "ALTER TABLE perspective_handle ADD COLUMN owner_did TEXT",
+            [],
+        );
 
         Ok(Self { conn })
     }
@@ -2088,6 +2103,27 @@ impl Ad4mDb {
         }
 
         Ok(result)
+    }
+
+    // User management functions
+    pub fn add_user(&self, user: &User) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "INSERT INTO users (username, did, seed) VALUES (?1, ?2, ?3)",
+            params![user.username, user.did, user.seed],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_user(&self, username: &str) -> Ad4mDbResult<User> {
+        let mut stmt = self.conn.prepare("SELECT username, did, seed FROM users WHERE username = ?1")?;
+        let user = stmt.query_row([username], |row| {
+            Ok(User {
+                username: row.get(0)?,
+                did: row.get(1)?,
+                seed: row.get(2)?,
+            })
+        })?;
+        Ok(user)
     }
 }
 

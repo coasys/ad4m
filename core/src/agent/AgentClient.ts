@@ -8,6 +8,7 @@ import {
   AuthInfoInput,
   EntanglementProof,
   EntanglementProofInput,
+  UserCreationResult,
 } from "./Agent";
 import { AgentStatus } from "./AgentStatus";
 import { LinkMutations } from "../links/Links";
@@ -527,5 +528,34 @@ export class AgentClient {
       })
     );
     return agentSignMessage;
+  }
+
+  // Multi-user methods
+  async createUser(email: string, password: string): Promise<UserCreationResult> {
+    const { runtimeCreateUser } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeCreateUser($email: String!, $password: String!) {
+          runtimeCreateUser(email: $email, password: $password) {
+            did
+            success
+            error
+          }
+        }`,
+        variables: { email, password },
+      })
+    );
+    return runtimeCreateUser;
+  }
+
+  async loginUser(email: string, password: string): Promise<string> {
+    const { runtimeLoginUser } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeLoginUser($email: String!, $password: String!) {
+          runtimeLoginUser(email: $email, password: $password)
+        }`,
+        variables: { email, password },
+      })
+    );
+    return runtimeLoginUser;
   }
 }

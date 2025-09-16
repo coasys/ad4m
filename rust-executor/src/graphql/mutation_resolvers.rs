@@ -381,6 +381,112 @@ impl Mutation {
         })
     }
 
+    // Simple user management mutations for multi-user mode
+    async fn runtime_create_user(
+        &self,
+        context: &RequestContext,
+        email: String,
+        password: String,
+    ) -> FieldResult<UserCreationResult> {
+        check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY)?;
+        
+        // Generate random DID for now (will improve with CAL-compliant derivation later)
+        use did_key::{Ed25519KeyPair, DIDCore};
+        let key_pair = did_key::generate::<Ed25519KeyPair>(None);
+        let did_doc = key_pair.get_did_document(did_key::Config::default());
+        let did = did_doc.id.clone();
+
+        // Check if user already exists
+        let db = Ad4mDb::global_instance();
+        let existing_user = {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref.get_user(&email).ok()
+        };
+        
+        if existing_user.is_some() {
+            return Ok(UserCreationResult {
+                did: String::new(),
+                success: false,
+                error: Some("User already exists".to_string()),
+            });
+        }
+
+        // Create new user
+        let user = User {
+            username: email.clone(),
+            did: did.clone(),
+            seed: password, // Store password as seed for now (will improve later)
+        };
+        
+        // Add user to database
+        {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref.add_user(&user).map_err(|e| FieldError::new(
+                format!("Failed to add user: {}", e),
+                graphql_value!(null),
+            ))?;
+        }
+
+        Ok(UserCreationResult {
+            did,
+            success: true,
+            error: None,
+        })
+    }
+
+    async fn runtime_login_user(
+        &self,
+        context: &RequestContext,
+        email: String,
+        password: String,
+    ) -> FieldResult<String> {
+        check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)?;
+        
+        // Get user from database
+        let db = Ad4mDb::global_instance();
+        let user = {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref.get_user(&email).map_err(|e| FieldError::new(
+                format!("User not found: {}", e),
+                graphql_value!(null),
+            ))?
+        };
+        
+        // Verify password (simple comparison for now)
+        if user.seed != password {
+            return Err(FieldError::new(
+                "Invalid credentials",
+                graphql_value!(null),
+            ));
+        }
+
+        // Generate capability token with user DID
+        let auth_info = AuthInfo {
+            app_name: "multi-user-app".to_string(),
+            app_desc: "Multi-user application".to_string(),
+            app_domain: Some("multi-user".to_string()),
+            app_url: Some("https://multi-user.app".to_string()),
+            app_icon_path: None,
+            capabilities: Some(vec![ALL_CAPABILITY.clone()]), // Give full access for now
+            user_did: Some(user.did),
+        };
+
+        let cap_token = token::generate_jwt(
+            auth_info.app_name.clone(),
+            DEFAULT_TOKEN_VALID_PERIOD,
+            auth_info,
+        )
+        .map_err(|e| FieldError::new(
+            format!("Failed to generate token: {}", e),
+            graphql_value!(null),
+        ))?;
+
+        Ok(cap_token)
+    }
+
     async fn expression_create(
         &self,
         context: &RequestContext,

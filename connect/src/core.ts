@@ -22,6 +22,11 @@ export type Ad4mConnectOptions = {
   url?: string;
   hosting?: boolean;
   mobile?: boolean;
+  // Multi-user options
+  multiUser?: boolean;
+  backendUrl?: string;
+  userEmail?: string;
+  userPassword?: string;
 };
 
 export type AuthStates = "authenticated" | "locked" | "unauthenticated";
@@ -60,6 +65,7 @@ export default class Ad4mConnect {
   appIconPath: string;
   appUrl?: string;
   isHosting: boolean = false;
+  options: Ad4mConnectOptions;
   listeners: Record<Event, Function[]> = {
     ["authstatechange"]: [],
     ["configstatechange"]: [],
@@ -67,30 +73,20 @@ export default class Ad4mConnect {
   };
 
   // @fayeed - params
-  constructor({
-    appName,
-    appDesc,
-    appIconPath,
-    appUrl,
-    appDomain,
-    capabilities,
-    port,
-    token,
-    url,
-    hosting
-  }: Ad4mConnectOptions) {
+  constructor(options: Ad4mConnectOptions) {
     autoBind(this);
     //! @fayeed - make it support node.js
-    this.appName = appName;
-    this.appDesc = appDesc;
-    this.appDomain = appDomain;
-    this.appUrl = appUrl;
-    this.appIconPath = appIconPath;
-    this.capabilities = capabilities;
-    this.port = port || this.port;
-    this.url = url || `ws://localhost:${this.port}/graphql`;
-    this.token = token || this.token;
-    this.isHosting = hosting || false;
+    this.options = options;
+    this.appName = options.appName;
+    this.appDesc = options.appDesc;
+    this.appDomain = options.appDomain;
+    this.appUrl = options.appUrl;
+    this.appIconPath = options.appIconPath;
+    this.capabilities = options.capabilities;
+    this.port = options.port || this.port;
+    this.url = options.url || `ws://localhost:${this.port}/graphql`;
+    this.token = options.token || this.token;
+    this.isHosting = options.hosting || false;
     this.buildClient();
   }
 
@@ -142,6 +138,11 @@ export default class Ad4mConnect {
   // If url is explicit , don't search for open ports
   async connect(url?: string): Promise<Ad4mClient> {
     try {
+      // Multi-user mode: connect to backend and login with email/password
+      if (this.options.multiUser && this.options.backendUrl && this.options.userEmail && this.options.userPassword) {
+        return await this.connectMultiUser();
+      }
+
       if (url) {
         await connectWebSocket(url);
         this.setUrl(url);
@@ -167,6 +168,51 @@ export default class Ad4mConnect {
     } catch {
       this.notifyConnectionChange("not_connected");
       this.notifyAuthChange("unauthenticated");
+    }
+  }
+
+  async connectMultiUser(): Promise<Ad4mClient> {
+    try {
+      // Connect to the multi-user backend
+      const backendUrl = this.options.backendUrl!;
+      await connectWebSocket(backendUrl);
+      this.setUrl(backendUrl);
+      
+      // Build client for user management operations (without token initially)
+      const tempClient = this.buildClient();
+      
+      // Try to login first, if that fails, try to create user
+      let token: string;
+      try {
+        token = await tempClient.agent.loginUser(this.options.userEmail!, this.options.userPassword!);
+      } catch (loginError) {
+        // User doesn't exist, try to create
+        try {
+          const createResult = await tempClient.agent.createUser(this.options.userEmail!, this.options.userPassword!);
+          if (!createResult.success) {
+            throw new Error(createResult.error || "Failed to create user");
+          }
+          // Now login
+          token = await tempClient.agent.loginUser(this.options.userEmail!, this.options.userPassword!);
+        } catch (createError) {
+          throw new Error(`Failed to create/login user: ${createError.message}`);
+        }
+      }
+
+      // Set the token and build authenticated client
+      this.setToken(token);
+      const authenticatedClient = this.buildClient();
+      
+      // Verify authentication
+      await authenticatedClient.agent.status();
+      this.notifyAuthChange("authenticated");
+      this.notifyConnectionChange("connected");
+      
+      return authenticatedClient;
+    } catch (error) {
+      this.notifyConnectionChange("error");
+      this.notifyAuthChange("unauthenticated");
+      throw error;
     }
   }
 

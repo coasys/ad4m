@@ -17,6 +17,7 @@ pub struct RequestContext {
     pub capabilities: Result<Vec<Capability>, String>,
     pub js_handle: JsCoreHandle,
     pub auto_permit_cap_requests: bool,
+    pub auth_token: String,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -69,6 +70,8 @@ pub struct AuthInfoInput {
     pub app_url: Option<String>,
     #[graphql(name = "capabilities")]
     pub capabilities: Option<Vec<CapabilityInput>>,
+    #[graphql(name = "userDid")]
+    pub user_did: Option<String>,
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -557,6 +560,22 @@ pub struct RuntimeInfo {
 pub struct SentMessage {
     pub message: PerspectiveExpression,
     pub recipient: String,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct User {
+    pub username: String,
+    pub did: String,
+    pub seed: String,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UserCreationResult {
+    pub did: String,
+    pub success: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize)]

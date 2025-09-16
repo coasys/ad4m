@@ -71,13 +71,14 @@ pub async fn start_server(
         .and(warp::header::<String>("authorization"))
         .or(default_auth)
         .unify()
-        .map(move |auth_header| {
+        .map(move |auth_header: String| {
             //println!("Request body: {}", std::str::from_utf8(body_data::bytes()).expect("error converting bytes to &str"));
-            let capabilities = capabilities_from_token(auth_header, admin_credential.clone());
+            let capabilities = capabilities_from_token(auth_header.clone(), admin_credential.clone());
             RequestContext {
                 capabilities,
                 js_handle: js_core_handle_cloned1.clone(),
                 auto_permit_cap_requests: config.auto_permit_cap_requests.unwrap_or(false),
+                auth_token: auth_header,
             }
         });
     let qm_graphql_filter = coasys_juniper_warp::make_graphql_filter(qm_schema, qm_state.boxed());
@@ -110,7 +111,7 @@ pub async fn start_server(
                         };
 
                         let capabilities = capabilities_from_token(
-                            auth_header,
+                            auth_header.clone(),
                             admin_credential_arc.as_ref().clone(),
                         );
 
@@ -118,6 +119,7 @@ pub async fn start_server(
                             capabilities,
                             js_handle: js_core_handle.clone(),
                             auto_permit_cap_requests,
+                            auth_token: auth_header,
                         };
                         Ok(ConnectionConfig::new(context))
                             as Result<ConnectionConfig<_>, Infallible>

@@ -21,6 +21,7 @@ pub const RUNTIME_TRUSTED_AGENTS: &str = "runtime.trusted_agents";
 pub const RUNTIME_KNOWN_LINK_LANGUAGES: &str = "runtime.known_link_languages";
 pub const RUNTIME_FRIENDS: &str = "runtime.friends";
 pub const RUNTIME_MESSAGES: &str = "runtime.messages";
+pub const RUNTIME_USER_MANAGEMENT: &str = "runtime.user_management";
 pub const AI: &str = "artificial intelligence";
 
 // admin capabilities
@@ -428,5 +429,22 @@ lazy_static! {
             pointers: vec![WILD_CARD.to_string()],
         },
         can: vec![SUBSCRIBE.to_string()],
+    };
+
+    // User management capabilities for multi-user mode
+    pub static ref RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: RUNTIME_USER_MANAGEMENT.to_string(),
+            pointers: vec![WILD_CARD.to_string()],
+        },
+        can: vec![CREATE.to_string()],
+    };
+
+    pub static ref RUNTIME_USER_MANAGEMENT_READ_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: RUNTIME_USER_MANAGEMENT.to_string(),
+            pointers: vec![WILD_CARD.to_string()],
+        },
+        can: vec![READ.to_string()],
     };
 }

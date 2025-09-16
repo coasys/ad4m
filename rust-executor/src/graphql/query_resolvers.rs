@@ -20,6 +20,17 @@ pub struct Query;
 impl Query {
     async fn agent(&self, context: &RequestContext) -> FieldResult<Agent> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        
+        // For multi-user mode: extract user DID from JWT token if present
+        if let Some(user_did) = user_did_from_token(context.auth_token.clone()) {
+            return Ok(Agent {
+                did: user_did,
+                direct_message_language: None, // TODO: Handle user-specific DM language
+                perspective: Some(Perspective { links: vec![] }), // TODO: Handle user-specific perspective
+            });
+        }
+        
+        // Fallback to main agent for admin/legacy mode
         AgentService::with_global_instance(|agent_service| {
             let mut agent = agent_service
                 .agent
@@ -96,6 +107,18 @@ impl Query {
     async fn agent_status(&self, context: &RequestContext) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
 
+        // For multi-user mode: extract user DID from JWT token if present
+        if let Some(user_did) = user_did_from_token(context.auth_token.clone()) {
+            return Ok(AgentStatus {
+                did: Some(user_did),
+                did_document: None, // TODO: Generate DID document for user
+                error: None,
+                is_initialized: true,
+                is_unlocked: true,
+            });
+        }
+
+        // Fallback to main agent status for admin/legacy mode
         AgentService::with_global_instance(|agent_service| Ok(agent_service.dump()))
     }
 
