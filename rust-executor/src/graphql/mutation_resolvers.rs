@@ -463,15 +463,39 @@ impl Mutation {
             ));
         }
 
-        // Generate capability token with user DID
-        let auth_info = AuthInfo {
-            app_name: "multi-user-app".to_string(),
-            app_desc: "Multi-user application".to_string(),
-            app_domain: Some("multi-user".to_string()),
-            app_url: Some("https://multi-user.app".to_string()),
-            app_icon_path: None,
-            capabilities: Some(vec![ALL_CAPABILITY.clone()]), // Give full access for now
-            user_did: Some(user.did),
+        // Extract app info from the current capability token if available
+        let auth_info = if context.auth_token.is_empty() {
+            // Admin context - use default app info
+            AuthInfo {
+                app_name: "multi-user-app".to_string(),
+                app_desc: "Multi-user application".to_string(),
+                app_domain: Some("multi-user".to_string()),
+                app_url: Some("https://multi-user.app".to_string()),
+                app_icon_path: None,
+                capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+                user_did: Some(user.did),
+            }
+        } else {
+            // App context - preserve the original app info and add user DID
+            match decode_jwt(context.auth_token.clone()) {
+                Ok(current_claims) => {
+                    let mut auth_info = current_claims.capabilities;
+                    auth_info.user_did = Some(user.did);
+                    auth_info
+                },
+                Err(_) => {
+                    // Fallback if token decode fails
+                    AuthInfo {
+                        app_name: "multi-user-app".to_string(),
+                        app_desc: "Multi-user application".to_string(),
+                        app_domain: Some("multi-user".to_string()),
+                        app_url: Some("https://multi-user.app".to_string()),
+                        app_icon_path: None,
+                        capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+                        user_did: Some(user.did),
+                    }
+                }
+            }
         };
 
         let cap_token = token::generate_jwt(
