@@ -293,6 +293,24 @@ export class AuthInfoInput {
 }
 
 @ObjectType()
+export class User {
+  @Field()
+  username: string;
+
+  @Field()
+  did: string;
+
+  @Field()
+  password: string;
+
+  constructor(username: string, did: string, password: string) {
+    this.username = username;
+    this.did = did;
+    this.password = password;
+  }
+}
+
+@ObjectType()
 export class UserCreationResult {
   @Field()
   did: string;
