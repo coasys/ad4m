@@ -416,7 +416,7 @@ impl Mutation {
         let user = User {
             username: email.clone(),
             did: did.clone(),
-            seed: password, // Store password as seed for now (will improve later)
+            password: password, // Store password for now (will improve with CAL-compliant key derivation later)
         };
         
         // Add user to database
@@ -456,7 +456,7 @@ impl Mutation {
         };
         
         // Verify password (simple comparison for now)
-        if user.seed != password {
+        if user.password != password {
             return Err(FieldError::new(
                 "Invalid credentials",
                 graphql_value!(null),

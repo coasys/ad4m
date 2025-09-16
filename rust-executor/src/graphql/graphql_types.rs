@@ -567,7 +567,7 @@ pub struct SentMessage {
 pub struct User {
     pub username: String,
     pub did: String,
-    pub seed: String,
+    pub password: String,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]

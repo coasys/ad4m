@@ -236,7 +236,7 @@ impl Ad4mDb {
             "CREATE TABLE IF NOT EXISTS users (
                 username TEXT PRIMARY KEY,
                 did TEXT NOT NULL,
-                seed TEXT NOT NULL
+                password TEXT NOT NULL
              )",
             [],
         )?;
@@ -2108,19 +2108,19 @@ impl Ad4mDb {
     // User management functions
     pub fn add_user(&self, user: &User) -> Ad4mDbResult<()> {
         self.conn.execute(
-            "INSERT INTO users (username, did, seed) VALUES (?1, ?2, ?3)",
-            params![user.username, user.did, user.seed],
+            "INSERT INTO users (username, did, password) VALUES (?1, ?2, ?3)",
+            params![user.username, user.did, user.password],
         )?;
         Ok(())
     }
 
     pub fn get_user(&self, username: &str) -> Ad4mDbResult<User> {
-        let mut stmt = self.conn.prepare("SELECT username, did, seed FROM users WHERE username = ?1")?;
+        let mut stmt = self.conn.prepare("SELECT username, did, password FROM users WHERE username = ?1")?;
         let user = stmt.query_row([username], |row| {
             Ok(User {
                 username: row.get(0)?,
                 did: row.get(1)?,
-                seed: row.get(2)?,
+                password: row.get(2)?,
             })
         })?;
         Ok(user)
