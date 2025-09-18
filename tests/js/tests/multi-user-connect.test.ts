@@ -1,6 +1,6 @@
 import path from "path";
 import { Ad4mClient } from "@coasys/ad4m";
-import Ad4mConnect from "@coasys/ad4m-connect";
+import Ad4mConnect from "../../../connect/src/core.ts";
 import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
