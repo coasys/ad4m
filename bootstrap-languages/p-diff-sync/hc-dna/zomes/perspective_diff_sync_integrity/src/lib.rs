@@ -232,3 +232,33 @@ impl OnlineAgent {
             .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))
     }
 }
+
+#[hdk_extern]
+pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
+    match op {
+        Op::StoreRecord(StoreRecord { record }) => {
+            // Only care about our PerspectiveDiffEntryReference entries
+            let maybe_entry = record
+                .entry()
+                .to_app_option::<PerspectiveDiffEntryReference>()
+                .map_err(|e| wasm_error!(e))?;
+
+            if let Some(pdiff_ref) = maybe_entry {
+                if let Some(parents) = pdiff_ref.parents {
+                    for parent_action_hash in parents {
+                        // Ensure each declared parent exists and is valid in the source chain/DHT
+                        if must_get_valid_record(parent_action_hash).is_err() {
+                            return Ok(ValidateCallbackResult::Invalid(
+                                "Parent action not found or invalid".into(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            Ok(ValidateCallbackResult::Valid)
+        }
+        // For all other ops in this zome we accept by default
+        _ => Ok(ValidateCallbackResult::Valid),
+    }
+}
