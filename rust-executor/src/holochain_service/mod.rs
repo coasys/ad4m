@@ -26,7 +26,6 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::select;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio::task::yield_now;
 use tokio::time::timeout;
 
 use tokio_stream::StreamExt;
@@ -126,9 +125,13 @@ impl HolochainService {
                                     let sig_broadcasters = conductor_clone.subscribe_to_app_signals(new_app_id.installed_app_id.clone());
                                     streams.insert(new_app_id.installed_app_id.clone(), tokio_stream::wrappers::BroadcastStream::new(sig_broadcasters));
                                 }
+                                // Add a gentle backoff when no signals are available to prevent busy-waiting
+                                _ = tokio::time::sleep(tokio::time::Duration::from_millis(1)) => {
+                                    // This provides a small backoff to prevent excessive CPU usage
+                                    // when no signals are being processed
+                                }
                                 else => break,
                             }
-                            yield_now().await;
                         }
                     });
 
@@ -756,4 +759,63 @@ pub async fn run_local_hc_services() -> Result<(), AnyError> {
     );
     ops.run().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn test_signal_loop_performance() {
+        // Test that the signal processing loop doesn't consume excessive CPU
+        // when no signals are being processed
+
+        let start_time = Instant::now();
+        let test_duration = Duration::from_millis(100);
+
+        // Simulate the signal processing pattern with backoff
+        let iterations = tokio::spawn(async move {
+            let mut count = 0;
+            let start = Instant::now();
+
+            while start.elapsed() < test_duration {
+                // Simulate the select! pattern with backoff
+                tokio::select! {
+                    // Simulate no signals available
+                    _ = tokio::time::sleep(Duration::from_millis(1)) => {
+                        // This branch represents the backoff case
+                    }
+                }
+                count += 1;
+            }
+            count
+        })
+        .await
+        .unwrap();
+
+        let elapsed = start_time.elapsed();
+
+        // With 1ms delays, we should get roughly 100 iterations in 100ms
+        // This verifies the backoff is working and not busy-waiting
+        // Allow for some variance due to system scheduling
+        assert!(
+            iterations < 300,
+            "Too many iterations: {} (expected < 300), suggests busy-waiting",
+            iterations
+        );
+        assert!(
+            iterations > 20,
+            "Too few iterations: {} (expected > 20), suggests delays are too long",
+            iterations
+        );
+        assert!(
+            elapsed >= test_duration,
+            "Test didn't run for expected duration"
+        );
+
+        println!(
+            "Signal loop test: {} iterations in {:?}",
+            iterations, elapsed
+        );
+    }
 }

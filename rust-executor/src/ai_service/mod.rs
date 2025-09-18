@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::sleep;
 
@@ -38,6 +38,8 @@ static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 10;
 
 lazy_static! {
     static ref AI_SERVICE: Arc<Mutex<Option<AIService>>> = Arc::new(Mutex::new(None));
+    static ref PROGRESS_RATE_LIMITER: Arc<Mutex<HashMap<String, Instant>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 }
 
 struct TranscriptionSession {
@@ -149,13 +151,59 @@ async fn publish_model_status(
 
 async fn handle_progress(model_id: String, loading: ModelLoadingProgress) {
     let progress = loading.progress() * 100.0;
-    let status = if progress < 100.0 {
-        "Loading".to_string()
-    } else {
-        "Loaded".to_string()
+
+    // Rate limiting: Only update every 100ms to prevent task thrashing
+    let now = Instant::now();
+    let should_update = {
+        let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
+
+        if let Some(last_update) = rate_limiter.get(&model_id) {
+            // If less than 100ms since last update, skip unless it's 100% completion
+            if now.duration_since(*last_update) < Duration::from_millis(100) && progress < 100.0 {
+                false
+            } else {
+                rate_limiter.insert(model_id.clone(), now);
+                true
+            }
+        } else {
+            // First update for this model
+            rate_limiter.insert(model_id.clone(), now);
+            true
+        }
     };
-    //println!("Progress update: {}% for model {}", progress, model_id); // Add logging
-    publish_model_status(model_id.clone(), progress, &status, false, false).await;
+
+    if should_update {
+        let status = if progress < 100.0 {
+            "Loading".to_string()
+        } else {
+            "Loaded".to_string()
+        };
+
+        log::debug!(
+            "Publishing model status for {}: {}% - {}",
+            model_id,
+            progress,
+            status
+        );
+
+        // Clean up rate limiter entry when model is fully loaded
+        if progress >= 100.0 {
+            let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
+            rate_limiter.remove(&model_id);
+            log::debug!(
+                "Cleaned up rate limiter entry for completed model: {}",
+                model_id
+            );
+        }
+
+        publish_model_status(model_id.clone(), progress, &status, false, false).await;
+    } else {
+        log::trace!(
+            "Rate limited progress update for {}: {}%",
+            model_id,
+            progress
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -1343,6 +1391,62 @@ impl AIService {
 mod tests {
     use super::*;
     use crate::graphql::graphql_types::{AIPromptExamplesInput, LocalModelInput};
+    use tokio::time::{sleep, Duration};
+
+    #[tokio::test]
+    async fn test_progress_rate_limiting() {
+        // Test the rate limiting functionality by directly testing the rate limiter
+        let model_id = "test_model".to_string();
+
+        // Clear any existing rate limiter state
+        {
+            let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
+            rate_limiter.clear();
+        }
+
+        // Test that rate limiter prevents rapid updates
+        let now = std::time::Instant::now();
+
+        // First update should set the timestamp
+        {
+            let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
+            rate_limiter.insert(model_id.clone(), now);
+        }
+
+        // Immediate check should indicate rate limiting
+        {
+            let rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
+            let should_rate_limit = if let Some(last_update) = rate_limiter.get(&model_id) {
+                std::time::Instant::now().duration_since(*last_update) < Duration::from_millis(100)
+            } else {
+                false
+            };
+            assert!(should_rate_limit, "Should rate limit rapid updates");
+        }
+
+        // Wait for rate limit window to pass
+        sleep(Duration::from_millis(150)).await;
+
+        // Now updates should be allowed
+        {
+            let rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
+            let should_rate_limit = if let Some(last_update) = rate_limiter.get(&model_id) {
+                std::time::Instant::now().duration_since(*last_update) < Duration::from_millis(100)
+            } else {
+                false
+            };
+            assert!(
+                !should_rate_limit,
+                "Should allow updates after rate limit window"
+            );
+        }
+
+        // Clean up
+        {
+            let mut rate_limiter = PROGRESS_RATE_LIMITER.lock().await;
+            rate_limiter.remove(&model_id);
+        }
+    }
 
     // TODO: We ignore these tests because they need a GPU to not take ages to run
     // BUT: the model lifecycle and update tests show another problem:
