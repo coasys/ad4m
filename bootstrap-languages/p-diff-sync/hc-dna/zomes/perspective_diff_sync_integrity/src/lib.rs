@@ -240,10 +240,9 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
             // Only care about our PerspectiveDiffEntryReference entries
             let maybe_entry = record
                 .entry()
-                .to_app_option::<PerspectiveDiffEntryReference>()
-                .map_err(|e| wasm_error!(e))?;
+                .to_app_option::<PerspectiveDiffEntryReference>();
 
-            if let Some(pdiff_ref) = maybe_entry {
+            if let Ok(Some(pdiff_ref)) = maybe_entry {
                 if let Some(parents) = pdiff_ref.parents {
                     for parent_action_hash in parents {
                         // Ensure each declared parent exists and is valid in the source chain/DHT
