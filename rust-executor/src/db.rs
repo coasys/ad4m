@@ -3072,4 +3072,146 @@ mod tests {
         assert_eq!(full_diffs.additions.len(), 50); // 10 diffs * 5 additions
         assert_eq!(full_diffs.removals.len(), 50); // 10 diffs * 5 removals
     }
+
+    #[test]
+    fn test_user_management() {
+        use crate::graphql::graphql_types::User;
+        
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+        
+        // Test user creation
+        let test_user = User {
+            username: "test@example.com".to_string(),
+            did: "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp".to_string(),
+            password: "testpassword123".to_string(),
+        };
+        
+        // Add user should succeed
+        let add_result = db.add_user(&test_user);
+        assert!(add_result.is_ok(), "Failed to add user: {:?}", add_result.err());
+        
+        // Get user should return the same user
+        let retrieved_user = db.get_user(&test_user.username).unwrap();
+        assert_eq!(retrieved_user.username, test_user.username);
+        assert_eq!(retrieved_user.did, test_user.did);
+        assert_eq!(retrieved_user.password, test_user.password);
+        
+        // Test duplicate user creation should fail
+        let duplicate_result = db.add_user(&test_user);
+        assert!(duplicate_result.is_err(), "Duplicate user creation should fail");
+        
+        // Test getting non-existent user should fail
+        let non_existent_result = db.get_user("nonexistent@example.com");
+        assert!(non_existent_result.is_err(), "Getting non-existent user should fail");
+        
+        println!("✅ User management tests passed");
+    }
+
+    #[test]
+    fn test_multiple_users() {
+        use crate::graphql::graphql_types::User;
+        
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+        
+        // Create multiple test users
+        let user1 = User {
+            username: "user1@example.com".to_string(),
+            did: "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp".to_string(),
+            password: "password1".to_string(),
+        };
+        
+        let user2 = User {
+            username: "user2@example.com".to_string(),
+            did: "did:key:z6MkjRagNiMu4CWTaH5SBDeKHyYoPP2ooXqPoy3GmASHLtF6".to_string(),
+            password: "password2".to_string(),
+        };
+        
+        // Add both users
+        db.add_user(&user1).unwrap();
+        db.add_user(&user2).unwrap();
+        
+        // Verify both users can be retrieved independently
+        let retrieved_user1 = db.get_user(&user1.username).unwrap();
+        let retrieved_user2 = db.get_user(&user2.username).unwrap();
+        
+        assert_eq!(retrieved_user1.username, user1.username);
+        assert_eq!(retrieved_user1.did, user1.did);
+        assert_eq!(retrieved_user1.password, user1.password);
+        
+        assert_eq!(retrieved_user2.username, user2.username);
+        assert_eq!(retrieved_user2.did, user2.did);
+        assert_eq!(retrieved_user2.password, user2.password);
+        
+        // Verify users have different DIDs
+        assert_ne!(retrieved_user1.did, retrieved_user2.did);
+        
+        println!("✅ Multiple users management tests passed");
+    }
+
+    #[test]
+    fn test_user_table_schema() {
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+        
+        // Verify the users table was created by trying to query it
+        let result = db.conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'");
+        assert!(result.is_ok(), "Users table should exist");
+        
+        let mut stmt = result.unwrap();
+        let table_exists = stmt.query_row([], |row| {
+            let table_name: String = row.get(0)?;
+            Ok(table_name == "users")
+        });
+        
+        assert!(table_exists.is_ok() && table_exists.unwrap(), "Users table should exist and be named 'users'");
+        
+        // Verify table schema by checking column info
+        let schema_result = db.conn.prepare("PRAGMA table_info(users)");
+        assert!(schema_result.is_ok(), "Should be able to get users table schema");
+        
+        println!("✅ User table schema tests passed");
+    }
+
+    #[test]
+    fn test_user_password_handling() {
+        use crate::graphql::graphql_types::User;
+        
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+        
+        // Test user with various password formats
+        let users = vec![
+            User {
+                username: "user_simple@example.com".to_string(),
+                did: "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp".to_string(),
+                password: "simple".to_string(),
+            },
+            User {
+                username: "user_complex@example.com".to_string(),
+                did: "did:key:z6MkjRagNiMu4CWTaH5SBDeKHyYoPP2ooXqPoy3GmASHLtF6".to_string(),
+                password: "Complex!Password123@#$".to_string(),
+            },
+            User {
+                username: "user_unicode@example.com".to_string(),
+                did: "did:key:z6MkrJVnaZjsXc2WrVjsXc2WrVjsXc2WrVjsXc2WrVjsXc2W".to_string(),
+                password: "пароль🔐密码".to_string(),
+            },
+        ];
+        
+        // Add all users
+        for user in &users {
+            let result = db.add_user(user);
+            assert!(result.is_ok(), "Failed to add user {}: {:?}", user.username, result.err());
+        }
+        
+        // Verify all users can be retrieved with correct passwords
+        for user in &users {
+            let retrieved = db.get_user(&user.username).unwrap();
+            assert_eq!(retrieved.password, user.password, "Password should be stored and retrieved correctly for {}", user.username);
+        }
+        
+        println!("✅ User password handling tests passed");
+    }
 }
