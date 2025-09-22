@@ -73,7 +73,8 @@ pub async fn start_server(
         .unify()
         .map(move |auth_header: String| {
             //println!("Request body: {}", std::str::from_utf8(body_data::bytes()).expect("error converting bytes to &str"));
-            let capabilities = capabilities_from_token(auth_header.clone(), admin_credential.clone());
+            let capabilities =
+                capabilities_from_token(auth_header.clone(), admin_credential.clone());
             RequestContext {
                 capabilities,
                 js_handle: js_core_handle_cloned1.clone(),

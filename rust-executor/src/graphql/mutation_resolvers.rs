@@ -41,17 +41,20 @@ fn can_access_perspective(user_did: &Option<String>, perspective_owner: &Option<
         // Main agent context: don't allow access to user-owned perspectives
         (None, Some(_owner)) => {
             false // Main agent cannot access user-owned perspectives
-        },
+        }
         // User trying to access unowned perspective - not allowed
         (Some(_), None) => false,
     }
 }
 
 // Helper function to get perspective with access control
-fn get_perspective_with_access_control(uuid: &str, context: &RequestContext) -> FieldResult<PerspectiveInstance> {
+fn get_perspective_with_access_control(
+    uuid: &str,
+    context: &RequestContext,
+) -> FieldResult<PerspectiveInstance> {
     let perspective = get_perspective_with_uuid_field_error(uuid)?;
     let user_did = user_did_from_token(context.auth_token.clone());
-    
+
     // Check access to the perspective
     let handle = futures::executor::block_on(perspective.persisted.lock()).clone();
     if !can_access_perspective(&user_did, &handle.owner_did) {
@@ -60,7 +63,7 @@ fn get_perspective_with_access_control(uuid: &str, context: &RequestContext) -> 
             graphql_value!(null),
         ));
     }
-    
+
     Ok(perspective)
 }
 
@@ -421,10 +424,13 @@ impl Mutation {
         email: String,
         password: String,
     ) -> FieldResult<UserCreationResult> {
-        check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY)?;
-        
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY,
+        )?;
+
         // Generate random DID for now (will improve with CAL-compliant derivation later)
-        use did_key::{Ed25519KeyPair, DIDCore};
+        use did_key::{DIDCore, Ed25519KeyPair};
         let key_pair = did_key::generate::<Ed25519KeyPair>(None);
         let did_doc = key_pair.get_did_document(did_key::Config::default());
         let did = did_doc.id.clone();
@@ -436,7 +442,7 @@ impl Mutation {
             let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
             db_ref.get_user(&email).ok()
         };
-        
+
         if existing_user.is_some() {
             return Ok(UserCreationResult {
                 did: String::new(),
@@ -451,15 +457,14 @@ impl Mutation {
             did: did.clone(),
             password: password, // Store password for now (will improve with CAL-compliant key derivation later)
         };
-        
+
         // Add user to database
         {
             let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
             let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-            db_ref.add_user(&user).map_err(|e| FieldError::new(
-                format!("Failed to add user: {}", e),
-                graphql_value!(null),
-            ))?;
+            db_ref.add_user(&user).map_err(|e| {
+                FieldError::new(format!("Failed to add user: {}", e), graphql_value!(null))
+            })?;
         }
 
         Ok(UserCreationResult {
@@ -475,25 +480,24 @@ impl Mutation {
         email: String,
         password: String,
     ) -> FieldResult<String> {
-        check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)?;
-        
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
+        )?;
+
         // Get user from database
         let db = Ad4mDb::global_instance();
         let user = {
             let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
             let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-            db_ref.get_user(&email).map_err(|e| FieldError::new(
-                format!("User not found: {}", e),
-                graphql_value!(null),
-            ))?
+            db_ref.get_user(&email).map_err(|e| {
+                FieldError::new(format!("User not found: {}", e), graphql_value!(null))
+            })?
         };
-        
+
         // Verify password (simple comparison for now)
         if user.password != password {
-            return Err(FieldError::new(
-                "Invalid credentials",
-                graphql_value!(null),
-            ));
+            return Err(FieldError::new("Invalid credentials", graphql_value!(null)));
         }
 
         // Extract app info from the current capability token if available
@@ -515,7 +519,7 @@ impl Mutation {
                     let mut auth_info = current_claims.capabilities;
                     auth_info.user_did = Some(user.did);
                     auth_info
-                },
+                }
                 Err(_) => {
                     // Fallback if token decode fails
                     AuthInfo {
@@ -536,10 +540,12 @@ impl Mutation {
             DEFAULT_TOKEN_VALID_PERIOD,
             auth_info,
         )
-        .map_err(|e| FieldError::new(
-            format!("Failed to generate token: {}", e),
-            graphql_value!(null),
-        ))?;
+        .map_err(|e| {
+            FieldError::new(
+                format!("Failed to generate token: {}", e),
+                graphql_value!(null),
+            )
+        })?;
 
         Ok(cap_token)
     }
@@ -870,10 +876,10 @@ impl Mutation {
         name: String,
     ) -> FieldResult<PerspectiveHandle> {
         check_capability(&context.capabilities, &PERSPECTIVE_CREATE_CAPABILITY)?;
-        
+
         // Determine owner DID based on user context
         let user_did_opt = user_did_from_token(context.auth_token.clone());
-        
+
         let owner_did = if let Some(user_did) = user_did_opt {
             // Multi-user mode: set owner to the authenticated user
             Some(user_did.clone())
@@ -881,13 +887,13 @@ impl Mutation {
             // Main agent mode: set owner to main agent DID if available
             None // For now, don't assign ownership to main agent perspectives
         };
-        
+
         let handle = if let Some(owner) = &owner_did {
             PerspectiveHandle::new_with_owner(name.clone(), owner.clone())
         } else {
             PerspectiveHandle::new_from_name(name.clone())
         };
-        
+
         add_perspective(handle.clone(), None).await?;
         Ok(handle)
     }

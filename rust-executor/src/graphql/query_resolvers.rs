@@ -34,7 +34,7 @@ fn can_access_perspective(user_did: &Option<String>, perspective_owner: &Option<
 impl Query {
     async fn agent(&self, context: &RequestContext) -> FieldResult<Agent> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        
+
         // For multi-user mode: extract user DID from JWT token if present
         if let Some(user_did) = user_did_from_token(context.auth_token.clone()) {
             return Ok(Agent {
@@ -43,7 +43,7 @@ impl Query {
                 perspective: Some(Perspective { links: vec![] }), // TODO: Handle user-specific perspective
             });
         }
-        
+
         // Fallback to main agent for admin/legacy mode
         AgentService::with_global_instance(|agent_service| {
             let mut agent = agent_service
@@ -352,10 +352,10 @@ impl Query {
 
         if let Some(p) = get_perspective(&uuid) {
             let handle = p.persisted.lock().await.clone();
-            
+
             // Check if user has access to this perspective
             let user_did = user_did_from_token(context.auth_token.clone());
-            
+
             if can_access_perspective(&user_did, &handle.owner_did) {
                 Ok(Some(handle))
             } else {
@@ -436,13 +436,13 @@ impl Query {
         )?;
 
         let mut result = Vec::new();
-        
+
         // Extract user DID from token for multi-user filtering
         let user_did = user_did_from_token(context.auth_token.clone());
-        
+
         for p in all_perspectives().iter() {
             let handle = p.persisted.lock().await.clone();
-            
+
             // Filter perspectives based on ownership
             if can_access_perspective(&user_did, &handle.owner_did) {
                 result.push(handle);
