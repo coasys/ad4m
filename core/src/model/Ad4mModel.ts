@@ -1,8 +1,47 @@
 import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
-import { makeRandomPrologAtom } from "./decorators";
-import { singularToPlural } from "./util";
+import { makeRandomPrologAtom, PropertyOptions, CollectionOptions, ModelOptions } from "./decorators";
+import { singularToPlural, propertyNameToSetterName, collectionToAdderName, collectionToRemoverName, collectionToSetterName } from "./util";
+
+// JSON Schema type definitions
+interface JSONSchemaProperty {
+  type: string | string[];
+  items?: JSONSchemaProperty;
+  properties?: { [key: string]: JSONSchemaProperty };
+  required?: string[];
+  "x-ad4m"?: {
+    through?: string;
+    resolveLanguage?: string;
+    local?: boolean;
+    writable?: boolean;
+    initial?: string;
+  };
+}
+
+interface JSONSchema {
+  $schema?: string;
+  title?: string;
+  $id?: string;
+  type?: string;
+  properties?: { [key: string]: JSONSchemaProperty };
+  required?: string[];
+  "x-ad4m"?: {
+    namespace?: string;
+    className?: string;
+  };
+}
+
+interface JSONSchemaToModelOptions {
+  name: string;
+  namespace?: string;
+  predicateTemplate?: string;
+  predicateGenerator?: (title: string, property: string) => string;
+  propertyMapping?: Record<string, string>;
+  resolveLanguage?: string;
+  local?: boolean;
+  propertyOptions?: Record<string, Partial<PropertyOptions>>;
+}
 
 type ValueTuple = [name: string, value: any, resolve?: boolean];
 type WhereOps = {
@@ -898,6 +937,298 @@ export class Ad4mModel {
     query?: Query
   ): ModelQueryBuilder<T> {
     return new ModelQueryBuilder<T>(perspective, this as any, query);
+  }
+
+  /**
+   * Creates an Ad4mModel class from a JSON Schema definition.
+   * 
+   * @description
+   * This method dynamically generates an Ad4mModel subclass from a JSON Schema,
+   * enabling integration with systems that use JSON Schema for type definitions.
+   * 
+   * The method follows a cascading approach for determining predicates:
+   * 1. Explicit configuration in options parameter (highest precedence)
+   * 2. x-ad4m metadata in the JSON Schema
+   * 3. Inference from schema title and property names
+   * 4. Error if no namespace can be determined
+   * 
+   * @example
+   * ```typescript
+   * // With explicit configuration
+   * const PersonClass = Ad4mModel.fromJSONSchema(schema, {
+   *   name: "Person",
+   *   namespace: "person://",
+   *   resolveLanguage: "literal"
+   * });
+   * 
+   * // With property mapping
+   * const ContactClass = Ad4mModel.fromJSONSchema(schema, {
+   *   name: "Contact",
+   *   namespace: "contact://",
+   *   propertyMapping: {
+   *     "name": "foaf://name",
+   *     "email": "foaf://mbox"
+   *   }
+   * });
+   * 
+   * // With x-ad4m metadata in schema
+   * const schema = {
+   *   "title": "Product",
+   *   "x-ad4m": { "namespace": "product://" },
+   *   "properties": {
+   *     "name": { 
+   *       "type": "string",
+   *       "x-ad4m": { "through": "product://title" }
+   *     }
+   *   }
+   * };
+   * const ProductClass = Ad4mModel.fromJSONSchema(schema, { name: "Product" });
+   * ```
+   * 
+   * @param schema - JSON Schema definition
+   * @param options - Configuration options
+   * @returns Generated Ad4mModel subclass
+   * @throws Error when namespace cannot be inferred
+   */
+  static fromJSONSchema(
+    schema: JSONSchema,
+    options: JSONSchemaToModelOptions
+  ): typeof Ad4mModel {
+    // Determine namespace with cascading precedence
+    const namespace = this.determineNamespace(schema, options);
+    
+    // Create the dynamic class
+    const DynamicModelClass = class extends Ad4mModel {};
+    
+    // Set up class metadata
+    Object.defineProperty(DynamicModelClass, 'name', { value: options.name });
+    (DynamicModelClass as any).className = options.name;
+    (DynamicModelClass.prototype as any).className = options.name;
+    
+    // Generate properties and collections metadata
+    const properties: any = {};
+    const collections: any = {};
+    
+    if (schema.properties) {
+      for (const [propertyName, propertySchema] of Object.entries(schema.properties)) {
+        const predicate = this.determinePredicate(schema, propertyName, propertySchema, namespace, options);
+        const isRequired = schema.required?.includes(propertyName) || false;
+        const isArray = propertySchema.type === 'array';
+        
+        if (isArray) {
+          // Handle arrays as collections
+          collections[propertyName] = {
+            through: predicate,
+            local: this.getPropertyOption(propertyName, propertySchema, options, 'local')
+          };
+          
+          // Define the property on prototype
+          Object.defineProperty(DynamicModelClass.prototype, propertyName, {
+            configurable: true,
+            writable: true,
+            value: []
+          });
+          
+          // Add collection methods
+          const adderName = collectionToAdderName(propertyName);
+          const removerName = collectionToRemoverName(propertyName);
+          const setterName = collectionToSetterName(propertyName);
+          
+          (DynamicModelClass.prototype as any)[adderName] = function() {
+            // Placeholder function for SDNA generation
+          };
+          (DynamicModelClass.prototype as any)[removerName] = function() {
+            // Placeholder function for SDNA generation
+          };
+          (DynamicModelClass.prototype as any)[setterName] = function() {
+            // Placeholder function for SDNA generation
+          };
+          
+        } else {
+          // Handle regular properties
+          const resolveLanguage = this.getPropertyOption(propertyName, propertySchema, options, 'resolveLanguage');
+          const local = this.getPropertyOption(propertyName, propertySchema, options, 'local');
+          const writable = this.getPropertyOption(propertyName, propertySchema, options, 'writable', true);
+          let initial = this.getPropertyOption(propertyName, propertySchema, options, 'initial');
+          
+          // If property is required, ensure it has an initial value
+          if (isRequired && !initial) {
+            initial = "ad4m://undefined";
+          }
+          
+          properties[propertyName] = {
+            through: predicate,
+            required: isRequired,
+            writable: writable,
+            ...(resolveLanguage && { resolveLanguage }),
+            ...(local !== undefined && { local }),
+            ...(initial && { initial })
+          };
+          
+          // Define the property on prototype
+          Object.defineProperty(DynamicModelClass.prototype, propertyName, {
+            configurable: true,
+            writable: true,
+            value: this.getDefaultValueForType(propertySchema.type as string)
+          });
+          
+          // Add setter function if writable
+          if (writable) {
+            const setterName = propertyNameToSetterName(propertyName);
+            (DynamicModelClass.prototype as any)[setterName] = function() {
+              // This is a placeholder function that the SDNA generation looks for
+              // The actual setter logic is handled by the Ad4mModel base class
+            };
+          }
+        }
+      }
+    }
+    
+    // Validate that at least one property has an initial value (needed for valid SDNA constructor)
+    const hasPropertyWithInitial = Object.values(properties).some((prop: any) => prop.initial);
+    if (!hasPropertyWithInitial) {
+      throw new Error(
+        `JSON Schema must have at least one required property to generate a valid Ad4mModel. 
+        Either add properties to the "required" array in your JSON Schema, or provide initial values 
+        through the configuration options.`
+      );
+    }
+    
+    // Attach metadata to prototype
+    (DynamicModelClass.prototype as any).__properties = properties;
+    (DynamicModelClass.prototype as any).__collections = collections;
+    
+    // Apply the ModelOptions decorator to set up the generateSDNA method
+    const ModelOptionsDecorator = ModelOptions({ name: options.name });
+    ModelOptionsDecorator(DynamicModelClass);
+    
+    return DynamicModelClass as typeof Ad4mModel;
+  }
+  
+  /**
+   * Determines the namespace for predicates using cascading precedence
+   */
+  private static determineNamespace(schema: JSONSchema, options: JSONSchemaToModelOptions): string {
+    // 1. Explicit namespace in options (highest precedence)
+    if (options.namespace) {
+      return options.namespace;
+    }
+    
+    // 2. x-ad4m metadata in schema
+    if (schema["x-ad4m"]?.namespace) {
+      return schema["x-ad4m"].namespace;
+    }
+    
+    // 3. Infer from schema title
+    if (schema.title) {
+      return `${schema.title.toLowerCase()}://`;
+    }
+    
+    // 4. Try to extract from $id if it's a URL
+    if (schema.$id) {
+      try {
+        const url = new URL(schema.$id);
+        const pathParts = url.pathname.split('/').filter(p => p);
+        if (pathParts.length > 0) {
+          const lastPart = pathParts[pathParts.length - 1];
+          const baseName = lastPart.replace(/\.schema\.json$/, '').replace(/\.json$/, '');
+          return `${baseName.toLowerCase()}://`;
+        }
+      } catch {
+        // If $id is not a valid URL, continue to error
+      }
+    }
+    
+    // 5. Error if no namespace can be determined
+    throw new Error(
+      `Cannot infer namespace for JSON Schema. Please provide one of:
+      - options.namespace
+      - schema["x-ad4m"].namespace  
+      - schema.title
+      - valid schema.$id`
+    );
+  }
+  
+  /**
+   * Determines the predicate for a specific property using cascading precedence
+   */
+  private static determinePredicate(
+    schema: JSONSchema,
+    propertyName: string,
+    propertySchema: JSONSchemaProperty,
+    namespace: string,
+    options: JSONSchemaToModelOptions
+  ): string {
+    // 1. Explicit property mapping (highest precedence)
+    if (options.propertyMapping?.[propertyName]) {
+      return options.propertyMapping[propertyName];
+    }
+    
+    // 2. x-ad4m metadata in property schema
+    if (propertySchema["x-ad4m"]?.through) {
+      return propertySchema["x-ad4m"].through;
+    }
+    
+    // 3. Generate from namespace + property name
+    if (options.predicateTemplate) {
+      return options.predicateTemplate
+        .replace('${namespace}', namespace.replace('://', ''))
+        .replace('${title}', schema.title || '')
+        .replace('${property}', propertyName);
+    }
+    
+    // 4. Custom predicate generator
+    if (options.predicateGenerator) {
+      return options.predicateGenerator(schema.title || '', propertyName);
+    }
+    
+    // 5. Default: namespace + property name
+    const cleanNamespace = namespace.endsWith('://') ? namespace : `${namespace}://`;
+    return `${cleanNamespace}${propertyName}`;
+  }
+  
+  /**
+   * Gets property-specific options using cascading precedence
+   */
+  private static getPropertyOption(
+    propertyName: string,
+    propertySchema: JSONSchemaProperty,
+    options: JSONSchemaToModelOptions,
+    optionName: keyof PropertyOptions,
+    defaultValue?: any
+  ): any {
+    // 1. Property-specific options
+    if (options.propertyOptions?.[propertyName]?.[optionName] !== undefined) {
+      return options.propertyOptions[propertyName][optionName];
+    }
+    
+    // 2. x-ad4m metadata in property
+    if (propertySchema["x-ad4m"]?.[optionName as keyof JSONSchemaProperty["x-ad4m"]] !== undefined) {
+      return propertySchema["x-ad4m"][optionName as keyof JSONSchemaProperty["x-ad4m"]];
+    }
+    
+    // 3. Global option
+    if (options[optionName as keyof JSONSchemaToModelOptions] !== undefined) {
+      return options[optionName as keyof JSONSchemaToModelOptions];
+    }
+    
+    // 4. Default value
+    return defaultValue;
+  }
+  
+  /**
+   * Gets default value for a JSON Schema type
+   */
+  private static getDefaultValueForType(type: string): any {
+    switch (type) {
+      case 'string': return '';
+      case 'number': return 0;
+      case 'integer': return 0;
+      case 'boolean': return false;
+      case 'array': return [];
+      case 'object': return {};
+      default: return '';
+    }
   }
 }
 

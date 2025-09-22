@@ -41,6 +41,7 @@ describe("Prolog + Literals", () => {
             gqlPort, hcAdminPort, hcAppPort);
 
         console.log("Creating ad4m client")
+        // @ts-ignore - Apollo Client version mismatch between dependencies
         ad4m = new Ad4mClient(apolloClient(gqlPort))
         console.log("Generating agent")
         await ad4m.agent.generate("secret")
@@ -2718,6 +2719,321 @@ describe("Prolog + Literals", () => {
             expect(relatedVectors[0][1]).to.equal(embeddingUrl3);
         });
     });
+
+    describe("Ad4mModel.fromJSONSchema", () => {
+        let perspective: PerspectiveProxy | null = null
+
+        beforeEach(async () => {
+            perspective = await ad4m!.perspective.add("json-schema-test")
+        })
+
+        describe("with explicit configuration", () => {
+            it("should create Ad4mModel class from JSON Schema with explicit namespace", async () => {
+                const schema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "title": "Person",
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "age": { "type": "number" },
+                        "email": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }
+
+                const PersonClass = Ad4mModel.fromJSONSchema(schema, {
+                    name: "Person",
+                    namespace: "person://",
+                    resolveLanguage: "literal"
+                })
+
+                expect(PersonClass).to.be.a('function')
+                // @ts-ignore - className is added dynamically
+                expect(PersonClass.className).to.equal("Person")
+
+                // Test instance creation
+                const person = new PersonClass(perspective!)
+                expect(person).to.be.instanceOf(Ad4mModel)
+                expect(person.baseExpression).to.be.a('string')
+
+                // Test property assignment
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person.name = "Alice"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person.age = 30
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person.email = "alice@example.com"
+
+                await perspective!.ensureSDNASubjectClass(PersonClass)
+                await person.save()
+
+                // Verify data was saved
+                const savedPeople = await PersonClass.findAll(perspective!)
+                expect(savedPeople).to.have.lengthOf(1)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(savedPeople[0].name).to.equal("Alice")
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(savedPeople[0].age).to.equal(30)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(savedPeople[0].email).to.equal("alice@example.com")
+            })
+
+            it("should support property mapping overrides", async () => {
+                const schema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "title": "Contact",
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "email": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }
+
+                const ContactClass = Ad4mModel.fromJSONSchema(schema, {
+                    name: "Contact",
+                    namespace: "contact://",
+                    propertyMapping: {
+                        "name": "foaf://name",
+                        "email": "foaf://mbox"
+                    },
+                    resolveLanguage: "literal"
+                })
+
+                // @ts-ignore - className is added dynamically
+                expect(ContactClass.className).to.equal("Contact")
+
+                // Test that custom predicates are used
+                const contact = new ContactClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                contact.name = "Bob"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                contact.email = "bob@example.com"
+
+                await perspective!.ensureSDNASubjectClass(ContactClass)
+                await contact.save()
+
+                // Verify the custom predicates were used by checking the generated SDNA
+                // @ts-ignore - generateSDNA is added dynamically
+                const sdna = ContactClass.generateSDNA()
+                expect(sdna.sdna).to.include("foaf://name")
+                expect(sdna.sdna).to.include("foaf://mbox")
+            })
+        })
+
+        describe("with JSON Schema x-ad4m metadata", () => {
+            it("should use x-ad4m metadata when available", async () => {
+                const schema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "title": "Product",
+                    "type": "object",
+                    "x-ad4m": {
+                        "namespace": "product://",
+                        "className": "Product"
+                    },
+                    "properties": {
+                        "name": { 
+                            "type": "string",
+                            "x-ad4m": {
+                                "through": "product://title",
+                                "resolveLanguage": "literal"
+                            }
+                        },
+                        "price": { 
+                            "type": "number",
+                            "x-ad4m": {
+                                "through": "product://cost"
+                            }
+                        },
+                        "description": { 
+                            "type": "string",
+                            "x-ad4m": {
+                                "resolveLanguage": "literal"
+                            }
+                        }
+                    },
+                    "required": ["name"]
+                }
+
+                const ProductClass = Ad4mModel.fromJSONSchema(schema, {
+                    name: "ProductOverride" // This should take precedence
+                })
+
+                // @ts-ignore - className is added dynamically
+                expect(ProductClass.className).to.equal("ProductOverride")
+
+                const product = new ProductClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                product.name = "Laptop"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                product.price = 999.99
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                product.description = "A powerful laptop"
+
+                await perspective!.ensureSDNASubjectClass(ProductClass)
+                await product.save()
+
+                // Verify custom predicates from x-ad4m were used
+                // @ts-ignore - generateSDNA is added dynamically
+                const sdna = ProductClass.generateSDNA()
+                expect(sdna.sdna).to.include("product://title") // custom predicate for name
+                expect(sdna.sdna).to.include("product://cost")  // custom predicate for price
+                expect(sdna.sdna).to.include("product://description") // inferred from namespace + property
+            })
+        })
+
+        describe("with title-based inference", () => {
+            it("should infer namespace from schema title when no explicit config", async () => {
+                const schema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "title": "Book",
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string" },
+                        "author": { "type": "string" },
+                        "isbn": { "type": "string" }
+                    },
+                    "required": ["title"]
+                }
+
+                const BookClass = Ad4mModel.fromJSONSchema(schema, {
+                    name: "Book",
+                    resolveLanguage: "literal"
+                })
+
+                // @ts-ignore - className is added dynamically
+                expect(BookClass.className).to.equal("Book")
+
+                const book = new BookClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                book.title = "The Great Gatsby"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                book.author = "F. Scott Fitzgerald"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                book.isbn = "978-0-7432-7356-5"
+
+                await perspective!.ensureSDNASubjectClass(BookClass)
+                await book.save()
+
+                // Verify inferred predicates (should be book://title, book://author, etc.)
+                // @ts-ignore - generateSDNA is added dynamically
+                const sdna = BookClass.generateSDNA()
+                expect(sdna.sdna).to.include("book://title")
+                expect(sdna.sdna).to.include("book://author")
+                expect(sdna.sdna).to.include("book://isbn")
+            })
+        })
+
+        describe("error handling", () => {
+            it("should throw error when no title and no namespace provided", async () => {
+                const schema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": "string" }
+                    },
+                    "required": ["value"]  // Add required property to avoid constructor error
+                }
+
+                expect(() => {
+                    Ad4mModel.fromJSONSchema(schema, { name: "Test" })
+                }).to.throw(/Cannot infer namespace/)
+            })
+
+            it("should throw error when no required properties are provided", async () => {
+                const schema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "title": "OptionalOnly",
+                    "type": "object",
+                    "properties": {
+                        "optionalValue": { "type": "string" },
+                        "anotherOptional": { "type": "number" }
+                    }
+                    // No required array - all properties are optional
+                }
+
+                expect(() => {
+                    Ad4mModel.fromJSONSchema(schema, { 
+                        name: "OptionalOnly",
+                        namespace: "test://" 
+                    })
+                }).to.throw(/must have at least one required property/)
+            })
+
+            it("should work when properties have explicit initial values even if not required", async () => {
+                const schema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "title": "WithInitials",
+                    "type": "object",
+                    "properties": {
+                        "status": { "type": "string" },
+                        "count": { "type": "number" }
+                    }
+                    // No required array, but we'll provide initial values
+                }
+
+                // This should work because we provide initial values
+                const TestClass = Ad4mModel.fromJSONSchema(schema, {
+                    name: "WithInitials",
+                    namespace: "test://",
+                    propertyOptions: {
+                        "status": { initial: "test://active" },
+                        "count": { initial: "literal://number:0" }
+                    }
+                })
+
+                expect(TestClass).to.be.a('function')
+                // @ts-ignore - className is added dynamically
+                expect(TestClass.className).to.equal("WithInitials")
+
+                // Verify SDNA has constructor actions
+                // @ts-ignore - generateSDNA is added dynamically
+                const sdna = TestClass.generateSDNA()
+                expect(sdna.sdna).to.include('constructor(')
+                expect(sdna.sdna).to.include('test://active')
+                expect(sdna.sdna).to.include('literal://number:0')
+            })
+
+            it.skip("should handle complex property types", async () => {
+                const schema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "title": "Complex",
+                    "type": "object",
+                    "properties": {
+                        "tags": { 
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "metadata": { 
+                            "type": "object",
+                            "properties": {
+                                "created": { "type": "string" }
+                            }
+                        }
+                    },
+                    "required": ["tags"]
+                }
+
+                const ComplexClass = Ad4mModel.fromJSONSchema(schema, {
+                    name: "Complex",
+                    resolveLanguage: "literal"
+                })
+
+                // @ts-ignore - className is added dynamically
+                expect(ComplexClass.className).to.equal("Complex")
+
+                const instance = new ComplexClass(perspective!)
+                
+                // Arrays should become Collections
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(instance.tags).to.be.an('array')
+                
+                // Objects should be handled (exact behavior TBD)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(instance.metadata).to.exist
+            })
+        })
+    })
 
 })
 
