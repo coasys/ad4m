@@ -1046,14 +1046,24 @@ export class Ad4mModel {
           
         } else {
           // Handle regular properties
-          const resolveLanguage = this.getPropertyOption(propertyName, propertySchema, options, 'resolveLanguage');
+          let resolveLanguage = this.getPropertyOption(propertyName, propertySchema, options, 'resolveLanguage');
           const local = this.getPropertyOption(propertyName, propertySchema, options, 'local');
           const writable = this.getPropertyOption(propertyName, propertySchema, options, 'writable', true);
           let initial = this.getPropertyOption(propertyName, propertySchema, options, 'initial');
           
+          // Handle nested objects by serializing to JSON
+          if (propertySchema.type === 'object' && !resolveLanguage) {
+            resolveLanguage = 'literal';
+            console.warn(`Property "${propertyName}" is an object type. It will be stored as JSON. Consider flattening complex objects for better semantic querying.`);
+          }
+          
           // If property is required, ensure it has an initial value
           if (isRequired && !initial) {
-            initial = "ad4m://undefined";
+            if (propertySchema.type === 'object') {
+              initial = 'literal://json:{}';
+            } else {
+              initial = "ad4m://undefined";
+            }
           }
           
           properties[propertyName] = {
@@ -1085,13 +1095,30 @@ export class Ad4mModel {
     }
     
     // Validate that at least one property has an initial value (needed for valid SDNA constructor)
+    // Collections don't create constructor actions, only properties with initial values do
     const hasPropertyWithInitial = Object.values(properties).some((prop: any) => prop.initial);
+    
     if (!hasPropertyWithInitial) {
-      throw new Error(
-        `JSON Schema must have at least one required property to generate a valid Ad4mModel. 
-        Either add properties to the "required" array in your JSON Schema, or provide initial values 
-        through the configuration options.`
-      );
+      // If no properties have initial values, add a type identifier automatically
+      const typeProperty = `ad4m://type`;
+      const typeValue = `${namespace.replace('://', '')}://instance`;
+      
+      properties['__ad4m_type'] = {
+        through: typeProperty,
+        required: true,
+        writable: false,
+        initial: typeValue,
+        flag: true
+      };
+      
+      // Add the type property to the prototype
+      Object.defineProperty(DynamicModelClass.prototype, '__ad4m_type', {
+        configurable: true,
+        writable: false,
+        value: typeValue
+      });
+      
+      console.warn(`No properties with initial values found. Added automatic type flag: ${typeProperty} = ${typeValue}`);
     }
     
     // Attach metadata to prototype
