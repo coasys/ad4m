@@ -91,6 +91,7 @@ pub async fn install_neighbourhood(url: String) -> Result<PerspectiveHandle, Any
         shared_url: Some(url.clone()),
         neighbourhood: Some(neighbourhood),
         state,
+        owner_did: None, // Neighbourhood perspectives are not user-owned
     };
     add_perspective(handle.clone(), Some(true))
         .await

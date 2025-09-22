@@ -31,6 +31,39 @@ use crate::{
 };
 use base64::prelude::*;
 
+// Helper function to check if a user can access a perspective
+fn can_access_perspective(user_did: &Option<String>, perspective_owner: &Option<String>) -> bool {
+    match (user_did, perspective_owner) {
+        // User context: only allow access to own perspectives
+        (Some(user), Some(owner)) => user == owner,
+        // Main agent context: allow access to unowned perspectives
+        (None, None) => true,
+        // Main agent context: don't allow access to user-owned perspectives
+        (None, Some(_owner)) => {
+            false // Main agent cannot access user-owned perspectives
+        },
+        // User trying to access unowned perspective - not allowed
+        (Some(_), None) => false,
+    }
+}
+
+// Helper function to get perspective with access control
+fn get_perspective_with_access_control(uuid: &str, context: &RequestContext) -> FieldResult<PerspectiveInstance> {
+    let perspective = get_perspective_with_uuid_field_error(uuid)?;
+    let user_did = user_did_from_token(context.auth_token.clone());
+    
+    // Check access to the perspective
+    let handle = futures::executor::block_on(perspective.persisted.lock()).clone();
+    if !can_access_perspective(&user_did, &handle.owner_did) {
+        return Err(FieldError::new(
+            "Access denied: You don't have permission to access this perspective",
+            graphql_value!(null),
+        ));
+    }
+    
+    Ok(perspective)
+}
+
 pub struct Mutation;
 
 fn get_perspective_with_uuid_field_error(uuid: &str) -> FieldResult<PerspectiveInstance> {
@@ -837,7 +870,24 @@ impl Mutation {
         name: String,
     ) -> FieldResult<PerspectiveHandle> {
         check_capability(&context.capabilities, &PERSPECTIVE_CREATE_CAPABILITY)?;
-        let handle = PerspectiveHandle::new_from_name(name.clone());
+        
+        // Determine owner DID based on user context
+        let user_did_opt = user_did_from_token(context.auth_token.clone());
+        
+        let owner_did = if let Some(user_did) = user_did_opt {
+            // Multi-user mode: set owner to the authenticated user
+            Some(user_did.clone())
+        } else {
+            // Main agent mode: set owner to main agent DID if available
+            None // For now, don't assign ownership to main agent perspectives
+        };
+        
+        let handle = if let Some(owner) = &owner_did {
+            PerspectiveHandle::new_with_owner(name.clone(), owner.clone())
+        } else {
+            PerspectiveHandle::new_from_name(name.clone())
+        };
+        
         add_perspective(handle.clone(), None).await?;
         Ok(handle)
     }
@@ -855,7 +905,7 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
         Ok(perspective
             .add_link(link.into(), link_status_from_input(status)?, batch_id)
             .await?)
@@ -873,7 +923,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
         let link = crate::types::LinkExpression::try_from(link)?;
         Ok(perspective
             .add_link_expression(link, link_status_from_input(status)?, batch_id)
@@ -892,7 +942,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
         Ok(perspective
             .add_links(
                 links.into_iter().map(|l| l.into()).collect(),
@@ -913,7 +963,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
         Ok(perspective
             .link_mutations(mutations, link_status_from_input(status)?)
             .await?)
@@ -954,7 +1004,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
         let link = crate::types::LinkExpression::try_from(link)?;
         perspective.remove_link(link, batch_id).await?;
         Ok(true)
@@ -971,7 +1021,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
         let links = links
             .into_iter()
             .map(LinkExpression::try_from)
@@ -990,7 +1040,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let perspective = get_perspective_with_access_control(&uuid, context)?;
         let mut handle = perspective.persisted.lock().await.clone();
         handle.name = Some(name);
         update_perspective(&handle).await?;
@@ -1009,7 +1059,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
         Ok(perspective
             .update_link(
                 LinkExpression::from_input_without_proof(old_link),
@@ -1031,7 +1081,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
         let sdna_type = SdnaType::from_string(&sdna_type)
             .map_err(|e| FieldError::new(e, graphql_value!({ "invalid_sdna_type": sdna_type })))?;
         perspective.add_sdna(name, sdna_code, sdna_type).await?;
@@ -1052,7 +1102,7 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
 
         let commands: Vec<Command> = serde_json::from_str(&commands)?;
         let parameters: Vec<Parameter> = if let Some(parameters) = parameters {
@@ -1082,7 +1132,7 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
 
         let subject_class: SubjectClassOption = serde_json::from_str(&subject_class)?;
         let initial_values = if let Some(initial_values) = initial_values {
@@ -1118,7 +1168,7 @@ impl Mutation {
                 )
             })?;
 
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
 
         let result = perspective
             .get_subject_data(subject_class, expression_address)
@@ -1137,7 +1187,7 @@ impl Mutation {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let perspective = get_perspective_with_access_control(&uuid, context)?;
         let (subscription_id, result_string) = perspective.subscribe_and_query(query).await?;
 
         Ok(QuerySubscription {
@@ -1157,7 +1207,7 @@ impl Mutation {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let perspective = get_perspective_with_access_control(&uuid, context)?;
         perspective.keepalive_query(subscription_id).await?;
         Ok(true)
     }
@@ -1173,7 +1223,7 @@ impl Mutation {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let perspective = get_perspective_with_access_control(&uuid, context)?;
         Ok(perspective
             .dispose_query_subscription(subscription_id)
             .await?)
@@ -1767,7 +1817,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let perspective = get_perspective_with_access_control(&uuid, context)?;
         Ok(perspective.create_batch().await)
     }
 
@@ -1781,7 +1831,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
         Ok(perspective.commit_batch(batch_id).await?)
     }
 

@@ -13,6 +13,7 @@
     "test-auth": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/authentication.test.ts",
     "test-multi-user-connect": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/multi-user-connect.test.ts",
     "test-multi-user-simple": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/multi-user-simple.test.ts",
+    "test-multi-user-with-setup": "./test-multi-user-with-setup.sh",
     "test-prolog-and-literals": "ts-mocha -p tsconfig.json --timeout 1200000 --serial --exit tests/prolog-and-literals.test.ts",
     "prepare-test": "run-script-os",
     "prepare-test:macos": "./scripts/build-test-language.sh && ./scripts/prepareTestDirectory.sh && deno run --allow-all scripts/get-builtin-test-langs.js && pnpm run inject-language-language && pnpm run publish-test-languages && pnpm run inject-publishing-agent",

@@ -656,8 +656,8 @@ impl Ad4mDb {
 
     pub fn add_perspective(&self, perspective: &PerspectiveHandle) -> Ad4mDbResult<()> {
         self.conn.execute(
-            "INSERT INTO perspective_handle (name, uuid, neighbourhood, shared_url, state)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO perspective_handle (name, uuid, neighbourhood, shared_url, state, owner_did)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 perspective.name,
                 perspective.uuid,
@@ -667,6 +667,7 @@ impl Ad4mDb {
                     .and_then(|n| serde_json::to_string(n).ok()),
                 perspective.shared_url,
                 serde_json::to_string(&perspective.state)?,
+                perspective.owner_did,
             ],
         )?;
         Ok(())
@@ -674,7 +675,7 @@ impl Ad4mDb {
 
     pub fn _get_perspective(&self, uuid: &str) -> Ad4mDbResult<Option<PerspectiveHandle>> {
         let mut stmt = self.conn.prepare(
-            "SELECT name, uuid, neighbourhood, shared_url, state FROM perspective_handle WHERE uuid = ?1",
+            "SELECT name, uuid, neighbourhood, shared_url, state, owner_did FROM perspective_handle WHERE uuid = ?1",
         )?;
 
         let found_perspective = stmt
@@ -683,11 +684,12 @@ impl Ad4mDb {
                     name: row.get(0)?,
                     uuid: row.get(1)?,
                     neighbourhood: row
-                        .get::<usize, Option<String>>(3)?
+                        .get::<usize, Option<String>>(2)?
                         .and_then(|n| serde_json::from_str(&n).ok()),
-                    shared_url: row.get(4)?,
-                    state: serde_json::from_str(row.get::<usize, String>(5)?.as_str())
+                    shared_url: row.get(3)?,
+                    state: serde_json::from_str(row.get::<usize, String>(4)?.as_str())
                         .expect("Could not deserialize perspective state from DB"),
+                    owner_did: row.get(5)?,
                 })
             })?
             .map(|p| p.ok())
@@ -700,7 +702,7 @@ impl Ad4mDb {
 
     pub fn get_all_perspectives(&self) -> Ad4mDbResult<Vec<PerspectiveHandle>> {
         let mut stmt = self.conn.prepare(
-            "SELECT name, uuid, neighbourhood, shared_url, state FROM perspective_handle",
+            "SELECT name, uuid, neighbourhood, shared_url, state, owner_did FROM perspective_handle",
         )?;
         let perspective_iter = stmt.query_map([], |row| {
             Ok(PerspectiveHandle {
@@ -712,6 +714,7 @@ impl Ad4mDb {
                 shared_url: row.get(3)?,
                 state: serde_json::from_str(row.get::<usize, String>(4)?.as_str())
                     .expect("Could not deserialize perspective state from DB"),
+                owner_did: row.get(5)?,
             })
         })?;
 
@@ -1618,13 +1621,14 @@ impl Ad4mDb {
                             .expect("to serialize PerspectiveState");
 
                             self.conn.execute(
-                                "INSERT INTO perspective_handle (uuid, name, neighbourhood, shared_url, state) VALUES (?1, ?2, ?3, ?4, ?5)",
+                                "INSERT INTO perspective_handle (uuid, name, neighbourhood, shared_url, state, owner_did) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                                 params![
                                     perspective["uuid"].as_str().unwrap_or(Uuid::new_v4().to_string().as_str()),
                                     perspective["name"].as_str(),
                                     perspective.get("neighbourhood").and_then(|n| n.as_str()),
                                     perspective["shared_url"].as_str(),
-                                    perspective["state"].as_str().unwrap_or(state.as_str())
+                                    perspective["state"].as_str().unwrap_or(state.as_str()),
+                                    perspective.get("owner_did").and_then(|o| o.as_str())
                                 ],
                             )
                         };
@@ -2204,6 +2208,7 @@ mod tests {
             neighbourhood: None,
             shared_url: None,
             state: PerspectiveState::Private,
+            owner_did: None,
         };
         let perspective2 = PerspectiveHandle {
             uuid: Uuid::new_v4().to_string(),
@@ -2211,6 +2216,7 @@ mod tests {
             neighbourhood: Some(test_neighbourhood),
             shared_url: Some("test-shared-url".to_string()),
             state: PerspectiveState::Synced,
+            owner_did: None,
         };
 
         db.add_perspective(&perspective1).unwrap();

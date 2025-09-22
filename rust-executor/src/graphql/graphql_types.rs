@@ -478,6 +478,9 @@ pub struct PerspectiveHandle {
     pub neighbourhood: Option<DecoratedNeighbourhoodExpression>,
     pub shared_url: Option<String>,
     pub state: PerspectiveState,
+    #[graphql(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_did: Option<String>,
 }
 
 impl PerspectiveHandle {
@@ -494,6 +497,7 @@ impl PerspectiveHandle {
             neighbourhood,
             shared_url,
             state,
+            owner_did: None,
         }
     }
 
@@ -504,6 +508,18 @@ impl PerspectiveHandle {
             neighbourhood: None,
             shared_url: None,
             state: PerspectiveState::Private,
+            owner_did: None,
+        }
+    }
+
+    pub fn new_with_owner(name: String, owner_did: String) -> Self {
+        PerspectiveHandle {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            name: Some(name),
+            neighbourhood: None,
+            shared_url: None,
+            state: PerspectiveState::Private,
+            owner_did: Some(owner_did),
         }
     }
 }

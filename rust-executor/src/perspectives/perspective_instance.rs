@@ -2914,6 +2914,7 @@ mod tests {
                 shared_url: None,
                 neighbourhood: None,
                 state: PerspectiveState::Private,
+                owner_did: None,
             },
             None,
         )

@@ -16,6 +16,20 @@ use std::env;
 
 pub struct Query;
 
+// Helper function to check if a user can access a perspective
+fn can_access_perspective(user_did: &Option<String>, perspective_owner: &Option<String>) -> bool {
+    match (user_did, perspective_owner) {
+        // User context: only allow access to own perspectives
+        (Some(user), Some(owner)) => user == owner,
+        // Main agent context: allow access to unowned perspectives only
+        (None, None) => true,
+        // Main agent context: don't allow access to user-owned perspectives
+        (None, Some(_owner)) => false,
+        // User context: don't allow access to unowned perspectives (proper isolation)
+        (Some(_), None) => false,
+    }
+}
+
 #[graphql_object(context = RequestContext)]
 impl Query {
     async fn agent(&self, context: &RequestContext) -> FieldResult<Agent> {
@@ -337,7 +351,16 @@ impl Query {
         )?;
 
         if let Some(p) = get_perspective(&uuid) {
-            Ok(Some(p.persisted.lock().await.clone()))
+            let handle = p.persisted.lock().await.clone();
+            
+            // Check if user has access to this perspective
+            let user_did = user_did_from_token(context.auth_token.clone());
+            
+            if can_access_perspective(&user_did, &handle.owner_did) {
+                Ok(Some(handle))
+            } else {
+                Ok(None) // No access to this perspective
+            }
         } else {
             Ok(None)
         }
@@ -413,9 +436,17 @@ impl Query {
         )?;
 
         let mut result = Vec::new();
+        
+        // Extract user DID from token for multi-user filtering
+        let user_did = user_did_from_token(context.auth_token.clone());
+        
         for p in all_perspectives().iter() {
             let handle = p.persisted.lock().await.clone();
-            result.push(handle);
+            
+            // Filter perspectives based on ownership
+            if can_access_perspective(&user_did, &handle.owner_did) {
+                result.push(handle);
+            }
         }
         Ok(result)
     }
