@@ -35,8 +35,9 @@ fn sanitize_into_json(s: String) -> String {
 fn convert_assoc_to_json(_functor: &str, args: &[Term]) -> String {
     let mut pairs = Vec::new();
     collect_assoc_pairs(args, &mut pairs);
-    
-    let json_pairs: Vec<String> = pairs.iter()
+
+    let json_pairs: Vec<String> = pairs
+        .iter()
         .map(|(k, v)| format!("\"{}\": {}", k, prolog_value_to_json_string(v.clone())))
         .collect();
     format!("{{{}}}", json_pairs.join(", "))
@@ -48,11 +49,13 @@ fn collect_assoc_pairs(args: &[Term], pairs: &mut Vec<(String, Term)>) {
         if let Some(key) = get_string(&args[0]) {
             pairs.push((key, args[1].clone()));
         }
-        
+
         // Recursively collect from subtrees
         for subtree in &args[2..4] {
             if let Term::Compound(f, inner_args) = subtree {
-                if f == "-" { collect_assoc_pairs(inner_args, pairs); }
+                if f == "-" {
+                    collect_assoc_pairs(inner_args, pairs);
+                }
             }
         }
     }
@@ -61,23 +64,27 @@ fn collect_assoc_pairs(args: &[Term], pairs: &mut Vec<(String, Term)>) {
 fn parse_t_compound_to_json(args: &[Term]) -> String {
     let mut pairs = Vec::new();
     collect_t_pairs(args, &mut pairs);
-    
-    let json_pairs: Vec<String> = pairs.iter()
+
+    let json_pairs: Vec<String> = pairs
+        .iter()
         .map(|(k, v)| format!("\"{}\": {}", k, v))
         .collect();
     format!("{{{}}}", json_pairs.join(", "))
 }
 
 fn collect_t_pairs(args: &[Term], pairs: &mut Vec<(String, String)>) {
-    if args.len() < 2 { return; }
-    
+    if args.len() < 2 {
+        return;
+    }
+
     // Extract first key-value pair
     if let (Some(key), Some(value)) = (get_string(&args[0]), get_non_separator_value(&args[1])) {
         pairs.push((key, value));
     }
-    
+
     // Recursively process nested t(...) compounds
-    args.iter().skip(2)
+    args.iter()
+        .skip(2)
         .filter_map(|term| match term {
             Term::Compound(f, inner_args) if f == "t" => Some(inner_args.as_slice()),
             _ => None,
@@ -87,7 +94,9 @@ fn collect_t_pairs(args: &[Term], pairs: &mut Vec<(String, String)>) {
 
 fn get_string(term: &Term) -> Option<String> {
     match term {
-        Term::String(s) | Term::Atom(s) if !matches!(s.as_str(), "t" | "-" | "<" | ">") => Some(s.clone()),
+        Term::String(s) | Term::Atom(s) if !matches!(s.as_str(), "t" | "-" | "<" | ">") => {
+            Some(s.clone())
+        }
         _ => None,
     }
 }
@@ -99,10 +108,10 @@ fn get_non_separator_value(term: &Term) -> Option<String> {
     }
 }
 
-
 fn convert_internal_structure_to_json(_functor: &str, args: &[Term]) -> String {
     // Handle internal Prolog structures with alternating key-value pairs
-    let pairs: Vec<String> = args.chunks(2)
+    let pairs: Vec<String> = args
+        .chunks(2)
         .filter_map(|chunk| {
             if chunk.len() == 2 {
                 let key = get_string(&chunk[0])?;
@@ -113,7 +122,7 @@ fn convert_internal_structure_to_json(_functor: &str, args: &[Term]) -> String {
             }
         })
         .collect();
-    
+
     format!("{{{}}}", pairs.join(", "))
 }
 
@@ -252,8 +261,14 @@ mod tests {
     fn test_prolog_value_to_json_string_simple_values() {
         assert_eq!(prolog_value_to_json_string(Term::Integer(42.into())), "42");
         assert_eq!(prolog_value_to_json_string(Term::Float(3.14)), "3.14");
-        assert_eq!(prolog_value_to_json_string(Term::Atom("hello".to_string())), "\"hello\"");
-        assert_eq!(prolog_value_to_json_string(Term::String("world".to_string())), "\"world\"");
+        assert_eq!(
+            prolog_value_to_json_string(Term::Atom("hello".to_string())),
+            "\"hello\""
+        );
+        assert_eq!(
+            prolog_value_to_json_string(Term::String("world".to_string())),
+            "\"world\""
+        );
     }
 
     #[test]
@@ -261,7 +276,7 @@ mod tests {
         let term = Term::List(vec![
             Term::String("a".to_string()),
             Term::String("b".to_string()),
-            Term::Integer(42.into())
+            Term::Integer(42.into()),
         ]);
         assert_eq!(prolog_value_to_json_string(term), "[\"a\", \"b\", 42]");
     }
@@ -269,23 +284,29 @@ mod tests {
     #[test]
     fn test_t_compound_simple_object() {
         // Simple object: t("name", "Alice")
-        let term = Term::Compound("t".to_string(), vec![
-            Term::String("name".to_string()),
-            Term::String("Alice".to_string())
-        ]);
+        let term = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("name".to_string()),
+                Term::String("Alice".to_string()),
+            ],
+        );
         assert_eq!(prolog_value_to_json_string(term), r#"{"name": "Alice"}"#);
     }
 
     #[test]
     fn test_t_compound_with_terminators() {
         // Object with terminators: t("name", "Alice", "-", "t", "t")
-        let term = Term::Compound("t".to_string(), vec![
-            Term::String("name".to_string()),
-            Term::String("Alice".to_string()),
-            Term::Atom("-".to_string()),
-            Term::Atom("t".to_string()),
-            Term::Atom("t".to_string())
-        ]);
+        let term = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("name".to_string()),
+                Term::String("Alice".to_string()),
+                Term::Atom("-".to_string()),
+                Term::Atom("t".to_string()),
+                Term::Atom("t".to_string()),
+            ],
+        );
         assert_eq!(prolog_value_to_json_string(term), r#"{"name": "Alice"}"#);
     }
 
@@ -293,34 +314,43 @@ mod tests {
     fn test_t_compound_linked_list_structure() {
         // Test the linked list structure from debug logs:
         // t("created", "2025-09-22T11:00:00Z", "-", t("author", "Bob", "-", "t", "t"), t("views", 15, "-", "t", "t"))
-        
-        let author_node = Term::Compound("t".to_string(), vec![
-            Term::String("author".to_string()),
-            Term::String("Bob".to_string()),
-            Term::Atom("-".to_string()),
-            Term::Atom("t".to_string()),
-            Term::Atom("t".to_string())
-        ]);
-        
-        let views_node = Term::Compound("t".to_string(), vec![
-            Term::String("views".to_string()),
-            Term::Integer(15.into()),
-            Term::Atom("-".to_string()),
-            Term::Atom("t".to_string()),
-            Term::Atom("t".to_string())
-        ]);
-        
-        let main_term = Term::Compound("t".to_string(), vec![
-            Term::String("created".to_string()),
-            Term::String("2025-09-22T11:00:00Z".to_string()),
-            Term::Atom("-".to_string()),
-            author_node,
-            views_node
-        ]);
-        
+
+        let author_node = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("author".to_string()),
+                Term::String("Bob".to_string()),
+                Term::Atom("-".to_string()),
+                Term::Atom("t".to_string()),
+                Term::Atom("t".to_string()),
+            ],
+        );
+
+        let views_node = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("views".to_string()),
+                Term::Integer(15.into()),
+                Term::Atom("-".to_string()),
+                Term::Atom("t".to_string()),
+                Term::Atom("t".to_string()),
+            ],
+        );
+
+        let main_term = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("created".to_string()),
+                Term::String("2025-09-22T11:00:00Z".to_string()),
+                Term::Atom("-".to_string()),
+                author_node,
+                views_node,
+            ],
+        );
+
         let result = prolog_value_to_json_string(main_term);
         let parsed: serde_json::Value = serde_json::from_str(&result).expect("Valid JSON");
-        
+
         assert_eq!(parsed["created"], "2025-09-22T11:00:00Z");
         assert_eq!(parsed["author"], "Bob");
         assert_eq!(parsed["views"], 15);
@@ -330,25 +360,31 @@ mod tests {
     #[test]
     fn test_t_compound_with_separators() {
         // Test structure with "<" separators: t("location", "San Francisco", "<", t("bio", "Developer", "-", "t", "t"), "t")
-        let bio_node = Term::Compound("t".to_string(), vec![
-            Term::String("bio".to_string()),
-            Term::String("Developer".to_string()),
-            Term::Atom("-".to_string()),
-            Term::Atom("t".to_string()),
-            Term::Atom("t".to_string())
-        ]);
-        
-        let main_term = Term::Compound("t".to_string(), vec![
-            Term::String("location".to_string()),
-            Term::String("San Francisco".to_string()),
-            Term::Atom("<".to_string()),
-            bio_node,
-            Term::Atom("t".to_string())
-        ]);
-        
+        let bio_node = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("bio".to_string()),
+                Term::String("Developer".to_string()),
+                Term::Atom("-".to_string()),
+                Term::Atom("t".to_string()),
+                Term::Atom("t".to_string()),
+            ],
+        );
+
+        let main_term = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("location".to_string()),
+                Term::String("San Francisco".to_string()),
+                Term::Atom("<".to_string()),
+                bio_node,
+                Term::Atom("t".to_string()),
+            ],
+        );
+
         let result = prolog_value_to_json_string(main_term);
         let parsed: serde_json::Value = serde_json::from_str(&result).expect("Valid JSON");
-        
+
         assert_eq!(parsed["location"], "San Francisco");
         assert_eq!(parsed["bio"], "Developer");
         assert_eq!(parsed.as_object().unwrap().len(), 2);
@@ -357,33 +393,42 @@ mod tests {
     #[test]
     fn test_t_compound_deeply_nested() {
         // Test deeply nested structure with multiple levels
-        let leaf_node = Term::Compound("t".to_string(), vec![
-            Term::String("deep".to_string()),
-            Term::String("value".to_string()),
-            Term::Atom("-".to_string()),
-            Term::Atom("t".to_string()),
-            Term::Atom("t".to_string())
-        ]);
-        
-        let mid_node = Term::Compound("t".to_string(), vec![
-            Term::String("nested".to_string()),
-            Term::String("data".to_string()),
-            Term::Atom("-".to_string()),
-            leaf_node,
-            Term::Atom("t".to_string())
-        ]);
-        
-        let root_node = Term::Compound("t".to_string(), vec![
-            Term::String("root".to_string()),
-            Term::String("level".to_string()),
-            Term::Atom("-".to_string()),
-            mid_node,
-            Term::Atom("t".to_string())
-        ]);
-        
+        let leaf_node = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("deep".to_string()),
+                Term::String("value".to_string()),
+                Term::Atom("-".to_string()),
+                Term::Atom("t".to_string()),
+                Term::Atom("t".to_string()),
+            ],
+        );
+
+        let mid_node = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("nested".to_string()),
+                Term::String("data".to_string()),
+                Term::Atom("-".to_string()),
+                leaf_node,
+                Term::Atom("t".to_string()),
+            ],
+        );
+
+        let root_node = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("root".to_string()),
+                Term::String("level".to_string()),
+                Term::Atom("-".to_string()),
+                mid_node,
+                Term::Atom("t".to_string()),
+            ],
+        );
+
         let result = prolog_value_to_json_string(root_node);
         let parsed: serde_json::Value = serde_json::from_str(&result).expect("Valid JSON");
-        
+
         assert_eq!(parsed["root"], "level");
         assert_eq!(parsed["nested"], "data");
         assert_eq!(parsed["deep"], "value");
@@ -393,33 +438,42 @@ mod tests {
     #[test]
     fn test_t_compound_mixed_types() {
         // Test with mixed value types
-        let string_node = Term::Compound("t".to_string(), vec![
-            Term::String("name".to_string()),
-            Term::String("Alice".to_string()),
-            Term::Atom("-".to_string()),
-            Term::Atom("t".to_string()),
-            Term::Atom("t".to_string())
-        ]);
-        
-        let number_node = Term::Compound("t".to_string(), vec![
-            Term::String("count".to_string()),
-            Term::Integer(42.into()),
-            Term::Atom("-".to_string()),
-            Term::Atom("t".to_string()),
-            Term::Atom("t".to_string())
-        ]);
-        
-        let main_term = Term::Compound("t".to_string(), vec![
-            Term::String("active".to_string()),
-            Term::Atom("true".to_string()),
-            Term::Atom("-".to_string()),
-            string_node,
-            number_node
-        ]);
-        
+        let string_node = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("name".to_string()),
+                Term::String("Alice".to_string()),
+                Term::Atom("-".to_string()),
+                Term::Atom("t".to_string()),
+                Term::Atom("t".to_string()),
+            ],
+        );
+
+        let number_node = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("count".to_string()),
+                Term::Integer(42.into()),
+                Term::Atom("-".to_string()),
+                Term::Atom("t".to_string()),
+                Term::Atom("t".to_string()),
+            ],
+        );
+
+        let main_term = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("active".to_string()),
+                Term::Atom("true".to_string()),
+                Term::Atom("-".to_string()),
+                string_node,
+                number_node,
+            ],
+        );
+
         let result = prolog_value_to_json_string(main_term);
         let parsed: serde_json::Value = serde_json::from_str(&result).expect("Valid JSON");
-        
+
         assert_eq!(parsed["active"], true);
         assert_eq!(parsed["name"], "Alice");
         assert_eq!(parsed["count"], 42);
@@ -429,13 +483,16 @@ mod tests {
     #[test]
     fn test_prolog_assoc_dictionary() {
         // Test Prolog assoc structures: -(key, value, left_tree, right_tree)
-        let simple_assoc = Term::Compound("-".to_string(), vec![
-            Term::String("author".to_string()),
-            Term::String("Alice".to_string()),
-            Term::Atom("t".to_string()),
-            Term::Atom("t".to_string())
-        ]);
-        
+        let simple_assoc = Term::Compound(
+            "-".to_string(),
+            vec![
+                Term::String("author".to_string()),
+                Term::String("Alice".to_string()),
+                Term::Atom("t".to_string()),
+                Term::Atom("t".to_string()),
+            ],
+        );
+
         let result = prolog_value_to_json_string(simple_assoc);
         assert_eq!(result, r#"{"author": "Alice"}"#);
     }
@@ -445,10 +502,7 @@ mod tests {
         // Test compound terms with functors other than "t" should use the old format
         let term = Term::Compound(
             "some_functor".to_string(),
-            vec![
-                Term::String("arg1".to_string()),
-                Term::Integer(42.into())
-            ]
+            vec![Term::String("arg1".to_string()), Term::Integer(42.into())],
         );
         let result = prolog_value_to_json_string(term);
         assert_eq!(result, r#""some_functor": ["arg1", 42]"#);
@@ -457,30 +511,39 @@ mod tests {
     #[test]
     fn test_prolog_assoc_complex_tree() {
         // Test complex assoc binary tree structure
-        let left_subtree = Term::Compound("-".to_string(), vec![
-            Term::String("created".to_string()),
-            Term::String("2025-09-22T10:00:00Z".to_string()),
-            Term::Atom("t".to_string()),
-            Term::Atom("t".to_string())
-        ]);
-        
-        let right_subtree = Term::Compound("-".to_string(), vec![
-            Term::String("views".to_string()),
-            Term::Integer(42.into()),
-            Term::Atom("t".to_string()),
-            Term::Atom("t".to_string())
-        ]);
-        
-        let complex_assoc = Term::Compound("-".to_string(), vec![
-            Term::String("author".to_string()),
-            Term::String("Alice".to_string()),
-            left_subtree,
-            right_subtree
-        ]);
-        
+        let left_subtree = Term::Compound(
+            "-".to_string(),
+            vec![
+                Term::String("created".to_string()),
+                Term::String("2025-09-22T10:00:00Z".to_string()),
+                Term::Atom("t".to_string()),
+                Term::Atom("t".to_string()),
+            ],
+        );
+
+        let right_subtree = Term::Compound(
+            "-".to_string(),
+            vec![
+                Term::String("views".to_string()),
+                Term::Integer(42.into()),
+                Term::Atom("t".to_string()),
+                Term::Atom("t".to_string()),
+            ],
+        );
+
+        let complex_assoc = Term::Compound(
+            "-".to_string(),
+            vec![
+                Term::String("author".to_string()),
+                Term::String("Alice".to_string()),
+                left_subtree,
+                right_subtree,
+            ],
+        );
+
         let result = prolog_value_to_json_string(complex_assoc);
         let parsed: serde_json::Value = serde_json::from_str(&result).expect("Valid JSON");
-        
+
         assert_eq!(parsed["author"], "Alice");
         assert_eq!(parsed["created"], "2025-09-22T10:00:00Z");
         assert_eq!(parsed["views"], 42);
@@ -490,10 +553,10 @@ mod tests {
     #[test]
     fn test_prolog_value_to_json_string_real_debug_case() {
         // Test the exact structure from the debug logs
-        // Compound("t", [String("created"), String("2025-09-22T11:00:00Z"), Atom("-"), 
-        //                Compound("t", [String("author"), String("Bob"), Atom("-"), Atom("t"), Atom("t")]), 
+        // Compound("t", [String("created"), String("2025-09-22T11:00:00Z"), Atom("-"),
+        //                Compound("t", [String("author"), String("Bob"), Atom("-"), Atom("t"), Atom("t")]),
         //                Compound("t", [String("views"), Integer(15), Atom("-"), Atom("t"), Atom("t")])])
-        
+
         let author_compound = Term::Compound(
             "t".to_string(),
             vec![
@@ -501,10 +564,10 @@ mod tests {
                 Term::String("Bob".to_string()),
                 Term::Atom("-".to_string()),
                 Term::Atom("t".to_string()),
-                Term::Atom("t".to_string())
-            ]
+                Term::Atom("t".to_string()),
+            ],
         );
-        
+
         let views_compound = Term::Compound(
             "t".to_string(),
             vec![
@@ -512,10 +575,10 @@ mod tests {
                 Term::Integer(15.into()),
                 Term::Atom("-".to_string()),
                 Term::Atom("t".to_string()),
-                Term::Atom("t".to_string())
-            ]
+                Term::Atom("t".to_string()),
+            ],
         );
-        
+
         let main_compound = Term::Compound(
             "t".to_string(),
             vec![
@@ -523,19 +586,20 @@ mod tests {
                 Term::String("2025-09-22T11:00:00Z".to_string()),
                 Term::Atom("-".to_string()),
                 author_compound,
-                views_compound
-            ]
+                views_compound,
+            ],
         );
-        
+
         let result = prolog_value_to_json_string(main_compound);
         println!("Real debug case result: {}", result);
-        
+
         // This should produce: {"created": "2025-09-22T11:00:00Z", "author": "Bob", "views": 15}
-        let parsed: serde_json::Value = serde_json::from_str(&result).expect("Should be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("Should be valid JSON");
         assert_eq!(parsed["created"], "2025-09-22T11:00:00Z");
         assert_eq!(parsed["author"], "Bob");
         assert_eq!(parsed["views"], 15);
-        
+
         // Should contain all three properties
         if let Some(obj) = parsed.as_object() {
             assert_eq!(obj.len(), 3, "Should contain exactly 3 properties");
@@ -545,96 +609,132 @@ mod tests {
     #[test]
     fn test_non_t_compound_fallback() {
         // Test that non-"t" compounds use the legacy format
-        let term = Term::Compound("some_functor".to_string(), vec![
-            Term::String("arg1".to_string()),
-            Term::Integer(42.into())
-        ]);
-        assert_eq!(prolog_value_to_json_string(term), r#""some_functor": ["arg1", 42]"#);
+        let term = Term::Compound(
+            "some_functor".to_string(),
+            vec![Term::String("arg1".to_string()), Term::Integer(42.into())],
+        );
+        assert_eq!(
+            prolog_value_to_json_string(term),
+            r#""some_functor": ["arg1", 42]"#
+        );
     }
 
     #[test]
     fn test_complex_expression_like_structure() {
         // Test the full Expression object structure using proper linked list format
         // This simulates how a complex Expression object gets parsed by Prolog
-        
+
         // Create nested compounds for the "data" object using linked list structure
-        let data_author = Term::Compound("t".to_string(), vec![
-            Term::String("author".to_string()),
-            Term::String("Alice".to_string()),
-            Term::Atom("-".to_string()),
-            Term::Atom("t".to_string()),
-            Term::Atom("t".to_string())
-        ]);
-        
-        let data_views = Term::Compound("t".to_string(), vec![
-            Term::String("views".to_string()),
-            Term::Integer(42.into()),
-            Term::Atom("-".to_string()),
-            Term::Atom("t".to_string()),
-            Term::Atom("t".to_string())
-        ]);
-        
-        let data_compound = Term::Compound("t".to_string(), vec![
-            Term::String("created".to_string()),
-            Term::String("2025-09-22T10:00:00Z".to_string()),
-            Term::Atom("-".to_string()),
-            data_author,
-            data_views
-        ]);
-        
+        let data_author = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("author".to_string()),
+                Term::String("Alice".to_string()),
+                Term::Atom("-".to_string()),
+                Term::Atom("t".to_string()),
+                Term::Atom("t".to_string()),
+            ],
+        );
+
+        let data_views = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("views".to_string()),
+                Term::Integer(42.into()),
+                Term::Atom("-".to_string()),
+                Term::Atom("t".to_string()),
+                Term::Atom("t".to_string()),
+            ],
+        );
+
+        let data_compound = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("created".to_string()),
+                Term::String("2025-09-22T10:00:00Z".to_string()),
+                Term::Atom("-".to_string()),
+                data_author,
+                data_views,
+            ],
+        );
+
         // Create proof compound
-        let proof_compound = Term::Compound("t".to_string(), vec![
-            Term::String("key".to_string()),
-            Term::String("did:key:test#test".to_string()),
-            Term::Atom("-".to_string()),
-            Term::Atom("t".to_string()),
-            Term::Atom("t".to_string())
-        ]);
-        
+        let proof_compound = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("key".to_string()),
+                Term::String("did:key:test#test".to_string()),
+                Term::Atom("-".to_string()),
+                Term::Atom("t".to_string()),
+                Term::Atom("t".to_string()),
+            ],
+        );
+
         // Create the main Expression object using linked list structure
-        let timestamp_node = Term::Compound("t".to_string(), vec![
-            Term::String("timestamp".to_string()),
-            Term::String("2025-09-23T19:01:08.488Z".to_string()),
-            Term::Atom("-".to_string()),
-            Term::Atom("t".to_string()),
-            Term::Atom("t".to_string())
-        ]);
-        
-        let data_node = Term::Compound("t".to_string(), vec![
-            Term::String("data".to_string()),
-            data_compound,
-            Term::Atom("-".to_string()),
-            Term::Atom("t".to_string()),
-            Term::Atom("t".to_string())
-        ]);
-        
-        let proof_node = Term::Compound("t".to_string(), vec![
-            Term::String("proof".to_string()),
-            proof_compound,
-            Term::Atom("-".to_string()),
-            Term::Atom("t".to_string()),
-            Term::Atom("t".to_string())
-        ]);
-        
-        let expression_compound = Term::Compound("t".to_string(), vec![
-            Term::String("author".to_string()),
-            Term::String("did:key:z6MkiUs5qicZeaMVSbLCujGYbD3Qs2VGMnMGKtHHoyUjBVXf".to_string()),
-            Term::Atom("-".to_string()),
-            timestamp_node,
-            data_node,
-            proof_node
-        ]);
-        
+        let timestamp_node = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("timestamp".to_string()),
+                Term::String("2025-09-23T19:01:08.488Z".to_string()),
+                Term::Atom("-".to_string()),
+                Term::Atom("t".to_string()),
+                Term::Atom("t".to_string()),
+            ],
+        );
+
+        let data_node = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("data".to_string()),
+                data_compound,
+                Term::Atom("-".to_string()),
+                Term::Atom("t".to_string()),
+                Term::Atom("t".to_string()),
+            ],
+        );
+
+        let proof_node = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("proof".to_string()),
+                proof_compound,
+                Term::Atom("-".to_string()),
+                Term::Atom("t".to_string()),
+                Term::Atom("t".to_string()),
+            ],
+        );
+
+        let expression_compound = Term::Compound(
+            "t".to_string(),
+            vec![
+                Term::String("author".to_string()),
+                Term::String(
+                    "did:key:z6MkiUs5qicZeaMVSbLCujGYbD3Qs2VGMnMGKtHHoyUjBVXf".to_string(),
+                ),
+                Term::Atom("-".to_string()),
+                timestamp_node,
+                data_node,
+                proof_node,
+            ],
+        );
+
         let result = prolog_value_to_json_string(expression_compound);
-        
+
         // Parse the result to make sure it's valid JSON
-        let parsed: serde_json::Value = serde_json::from_str(&result).expect("Should be valid JSON");
-        
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("Should be valid JSON");
+
         // Verify the structure - this tests the full Expression object parsing
-        assert_eq!(parsed["author"], "did:key:z6MkiUs5qicZeaMVSbLCujGYbD3Qs2VGMnMGKtHHoyUjBVXf");
+        assert_eq!(
+            parsed["author"],
+            "did:key:z6MkiUs5qicZeaMVSbLCujGYbD3Qs2VGMnMGKtHHoyUjBVXf"
+        );
         assert_eq!(parsed["data"]["author"], "Alice");
         assert_eq!(parsed["data"]["created"], "2025-09-22T10:00:00Z");
         assert_eq!(parsed["data"]["views"], 42);
-        assert!(parsed["proof"]["key"].as_str().unwrap().contains("did:key:"));
+        assert!(parsed["proof"]["key"]
+            .as_str()
+            .unwrap()
+            .contains("did:key:"));
     }
 }
