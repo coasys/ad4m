@@ -555,7 +555,7 @@ describe("Prolog + Literals", () => {
 
             })
 
-            describe.skip("Active record implementation", () => {
+            describe("Active record implementation", () => {
                 @ModelOptions({
                     name: "Recipe"
                 })
