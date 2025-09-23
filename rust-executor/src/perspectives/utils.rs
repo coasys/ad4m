@@ -32,180 +32,89 @@ fn sanitize_into_json(s: String) -> String {
     }
 }
 
-fn convert_assoc_to_json(functor: &str, args: &[Term]) -> String {
-    // Handle Prolog assoc dictionary structures
-    // The assoc library in Prolog creates binary trees with functor "-"
-    // Pattern: -(Key, Value, Left, Right) where Left and Right are subtrees
-    
-    if functor != "-" {
-        return "{}".to_string();
-    }
-    
-    // Collect all key-value pairs from the binary tree
+fn convert_assoc_to_json(_functor: &str, args: &[Term]) -> String {
     let mut pairs = Vec::new();
-    collect_assoc_pairs(&Term::Compound(functor.to_string(), args.to_vec()), &mut pairs);
+    collect_assoc_pairs(args, &mut pairs);
     
-    // Convert to JSON object
-    let mut result = "{".to_string();
-    for (i, (key, value)) in pairs.iter().enumerate() {
-        if i > 0 {
-            result.push_str(", ");
-        }
-        result.push_str(&format!("\"{}\": {}", key, prolog_value_to_json_string(value.clone())));
-    }
-    result.push('}');
-    result
+    let json_pairs: Vec<String> = pairs.iter()
+        .map(|(k, v)| format!("\"{}\": {}", k, prolog_value_to_json_string(v.clone())))
+        .collect();
+    format!("{{{}}}", json_pairs.join(", "))
 }
 
-fn collect_assoc_pairs(term: &Term, pairs: &mut Vec<(String, Term)>) {
-    match term {
-        Term::Compound(functor, args) if functor == "-" && args.len() >= 4 => {
-            // Pattern: -(Key, Value, Left, Right)
-            let key = match &args[0] {
-                Term::String(s) => s.clone(),
-                Term::Atom(s) => s.clone(),
-                _ => "unknown".to_string(),
-            };
-            let value = args[1].clone();
-            pairs.push((key, value));
-            
-            // Recursively collect from left and right subtrees
-            collect_assoc_pairs(&args[2], pairs);
-            collect_assoc_pairs(&args[3], pairs);
+fn collect_assoc_pairs(args: &[Term], pairs: &mut Vec<(String, Term)>) {
+    if args.len() >= 4 {
+        // Pattern: -(Key, Value, Left, Right)
+        if let Some(key) = get_string(&args[0]) {
+            pairs.push((key, args[1].clone()));
         }
-        Term::Atom(a) if a == "t" => {
-            // Base case: empty tree (represented as atom 't')
-            return;
-        }
-        _ => {
-            // Handle unexpected structure - ignore
+        
+        // Recursively collect from subtrees
+        for subtree in &args[2..4] {
+            if let Term::Compound(f, inner_args) = subtree {
+                if f == "-" { collect_assoc_pairs(inner_args, pairs); }
+            }
         }
     }
 }
 
 fn parse_t_compound_to_json(args: &[Term]) -> String {
-    let pairs = extract_all_key_value_pairs(args);
-    build_json_object(pairs)
-}
-
-fn extract_all_key_value_pairs(args: &[Term]) -> Vec<(String, String)> {
     let mut pairs = Vec::new();
-    extract_t_compound_pairs(args, &mut pairs);
-    pairs
+    collect_t_pairs(args, &mut pairs);
+    
+    let json_pairs: Vec<String> = pairs.iter()
+        .map(|(k, v)| format!("\"{}\": {}", k, v))
+        .collect();
+    format!("{{{}}}", json_pairs.join(", "))
 }
 
-fn extract_t_compound_pairs(args: &[Term], pairs: &mut Vec<(String, String)>) {
-    if args.len() < 2 {
-        return;
-    }
+fn collect_t_pairs(args: &[Term], pairs: &mut Vec<(String, String)>) {
+    if args.len() < 2 { return; }
     
-    // Extract first key-value pair if valid
-    if let (Some(key), Some(value)) = (extract_key(&args[0]), extract_value(&args[1])) {
+    // Extract first key-value pair
+    if let (Some(key), Some(value)) = (get_string(&args[0]), get_non_separator_value(&args[1])) {
         pairs.push((key, value));
     }
     
-    // Process remaining elements (skip separators, recursively handle nested t compounds)
-    for i in 2..args.len() {
-        if let Term::Compound(functor, inner_args) = &args[i] {
-            if functor == "t" {
-                extract_t_compound_pairs(inner_args, pairs);
-            }
-        }
-    }
+    // Recursively process nested t(...) compounds
+    args.iter().skip(2)
+        .filter_map(|term| match term {
+            Term::Compound(f, inner_args) if f == "t" => Some(inner_args.as_slice()),
+            _ => None,
+        })
+        .for_each(|inner_args| collect_t_pairs(inner_args, pairs));
 }
 
-fn extract_key(term: &Term) -> Option<String> {
+fn get_string(term: &Term) -> Option<String> {
     match term {
-        Term::String(s) => Some(s.clone()),
-        Term::Atom(s) if !is_separator_or_terminator(s) => Some(s.clone()),
+        Term::String(s) | Term::Atom(s) if !matches!(s.as_str(), "t" | "-" | "<" | ">") => Some(s.clone()),
         _ => None,
     }
 }
 
-fn extract_value(term: &Term) -> Option<String> {
+fn get_non_separator_value(term: &Term) -> Option<String> {
     match term {
-        Term::Atom(a) if is_separator_or_terminator(a) => None, // Skip separators/terminators
+        Term::Atom(a) if matches!(a.as_str(), "t" | "-" | "<" | ">") => None,
         _ => Some(prolog_value_to_json_string(term.clone())),
     }
 }
 
-fn is_separator_or_terminator(atom: &str) -> bool {
-    matches!(atom, "t" | "-" | "<" | ">")
-}
-
-fn build_json_object(pairs: Vec<(String, String)>) -> String {
-    if pairs.is_empty() {
-        return "{}".to_string();
-    }
-    
-    let mut result = "{".to_string();
-    for (i, (key, value)) in pairs.iter().enumerate() {
-        if i > 0 {
-            result.push_str(", ");
-        }
-        result.push_str(&format!("\"{}\": {}", key, value));
-    }
-    result.push('}');
-    result
-}
-
 
 fn convert_internal_structure_to_json(_functor: &str, args: &[Term]) -> String {
-    // Handle Prolog internal structures like "<" and ">" that are part of JSON parsing
-    // These seem to represent key-value pairs in a flattened format
-    
-    if args.is_empty() {
-        return "{}".to_string();
-    }
-    
-    // Collect valid key-value pairs first to avoid trailing commas
-    let mut pairs = Vec::new();
-    let mut i = 0;
-    
-    while i < args.len() {
-        if i + 1 < args.len() {
-            // Extract key
-            let key = match &args[i] {
-                Term::String(s) => s.clone(),
-                Term::Atom(s) => s.clone(),
-                _ => format!("key_{}", i),
-            };
-            
-            // Extract value (could be complex)
-            // Skip pairs where the value is just the atom "t" (represents empty/null in Prolog)
-            let value_term = &args[i + 1];
-            if let Term::Atom(a) = value_term {
-                if a == "t" {
-                    i += 2;
-                    continue; // Skip this key-value pair
-                }
+    // Handle internal Prolog structures with alternating key-value pairs
+    let pairs: Vec<String> = args.chunks(2)
+        .filter_map(|chunk| {
+            if chunk.len() == 2 {
+                let key = get_string(&chunk[0])?;
+                let value = get_non_separator_value(&chunk[1])?;
+                Some(format!("\"{}\": {}", key, value))
+            } else {
+                None
             }
-            
-            let value = prolog_value_to_json_string(args[i + 1].clone());
-            pairs.push((key, value));
-            i += 2;
-        } else {
-            // Odd argument, treat as key with null value
-            let key = match &args[i] {
-                Term::String(s) => s.clone(),
-                Term::Atom(s) => s.clone(),
-                _ => format!("key_{}", i),
-            };
-            pairs.push((key, "null".to_string()));
-            i += 1;
-        }
-    }
+        })
+        .collect();
     
-    // Build JSON string from collected pairs
-    let mut result = "{".to_string();
-    for (i, (key, value)) in pairs.iter().enumerate() {
-        if i > 0 {
-            result.push_str(", ");
-        }
-        result.push_str(&format!("\"{}\": {}", key, value));
-    }
-    result.push('}');
-    result
+    format!("{{{}}}", pairs.join(", "))
 }
 
 pub fn prolog_value_to_json_string(value: Term) -> String {
@@ -641,5 +550,91 @@ mod tests {
             Term::Integer(42.into())
         ]);
         assert_eq!(prolog_value_to_json_string(term), r#""some_functor": ["arg1", 42]"#);
+    }
+
+    #[test]
+    fn test_complex_expression_like_structure() {
+        // Test the full Expression object structure using proper linked list format
+        // This simulates how a complex Expression object gets parsed by Prolog
+        
+        // Create nested compounds for the "data" object using linked list structure
+        let data_author = Term::Compound("t".to_string(), vec![
+            Term::String("author".to_string()),
+            Term::String("Alice".to_string()),
+            Term::Atom("-".to_string()),
+            Term::Atom("t".to_string()),
+            Term::Atom("t".to_string())
+        ]);
+        
+        let data_views = Term::Compound("t".to_string(), vec![
+            Term::String("views".to_string()),
+            Term::Integer(42.into()),
+            Term::Atom("-".to_string()),
+            Term::Atom("t".to_string()),
+            Term::Atom("t".to_string())
+        ]);
+        
+        let data_compound = Term::Compound("t".to_string(), vec![
+            Term::String("created".to_string()),
+            Term::String("2025-09-22T10:00:00Z".to_string()),
+            Term::Atom("-".to_string()),
+            data_author,
+            data_views
+        ]);
+        
+        // Create proof compound
+        let proof_compound = Term::Compound("t".to_string(), vec![
+            Term::String("key".to_string()),
+            Term::String("did:key:test#test".to_string()),
+            Term::Atom("-".to_string()),
+            Term::Atom("t".to_string()),
+            Term::Atom("t".to_string())
+        ]);
+        
+        // Create the main Expression object using linked list structure
+        let timestamp_node = Term::Compound("t".to_string(), vec![
+            Term::String("timestamp".to_string()),
+            Term::String("2025-09-23T19:01:08.488Z".to_string()),
+            Term::Atom("-".to_string()),
+            Term::Atom("t".to_string()),
+            Term::Atom("t".to_string())
+        ]);
+        
+        let data_node = Term::Compound("t".to_string(), vec![
+            Term::String("data".to_string()),
+            data_compound,
+            Term::Atom("-".to_string()),
+            Term::Atom("t".to_string()),
+            Term::Atom("t".to_string())
+        ]);
+        
+        let proof_node = Term::Compound("t".to_string(), vec![
+            Term::String("proof".to_string()),
+            proof_compound,
+            Term::Atom("-".to_string()),
+            Term::Atom("t".to_string()),
+            Term::Atom("t".to_string())
+        ]);
+        
+        let expression_compound = Term::Compound("t".to_string(), vec![
+            Term::String("author".to_string()),
+            Term::String("did:key:z6MkiUs5qicZeaMVSbLCujGYbD3Qs2VGMnMGKtHHoyUjBVXf".to_string()),
+            Term::Atom("-".to_string()),
+            timestamp_node,
+            data_node,
+            proof_node
+        ]);
+        
+        let result = prolog_value_to_json_string(expression_compound);
+        
+        // Parse the result to make sure it's valid JSON
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("Should be valid JSON");
+        
+        // Verify the structure - this tests the full Expression object parsing
+        assert_eq!(parsed["author"], "did:key:z6MkiUs5qicZeaMVSbLCujGYbD3Qs2VGMnMGKtHHoyUjBVXf");
+        assert_eq!(parsed["data"]["author"], "Alice");
+        assert_eq!(parsed["data"]["created"], "2025-09-22T10:00:00Z");
+        assert_eq!(parsed["data"]["views"], 42);
+        assert!(parsed["proof"]["key"].as_str().unwrap().contains("did:key:"));
     }
 }
