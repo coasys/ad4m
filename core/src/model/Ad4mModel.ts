@@ -1223,8 +1223,8 @@ export class Ad4mModel {
     }
     
     // 5. Default: namespace + property name
-    const cleanNamespace = namespace.endsWith('://') ? namespace : `${namespace}://`;
-    return `${cleanNamespace}${propertyName}`;
+    const cleanNamespace = namespace.endsWith('://') ? namespace.slice(0, -3) : namespace;
+    return `${cleanNamespace}://${propertyName}`;
   }
   
   /**
