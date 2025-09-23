@@ -3212,12 +3212,6 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 const tutorialPost = savedPosts.find(p => p.title === "Getting Started with AD4M")
                 expect(tutorialPost).to.exist
-                console.log("tutorialPost:")
-                console.log(tutorialPost)
-
-                let links = await perspective?.get(new LinkQuery({source: tutorialPost!.baseExpression}))
-                console.log("links:")
-                console.log(links)
                 
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 expect(tutorialPost!.tags).to.be.an('array')
