@@ -2,7 +2,7 @@ import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomPrologAtom, PropertyOptions, CollectionOptions, ModelOptions } from "./decorators";
-import { singularToPlural, propertyNameToSetterName, collectionToAdderName, collectionToRemoverName, collectionToSetterName } from "./util";
+import { singularToPlural, pluralToSingular, propertyNameToSetterName, collectionToAdderName, collectionToRemoverName, collectionToSetterName } from "./util";
 
 // JSON Schema type definitions
 interface JSONSchemaProperty {
@@ -1021,7 +1021,9 @@ export class Ad4mModel {
         
         if (isArray) {
           // Handle arrays as collections
-          collections[propertyName] = {
+          // Store the singular form as the collection key since SDNA generation expects singular
+          const singularKey = pluralToSingular(propertyName);
+          collections[singularKey] = {
             through: predicate,
             local: this.getPropertyOption(propertyName, propertySchema, options, 'local')
           };
