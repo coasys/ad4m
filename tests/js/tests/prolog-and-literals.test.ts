@@ -3130,12 +3130,13 @@ describe("Prolog + Literals", () => {
                 expect(sdna.sdna).to.include('literal://number:0')
             })
 
-            it("should handle complex property types", async () => {
+            it("should handle complex property types with full data storage and retrieval", async () => {
                 const schema = {
                     "$schema": "http://json-schema.org/draft-07/schema#",
-                    "title": "Complex",
+                    "title": "BlogPost",
                     "type": "object",
                     "properties": {
+                        "title": { "type": "string" },
                         "tags": { 
                             "type": "array",
                             "items": { "type": "string" }
@@ -3143,40 +3144,172 @@ describe("Prolog + Literals", () => {
                         "metadata": { 
                             "type": "object",
                             "properties": {
-                                "created": { "type": "string" }
+                                "created": { "type": "string" },
+                                "author": { "type": "string" },
+                                "views": { "type": "number" }
                             }
+                        },
+                        "categories": {
+                            "type": "array",
+                            "items": { "type": "string" }
                         }
                     },
-                    "required": ["tags"]
+                    "required": ["title"]
                 }
 
-                const ComplexClass = Ad4mModel.fromJSONSchema(schema, {
-                    name: "Complex",
+                const BlogPostClass = Ad4mModel.fromJSONSchema(schema, {
+                    name: "BlogPost",
                     resolveLanguage: "literal"
                 })
 
                 // @ts-ignore - className is added dynamically
-                expect(ComplexClass.className).to.equal("Complex")
+                expect(BlogPostClass.className).to.equal("BlogPost")
 
-                const instance = new ComplexClass(perspective!)
-                
-                // Arrays should become Collections
+                await perspective!.ensureSDNASubjectClass(BlogPostClass)
+
+                // Create a blog post with complex data
+                const post1 = new BlogPostClass(perspective!)
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                expect(instance.tags).to.be.an('array')
+                post1.title = "Getting Started with AD4M"
                 
-                // Objects should be handled as JSON-serialized properties
+                // Test array/collection handling
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                expect(instance.metadata).to.exist
-                
-                // Should have automatic type flag when no properties have initial values
+                post1.tags = ["ad4m", "tutorial", "blockchain"]
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                expect(instance.__ad4m_type).to.exist
+                post1.categories = ["technology", "development"]
                 
-                // Verify SDNA includes the automatic type flag
+                // Test complex object handling (should be stored as JSON)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                post1.metadata = {
+                    created: "2025-09-22T10:00:00Z",
+                    author: "Alice",
+                    views: 42
+                }
+                
+                await post1.save()
+
+                // Create a second post
+                const post2 = new BlogPostClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                post2.title = "Advanced AD4M Patterns"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                post2.tags = ["ad4m", "advanced", "patterns"]
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                post2.categories = ["technology"]
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                post2.metadata = {
+                    created: "2025-09-22T11:00:00Z",
+                    author: "Bob",
+                    views: 15
+                }
+                await post2.save()
+
+                // Test data retrieval
+                const savedPosts = await BlogPostClass.findAll(perspective!)
+                expect(savedPosts).to.have.lengthOf(2)
+
+                // Verify complex object data is preserved
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                const tutorialPost = savedPosts.find(p => p.title === "Getting Started with AD4M")
+                expect(tutorialPost).to.exist
+                console.log("tutorialPost:")
+                console.log(tutorialPost)
+
+                let links = await perspective?.get(new LinkQuery({source: tutorialPost!.baseExpression}))
+                console.log("links:")
+                console.log(links)
+                
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(tutorialPost!.tags).to.be.an('array')
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(tutorialPost!.tags).to.include.members(["ad4m", "tutorial", "blockchain"])
+                
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(tutorialPost!.metadata).to.be.an('object')
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(tutorialPost!.metadata.author).to.equal("Alice")
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(tutorialPost!.metadata.views).to.equal(42)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(tutorialPost!.metadata.created).to.equal("2025-09-22T10:00:00Z")
+
+                // Test querying by title
+                const advancedPosts = await BlogPostClass.findAll(perspective!, {
+                    where: { title: "Advanced AD4M Patterns" }
+                })
+                expect(advancedPosts).to.have.lengthOf(1)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(advancedPosts[0].metadata.author).to.equal("Bob")
+
+                // Verify SDNA structure for complex types
                 // @ts-ignore - generateSDNA is added dynamically
-                const sdna = ComplexClass.generateSDNA()
-                expect(sdna.sdna).to.include('ad4m://type')
-                expect(sdna.sdna).to.include('complex://instance')
+                const sdna = BlogPostClass.generateSDNA()
+                expect(sdna.sdna).to.include('collection(') // tags and categories should be collections
+                expect(sdna.sdna).to.include('property(') // title and metadata should be properties
+                expect(sdna.sdna).to.include('blogpost://title')
+                expect(sdna.sdna).to.include('blogpost://tags')
+                expect(sdna.sdna).to.include('blogpost://metadata')
+                expect(sdna.sdna).to.include('blogpost://categories')
+            })
+
+            it("should handle realistic Holon-like schema with nested objects", async () => {
+                const holonSchema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "title": "PersonHolon",
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "email": { "type": "string" },
+                        "profile": {
+                            "type": "object",
+                            "properties": {
+                                "bio": { "type": "string" },
+                                "location": { "type": "string" }
+                            }
+                        },
+                        "skills": {
+                            "type": "array", 
+                            "items": { "type": "string" }
+                        }
+                    },
+                    "required": ["name", "email"]
+                }
+
+                const PersonHolonClass = Ad4mModel.fromJSONSchema(holonSchema, {
+                    name: "PersonHolon",
+                    namespace: "holon://person/",
+                    resolveLanguage: "literal"
+                })
+
+
+                await perspective!.ensureSDNASubjectClass(PersonHolonClass)
+
+                // Test with realistic data
+                const person = new PersonHolonClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person.name = "Alice Cooper"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person.email = "alice@example.com"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person.skills = ["javascript", "typescript", "ad4m"]
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person.profile = {
+                    bio: "Software developer passionate about decentralized systems",
+                    location: "San Francisco"
+                }
+                await person.save()
+
+                // Verify retrieval preserves nested structure
+                const retrieved = await PersonHolonClass.findAll(perspective!)
+                expect(retrieved).to.have.lengthOf(1)
+                
+                const alice = retrieved[0]
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(alice.profile).to.be.an('object')
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(alice.profile.bio).to.equal("Software developer passionate about decentralized systems")
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(alice.skills).to.include.members(["javascript", "typescript", "ad4m"])
             })
         })
     })
