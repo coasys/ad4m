@@ -6,7 +6,9 @@ Model classes in AD4M provide a way to define, store, and query structured data 
 
 ## Quick Start
 
-Here's a basic recipe model:
+There are two ways to create model classes in AD4M:
+
+### Option 1: Using Decorators (Traditional)
 
 ```typescript
 import { Ad4mModel, ModelOptions, Property } from '@coasys/ad4m';
@@ -28,6 +30,43 @@ await recipe.save();
 // Reading it back
 const recipes = await Recipe.findAll(perspective);
 console.log(recipes[0].name); // "Chocolate Cake"
+```
+
+### Option 2: From JSON Schema (Dynamic)
+
+Perfect for integrating with external systems or when you have existing JSON Schema definitions:
+
+```typescript
+import { Ad4mModel } from '@coasys/ad4m';
+
+// Define your data structure using JSON Schema
+const recipeSchema = {
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Recipe",
+  "type": "object",
+  "properties": {
+    "name": { "type": "string" },
+    "ingredients": { 
+      "type": "array", 
+      "items": { "type": "string" } 
+    },
+    "difficulty": { "type": "number" }
+  },
+  "required": ["name"]
+};
+
+// Dynamically create the model class
+const Recipe = Ad4mModel.fromJSONSchema(recipeSchema, {
+  namespace: "recipe://",
+  resolveLanguage: "literal"
+});
+
+// Use exactly like decorator-based models
+const recipe = new Recipe(perspective);
+recipe.name = "Chocolate Cake";
+recipe.ingredients = ["flour", "sugar", "cocoa"];
+recipe.difficulty = 3;
+await recipe.save();
 ```
 
 Before using any model class, register it with your perspective:
@@ -276,6 +315,299 @@ const initialCount = await builder.countSubscribe(count => {
 // Remember to clean up
 builder.dispose();
 ```
+
+## Dynamic Models from JSON Schema
+
+The `fromJSONSchema()` method allows you to dynamically create AD4M model classes from JSON Schema definitions. This is perfect for:
+
+- **Integrating with external systems** that use JSON Schema
+- **Runtime model generation** based on user-defined schemas
+- **Partner app integration** (like Holons) that define types using JSON Schema
+- **Rapid prototyping** without writing decorator-based classes
+
+### Basic Usage
+
+```typescript
+import { Ad4mModel } from '@coasys/ad4m';
+
+const schema = {
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BlogPost",
+  "type": "object",
+  "properties": {
+    "title": { "type": "string" },
+    "content": { "type": "string" },
+    "tags": { 
+      "type": "array", 
+      "items": { "type": "string" } 
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "author": { "type": "string" },
+        "publishedAt": { "type": "string" }
+      }
+    }
+  },
+  "required": ["title"]
+};
+
+const BlogPost = Ad4mModel.fromJSONSchema(schema, {
+  namespace: "blog://",
+  resolveLanguage: "literal"
+});
+
+// Use like any other Ad4mModel
+const post = new BlogPost(perspective);
+post.title = "My First Post";
+post.tags = ["ad4m", "tutorial"];
+post.metadata = { author: "Alice", publishedAt: "2025-09-23" };
+await post.save();
+```
+
+### Configuration Options
+
+The second parameter to `fromJSONSchema()` accepts these options:
+
+```typescript
+interface JSONSchemaToModelOptions {
+  // Model configuration
+  name?: string;              // Override class name (defaults to schema.title)
+  namespace?: string;         // Base namespace for predicates
+  
+  // Global property settings
+  resolveLanguage?: string;   // Default language for all properties
+  local?: boolean;           // Whether properties are stored locally
+  writable?: boolean;        // Whether properties are writable
+  
+  // Property-specific overrides
+  properties?: {
+    [propertyName: string]: {
+      through?: string;         // Custom predicate URI
+      resolveLanguage?: string; // Override for this property
+      local?: boolean;         // Override for this property
+      writable?: boolean;      // Override for this property
+      initial?: any;           // Initial value
+    }
+  };
+  
+  // Namespace/predicate generation
+  namespaceTemplate?: string; // Template for generating namespaces
+  predicateTemplate?: string; // Template for generating predicates
+  predicateGenerator?: (propertyName: string, schema: any) => string;
+}
+```
+
+### Namespace Resolution (Cascading Priority)
+
+The namespace is determined using this priority order:
+
+1. **Explicit `options.namespace`** (highest priority)
+2. **`x-ad4m` metadata in schema** 
+3. **Schema `title`** (converted to namespace)
+4. **Schema `$id`** (extracted from URI)
+5. **Error** if none found (lowest priority)
+
+```typescript
+// Priority 1: Explicit namespace
+const Model1 = Ad4mModel.fromJSONSchema(schema, {
+  namespace: "custom://"
+});
+
+// Priority 2: x-ad4m metadata
+const schemaWithMetadata = {
+  "title": "Person",
+  "x-ad4m": {
+    "namespace": "person://"
+  },
+  "properties": { /* ... */ }
+};
+
+// Priority 3: Inferred from title
+const schemaWithTitle = {
+  "title": "BlogPost", // becomes "blogpost://"
+  "properties": { /* ... */ }
+};
+```
+
+### Property Predicate Resolution
+
+Each property's predicate URI is determined by:
+
+1. **`options.properties[name].through`** (explicit override)
+2. **`x-ad4m.through` in property schema**
+3. **`predicateTemplate`** (e.g., `"{namespace}{property}"`)
+4. **`predicateGenerator` function**
+5. **Default**: `{namespace}{propertyName}`
+
+```typescript
+const schema = {
+  "title": "Product",
+  "properties": {
+    "name": { "type": "string" },
+    "price": { 
+      "type": "number",
+      "x-ad4m": {
+        "through": "product://cost"  // Custom predicate
+      }
+    }
+  }
+};
+
+const Product = Ad4mModel.fromJSONSchema(schema, {
+  namespace: "product://",
+  properties: {
+    name: {
+      through: "product://title"  // Override via options
+    }
+  }
+});
+```
+
+### Advanced Schema Features
+
+#### Using x-ad4m Extensions
+
+Add AD4M-specific metadata directly to your JSON Schema:
+
+```typescript
+const advancedSchema = {
+  "title": "User",
+  "x-ad4m": {
+    "namespace": "user://",
+    "resolveLanguage": "literal"
+  },
+  "properties": {
+    "email": { 
+      "type": "string",
+      "x-ad4m": {
+        "through": "user://email_address",
+        "local": true
+      }
+    },
+    "profile": {
+      "type": "object",
+      "x-ad4m": {
+        "resolveLanguage": "literal"  // Store as JSON
+      }
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "x-ad4m": {
+        "through": "user://interests"
+      }
+    }
+  },
+  "required": ["email"]
+};
+
+const User = Ad4mModel.fromJSONSchema(advancedSchema);
+```
+
+#### Complex Object Handling
+
+Object properties are automatically stored as JSON literals:
+
+```typescript
+const schema = {
+  "title": "Article",
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "author": { "type": "string" },
+        "publishedAt": { "type": "string" },
+        "views": { "type": "number" }
+      }
+    }
+  },
+  "required": ["metadata"]
+};
+
+const Article = Ad4mModel.fromJSONSchema(schema, {
+  namespace: "article://"
+});
+
+const article = new Article(perspective);
+article.metadata = {
+  author: "Alice",
+  publishedAt: "2025-09-23",
+  views: 42
+};
+await article.save();
+
+// Complex objects are preserved
+const saved = await Article.findAll(perspective);
+console.log(saved[0].metadata.author); // "Alice"
+```
+
+#### Array/Collection Mapping
+
+Arrays in JSON Schema automatically become AD4M collections:
+
+```typescript
+const schema = {
+  "title": "BlogPost",
+  "properties": {
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "categories": {
+      "type": "array", 
+      "items": { "type": "string" }
+    }
+  }
+};
+
+const BlogPost = Ad4mModel.fromJSONSchema(schema, {
+  namespace: "blog://"
+});
+
+const post = new BlogPost(perspective);
+post.tags = ["ad4m", "tutorial"];
+post.categories = ["technology"];
+await post.save();
+
+// Collections work with all standard AD4M collection methods
+post.addTag("blockchain");
+post.removeCategory("technology");
+```
+
+### Type Safety Considerations
+
+Since properties are added dynamically, TypeScript won't know about them at compile time. You can:
+
+1. **Use type assertions** for better IDE support:
+```typescript
+const BlogPost = Ad4mModel.fromJSONSchema(schema) as typeof Ad4mModel & {
+  new(perspective: PerspectiveProxy): Ad4mModel & {
+    title: string;
+    tags: string[];
+    metadata: { author: string; publishedAt: string };
+  }
+};
+```
+
+2. **Create TypeScript interfaces** for your schemas:
+```typescript
+interface BlogPostData {
+  title: string;
+  tags: string[];
+  metadata: { author: string; publishedAt: string };
+}
+
+const post = new BlogPost(perspective) as Ad4mModel & BlogPostData;
+post.title = "Type-safe access";
+```
+
+### Limitations and Best Practices
+
+- **No `author` property**: JSON schemas cannot define a top-level `author` property (conflicts with built-in AD4M property)
+- **Required properties**: At least one property must be required or have an initial value
+- **Complex objects**: Nested objects are stored as JSON literals, limiting semantic querying capabilities
+- **Performance**: For better semantic querying, consider flattening complex objects into separate properties
 
 ## Under the Hood
 
