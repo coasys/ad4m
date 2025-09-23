@@ -994,6 +994,10 @@ export class Ad4mModel {
     schema: JSONSchema,
     options: JSONSchemaToModelOptions
   ): typeof Ad4mModel {
+    // Disallow top-level "author" property since Ad4mModel provides it implicitly via link authorship
+    if (schema?.properties && Object.prototype.hasOwnProperty.call(schema.properties, "author")) {
+      throw new Error('JSON Schema must not define a top-level "author" property because Ad4mModel already exposes it. Please rename the property (e.g., "writer").');
+    }
     // Determine namespace with cascading precedence
     const namespace = this.determineNamespace(schema, options);
     
@@ -1046,7 +1050,11 @@ export class Ad4mModel {
           
         } else {
           // Handle regular properties
-          let resolveLanguage = this.getPropertyOption(propertyName, propertySchema, options, 'resolveLanguage');
+                let resolveLanguage = this.getPropertyOption(propertyName, propertySchema, options, 'resolveLanguage');
+                // If no specific resolveLanguage for this property, use the global one
+                if (!resolveLanguage && options.resolveLanguage) {
+                  resolveLanguage = options.resolveLanguage;
+                }
           const local = this.getPropertyOption(propertyName, propertySchema, options, 'local');
           const writable = this.getPropertyOption(propertyName, propertySchema, options, 'writable', true);
           let initial = this.getPropertyOption(propertyName, propertySchema, options, 'initial');
@@ -1055,6 +1063,11 @@ export class Ad4mModel {
           if (propertySchema.type === 'object' && !resolveLanguage) {
             resolveLanguage = 'literal';
             console.warn(`Property "${propertyName}" is an object type. It will be stored as JSON. Consider flattening complex objects for better semantic querying.`);
+          }
+
+          // Ensure numeric properties use literal language for correct typing
+          if ((resolveLanguage === undefined || resolveLanguage === null) && (propertySchema.type === 'number' || propertySchema.type === 'integer')) {
+            resolveLanguage = 'literal';
           }
           
           // If property is required, ensure it has an initial value

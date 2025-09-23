@@ -2758,24 +2758,54 @@ describe("Prolog + Literals", () => {
 
                 // Test property assignment
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                person.name = "Alice"
+                person.name = "Alice Johnson"
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 person.age = 30
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                person.email = "alice@example.com"
+                person.email = "alice.johnson@example.com"
 
                 await perspective!.ensureSDNASubjectClass(PersonClass)
                 await person.save()
 
-                // Verify data was saved
+                // Create a second person to test multiple instances
+                const person2 = new PersonClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person2.name = "Bob Smith"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person2.age = 25
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person2.email = "bob.smith@example.com"
+                await person2.save()
+
+                // Verify data was saved and can be retrieved
                 const savedPeople = await PersonClass.findAll(perspective!)
-                expect(savedPeople).to.have.lengthOf(1)
+                expect(savedPeople).to.have.lengthOf(2)
+                
+                // Find Alice
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                expect(savedPeople[0].name).to.equal("Alice")
+                const alice = savedPeople.find(p => p.name === "Alice Johnson")
+                expect(alice).to.exist
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                expect(savedPeople[0].age).to.equal(30)
+                expect(alice!.name).to.equal("Alice Johnson")
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                expect(savedPeople[0].email).to.equal("alice@example.com")
+                expect(alice!.age).to.equal(30)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(alice!.email).to.equal("alice.johnson@example.com")
+
+                // Find Bob
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                const bob = savedPeople.find(p => p.name === "Bob Smith")
+                expect(bob).to.exist
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(bob!.age).to.equal(25)
+
+                // Test querying with where clauses
+                const adults = await PersonClass.findAll(perspective!, {
+                    where: { age: { gt: 28 } }
+                })
+                expect(adults).to.have.lengthOf(1)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(adults[0].name).to.equal("Alice Johnson")
             })
 
             it("should support property mapping overrides", async () => {
@@ -2806,18 +2836,44 @@ describe("Prolog + Literals", () => {
                 // Test that custom predicates are used
                 const contact = new ContactClass(perspective!)
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                contact.name = "Bob"
+                contact.name = "Bob Wilson"
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                contact.email = "bob@example.com"
+                contact.email = "bob.wilson@company.com"
 
                 await perspective!.ensureSDNASubjectClass(ContactClass)
                 await contact.save()
+
+                // Create second contact to test multiple instances
+                const contact2 = new ContactClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                contact2.name = "Carol Davis"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                contact2.email = "carol.davis@company.com"
+                await contact2.save()
+
+                // Verify data retrieval works with custom predicates
+                const savedContacts = await ContactClass.findAll(perspective!)
+                expect(savedContacts).to.have.lengthOf(2)
+                
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                const bob = savedContacts.find(c => c.name === "Bob Wilson")
+                expect(bob).to.exist
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(bob!.email).to.equal("bob.wilson@company.com")
 
                 // Verify the custom predicates were used by checking the generated SDNA
                 // @ts-ignore - generateSDNA is added dynamically
                 const sdna = ContactClass.generateSDNA()
                 expect(sdna.sdna).to.include("foaf://name")
                 expect(sdna.sdna).to.include("foaf://mbox")
+
+                // Test querying works with custom predicates
+                const bobQuery = await ContactClass.findAll(perspective!, {
+                    where: { name: "Bob Wilson" }
+                })
+                expect(bobQuery).to.have.lengthOf(1)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(bobQuery[0].email).to.equal("bob.wilson@company.com")
             })
         })
 
@@ -2864,14 +2920,45 @@ describe("Prolog + Literals", () => {
 
                 const product = new ProductClass(perspective!)
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                product.name = "Laptop"
+                product.name = "Gaming Laptop"
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                product.price = 999.99
+                product.price = 1299.99
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                product.description = "A powerful laptop"
+                product.description = "A high-performance gaming laptop with RTX graphics"
 
                 await perspective!.ensureSDNASubjectClass(ProductClass)
                 await product.save()
+
+                // Create a second product with different pricing
+                const product2 = new ProductClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                product2.name = "Office Laptop"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                product2.price = 799.99
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                product2.description = "A reliable laptop for office work"
+                await product2.save()
+
+                // Test data retrieval and validation
+                const savedProducts = await ProductClass.findAll(perspective!)
+                expect(savedProducts).to.have.lengthOf(2)
+
+                // Verify x-ad4m custom predicates work for data retrieval
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                const gamingLaptop = savedProducts.find(p => p.name === "Gaming Laptop")
+                expect(gamingLaptop).to.exist
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(gamingLaptop!.price).to.equal(1299.99)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(gamingLaptop!.description).to.equal("A high-performance gaming laptop with RTX graphics")
+
+                // Test querying with price ranges
+                const expensiveProducts = await ProductClass.findAll(perspective!, {
+                    where: { price: { gt: 1000 } }
+                })
+                expect(expensiveProducts).to.have.lengthOf(1)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(expensiveProducts[0].name).to.equal("Gaming Laptop")
 
                 // Verify custom predicates from x-ad4m were used
                 // @ts-ignore - generateSDNA is added dynamically
@@ -2890,7 +2977,8 @@ describe("Prolog + Literals", () => {
                     "type": "object",
                     "properties": {
                         "title": { "type": "string" },
-                        "author": { "type": "string" },
+                        // Avoid reserved top-level "author" which conflicts with Ad4mModel built-in
+                        "writer": { "type": "string" },
                         "isbn": { "type": "string" }
                     },
                     "required": ["title"]
@@ -2908,18 +2996,52 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 book.title = "The Great Gatsby"
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                book.author = "F. Scott Fitzgerald"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                book.writer = "F. Scott Fitzgerald"
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 book.isbn = "978-0-7432-7356-5"
 
                 await perspective!.ensureSDNASubjectClass(BookClass)
                 await book.save()
 
+                // Add a second book
+                const book2 = new BookClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                book2.title = "To Kill a Mockingbird"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                book2.writer = "Harper Lee"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                book2.isbn = "978-0-06-112008-4"
+                await book2.save()
+
+                // Test data retrieval with inferred predicates
+                const savedBooks = await BookClass.findAll(perspective!)
+                expect(savedBooks).to.have.lengthOf(2)
+
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                const gatsby = savedBooks.find(b => b.title === "The Great Gatsby")
+                expect(gatsby).to.exist
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(gatsby!.writer).to.equal("F. Scott Fitzgerald")
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(gatsby!.isbn).to.equal("978-0-7432-7356-5")
+
+                // Test querying by author
+                const fitzgeraldBooks = await BookClass.findAll(perspective!, {
+                    where: { writer: "F. Scott Fitzgerald" }
+                })
+                expect(fitzgeraldBooks).to.have.lengthOf(1)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(fitzgeraldBooks[0].title).to.equal("The Great Gatsby")
+
                 // Verify inferred predicates (should be book://title, book://author, etc.)
                 // @ts-ignore - generateSDNA is added dynamically
                 const sdna = BookClass.generateSDNA()
                 expect(sdna.sdna).to.include("book://title")
-                expect(sdna.sdna).to.include("book://author")
+                expect(sdna.sdna).to.include("book://writer")
                 expect(sdna.sdna).to.include("book://isbn")
             })
         })
