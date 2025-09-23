@@ -1022,8 +1022,7 @@ export class Ad4mModel {
         if (isArray) {
           // Handle arrays as collections
           // Store the singular form as the collection key since SDNA generation expects singular
-          const singularKey = pluralToSingular(propertyName);
-          collections[singularKey] = {
+          collections[propertyName] = {
             through: predicate,
             local: this.getPropertyOption(propertyName, propertySchema, options, 'local')
           };
@@ -1036,9 +1035,9 @@ export class Ad4mModel {
           });
           
           // Add collection methods
-          const adderName = collectionToAdderName(propertyName);
-          const removerName = collectionToRemoverName(propertyName);
-          const setterName = collectionToSetterName(propertyName);
+          const adderName = `add${capitalize(propertyName)}`;
+          const removerName = `remove${capitalize(propertyName)}`;
+          const setterName = `setCollection${capitalize(propertyName)}`;
           
           (DynamicModelClass.prototype as any)[adderName] = function() {
             // Placeholder function for SDNA generation
