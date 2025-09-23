@@ -1052,11 +1052,11 @@ export class Ad4mModel {
           
         } else {
           // Handle regular properties
-                let resolveLanguage = this.getPropertyOption(propertyName, propertySchema, options, 'resolveLanguage');
-                // If no specific resolveLanguage for this property, use the global one
-                if (!resolveLanguage && options.resolveLanguage) {
-                  resolveLanguage = options.resolveLanguage;
-                }
+          let resolveLanguage = this.getPropertyOption(propertyName, propertySchema, options, 'resolveLanguage');
+          // If no specific resolveLanguage for this property, use the global one
+          if (!resolveLanguage && options.resolveLanguage) {
+            resolveLanguage = options.resolveLanguage;
+          }
           const local = this.getPropertyOption(propertyName, propertySchema, options, 'local');
           const writable = this.getPropertyOption(propertyName, propertySchema, options, 'writable', true);
           let initial = this.getPropertyOption(propertyName, propertySchema, options, 'initial');
