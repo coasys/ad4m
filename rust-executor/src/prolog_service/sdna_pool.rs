@@ -320,7 +320,7 @@ impl SdnaPrologPool {
                 log::trace!("  {}. {}", i + 1, fact);
             }
         } else {
-            log::warn!("📊 SDNA FACT CREATION: No SDNA facts found");
+            log::trace!("📊 SDNA FACT CREATION: No SDNA facts found");
         }
 
         sdna_lines.extend(sdna_facts);
