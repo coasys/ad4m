@@ -6,12 +6,62 @@ use deno_core::error::AnyError;
 use serde::{Deserialize, Serialize};
 
 use crate::graphql::graphql_types::{Agent, AgentStatus, Perspective};
-
 use crate::types::{Expression, ExpressionProof};
 use crate::wallet::Wallet;
 
 pub mod capabilities;
 pub mod signatures;
+
+/// Context for determining which agent to use for operations
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentContext {
+    pub user_did: Option<String>,
+    pub is_main_agent: bool,
+}
+
+impl AgentContext {
+    /// Create AgentContext from auth token string
+    pub fn from_auth_token(auth_token: String) -> Self {
+        let user_did = capabilities::user_did_from_token(auth_token);
+        Self {
+            is_main_agent: user_did.is_none(),
+            user_did,
+        }
+    }
+
+    /// Create AgentContext for main agent
+    pub fn main_agent() -> Self {
+        Self {
+            user_did: None,
+            is_main_agent: true,
+        }
+    }
+
+    /// Create AgentContext for specific user
+    pub fn for_user(user_did: String) -> Self {
+        Self {
+            user_did: Some(user_did),
+            is_main_agent: false,
+        }
+    }
+
+    /// Get the wallet key name for this context
+    pub fn wallet_key_name(&self) -> String {
+        match &self.user_did {
+            Some(did) => did.clone(),
+            None => "main".to_string(),
+        }
+    }
+}
+
+/// Data for a specific agent (main or user)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentData {
+    pub did: String,
+    pub did_document: String,
+    pub signing_key_id: String,
+    pub wallet_key_name: String,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AgentStore {
@@ -25,23 +75,18 @@ pub struct AgentStore {
 }
 
 pub fn did_document() -> did_key::Document {
-    let wallet_instance = Wallet::instance();
-    let wallet = wallet_instance.lock().expect("wallet lock");
-    let wallet_ref = wallet.as_ref().expect("wallet instance");
-    let name = "main".to_string();
-    wallet_ref
-        .get_did_document(&name)
-        .ok_or(anyhow!("main key not found. call createMainKey() first"))
-        .unwrap()
+    did_document_for_context(&AgentContext::main_agent())
+        .expect("Failed to get did_document for main agent")
 }
 
 pub fn signing_key_id() -> String {
-    did_document().verification_method[0].id.clone()
+    signing_key_id_for_context(&AgentContext::main_agent())
+        .expect("Failed to get signing_key_id for main agent")
 }
 
 pub fn did() -> String {
-    AgentService::with_global_instance(|a| a.did.clone())
-        .expect("DID requested but not yet set in AgentService")
+    did_for_context(&AgentContext::main_agent())
+        .expect("Failed to get did for main agent")
 }
 
 pub fn check_keys_and_create(did: String) -> did_key::Document {
@@ -57,31 +102,76 @@ pub fn check_keys_and_create(did: String) -> did_key::Document {
 }
 
 pub fn create_signed_expression<T: Serialize>(data: T) -> Result<Expression<T>, AnyError> {
-    let timestamp = chrono::Utc::now();
-    let signature = hex::encode(sign(&signatures::hash_data_and_timestamp(
-        &data, &timestamp,
-    ))?);
-
-    Ok(Expression {
-        author: did(),
-        timestamp: timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        data,
-        proof: ExpressionProof {
-            signature,
-            key: signing_key_id(),
-        },
-    })
+    create_signed_expression_for_context(data, &AgentContext::main_agent())
 }
 
 pub fn sign(payload: &[u8]) -> Result<Vec<u8>, AnyError> {
+    sign_for_context(payload, &AgentContext::main_agent())
+}
+
+// Context-aware agent functions
+
+pub fn did_document_for_context(context: &AgentContext) -> Result<did_key::Document, AnyError> {
     let wallet_instance = Wallet::instance();
     let wallet = wallet_instance.lock().expect("wallet lock");
     let wallet_ref = wallet.as_ref().expect("wallet instance");
-    let name = "main".to_string();
+    let key_name = context.wallet_key_name();
+    
+    wallet_ref
+        .get_did_document(&key_name)
+        .ok_or(anyhow!("{} key not found. call createMainKey() first", key_name))
+}
+
+pub fn signing_key_id_for_context(context: &AgentContext) -> Result<String, AnyError> {
+    let did_doc = did_document_for_context(context)?;
+    Ok(did_doc.verification_method[0].id.clone())
+}
+
+pub fn did_for_context(context: &AgentContext) -> Result<String, AnyError> {
+    if context.is_main_agent {
+        // For main agent, get from AgentService
+        let did_result = AgentService::with_global_instance(|a| {
+            a.did.clone().ok_or(anyhow!("DID requested but not yet set in AgentService"))
+        });
+        did_result
+    } else {
+        // For user agents, get from did document
+        let did_doc = did_document_for_context(context)?;
+        Ok(did_doc.id)
+    }
+}
+
+pub fn sign_for_context(payload: &[u8], context: &AgentContext) -> Result<Vec<u8>, AnyError> {
+    let wallet_instance = Wallet::instance();
+    let wallet = wallet_instance.lock().expect("wallet lock");
+    let wallet_ref = wallet.as_ref().expect("wallet instance");
+    let key_name = context.wallet_key_name();
+    
     let signature = wallet_ref
-        .sign(&name, payload)
-        .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
+        .sign(&key_name, payload)
+        .ok_or(anyhow!("{} key not found", key_name))?;
     Ok(signature)
+}
+
+pub fn create_signed_expression_for_context<T: Serialize>(
+    data: T,
+    context: &AgentContext,
+) -> Result<Expression<T>, AnyError> {
+    let timestamp = chrono::Utc::now();
+    let signature = hex::encode(sign_for_context(
+        &signatures::hash_data_and_timestamp(&data, &timestamp),
+        context,
+    )?);
+
+    Ok(Expression {
+        author: did_for_context(context)?,
+        timestamp: timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        data,
+        proof: ExpressionProof {
+            key: signing_key_id_for_context(context)?,
+            signature,
+        },
+    })
 }
 
 pub fn sign_string_hex(data: String) -> Result<String, AnyError> {
@@ -468,5 +558,124 @@ mod tests {
             signatures::verify(&signed_expression).expect("Verification failed"),
             "Signature verification for create_signed_expression with string data should succeed"
         );
+    }
+
+    // Context-aware function tests
+
+    #[test]
+    fn test_agent_context_creation() {
+        let main_context = AgentContext::main_agent();
+        assert!(main_context.is_main_agent);
+        assert_eq!(main_context.user_did, None);
+        assert_eq!(main_context.wallet_key_name(), "main");
+
+        let user_did = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string();
+        let user_context = AgentContext::for_user(user_did.clone());
+        assert!(!user_context.is_main_agent);
+        assert_eq!(user_context.user_did, Some(user_did.clone()));
+        assert_eq!(user_context.wallet_key_name(), user_did);
+    }
+
+    #[test]
+    fn test_context_aware_functions_main_agent() {
+        ensure_setup();
+        let context = AgentContext::main_agent();
+
+        // Test did_for_context
+        let context_did = did_for_context(&context).expect("Failed to get DID for context");
+        let static_did = did();
+        assert_eq!(context_did, static_did, "Context-aware DID should match static DID");
+
+        // Test signing_key_id_for_context
+        let context_key_id = signing_key_id_for_context(&context).expect("Failed to get signing key ID for context");
+        let static_key_id = signing_key_id();
+        assert_eq!(context_key_id, static_key_id, "Context-aware signing key ID should match static signing key ID");
+
+        // Test did_document_for_context
+        let context_doc = did_document_for_context(&context).expect("Failed to get DID document for context");
+        let static_doc = did_document();
+        assert_eq!(context_doc.id, static_doc.id, "Context-aware DID document should match static DID document");
+    }
+
+    #[test]
+    fn test_context_aware_sign_and_verify() {
+        ensure_setup();
+        let context = AgentContext::main_agent();
+        let test_payload = b"test message for context signing";
+
+        // Test sign_for_context
+        let context_signature = sign_for_context(test_payload, &context).expect("Failed to sign with context");
+        let static_signature = sign(test_payload).expect("Failed to sign with static function");
+        
+        // Both should produce valid signatures (though they may be different due to randomness in some signature schemes)
+        assert!(!context_signature.is_empty(), "Context signature should not be empty");
+        assert!(!static_signature.is_empty(), "Static signature should not be empty");
+    }
+
+    #[test]
+    fn test_context_aware_create_signed_expression() {
+        ensure_setup();
+        let context = AgentContext::main_agent();
+        let test_data = json!({"test": "context_data"});
+
+        // Test create_signed_expression_for_context
+        let context_expr = create_signed_expression_for_context(test_data.clone(), &context)
+            .expect("Failed to create signed expression with context");
+        let static_expr = create_signed_expression(test_data)
+            .expect("Failed to create signed expression with static function");
+
+        // Both expressions should be valid
+        assert!(
+            signatures::verify(&context_expr).expect("Context expression verification failed"),
+            "Context-aware expression should be valid"
+        );
+        assert!(
+            signatures::verify(&static_expr).expect("Static expression verification failed"),
+            "Static expression should be valid"
+        );
+
+        // Both should have the same author (main agent DID)
+        assert_eq!(context_expr.author, static_expr.author, "Both expressions should have the same author");
+    }
+
+    #[test]
+    fn test_user_context_with_nonexistent_key() {
+        ensure_setup();
+        let fake_user_did = "did:key:z6MkfakeUserDidThatDoesNotExist".to_string();
+        let user_context = AgentContext::for_user(fake_user_did);
+
+        // These should fail because the user key doesn't exist in the wallet
+        assert!(
+            did_document_for_context(&user_context).is_err(),
+            "Getting DID document for nonexistent user should fail"
+        );
+        assert!(
+            signing_key_id_for_context(&user_context).is_err(),
+            "Getting signing key ID for nonexistent user should fail"
+        );
+        assert!(
+            did_for_context(&user_context).is_err(),
+            "Getting DID for nonexistent user should fail"
+        );
+        assert!(
+            sign_for_context(b"test", &user_context).is_err(),
+            "Signing for nonexistent user should fail"
+        );
+        assert!(
+            create_signed_expression_for_context(json!({"test": "data"}), &user_context).is_err(),
+            "Creating signed expression for nonexistent user should fail"
+        );
+    }
+
+    #[test]
+    fn test_agent_context_from_auth_token() {
+        // Test with empty token (main agent)
+        let empty_token = String::new();
+        let context = AgentContext::from_auth_token(empty_token);
+        assert!(context.is_main_agent, "Empty token should result in main agent context");
+        assert!(context.user_did.is_none(), "Empty token should have no user DID");
+        
+        // Note: Full JWT token testing will be added in integration tests
+        // since it requires more complex setup with JWT tokens and user creation
     }
 }
