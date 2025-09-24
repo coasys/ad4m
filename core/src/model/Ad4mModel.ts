@@ -1005,7 +1005,9 @@ export class Ad4mModel {
     const DynamicModelClass = class extends Ad4mModel {};
     
     // Set up class metadata
-    Object.defineProperty(DynamicModelClass, 'name', { value: options.name });
+    if (!options.name || options.name.trim() === '') {
+      throw new Error("options.name is required and cannot be empty");
+    }
     (DynamicModelClass as any).className = options.name;
     (DynamicModelClass.prototype as any).className = options.name;
     
