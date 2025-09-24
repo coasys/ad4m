@@ -1145,7 +1145,15 @@ export class Ad4mModel {
     if (!hasPropertyWithInitial) {
       // If no properties have initial values, add a type identifier automatically
       const typeProperty = `ad4m://type`;
-      const typeValue = `${namespace.replace('://', '')}://instance`;
+      let typeValue: string;
+      if (namespace.includes('://')) {
+        const [scheme, rest] = namespace.split('://');
+        const path = (rest || '').replace(/\/+$/,'');
+        typeValue = `${scheme}://${path}/instance`;
+      } else {
+        const path = namespace.replace(/\/+$/,'');
+        typeValue = `${path}/instance`;
+      }
       
       properties['__ad4m_type'] = {
         through: typeProperty,
