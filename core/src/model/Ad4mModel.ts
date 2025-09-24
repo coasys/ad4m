@@ -210,6 +210,17 @@ function buildLimitQuery(limit?: number): string {
   return `takeN(InstancesWithOffset, ${limit}, AllInstances)`;
 }
 
+function normalizeNamespaceString(namespace: string): string {
+  if (!namespace) return '';
+  if (namespace.includes('://')) {
+    const [scheme, rest] = namespace.split('://');
+    const path = (rest || '').replace(/\/+$/,'');
+    return `${scheme}://${path}`;
+  } else {
+    return namespace.replace(/\/+$/,'');
+  }
+}
+
 function normalizeSchemaType(type?: string | string[]): string | undefined {
   if (!type) return undefined;
   if (typeof type === "string") return type;
@@ -1250,8 +1261,13 @@ export class Ad4mModel {
     
     // 3. Generate from namespace + property name
     if (options.predicateTemplate) {
+      const normalizedNs = normalizeNamespaceString(namespace);
+      const [scheme, rest] = normalizedNs.includes('://') ? normalizedNs.split('://') : ['', normalizedNs];
+      const nsNoScheme = rest || '';
       return options.predicateTemplate
-        .replace('${namespace}', namespace.replace('://', ''))
+        .replace('${namespace}', nsNoScheme)
+        .replace('${scheme}', scheme)
+        .replace('${ns}', nsNoScheme)
         .replace('${title}', schema.title || '')
         .replace('${property}', propertyName);
     }
@@ -1262,8 +1278,12 @@ export class Ad4mModel {
     }
     
     // 5. Default: namespace + property name
-    const cleanNamespace = namespace.endsWith('://') ? namespace.slice(0, -3) : namespace;
-    return `${cleanNamespace}://${propertyName}`;
+    const normalizedNs = normalizeNamespaceString(namespace);
+    if (normalizedNs.includes('://')) {
+      return `${normalizedNs}/${propertyName}`;
+    } else {
+      return `${normalizedNs}://${propertyName}`;
+    }
   }
   
   /**
