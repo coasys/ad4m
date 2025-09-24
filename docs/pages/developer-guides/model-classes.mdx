@@ -57,6 +57,7 @@ const recipeSchema = {
 
 // Dynamically create the model class
 const Recipe = Ad4mModel.fromJSONSchema(recipeSchema, {
+  name: "Recipe",
   namespace: "recipe://",
   resolveLanguage: "literal"
 });
