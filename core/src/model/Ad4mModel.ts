@@ -1160,7 +1160,11 @@ export class Ad4mModel {
       if (namespace.includes('://')) {
         const [scheme, rest] = namespace.split('://');
         const path = (rest || '').replace(/\/+$/,'');
-        typeValue = `${scheme}://${path}/instance`;
+        if (path) {
+          typeValue = `${scheme}://${path}/instance`;
+        } else {
+          typeValue = `${scheme}://instance`;
+        }
       } else {
         const path = namespace.replace(/\/+$/,'');
         typeValue = `${path}/instance`;
@@ -1280,7 +1284,8 @@ export class Ad4mModel {
     // 5. Default: namespace + property name
     const normalizedNs = normalizeNamespaceString(namespace);
     if (normalizedNs.includes('://')) {
-      return `${normalizedNs}/${propertyName}`;
+      // For namespaces like "product://", append property directly
+      return `${normalizedNs}${propertyName}`;
     } else {
       return `${normalizedNs}://${propertyName}`;
     }
