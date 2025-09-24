@@ -163,8 +163,8 @@ pub fn prolog_value_to_json_string(value: Term) -> String {
                 // Convert them to proper JSON objects
                 return convert_internal_structure_to_json(&s, &l);
             } else {
-                // For other compound terms, use the old format
-                let mut string_result = format!("\"{}\": [", s.as_str());
+                // For other compound terms, return an object with the functor as key and args as array value
+                let mut string_result = format!("{{\"{}\": [", s.as_str());
                 for (i, v) in l.iter().enumerate() {
                     if i > 0 {
                         string_result.push_str(", ");
@@ -172,6 +172,7 @@ pub fn prolog_value_to_json_string(value: Term) -> String {
                     string_result.push_str(&prolog_value_to_json_string(v.clone()));
                 }
                 string_result.push(']');
+                string_result.push('}');
                 string_result
             }
         }
@@ -506,7 +507,7 @@ mod tests {
             vec![Term::String("arg1".to_string()), Term::Integer(42.into())],
         );
         let result = prolog_value_to_json_string(term);
-        assert_eq!(result, r#""some_functor": ["arg1", 42]"#);
+        assert_eq!(result, r#"{"some_functor": ["arg1", 42]}"#);
     }
 
     #[test]
@@ -616,7 +617,7 @@ mod tests {
         );
         assert_eq!(
             prolog_value_to_json_string(term),
-            r#""some_functor": ["arg1", 42]"#
+            r#"{"some_functor": ["arg1", 42]}"#
         );
     }
 
