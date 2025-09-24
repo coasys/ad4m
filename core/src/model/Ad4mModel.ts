@@ -210,6 +210,33 @@ function buildLimitQuery(limit?: number): string {
   return `takeN(InstancesWithOffset, ${limit}, AllInstances)`;
 }
 
+function normalizeSchemaType(type?: string | string[]): string | undefined {
+  if (!type) return undefined;
+  if (typeof type === "string") return type;
+  if (Array.isArray(type) && type.length > 0) {
+    const nonNull = type.find((t) => t !== "null");
+    return nonNull || type[0];
+  }
+  return undefined;
+}
+
+function isSchemaType(schema: JSONSchemaProperty, expectedType: string): boolean {
+  return normalizeSchemaType(schema.type) === expectedType;
+}
+
+function isArrayType(schema: JSONSchemaProperty): boolean {
+  return isSchemaType(schema, "array");
+}
+
+function isObjectType(schema: JSONSchemaProperty): boolean {
+  return isSchemaType(schema, "object");
+}
+
+function isNumericType(schema: JSONSchemaProperty): boolean {
+  const normalized = normalizeSchemaType(schema.type);
+  return normalized === "number" || normalized === "integer";
+}
+
 /**
  * Base class for defining data models in AD4M.
  * 
@@ -1019,7 +1046,8 @@ export class Ad4mModel {
       for (const [propertyName, propertySchema] of Object.entries(schema.properties)) {
         const predicate = this.determinePredicate(schema, propertyName, propertySchema, namespace, options);
         const isRequired = schema.required?.includes(propertyName) || false;
-        const isArray = propertySchema.type === 'array';
+        const propertyType = normalizeSchemaType(propertySchema.type);
+        const isArray = isArrayType(propertySchema);
         
         if (isArray) {
           // Handle arrays as collections
@@ -1063,19 +1091,19 @@ export class Ad4mModel {
           let initial = this.getPropertyOption(propertyName, propertySchema, options, 'initial');
           
           // Handle nested objects by serializing to JSON
-          if (propertySchema.type === 'object' && !resolveLanguage) {
+          if (isObjectType(propertySchema) && !resolveLanguage) {
             resolveLanguage = 'literal';
             console.warn(`Property "${propertyName}" is an object type. It will be stored as JSON. Consider flattening complex objects for better semantic querying.`);
           }
 
           // Ensure numeric properties use literal language for correct typing
-          if ((resolveLanguage === undefined || resolveLanguage === null) && (propertySchema.type === 'number' || propertySchema.type === 'integer')) {
+          if ((resolveLanguage === undefined || resolveLanguage === null) && isNumericType(propertySchema)) {
             resolveLanguage = 'literal';
           }
           
           // If property is required, ensure it has an initial value
           if (isRequired && !initial) {
-            if (propertySchema.type === 'object') {
+            if (isObjectType(propertySchema)) {
               initial = 'literal://json:{}';
             } else {
               initial = "ad4m://undefined";
@@ -1095,7 +1123,7 @@ export class Ad4mModel {
           Object.defineProperty(DynamicModelClass.prototype, propertyName, {
             configurable: true,
             writable: true,
-            value: this.getDefaultValueForType(propertySchema.type as string)
+            value: this.getDefaultValueForType(propertyType)
           });
           
           // Add setter function if writable
@@ -1262,7 +1290,7 @@ export class Ad4mModel {
   /**
    * Gets default value for a JSON Schema type
    */
-  private static getDefaultValueForType(type: string): any {
+  private static getDefaultValueForType(type?: string): any {
     switch (type) {
       case 'string': return '';
       case 'number': return 0;
