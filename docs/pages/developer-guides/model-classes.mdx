@@ -354,6 +354,7 @@ const schema = {
 };
 
 const BlogPost = Ad4mModel.fromJSONSchema(schema, {
+  name: "BlogPost",
   namespace: "blog://",
   resolveLanguage: "literal"
 });
@@ -373,29 +374,31 @@ The second parameter to `fromJSONSchema()` accepts these options:
 ```typescript
 interface JSONSchemaToModelOptions {
   // Model configuration
-  name?: string;              // Override class name (defaults to schema.title)
-  namespace?: string;         // Base namespace for predicates
-  
+  name: string;               // Class name (required)
+  namespace?: string;         // Base namespace for predicates (e.g., "recipe://")
+
   // Global property settings
   resolveLanguage?: string;   // Default language for all properties
-  local?: boolean;           // Whether properties are stored locally
-  writable?: boolean;        // Whether properties are writable
-  
-  // Property-specific overrides
-  properties?: {
-    [propertyName: string]: {
-      through?: string;         // Custom predicate URI
-      resolveLanguage?: string; // Override for this property
-      local?: boolean;         // Override for this property
-      writable?: boolean;      // Override for this property
-      initial?: any;           // Initial value
-    }
-  };
-  
-  // Namespace/predicate generation
-  namespaceTemplate?: string; // Template for generating namespaces
-  predicateTemplate?: string; // Template for generating predicates
-  predicateGenerator?: (propertyName: string, schema: any) => string;
+  local?: boolean;            // Whether properties are stored locally
+
+  // Property-specific overrides (per-property decorator options)
+  propertyOptions?: Record<string, {
+    through?: string;         // Custom predicate URI
+    resolveLanguage?: string; // Override for this property
+    local?: boolean;          // Override for this property
+    writable?: boolean;       // Override for this property (default true)
+    initial?: any;            // Initial value (generates constructor action)
+  }>;
+
+  // Predicate generation helpers
+  // 1) Direct mapping: propertyName -> predicate URI
+  propertyMapping?: Record<string, string>;
+
+  // 2) Template: supports ${scheme}, ${namespace} (or ${ns}), ${title}, ${property}
+  predicateTemplate?: string;
+
+  // 3) Generator callback: receives schema title and property name
+  predicateGenerator?: (title: string, property: string) => string;
 }
 ```
 
@@ -433,13 +436,14 @@ const schemaWithTitle = {
 
 ### Property Predicate Resolution
 
-Each property's predicate URI is determined by:
+Each property's predicate URI is determined by (highest to lowest precedence):
 
-1. **`options.properties[name].through`** (explicit override)
-2. **`x-ad4m.through` in property schema**
-3. **`predicateTemplate`** (e.g., `"{namespace}{property}"`)
-4. **`predicateGenerator` function**
-5. **Default**: `{namespace}{propertyName}`
+1. **`options.propertyMapping[name]`** (explicit mapping)
+2. **`options.propertyOptions[name].through`** (per-property override)
+3. **`x-ad4m.through` in property schema**
+4. **`predicateTemplate`** (supports `${scheme}`, `${namespace}`/`${ns}`, `${title}`, `${property}`)
+5. **`predicateGenerator(title, property)`**
+6. **Default**: `${namespace}/${propertyName}` (normalized)
 
 ```typescript
 const schema = {
@@ -456,12 +460,14 @@ const schema = {
 };
 
 const Product = Ad4mModel.fromJSONSchema(schema, {
+  name: "Product",
   namespace: "product://",
-  properties: {
-    name: {
-      through: "product://title"  // Override via options
-    }
+  // Option A: direct mapping
+  propertyMapping: {
+    name: "product://title"
   }
+  // Option B: or per-property options
+  // propertyOptions: { name: { through: "product://title" } }
 });
 ```
 
