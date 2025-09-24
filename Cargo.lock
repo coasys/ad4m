@@ -20,7 +20,7 @@ checksum = "415ed64958754dbe991900f3940677e6a7eefb4d7367afd70d642677b0c7d19d"
 
 [[package]]
 name = "ad4m"
-version = "0.10.1-dev"
+version = "0.10.1-dev-1"
 dependencies = [
  "ad4m-client",
  "ad4m-executor",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-client"
-version = "0.10.1-dev"
+version = "0.10.1-dev-1"
 dependencies = [
  "anyhow",
  "async-tungstenite",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-executor"
-version = "0.10.1-dev"
+version = "0.10.1-dev-1"
 dependencies = [
  "ad4m-client",
  "anyhow",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-launcher"
-version = "0.10.1-dev"
+version = "0.10.1-dev-1"
 dependencies = [
  "ad4m-client",
  "ad4m-executor",
