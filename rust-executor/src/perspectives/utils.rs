@@ -1,5 +1,6 @@
 use crate::prolog_service::types::{QueryMatch, QueryResolution};
 use scryer_prolog::Term;
+use serde_json::{Map as JsonMap, Value as JsonValue};
 
 fn sanitize_into_json(s: String) -> String {
     match s.as_str() {
@@ -36,11 +37,13 @@ fn convert_assoc_to_json(_functor: &str, args: &[Term]) -> String {
     let mut pairs = Vec::new();
     collect_assoc_pairs(args, &mut pairs);
 
-    let json_pairs: Vec<String> = pairs
-        .iter()
-        .map(|(k, v)| format!("\"{}\": {}", k, prolog_value_to_json_string(v.clone())))
-        .collect();
-    format!("{{{}}}", json_pairs.join(", "))
+    let mut map = JsonMap::new();
+    for (k, v_term) in pairs.into_iter() {
+        let v_json = prolog_value_to_json_string(v_term);
+        let v_value: JsonValue = serde_json::from_str(&v_json).unwrap_or(JsonValue::Null);
+        map.insert(k, v_value);
+    }
+    JsonValue::Object(map).to_string()
 }
 
 fn collect_assoc_pairs(args: &[Term], pairs: &mut Vec<(String, Term)>) {
@@ -65,11 +68,12 @@ fn parse_t_compound_to_json(args: &[Term]) -> String {
     let mut pairs = Vec::new();
     collect_t_pairs(args, &mut pairs);
 
-    let json_pairs: Vec<String> = pairs
-        .iter()
-        .map(|(k, v)| format!("\"{}\": {}", k, v))
-        .collect();
-    format!("{{{}}}", json_pairs.join(", "))
+    let mut map = JsonMap::new();
+    for (k, v_json) in pairs.into_iter() {
+        let v_value: JsonValue = serde_json::from_str(&v_json).unwrap_or(JsonValue::Null);
+        map.insert(k, v_value);
+    }
+    JsonValue::Object(map).to_string()
 }
 
 fn collect_t_pairs(args: &[Term], pairs: &mut Vec<(String, String)>) {
@@ -110,20 +114,18 @@ fn get_non_separator_value(term: &Term) -> Option<String> {
 
 fn convert_internal_structure_to_json(_functor: &str, args: &[Term]) -> String {
     // Handle internal Prolog structures with alternating key-value pairs
-    let pairs: Vec<String> = args
-        .chunks(2)
-        .filter_map(|chunk| {
-            if chunk.len() == 2 {
-                let key = get_string(&chunk[0])?;
-                let value = get_non_separator_value(&chunk[1])?;
-                Some(format!("\"{}\": {}", key, value))
-            } else {
-                None
+    let mut map = JsonMap::new();
+    for chunk in args.chunks(2) {
+        if chunk.len() == 2 {
+            if let Some(key) = get_string(&chunk[0]) {
+                if let Some(value_json) = get_non_separator_value(&chunk[1]) {
+                    let v: JsonValue = serde_json::from_str(&value_json).unwrap_or(JsonValue::Null);
+                    map.insert(key, v);
+                }
             }
-        })
-        .collect();
-
-    format!("{{{}}}", pairs.join(", "))
+        }
+    }
+    JsonValue::Object(map).to_string()
 }
 
 pub fn prolog_value_to_json_string(value: Term) -> String {
@@ -178,19 +180,13 @@ pub fn prolog_value_to_json_string(value: Term) -> String {
 }
 
 fn prolog_match_to_json_string(query_match: &QueryMatch) -> String {
-    let mut string_result = "{".to_string();
-    for (i, (k, v)) in query_match.bindings.iter().enumerate() {
-        if i > 0 {
-            string_result.push_str(", ");
-        }
-        string_result.push_str(&format!(
-            "\"{}\": {}",
-            k,
-            prolog_value_to_json_string(v.clone())
-        ));
+    let mut map = JsonMap::new();
+    for (k, v_term) in query_match.bindings.iter() {
+        let v_json = prolog_value_to_json_string(v_term.clone());
+        let v_value: JsonValue = serde_json::from_str(&v_json).unwrap_or(JsonValue::Null);
+        map.insert(k.clone(), v_value);
     }
-    string_result.push('}');
-    string_result
+    JsonValue::Object(map).to_string()
 }
 
 pub fn prolog_resolution_to_string(resultion: QueryResolution) -> String {
@@ -198,9 +194,14 @@ pub fn prolog_resolution_to_string(resultion: QueryResolution) -> String {
         QueryResolution::True => "true".to_string(),
         QueryResolution::False => "false".to_string(),
         QueryResolution::Matches(matches) => {
-            let matches_json: Vec<String> =
-                matches.iter().map(prolog_match_to_json_string).collect();
-            format!("[{}]", matches_json.join(", "))
+            let json_values: Vec<JsonValue> = matches
+                .iter()
+                .map(|m| {
+                    let s = prolog_match_to_json_string(m);
+                    serde_json::from_str::<JsonValue>(&s).unwrap_or(JsonValue::Null)
+                })
+                .collect();
+            JsonValue::Array(json_values).to_string()
         }
     }
 }
@@ -291,7 +292,7 @@ mod tests {
                 Term::String("Alice".to_string()),
             ],
         );
-        assert_eq!(prolog_value_to_json_string(term), r#"{"name": "Alice"}"#);
+        assert_eq!(prolog_value_to_json_string(term), r#"{"name":"Alice"}"#);
     }
 
     #[test]
@@ -307,7 +308,7 @@ mod tests {
                 Term::Atom("t".to_string()),
             ],
         );
-        assert_eq!(prolog_value_to_json_string(term), r#"{"name": "Alice"}"#);
+        assert_eq!(prolog_value_to_json_string(term), r#"{"name":"Alice"}"#);
     }
 
     #[test]
@@ -494,7 +495,7 @@ mod tests {
         );
 
         let result = prolog_value_to_json_string(simple_assoc);
-        assert_eq!(result, r#"{"author": "Alice"}"#);
+        assert_eq!(result, r#"{"author":"Alice"}"#);
     }
 
     #[test]
