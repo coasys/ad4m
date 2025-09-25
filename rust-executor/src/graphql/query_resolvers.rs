@@ -17,10 +17,17 @@ use std::env;
 pub struct Query;
 
 // Helper function to check if a user can access a perspective
-fn can_access_perspective(user_did: &Option<String>, perspective_owner: &Option<String>) -> bool {
-    match (user_did, perspective_owner) {
+pub fn can_access_perspective(user_email: &Option<String>, perspective_owner: &Option<String>) -> bool {
+    match (user_email, perspective_owner) {
         // User context: only allow access to own perspectives
-        (Some(user), Some(owner)) => user == owner,
+        (Some(email), Some(owner_did)) => {
+            // Convert email to DID for comparison
+            if let Ok(user_did) = AgentService::get_user_did_by_email(email) {
+                user_did == *owner_did
+            } else {
+                false // Failed to get user DID
+            }
+        }
         // Main agent context: allow access to unowned perspectives only
         (None, None) => true,
         // Main agent context: don't allow access to user-owned perspectives
@@ -36,11 +43,18 @@ impl Query {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
 
         // For multi-user mode: extract user DID from JWT token if present
-        if let Some(user_did) = user_did_from_token(context.auth_token.clone()) {
+        if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
+            let agent_data = AgentService::get_user_agent_data(&user_email).map_err(|e| {
+                FieldError::new(
+                    format!("User agent not available: {}", e),
+                    Value::null(),
+                )
+            })?;
+
             return Ok(Agent {
-                did: user_did,
-                direct_message_language: None, // TODO: Handle user-specific DM language
-                perspective: Some(Perspective { links: vec![] }), // TODO: Handle user-specific perspective
+                did: agent_data.did,
+                direct_message_language: None,
+                perspective: Some(Perspective { links: vec![] }),
             });
         }
 
@@ -70,7 +84,10 @@ impl Query {
         let did_match = {
             let agent_service = agent_instance.lock().expect("agent lock");
             let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
-            did == agent_ref.did.clone().unwrap()
+            match &agent_ref.did {
+                Some(existing) => &did == existing,
+                None => false,
+            }
         };
 
         if !did_match {
@@ -122,9 +139,16 @@ impl Query {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
 
         // For multi-user mode: extract user DID from JWT token if present
-        if let Some(user_did) = user_did_from_token(context.auth_token.clone()) {
+        if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
+            let agent_data = AgentService::get_user_agent_data(&user_email).map_err(|e| {
+                FieldError::new(
+                    format!("User agent not available: {}", e),
+                    Value::null(),
+                )
+            })?;
+
             return Ok(AgentStatus {
-                did: Some(user_did),
+                did: Some(agent_data.did),
                 did_document: None, // TODO: Generate DID document for user
                 error: None,
                 is_initialized: true,
@@ -354,9 +378,9 @@ impl Query {
             let handle = p.persisted.lock().await.clone();
 
             // Check if user has access to this perspective
-            let user_did = user_did_from_token(context.auth_token.clone());
+            let user_email = user_email_from_token(context.auth_token.clone());
 
-            if can_access_perspective(&user_did, &handle.owner_did) {
+            if can_access_perspective(&user_email, &handle.owner_did) {
                 Ok(Some(handle))
             } else {
                 Ok(None) // No access to this perspective
@@ -438,13 +462,13 @@ impl Query {
         let mut result = Vec::new();
 
         // Extract user DID from token for multi-user filtering
-        let user_did = user_did_from_token(context.auth_token.clone());
+        let user_email = user_email_from_token(context.auth_token.clone());
 
         for p in all_perspectives().iter() {
             let handle = p.persisted.lock().await.clone();
 
             // Filter perspectives based on ownership
-            if can_access_perspective(&user_did, &handle.owner_did) {
+            if can_access_perspective(&user_email, &handle.owner_did) {
                 result.push(handle);
             }
         }

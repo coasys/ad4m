@@ -15,40 +15,41 @@ pub mod signatures;
 /// Context for determining which agent to use for operations
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentContext {
-    pub user_did: Option<String>,
+    pub user_email: Option<String>,  // The user's email for wallet key lookup
     pub is_main_agent: bool,
 }
 
 impl AgentContext {
     /// Create AgentContext from auth token string
     pub fn from_auth_token(auth_token: String) -> Self {
-        let user_did = capabilities::user_did_from_token(auth_token);
+        let user_email = capabilities::user_email_from_token(auth_token);
         Self {
-            is_main_agent: user_did.is_none(),
-            user_did,
+            is_main_agent: user_email.is_none(),
+            user_email,
         }
     }
 
     /// Create AgentContext for main agent
     pub fn main_agent() -> Self {
         Self {
-            user_did: None,
+            user_email: None,
             is_main_agent: true,
         }
     }
 
     /// Create AgentContext for specific user
-    pub fn for_user(user_did: String) -> Self {
+    pub fn for_user_email(user_email: String) -> Self {
         Self {
-            user_did: Some(user_did),
+            user_email: Some(user_email),
             is_main_agent: false,
         }
     }
 
     /// Get the wallet key name for this context
+    /// For users, this uses their email directly
     pub fn wallet_key_name(&self) -> String {
-        match &self.user_did {
-            Some(did) => did.clone(),
+        match &self.user_email {
+            Some(email) => email.clone(),
             None => "main".to_string(),
         }
     }
@@ -109,17 +110,27 @@ pub fn sign(payload: &[u8]) -> Result<Vec<u8>, AnyError> {
     sign_for_context(payload, &AgentContext::main_agent())
 }
 
+
 // Context-aware agent functions
 
 pub fn did_document_for_context(context: &AgentContext) -> Result<did_key::Document, AnyError> {
-    let wallet_instance = Wallet::instance();
-    let wallet = wallet_instance.lock().expect("wallet lock");
-    let wallet_ref = wallet.as_ref().expect("wallet instance");
-    let key_name = context.wallet_key_name();
-    
-    wallet_ref
-        .get_did_document(&key_name)
-        .ok_or(anyhow!("{} key not found. call createMainKey() first", key_name))
+    // For user contexts, ensure the key exists
+    if context.is_main_agent {
+        let wallet_instance = Wallet::instance();
+        let wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref = wallet.as_ref().expect("wallet instance");
+        let key_name = context.wallet_key_name();
+
+        wallet_ref
+            .get_did_document(&key_name)
+            .ok_or(anyhow!("{} key not found", key_name))
+    } else if let Some(user_email) = &context.user_email {
+        let agent_data = AgentService::get_user_agent_data(user_email)?;
+        let did_doc: did_key::Document = serde_json::from_str(&agent_data.did_document)?;
+        Ok(did_doc)
+    } else {
+        Err(anyhow!("Invalid user context"))
+    }
 }
 
 pub fn signing_key_id_for_context(context: &AgentContext) -> Result<String, AnyError> {
@@ -135,9 +146,11 @@ pub fn did_for_context(context: &AgentContext) -> Result<String, AnyError> {
         });
         did_result
     } else {
-        // For user agents, get from did document
-        let did_doc = did_document_for_context(context)?;
-        Ok(did_doc.id)
+        if let Some(user_email) = &context.user_email {
+            AgentService::get_user_did_by_email(user_email)
+        } else {
+            Err(anyhow!("Invalid user context"))
+        }
     }
 }
 
@@ -319,6 +332,79 @@ impl AgentService {
         self.signing_checks()?;
 
         sign_string_hex(data)
+    }
+
+    // User management functions
+    
+    /// Ensure a user key exists in the wallet, generating it if necessary.
+    /// Uses email as the wallet key name.
+    pub fn ensure_user_key_exists(user_email: &str) -> Result<(), AnyError> {
+        let wallet_instance = Wallet::instance();
+        let mut wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref = wallet.as_mut().expect("wallet instance");
+
+        if wallet_ref.get_did_document(&user_email.to_string()).is_some() {
+            return Ok(());
+        }
+
+        log::info!("Generating new key for user: {}", user_email);
+        wallet_ref.generate_keypair(user_email.to_string());
+
+        Ok(())
+    }
+
+    /// Get user agent data for a specific user email. Fails if the user does not exist.
+    pub fn get_user_agent_data(user_email: &str) -> Result<AgentData, AnyError> {
+        let wallet_instance = Wallet::instance();
+        let wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref = wallet.as_ref().expect("wallet instance");
+
+        let did_document = wallet_ref
+            .get_did_document(&user_email.to_string())
+            .ok_or(anyhow!("No key found for user {}", user_email))?;
+
+        let signing_key_id = did_document.verification_method[0].id.clone();
+
+        Ok(AgentData {
+            did: did_document.id.clone(),
+            did_document: serde_json::to_string(&did_document)?,
+            signing_key_id,
+            wallet_key_name: user_email.to_string(),
+        })
+    }
+
+    /// Check whether a user key exists in the wallet.
+    pub fn user_exists(user_email: &str) -> bool {
+        let wallet_instance = Wallet::instance();
+        if let Ok(wallet) = wallet_instance.lock() {
+            if let Some(wallet_ref) = wallet.as_ref() {
+                return wallet_ref
+                    .get_did_document(&user_email.to_string())
+                    .is_some();
+            }
+        }
+        false
+    }
+
+    /// List all user emails that have keys in the wallet (excluding "main")
+    pub fn list_user_emails() -> Result<Vec<String>, AnyError> {
+        let wallet_instance = Wallet::instance();
+        let wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref = wallet.as_ref().expect("wallet instance");
+
+        let all_keys = wallet_ref.list_key_names();
+        let user_emails: Vec<String> = all_keys
+            .into_iter()
+            .filter(|key_name| key_name != "main")
+            .collect();
+
+        Ok(user_emails)
+    }
+
+    /// Get DID for a user by email. Fails if the user does not exist.
+    pub fn get_user_did_by_email(user_email: &str) -> Result<String, AnyError> {
+        let agent_data = Self::get_user_agent_data(user_email)?;
+        Ok(agent_data.did)
     }
 
     pub fn store_agent_profile(&self) {
@@ -566,14 +652,14 @@ mod tests {
     fn test_agent_context_creation() {
         let main_context = AgentContext::main_agent();
         assert!(main_context.is_main_agent);
-        assert_eq!(main_context.user_did, None);
+        assert_eq!(main_context.user_email, None);
         assert_eq!(main_context.wallet_key_name(), "main");
 
-        let user_did = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string();
-        let user_context = AgentContext::for_user(user_did.clone());
+        let user_email = "test@example.com".to_string();
+        let user_context = AgentContext::for_user_email(user_email.clone());
         assert!(!user_context.is_main_agent);
-        assert_eq!(user_context.user_did, Some(user_did.clone()));
-        assert_eq!(user_context.wallet_key_name(), user_did);
+        assert_eq!(user_context.user_email, Some(user_email.clone()));
+        assert_eq!(user_context.wallet_key_name(), user_email);
     }
 
     #[test]
@@ -639,31 +725,26 @@ mod tests {
     }
 
     #[test]
-    fn test_user_context_with_nonexistent_key() {
+    fn test_user_context_auto_key_generation() {
         ensure_setup();
-        let fake_user_did = "did:key:z6MkfakeUserDidThatDoesNotExist".to_string();
-        let user_context = AgentContext::for_user(fake_user_did);
+        let test_user_email = "test.auto@example.com";
+        let user_context = AgentContext::for_user_email(test_user_email.to_string());
 
-        // These should fail because the user key doesn't exist in the wallet
+        // Before the key exists, operations should fail
+        assert!(did_document_for_context(&user_context).is_err());
+        assert!(signing_key_id_for_context(&user_context).is_err());
+        assert!(did_for_context(&user_context).is_err());
+        assert!(sign_for_context(b"test", &user_context).is_err());
+
+        AgentService::ensure_user_key_exists(test_user_email).expect("Failed to create user key");
+
+        assert!(did_document_for_context(&user_context).is_ok());
+        assert!(signing_key_id_for_context(&user_context).is_ok());
+        assert!(did_for_context(&user_context).is_ok());
+        assert!(sign_for_context(b"test", &user_context).is_ok());
         assert!(
-            did_document_for_context(&user_context).is_err(),
-            "Getting DID document for nonexistent user should fail"
-        );
-        assert!(
-            signing_key_id_for_context(&user_context).is_err(),
-            "Getting signing key ID for nonexistent user should fail"
-        );
-        assert!(
-            did_for_context(&user_context).is_err(),
-            "Getting DID for nonexistent user should fail"
-        );
-        assert!(
-            sign_for_context(b"test", &user_context).is_err(),
-            "Signing for nonexistent user should fail"
-        );
-        assert!(
-            create_signed_expression_for_context(json!({"test": "data"}), &user_context).is_err(),
-            "Creating signed expression for nonexistent user should fail"
+            create_signed_expression_for_context(json!({"test": "data"}), &user_context).is_ok(),
+            "Creating signed expression should succeed once key exists"
         );
     }
 
@@ -673,9 +754,261 @@ mod tests {
         let empty_token = String::new();
         let context = AgentContext::from_auth_token(empty_token);
         assert!(context.is_main_agent, "Empty token should result in main agent context");
-        assert!(context.user_did.is_none(), "Empty token should have no user DID");
+        assert!(context.user_email.is_none(), "Empty token should have no user email");
         
         // Note: Full JWT token testing will be added in integration tests
         // since it requires more complex setup with JWT tokens and user creation
+    }
+
+    // User key management tests
+
+    #[test]
+    fn test_ensure_user_key_exists() {
+        ensure_setup();
+        let test_user_email = "test.keygeneration@example.com";
+
+        // First call should generate the key
+        let result = AgentService::ensure_user_key_exists(test_user_email);
+        assert!(result.is_ok(), "First call to ensure_user_key_exists should succeed");
+
+        // Second call should be idempotent (key already exists)
+        let result2 = AgentService::ensure_user_key_exists(test_user_email);
+        assert!(result2.is_ok(), "Second call to ensure_user_key_exists should also succeed");
+
+        // Verify the key was actually created
+        let wallet_instance = Wallet::instance();
+        let wallet = wallet_instance.lock().expect("wallet lock");
+        let wallet_ref = wallet.as_ref().expect("wallet instance");
+        
+        let did_doc = wallet_ref.get_did_document(&test_user_email.to_string());
+        assert!(did_doc.is_some(), "User key should exist in wallet after generation");
+    }
+
+    #[test]
+    fn test_get_or_create_user_agent_data() {
+        ensure_setup();
+        let test_user_email = "test.agentdata@example.com";
+
+        AgentService::ensure_user_key_exists(test_user_email).expect("Failed to create user key");
+
+        let data = AgentService::get_user_agent_data(test_user_email).expect("Failed to get user agent data");
+        assert!(data.did.starts_with("did:key:"), "Agent data should have a valid DID");
+        assert!(!data.did_document.is_empty(), "Agent data should have a DID document");
+        assert!(!data.signing_key_id.is_empty(), "Agent data should have a signing key ID");
+        assert_eq!(data.wallet_key_name, test_user_email, "Wallet key name should match user email");
+    }
+
+    #[test]
+    fn test_list_user_emails() {
+        ensure_setup();
+        let test_user_email1 = "user1.list@example.com";
+        let test_user_email2 = "user2.list@example.com";
+
+        // Initially should only have main key
+        let initial_users = AgentService::list_user_emails().unwrap_or_default();
+        let initial_count = initial_users.len();
+
+        // Add two user keys
+        AgentService::ensure_user_key_exists(test_user_email1).expect("Failed to create user 1 key");
+        AgentService::ensure_user_key_exists(test_user_email2).expect("Failed to create user 2 key");
+
+        // Should now have 2 more users
+        let final_users = AgentService::list_user_emails().expect("Failed to list user emails");
+        assert_eq!(
+            final_users.len(),
+            initial_count + 2,
+            "Should have 2 more users after key generation"
+        );
+        
+        assert!(
+            final_users.contains(&test_user_email1.to_string()),
+            "User list should contain test user 1"
+        );
+        assert!(
+            final_users.contains(&test_user_email2.to_string()),
+            "User list should contain test user 2"
+        );
+        
+        // Should not contain "main"
+        assert!(
+            !final_users.contains(&"main".to_string()),
+            "User list should not contain main agent"
+        );
+    }
+
+    #[test]
+    fn test_context_aware_functions_with_user_key_generation() {
+        ensure_setup();
+        let test_user_email = "test.context@example.com";
+
+        assert!(
+            !AgentService::user_exists(test_user_email),
+            "Fresh test user should not exist before key creation"
+        );
+
+        let user_context = AgentContext::for_user_email(test_user_email.to_string());
+
+        assert!(did_document_for_context(&user_context).is_err());
+        assert!(signing_key_id_for_context(&user_context).is_err());
+        assert!(did_for_context(&user_context).is_err());
+        assert!(sign_for_context(b"test", &user_context).is_err());
+
+        AgentService::ensure_user_key_exists(test_user_email)
+            .expect("Failed to create user key");
+
+        let did_doc = did_document_for_context(&user_context).expect("DID document should exist");
+        assert!(did_doc.id.starts_with("did:key:"));
+
+        assert!(signing_key_id_for_context(&user_context).is_ok());
+        assert!(did_for_context(&user_context).is_ok());
+        assert!(sign_for_context(b"test", &user_context).is_ok());
+
+        let test_data = json!({"test": "context_data"});
+        let signed_expr = create_signed_expression_for_context(test_data, &user_context);
+        assert!(signed_expr.is_ok());
+        if let Ok(expr) = signed_expr {
+            assert!(signatures::verify(&expr).expect("Expression verification failed"));
+        }
+    }
+
+    #[test]
+    fn test_email_based_agent_context() {
+        ensure_setup();
+        
+        // Test the new email-based approach
+        let alice_email = "alice@example.com";
+        let bob_email = "bob@example.com";
+        
+        // Keys do not exist initially
+        let alice_context = AgentContext::for_user_email(alice_email.to_string());
+        let bob_context = AgentContext::for_user_email(bob_email.to_string());
+
+        assert!(did_for_context(&alice_context).is_err());
+        assert!(did_for_context(&bob_context).is_err());
+
+        AgentService::ensure_user_key_exists(alice_email).expect("Failed to create alice key");
+        AgentService::ensure_user_key_exists(bob_email).expect("Failed to create bob key");
+        
+        let alice_context = AgentContext::for_user_email(alice_email.to_string());
+        let bob_context = AgentContext::for_user_email(bob_email.to_string());
+        
+        assert!(!alice_context.is_main_agent, "Alice context should not be main agent");
+        assert!(!bob_context.is_main_agent, "Bob context should not be main agent");
+        assert_eq!(alice_context.user_email, Some(alice_email.to_string()));
+        assert_eq!(bob_context.user_email, Some(bob_email.to_string()));
+        
+        // Verify wallet key names are emails
+        assert_eq!(alice_context.wallet_key_name(), alice_email);
+        assert_eq!(bob_context.wallet_key_name(), bob_email);
+        
+        // Generate DIDs
+        let alice_did = did_for_context(&alice_context).expect("Alice DID generation failed");
+        let bob_did = did_for_context(&bob_context).expect("Bob DID generation failed");
+        
+        assert_ne!(alice_did, bob_did);
+        
+        let test_data = json!({"message": "Email-based context test"});
+        let alice_expr = create_signed_expression_for_context(test_data.clone(), &alice_context)
+            .expect("Alice expression creation failed");
+        let bob_expr = create_signed_expression_for_context(test_data.clone(), &bob_context)
+            .expect("Bob expression creation failed");
+        
+        assert!(signatures::verify(&alice_expr).expect("Alice expression verification failed"));
+        assert!(signatures::verify(&bob_expr).expect("Bob expression verification failed"));
+        assert_eq!(alice_expr.author, alice_did);
+        assert_eq!(bob_expr.author, bob_did);
+        assert_ne!(alice_expr.proof.signature, bob_expr.proof.signature);
+        
+        let alice_data = AgentService::get_user_agent_data(alice_email).expect("Alice agent data failed");
+        let bob_data = AgentService::get_user_agent_data(bob_email).expect("Bob agent data failed");
+        
+        assert_eq!(alice_data.wallet_key_name, alice_email);
+        assert_eq!(bob_data.wallet_key_name, bob_email);
+        
+        let user_emails = AgentService::list_user_emails().expect("Failed to list user emails");
+        assert!(user_emails.contains(&alice_email.to_string()));
+        assert!(user_emails.contains(&bob_email.to_string()));
+    }
+
+    #[test]
+    fn test_multi_user_agent_system_integration() {
+        ensure_setup();
+        
+        let alice_email = "alice.integration@example.com";
+        let bob_email = "bob.integration@example.com";
+        let main_context = AgentContext::main_agent();
+
+        AgentService::ensure_user_key_exists(alice_email).expect("Failed to create alice key");
+        AgentService::ensure_user_key_exists(bob_email).expect("Failed to create bob key");
+        
+        let alice_context = AgentContext::for_user_email(alice_email.to_string());
+        let bob_context = AgentContext::for_user_email(bob_email.to_string());
+        
+        let main_did = did_for_context(&main_context).expect("Main agent DID failed");
+        let alice_did_result = did_for_context(&alice_context).expect("Alice DID failed");
+        let bob_did_result = did_for_context(&bob_context).expect("Bob DID failed");
+        
+        assert_ne!(main_did, alice_did_result);
+        assert_ne!(main_did, bob_did_result);
+        assert_ne!(alice_did_result, bob_did_result);
+        
+        let test_data = json!({"message": "Hello from multi-user system", "timestamp": "2024-01-01"});
+        
+        let main_expr = create_signed_expression_for_context(test_data.clone(), &main_context)
+            .expect("Main agent expression creation failed");
+        let alice_expr = create_signed_expression_for_context(test_data.clone(), &alice_context)
+            .expect("Alice expression creation failed");
+        let bob_expr = create_signed_expression_for_context(test_data.clone(), &bob_context)
+            .expect("Bob expression creation failed");
+        
+        assert!(signatures::verify(&main_expr).expect("Main expression verification failed"));
+        assert!(signatures::verify(&alice_expr).expect("Alice expression verification failed"));
+        assert!(signatures::verify(&bob_expr).expect("Bob expression verification failed"));
+        
+        assert_eq!(main_expr.author, main_did);
+        assert_eq!(alice_expr.author, alice_did_result);
+        assert_eq!(bob_expr.author, bob_did_result);
+        
+        assert_ne!(main_expr.proof.signature, alice_expr.proof.signature);
+        assert_ne!(main_expr.proof.signature, bob_expr.proof.signature);
+        assert_ne!(alice_expr.proof.signature, bob_expr.proof.signature);
+        
+        let user_list = AgentService::list_user_emails().expect("Failed to list user emails");
+        assert!(user_list.contains(&alice_email.to_string()));
+        assert!(user_list.contains(&bob_email.to_string()));
+        assert!(!user_list.contains(&"main".to_string()));
+        
+        let alice_data = AgentService::get_user_agent_data(alice_email).expect("Failed to get Alice agent data");
+        let bob_data = AgentService::get_user_agent_data(bob_email).expect("Failed to get Bob agent data");
+        
+        assert_eq!(alice_data.did, alice_did_result);
+        assert_eq!(bob_data.did, bob_did_result);
+    }
+
+    #[test]
+    fn test_user_key_isolation() {
+        ensure_setup();
+        let user1_email = "user1.isolation@example.com";
+        let user2_email = "user2.isolation@example.com";
+        
+        let user1_context = AgentContext::for_user_email(user1_email.to_string());
+        let user2_context = AgentContext::for_user_email(user2_email.to_string());
+
+        assert!(did_for_context(&user1_context).is_err());
+        assert!(did_for_context(&user2_context).is_err());
+
+        AgentService::ensure_user_key_exists(user1_email).expect("Failed to create user1 key");
+        AgentService::ensure_user_key_exists(user2_email).expect("Failed to create user2 key");
+
+        let user1_did_result = did_for_context(&user1_context).expect("User 1 DID generation failed");
+        let user2_did_result = did_for_context(&user2_context).expect("User 2 DID generation failed");
+        
+        assert_ne!(user1_did_result, user2_did_result);
+        
+        let test_payload = b"isolation test message";
+        let user1_signature = sign_for_context(test_payload, &user1_context).expect("User 1 signing failed");
+        let user2_signature = sign_for_context(test_payload, &user2_context).expect("User 2 signing failed");
+        
+        assert_ne!(user1_signature, user2_signature);
     }
 }

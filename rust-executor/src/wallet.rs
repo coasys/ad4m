@@ -270,6 +270,13 @@ impl Wallet {
     pub fn load(&mut self, data: String) {
         self.cipher = Some(data);
     }
+
+    pub fn list_key_names(&self) -> Vec<String> {
+        self.keys
+            .as_ref()
+            .map(|keys| keys.by_name.keys().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

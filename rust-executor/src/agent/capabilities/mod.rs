@@ -66,12 +66,12 @@ pub fn check_token_revoked(token: &String) -> Result<(), String> {
     Ok(())
 }
 
-pub fn user_did_from_token(token: String) -> Option<String> {
+pub fn user_email_from_token(token: String) -> Option<String> {
     if token.is_empty() {
         return None;
     }
 
-    // Try to decode JWT and extract user DID from sub field
+    // Try to decode JWT and extract user email from sub field
     if let Ok(claims) = decode_jwt(token) {
         claims.sub
     } else {

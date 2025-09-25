@@ -18,7 +18,7 @@ pub struct AuthInfo {
     pub app_url: Option<String>,
     pub app_icon_path: Option<String>,
     pub capabilities: Option<Vec<Capability>>,
-    pub user_did: Option<String>,
+    pub user_email: Option<String>,  // Email field for multi-user tokens
 }
 
 impl From<crate::graphql::graphql_types::AuthInfoInput> for AuthInfo {
@@ -32,7 +32,7 @@ impl From<crate::graphql::graphql_types::AuthInfoInput> for AuthInfo {
             capabilities: input
                 .capabilities
                 .map(|vec| vec.into_iter().map(|c| c.into()).collect()),
-            user_did: input.user_did,
+            user_email: None, // Will be set by login process
         }
     }
 }
@@ -72,7 +72,7 @@ impl From<crate::graphql::graphql_types::ResourceInput> for Resource {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     iss: String,
-    pub sub: Option<String>, // User DID - make public so we can access it
+    pub sub: Option<String>, // User email - make public so we can access it
     aud: String,
     exp: u64,
     iat: u64,
@@ -97,7 +97,7 @@ impl Claims {
 
         Claims {
             iss: issuer,
-            sub: capabilities.user_did.clone(), // Set sub to user DID
+            sub: capabilities.user_email.clone(), // Set sub to user email
             aud: audience,
             exp: unix_timestamp + expiration_time,
             iat: unix_timestamp,

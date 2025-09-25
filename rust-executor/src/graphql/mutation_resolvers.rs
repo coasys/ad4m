@@ -31,21 +31,8 @@ use crate::{
 };
 use base64::prelude::*;
 
-// Helper function to check if a user can access a perspective
-fn can_access_perspective(user_did: &Option<String>, perspective_owner: &Option<String>) -> bool {
-    match (user_did, perspective_owner) {
-        // User context: only allow access to own perspectives
-        (Some(user), Some(owner)) => user == owner,
-        // Main agent context: allow access to unowned perspectives
-        (None, None) => true,
-        // Main agent context: don't allow access to user-owned perspectives
-        (None, Some(_owner)) => {
-            false // Main agent cannot access user-owned perspectives
-        }
-        // User trying to access unowned perspective - not allowed
-        (Some(_), None) => false,
-    }
-}
+// Use the shared can_access_perspective function from query_resolvers
+use super::query_resolvers::can_access_perspective;
 
 // Helper function to get perspective with access control
 fn get_perspective_with_access_control(
@@ -53,11 +40,11 @@ fn get_perspective_with_access_control(
     context: &RequestContext,
 ) -> FieldResult<PerspectiveInstance> {
     let perspective = get_perspective_with_uuid_field_error(uuid)?;
-    let user_did = user_did_from_token(context.auth_token.clone());
+    let user_email = user_email_from_token(context.auth_token.clone());
 
     // Check access to the perspective
     let handle = futures::executor::block_on(perspective.persisted.lock()).clone();
-    if !can_access_perspective(&user_did, &handle.owner_did) {
+    if !can_access_perspective(&user_email, &handle.owner_did) {
         return Err(FieldError::new(
             "Access denied: You don't have permission to access this perspective",
             graphql_value!(null),
@@ -429,11 +416,21 @@ impl Mutation {
             &RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY,
         )?;
 
-        // Generate random DID for now (will improve with CAL-compliant derivation later)
-        use did_key::{DIDCore, Ed25519KeyPair};
-        let key_pair = did_key::generate::<Ed25519KeyPair>(None);
-        let did_doc = key_pair.get_did_document(did_key::Config::default());
-        let did = did_doc.id.clone();
+        // Generate DID by creating a keypair in the wallet using email as key name
+        use crate::agent::AgentService;
+        AgentService::ensure_user_key_exists(&email).map_err(|e| {
+            FieldError::new(
+                format!("Failed to create user key: {}", e),
+                graphql_value!(null),
+            )
+        })?;
+
+        let did = AgentService::get_user_did_by_email(&email).map_err(|e| {
+            FieldError::new(
+                format!("Failed to retrieve user DID: {}", e),
+                graphql_value!(null),
+            )
+        })?;
 
         // Check if user already exists
         let db = Ad4mDb::global_instance();
@@ -500,6 +497,13 @@ impl Mutation {
             return Err(FieldError::new("Invalid credentials", graphql_value!(null)));
         }
 
+        if !AgentService::user_exists(&email) {
+            return Err(FieldError::new(
+                "User key not found on executor",
+                graphql_value!(null),
+            ));
+        }
+
         // Extract app info from the current capability token if available
         let auth_info = if context.auth_token.is_empty() {
             // Admin context - use default app info
@@ -510,14 +514,14 @@ impl Mutation {
                 app_url: Some("https://multi-user.app".to_string()),
                 app_icon_path: None,
                 capabilities: Some(vec![ALL_CAPABILITY.clone()]),
-                user_did: Some(user.did),
+                user_email: Some(user.username.clone()),
             }
         } else {
-            // App context - preserve the original app info and add user DID
+            // App context - preserve the original app info and add user supposed to be the same as the caller
             match decode_jwt(context.auth_token.clone()) {
                 Ok(current_claims) => {
                     let mut auth_info = current_claims.capabilities;
-                    auth_info.user_did = Some(user.did);
+                    auth_info.user_email = Some(user.username.clone());
                     auth_info
                 }
                 Err(_) => {
@@ -529,7 +533,7 @@ impl Mutation {
                         app_url: Some("https://multi-user.app".to_string()),
                         app_icon_path: None,
                         capabilities: Some(vec![ALL_CAPABILITY.clone()]),
-                        user_did: Some(user.did),
+                        user_email: Some(user.username.clone()),
                     }
                 }
             }
@@ -878,11 +882,16 @@ impl Mutation {
         check_capability(&context.capabilities, &PERSPECTIVE_CREATE_CAPABILITY)?;
 
         // Determine owner DID based on user context
-        let user_did_opt = user_did_from_token(context.auth_token.clone());
+        let user_email_opt = user_email_from_token(context.auth_token.clone());
 
-        let owner_did = if let Some(user_did) = user_did_opt {
-            // Multi-user mode: set owner to the authenticated user
-            Some(user_did.clone())
+        let owner_did = if let Some(user_email) = user_email_opt {
+            // Multi-user mode: set owner to the authenticated user's DID
+            Some(AgentService::get_user_did_by_email(&user_email).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to get user DID: {}", e),
+                    graphql_value!(null),
+                )
+            })?)
         } else {
             // Main agent mode: set owner to main agent DID if available
             None // For now, don't assign ownership to main agent perspectives
