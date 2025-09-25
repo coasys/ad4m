@@ -18,7 +18,7 @@ pub struct AuthInfo {
     pub app_url: Option<String>,
     pub app_icon_path: Option<String>,
     pub capabilities: Option<Vec<Capability>>,
-    pub user_email: Option<String>,  // Email field for multi-user tokens
+    pub user_email: Option<String>, // Email field for multi-user tokens
 }
 
 impl From<crate::graphql::graphql_types::AuthInfoInput> for AuthInfo {

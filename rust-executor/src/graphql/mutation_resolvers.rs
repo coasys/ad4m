@@ -886,12 +886,14 @@ impl Mutation {
 
         let owner_did = if let Some(user_email) = user_email_opt {
             // Multi-user mode: set owner to the authenticated user's DID
-            Some(AgentService::get_user_did_by_email(&user_email).map_err(|e| {
-                FieldError::new(
-                    format!("Failed to get user DID: {}", e),
-                    graphql_value!(null),
-                )
-            })?)
+            Some(
+                AgentService::get_user_did_by_email(&user_email).map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to get user DID: {}", e),
+                        graphql_value!(null),
+                    )
+                })?,
+            )
         } else {
             // Main agent mode: set owner to main agent DID if available
             None // For now, don't assign ownership to main agent perspectives

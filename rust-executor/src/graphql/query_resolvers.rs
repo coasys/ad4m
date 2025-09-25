@@ -17,7 +17,10 @@ use std::env;
 pub struct Query;
 
 // Helper function to check if a user can access a perspective
-pub fn can_access_perspective(user_email: &Option<String>, perspective_owner: &Option<String>) -> bool {
+pub fn can_access_perspective(
+    user_email: &Option<String>,
+    perspective_owner: &Option<String>,
+) -> bool {
     match (user_email, perspective_owner) {
         // User context: only allow access to own perspectives
         (Some(email), Some(owner_did)) => {
@@ -45,10 +48,7 @@ impl Query {
         // For multi-user mode: extract user DID from JWT token if present
         if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
             let agent_data = AgentService::get_user_agent_data(&user_email).map_err(|e| {
-                FieldError::new(
-                    format!("User agent not available: {}", e),
-                    Value::null(),
-                )
+                FieldError::new(format!("User agent not available: {}", e), Value::null())
             })?;
 
             return Ok(Agent {
@@ -141,10 +141,7 @@ impl Query {
         // For multi-user mode: extract user DID from JWT token if present
         if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
             let agent_data = AgentService::get_user_agent_data(&user_email).map_err(|e| {
-                FieldError::new(
-                    format!("User agent not available: {}", e),
-                    Value::null(),
-                )
+                FieldError::new(format!("User agent not available: {}", e), Value::null())
             })?;
 
             return Ok(AgentStatus {
