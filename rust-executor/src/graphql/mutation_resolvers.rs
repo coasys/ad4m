@@ -1114,9 +1114,10 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
         let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let sdna_type = SdnaType::from_string(&sdna_type)
             .map_err(|e| FieldError::new(e, graphql_value!({ "invalid_sdna_type": sdna_type })))?;
-        perspective.add_sdna(name, sdna_code, sdna_type).await?;
+        perspective.add_sdna(name, sdna_code, sdna_type, &agent_context).await?;
         Ok(true)
     }
 
@@ -1135,6 +1136,7 @@ impl Mutation {
         )?;
 
         let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
         let commands: Vec<Command> = serde_json::from_str(&commands)?;
         let parameters: Vec<Parameter> = if let Some(parameters) = parameters {
@@ -1144,7 +1146,7 @@ impl Mutation {
         };
 
         perspective
-            .execute_commands(commands, expression, parameters, batch_id)
+            .execute_commands(commands, expression, parameters, batch_id, &agent_context)
             .await?;
 
         Ok(true)
@@ -1165,6 +1167,7 @@ impl Mutation {
         )?;
 
         let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
         let subject_class: SubjectClassOption = serde_json::from_str(&subject_class)?;
         let initial_values = if let Some(initial_values) = initial_values {
@@ -1174,7 +1177,7 @@ impl Mutation {
         };
 
         perspective
-            .create_subject(subject_class, expression_address, initial_values, batch_id)
+            .create_subject(subject_class, expression_address, initial_values, batch_id, &agent_context)
             .await?;
 
         Ok(true)

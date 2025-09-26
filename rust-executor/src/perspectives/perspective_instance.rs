@@ -1221,6 +1221,7 @@ impl PerspectiveInstance {
         name: String,
         mut sdna_code: String,
         sdna_type: SdnaType,
+        context: &AgentContext,
     ) -> Result<bool, AnyError> {
         //let mut added = false;
         let mutex = self.sdna_change_mutex.clone();
@@ -1276,7 +1277,7 @@ impl PerspectiveInstance {
             sdna_links,
             LinkStatus::Shared,
             None,
-            &AgentContext::main_agent(),
+            context,
         )
         .await?;
         //added = true;
@@ -1291,7 +1292,10 @@ impl PerspectiveInstance {
 
         // Get service reference before taking any locks
         let service = get_prolog_service().await;
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let persisted = self.persisted.lock().await;
+        let uuid = persisted.uuid.clone();
+        let owner_did = persisted.owner_did.clone();
+        drop(persisted); // Release the lock early
 
         if !service.has_perspective_pool(uuid.clone()).await
             || !service
@@ -1325,6 +1329,7 @@ impl PerspectiveInstance {
                         "facts".to_string(),
                         all_links.clone(),
                         neighbourhood_author.clone(),
+                        owner_did.clone(),
                     )
                     .await?;
             }
@@ -1345,6 +1350,7 @@ impl PerspectiveInstance {
                         "facts".to_string(),
                         all_links,
                         neighbourhood_author,
+                        owner_did,
                     )
                     .await?;
             }
@@ -1738,9 +1744,9 @@ impl PerspectiveInstance {
 
     async fn update_prolog_engine_facts(&self) -> Result<(), AnyError> {
         // Get all required data before making service calls
-        let uuid = {
+        let (uuid, owner_did) = {
             let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
+            (persisted_guard.uuid.clone(), persisted_guard.owner_did.clone())
         };
 
         let all_links = self.get_links(&LinkQuery::default()).await?;
@@ -1760,6 +1766,7 @@ impl PerspectiveInstance {
                 "facts".to_string(),
                 all_links.clone(),
                 neighbourhood_author.clone(),
+                owner_did.clone(),
             )
             .await?;
         let service_clone = service.clone();
@@ -1770,6 +1777,7 @@ impl PerspectiveInstance {
                     "facts".to_string(),
                     all_links,
                     neighbourhood_author,
+                    owner_did,
                 )
                 .await;
         });
@@ -1881,6 +1889,7 @@ impl PerspectiveInstance {
         expression: String,
         parameters: Vec<Parameter>,
         batch_id: Option<String>,
+        context: &AgentContext,
     ) -> Result<(), AnyError> {
         //let execute_start = std::time::Instant::now();
         //log::info!("⚙️ EXECUTE COMMANDS: Starting execution of {} commands for expression '{}', batch_id: {:?}",
@@ -1938,7 +1947,7 @@ impl PerspectiveInstance {
                         },
                         status,
                         batch_id.clone(),
-                        &AgentContext::main_agent(),
+                        context,
                     )
                     .await?;
                 }
@@ -1987,7 +1996,7 @@ impl PerspectiveInstance {
                         },
                         status,
                         batch_id.clone(),
-                        &AgentContext::main_agent(),
+                        context,
                     )
                     .await?;
                 }
@@ -2017,7 +2026,7 @@ impl PerspectiveInstance {
                             .collect(),
                         status,
                         batch_id.clone(),
-                        &AgentContext::main_agent(),
+                        context,
                     )
                     .await?;
                 }
@@ -2164,6 +2173,7 @@ impl PerspectiveInstance {
         expression_address: String,
         initial_values: Option<serde_json::Value>,
         batch_id: Option<String>,
+        context: &AgentContext,
     ) -> Result<(), AnyError> {
         //let create_start = std::time::Instant::now();
         //log::info!("🎯 CREATE SUBJECT: Starting create_subject for expression '{}' - batch_id: {:?}",
@@ -2231,6 +2241,7 @@ impl PerspectiveInstance {
             expression_address.clone(),
             vec![],
             batch_id.clone(),
+            context,
         )
         .await?;
 
@@ -3388,6 +3399,7 @@ mod tests {
                 "test://expression".to_string(),
                 vec![],
                 Some(batch_id.clone()),
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();

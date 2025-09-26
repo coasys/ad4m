@@ -293,7 +293,7 @@ impl SdnaPrologPool {
         let mut sdna_lines = get_static_infrastructure_facts();
 
         // Get current data from complete pool state
-        let (all_links, neighbourhood_author) = {
+        let (all_links, neighbourhood_author, owner_did) = {
             let complete_pool_state = self.complete_pool.engine_state().read().await;
             let all_links = complete_pool_state.current_all_links.as_ref()
                 .ok_or_else(|| anyhow!(
@@ -301,11 +301,12 @@ impl SdnaPrologPool {
                      This indicates SDNA pool population happened before parent pool data population."
                 ))?;
             let neighbourhood_author = complete_pool_state.current_neighbourhood_author.clone();
-            (all_links.clone(), neighbourhood_author)
+            let owner_did = complete_pool_state.current_owner_did.clone();
+            (all_links.clone(), neighbourhood_author, owner_did)
         };
 
         // Add SDNA facts (subject class definitions, constructors, setters, etc.)
-        let sdna_facts = get_sdna_facts(&all_links, neighbourhood_author.clone())?;
+        let sdna_facts = get_sdna_facts(&all_links, neighbourhood_author.clone(), owner_did)?;
 
         log::trace!(
             "📊 SDNA FACT CREATION: Infrastructure facts: {}, SDNA facts: {}",
@@ -423,7 +424,7 @@ mod tests {
 
         // Set up test data in the complete pool first
         complete_pool
-            .update_all_engines_with_links("facts".to_string(), test_links, None)
+            .update_all_engines_with_links("facts".to_string(), test_links, None, None)
             .await
             .unwrap();
 

@@ -391,6 +391,7 @@ impl PrologEnginePool {
         module_name: String,
         all_links: Vec<DecoratedLinkExpression>,
         neighbourhood_author: Option<String>,
+        owner_did: Option<String>,
     ) -> Result<(), Error> {
         let mut pool_state = self.engine_pool_state.write().await;
 
@@ -406,7 +407,7 @@ impl PrologEnginePool {
         // For complete pools, use all facts (infrastructure + data + SDNA)
         let mut facts_to_load = get_static_infrastructure_facts();
         facts_to_load.extend(get_data_facts(&all_links));
-        facts_to_load.extend(get_sdna_facts(&all_links, neighbourhood_author.clone())?);
+        facts_to_load.extend(get_sdna_facts(&all_links, neighbourhood_author.clone(), owner_did.clone())?);
 
         // Preprocess the facts to handle embeddings ONCE
         let processed_facts =
@@ -447,6 +448,7 @@ impl PrologEnginePool {
         // ✅ SUCCESS: All engines populated successfully - now set current_all_links
         pool_state.current_all_links = Some(all_links);
         pool_state.current_neighbourhood_author = neighbourhood_author;
+        pool_state.current_owner_did = owner_did;
 
         log::debug!(
             "📊 POOL POPULATION: All {} engines populated successfully",
@@ -526,8 +528,9 @@ impl PrologEnginePool {
         module_name: String,
         all_links: Vec<DecoratedLinkExpression>,
         neighbourhood_author: Option<String>,
+        owner_did: Option<String>,
     ) -> Result<(), Error> {
-        self.update_all_engines_with_links_internal(module_name, all_links, neighbourhood_author)
+        self.update_all_engines_with_links_internal(module_name, all_links, neighbourhood_author, owner_did)
             .await?;
         self.update_filtered_pools_with_links_internal().await?;
         self.update_sdna_pool_with_links_internal().await?;
@@ -1136,7 +1139,7 @@ mod tests {
             status: None,
         }];
         let result = pool
-            .update_all_engines_with_links("test".to_string(), test_links, None)
+            .update_all_engines_with_links("test".to_string(), test_links, None, None)
             .await;
         assert!(result.is_ok());
 
@@ -1188,7 +1191,7 @@ mod tests {
             },
         ];
 
-        pool.update_all_engines_with_links("test_facts".to_string(), test_links, None)
+        pool.update_all_engines_with_links("test_facts".to_string(), test_links, None, None)
             .await
             .unwrap();
 
@@ -1258,7 +1261,7 @@ mod tests {
             },
             status: None,
         }];
-        pool.update_all_engines_with_links("test".to_string(), test_links, None)
+        pool.update_all_engines_with_links("test".to_string(), test_links, None, None)
             .await
             .unwrap();
 
@@ -1343,7 +1346,7 @@ mod tests {
         ];
 
         // Use the PRODUCTION method that properly sets up the pool state
-        pool.update_all_engines_with_links("test_facts".to_string(), test_links, None)
+        pool.update_all_engines_with_links("test_facts".to_string(), test_links, None, None)
             .await
             .unwrap();
 
@@ -1541,7 +1544,7 @@ mod tests {
         ];
 
         // Use the PRODUCTION method that properly sets up the pool state
-        pool.update_all_engines_with_links("test_facts".to_string(), test_links.clone(), None)
+        pool.update_all_engines_with_links("test_facts".to_string(), test_links.clone(), None, None)
             .await
             .unwrap();
 
@@ -1859,7 +1862,7 @@ mod tests {
         });
 
         // Use the PRODUCTION method that properly sets up the pool state
-        pool.update_all_engines_with_links("test_facts".to_string(), test_links, None)
+        pool.update_all_engines_with_links("test_facts".to_string(), test_links, None, None)
             .await
             .unwrap();
 
@@ -2002,7 +2005,7 @@ mod tests {
 
         println!("🧪 INTEGRATION: Setting up initial facts like perspective instance");
         // Use the PRODUCTION method that properly sets up the pool state
-        pool.update_all_engines_with_links("facts".to_string(), test_links, None)
+        pool.update_all_engines_with_links("facts".to_string(), test_links, None, None)
             .await
             .unwrap();
 
@@ -2224,7 +2227,7 @@ mod tests {
         }];
 
         // Use the PRODUCTION method that properly sets up the pool state
-        pool.update_all_engines_with_links("test_facts".to_string(), test_links, None)
+        pool.update_all_engines_with_links("test_facts".to_string(), test_links, None, None)
             .await
             .unwrap();
 
@@ -2380,7 +2383,7 @@ mod tests {
         ];
 
         pool1
-            .update_all_engines_with_links("facts".to_string(), basic_data_only.clone(), None)
+            .update_all_engines_with_links("facts".to_string(), basic_data_only.clone(), None, None)
             .await
             .unwrap();
 
@@ -2491,7 +2494,7 @@ mod tests {
         ]);
 
         pool2
-            .update_all_engines_with_links("facts".to_string(), all_data, None)
+            .update_all_engines_with_links("facts".to_string(), all_data, None, None)
             .await
             .unwrap();
 
@@ -2636,7 +2639,7 @@ mod tests {
             status: None,
         }];
 
-        pool.update_all_engines_with_links("facts".to_string(), test_links, None)
+        pool.update_all_engines_with_links("facts".to_string(), test_links, None, None)
             .await
             .unwrap();
 
@@ -2842,7 +2845,7 @@ mod tests {
         ];
 
         // Load the data using production method - this should set up SDNA across all engines
-        pool.update_all_engines_with_links("model_data".to_string(), model_data.clone(), None)
+        pool.update_all_engines_with_links("model_data".to_string(), model_data.clone(), None, None)
             .await
             .unwrap();
 
@@ -3024,6 +3027,7 @@ mod tests {
             "facts".to_string(),
             large_test_links,
             Some("neighbourhood".to_string()),
+            None,
         )
         .await
         .unwrap();
@@ -3116,7 +3120,7 @@ mod tests {
             status: None,
         }];
 
-        pool.update_all_engines_with_links("test_facts".to_string(), test_links, None)
+        pool.update_all_engines_with_links("test_facts".to_string(), test_links, None, None)
             .await
             .unwrap();
 
@@ -3287,7 +3291,7 @@ mod tests {
             status: None,
         }];
 
-        pool.update_all_engines_with_links("facts".to_string(), test_links, None)
+        pool.update_all_engines_with_links("facts".to_string(), test_links, None, None)
             .await
             .unwrap();
 
@@ -3324,7 +3328,7 @@ mod tests {
 
         // Use large dataset to trigger filtering
         let test_links = create_large_test_dataset();
-        pool.update_all_engines_with_links("cleanup_test".to_string(), test_links, None)
+        pool.update_all_engines_with_links("cleanup_test".to_string(), test_links, None, None)
             .await
             .unwrap();
 
@@ -3410,7 +3414,7 @@ mod tests {
 
         // Use large dataset to trigger filtering
         let test_links = create_large_test_dataset();
-        pool.update_all_engines_with_links("preserve_test".to_string(), test_links, None)
+        pool.update_all_engines_with_links("preserve_test".to_string(), test_links, None, None)
             .await
             .unwrap();
 
@@ -3621,7 +3625,7 @@ mod tests {
             status: None,
         }];
 
-        pool.update_all_engines_with_links("facts".to_string(), test_links, None)
+        pool.update_all_engines_with_links("facts".to_string(), test_links, None, None)
             .await
             .unwrap();
 
@@ -3694,7 +3698,7 @@ mod tests {
             },
         ];
 
-        pool.update_all_engines_with_links("test_facts".to_string(), test_links, None)
+        pool.update_all_engines_with_links("test_facts".to_string(), test_links, None, None)
             .await
             .unwrap();
 
