@@ -160,7 +160,10 @@ pub fn check_keys_and_create(did: String) -> did_key::Document {
     }
 }
 
-pub fn create_signed_expression<T: Serialize>(data: T, context: &AgentContext) -> Result<Expression<T>, AnyError> {
+pub fn create_signed_expression<T: Serialize>(
+    data: T,
+    context: &AgentContext,
+) -> Result<Expression<T>, AnyError> {
     let timestamp = chrono::Utc::now();
     let signature = hex::encode(sign_for_context(
         &signatures::hash_data_and_timestamp(&data, &timestamp),
@@ -562,8 +565,9 @@ mod tests {
     #[test]
     fn test_create_signed_expression() {
         ensure_setup();
-        let signed_expression = create_signed_expression(json!({"test": "data"}), &AgentContext::main_agent())
-            .expect("Failed to create signed expression");
+        let signed_expression =
+            create_signed_expression(json!({"test": "data"}), &AgentContext::main_agent())
+                .expect("Failed to create signed expression");
         assert!(
             signatures::verify(&signed_expression).expect("Verification failed"),
             "Signature verification for create_signed_expression failed"
@@ -606,8 +610,8 @@ mod tests {
         ensure_setup();
         let json_value =
             serde_json::Value::String(r#"{"key2": "value1", "key1": "value2"}"#.to_string());
-        let signed_expression =
-            create_signed_expression(json_value, &AgentContext::main_agent()).expect("Failed to create signed expression");
+        let signed_expression = create_signed_expression(json_value, &AgentContext::main_agent())
+            .expect("Failed to create signed expression");
         // Verify the expression with changed sorting
         assert!(
             signatures::verify(&signed_expression).expect("Verification failed"),

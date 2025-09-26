@@ -4,6 +4,7 @@ use super::utils::{
     prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string,
 };
 use crate::agent::create_signed_expression;
+use crate::agent::AgentContext;
 use crate::graphql::graphql_types::{
     DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery,
     LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle,
@@ -43,7 +44,6 @@ use tokio::time::{sleep, Instant};
 use tokio::{join, time};
 use uuid;
 use uuid::Uuid;
-use crate::agent::AgentContext;
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
@@ -965,7 +965,8 @@ impl PerspectiveInstance {
             }
         };
 
-        let new_link_expression = LinkExpression::from(create_signed_expression(new_link, context)?);
+        let new_link_expression =
+            LinkExpression::from(create_signed_expression(new_link, context)?);
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
@@ -1271,7 +1272,13 @@ impl PerspectiveInstance {
             target: sdna_code,
         });
 
-        self.add_links(sdna_links, LinkStatus::Shared, None, &AgentContext::main_agent()).await?;
+        self.add_links(
+            sdna_links,
+            LinkStatus::Shared,
+            None,
+            &AgentContext::main_agent(),
+        )
+        .await?;
         //added = true;
         //}
         // Mutex guard is automatically dropped here
@@ -2945,7 +2952,12 @@ mod tests {
         for _ in 0..5 {
             let link = create_link();
             let expression = perspective
-                .add_link(link.clone(), LinkStatus::Local, None, &AgentContext::main_agent())
+                .add_link(
+                    link.clone(),
+                    LinkStatus::Local,
+                    None,
+                    &AgentContext::main_agent(),
+                )
                 .await
                 .unwrap();
             all_links.push(expression);
@@ -2982,7 +2994,12 @@ mod tests {
             }
 
             let expression = perspective
-                .add_link(link.clone(), LinkStatus::Shared, None, &AgentContext::main_agent())
+                .add_link(
+                    link.clone(),
+                    LinkStatus::Shared,
+                    None,
+                    &AgentContext::main_agent(),
+                )
                 .await
                 .unwrap();
             all_links.push(expression);
@@ -3049,7 +3066,8 @@ mod tests {
         for i in 0..5 {
             let mut link = create_link();
             link.target = format!("lang://test-target {}", i);
-            let mut link = create_signed_expression(link, &AgentContext::main_agent()).expect("Failed to create link");
+            let mut link = create_signed_expression(link, &AgentContext::main_agent())
+                .expect("Failed to create link");
             link.timestamp = (now - chrono::Duration::minutes(5)
                 + chrono::Duration::minutes(i as i64))
             .to_rfc3339();
@@ -3162,7 +3180,12 @@ mod tests {
         let batch_id = perspective.create_batch().await;
 
         perspective
-            .add_link(link.clone(), LinkStatus::Shared, Some(batch_id.clone()), &AgentContext::main_agent())
+            .add_link(
+                link.clone(),
+                LinkStatus::Shared,
+                Some(batch_id.clone()),
+                &AgentContext::main_agent(),
+            )
             .await
             .unwrap();
 
@@ -3171,7 +3194,10 @@ mod tests {
         assert_eq!(links.len(), 0);
 
         // Commit the batch
-        let diff = perspective.commit_batch(batch_id, &AgentContext::main_agent()).await.unwrap();
+        let diff = perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .unwrap();
         assert_eq!(diff.additions.len(), 1);
 
         // Verify links are now in DB
@@ -3187,7 +3213,12 @@ mod tests {
 
         // Add initial link
         perspective
-            .add_link(link.clone(), LinkStatus::Shared, None, &AgentContext::main_agent())
+            .add_link(
+                link.clone(),
+                LinkStatus::Shared,
+                None,
+                &AgentContext::main_agent(),
+            )
             .await
             .unwrap();
 
@@ -3210,7 +3241,10 @@ mod tests {
             .unwrap();
 
         // Commit the batch
-        perspective.commit_batch(batch_id, &AgentContext::main_agent()).await.unwrap();
+        perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .unwrap();
 
         // Verify final state in DB
         let links = perspective.get_links(&query).await.unwrap();
@@ -3225,7 +3259,12 @@ mod tests {
         // one link outside the batch, for removal
         let link0 = create_link();
         let link0_expression = perspective
-            .add_link(link0.clone(), LinkStatus::Shared, None, &AgentContext::main_agent())
+            .add_link(
+                link0.clone(),
+                LinkStatus::Shared,
+                None,
+                &AgentContext::main_agent(),
+            )
             .await
             .unwrap();
 
@@ -3238,11 +3277,21 @@ mod tests {
 
         // Add two links in batch
         perspective
-            .add_link(link1.clone(), LinkStatus::Shared, Some(batch_id.clone()), &AgentContext::main_agent())
+            .add_link(
+                link1.clone(),
+                LinkStatus::Shared,
+                Some(batch_id.clone()),
+                &AgentContext::main_agent(),
+            )
             .await
             .unwrap();
         perspective
-            .add_link(link2.clone(), LinkStatus::Shared, Some(batch_id.clone()), &AgentContext::main_agent())
+            .add_link(
+                link2.clone(),
+                LinkStatus::Shared,
+                Some(batch_id.clone()),
+                &AgentContext::main_agent(),
+            )
             .await
             .unwrap();
         perspective
@@ -3256,7 +3305,10 @@ mod tests {
         assert_eq!(links_before.len(), 1);
 
         // Commit the batch
-        let diff = perspective.commit_batch(batch_id, &AgentContext::main_agent()).await.unwrap();
+        let diff = perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .unwrap();
         assert_eq!(diff.additions.len(), 2); // link1 and link2
         assert_eq!(diff.removals.len(), 1); // link1
 
@@ -3269,7 +3321,9 @@ mod tests {
         let mut perspective = setup();
 
         // Try to commit non-existent batch
-        let result = perspective.commit_batch("non-existent".to_string(), &AgentContext::main_agent()).await;
+        let result = perspective
+            .commit_batch("non-existent".to_string(), &AgentContext::main_agent())
+            .await;
         assert!(result.is_err());
 
         // Create a batch
@@ -3351,7 +3405,10 @@ mod tests {
         assert_eq!(links.len(), 0);
 
         // Commit batch and verify links are now visible
-        let diff = perspective.commit_batch(batch_id, &AgentContext::main_agent()).await.unwrap();
+        let diff = perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .unwrap();
         assert_eq!(diff.additions.len(), 2);
         assert_eq!(diff.removals.len(), 0);
 

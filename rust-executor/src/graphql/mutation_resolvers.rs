@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 
 use crate::{
-    agent::{capabilities::*, AgentService, AgentContext, create_signed_expression},
+    agent::{capabilities::*, create_signed_expression, AgentContext, AgentService},
     ai_service::AIService,
     neighbourhoods::{self, install_neighbourhood},
     perspectives::{
@@ -234,11 +234,10 @@ impl Mutation {
         if context.auto_permit_cap_requests {
             println!("======================================");
             println!("Got capability request: \n{:?}", auth_info);
-            let random_number_challenge =
-                permit_capability(AuthInfoExtended {
-                    request_id: request_id.clone(),
-                    auth: auth_info,
-                })?;
+            let random_number_challenge = permit_capability(AuthInfoExtended {
+                request_id: request_id.clone(),
+                auth: auth_info,
+            })?;
             println!("--------------------------------------");
             println!("Random number challenge: {}", random_number_challenge);
             println!("======================================");
@@ -930,7 +929,12 @@ impl Mutation {
         let mut perspective = get_perspective_with_access_control(&uuid, context)?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
-            .add_link(link.into(), link_status_from_input(status)?, batch_id, &agent_context)
+            .add_link(
+                link.into(),
+                link_status_from_input(status)?,
+                batch_id,
+                &agent_context,
+            )
             .await?)
     }
 

@@ -2,8 +2,8 @@ use super::utils::sort_json_value;
 use crate::js_core::error::AnyhowWrapperError;
 use crate::{
     agent::{
-        create_signed_expression, did, did_document, sign_for_context, sign_string_hex, signing_key_id, AgentContext,
-        AgentService,
+        create_signed_expression, did, did_document, sign_for_context, sign_string_hex,
+        signing_key_id, AgentContext, AgentService,
     },
     graphql::graphql_types::{Agent, AgentStatus},
 };
@@ -34,8 +34,8 @@ fn agent_create_signed_expression(
     #[serde] data: serde_json::Value,
 ) -> Result<serde_json::Value, AnyhowWrapperError> {
     let sorted_json = sort_json_value(&data);
-    let signed_expression =
-        create_signed_expression(sorted_json, &AgentContext::main_agent()).map_err(AnyhowWrapperError::from)?;
+    let signed_expression = create_signed_expression(sorted_json, &AgentContext::main_agent())
+        .map_err(AnyhowWrapperError::from)?;
     serde_json::to_value(signed_expression).map_err(AnyhowWrapperError::from)
 }
 
