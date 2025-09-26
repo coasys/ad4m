@@ -75,42 +75,6 @@ pub struct AgentStore {
     agent: Option<Agent>,
 }
 
-pub fn did_document() -> did_key::Document {
-    did_document_for_context(&AgentContext::main_agent())
-        .expect("Failed to get did_document for main agent")
-}
-
-pub fn signing_key_id() -> String {
-    signing_key_id_for_context(&AgentContext::main_agent())
-        .expect("Failed to get signing_key_id for main agent")
-}
-
-pub fn did() -> String {
-    did_for_context(&AgentContext::main_agent()).expect("Failed to get did for main agent")
-}
-
-pub fn check_keys_and_create(did: String) -> did_key::Document {
-    let wallet_instance = Wallet::instance();
-    let mut wallet = wallet_instance.lock().expect("wallet lock");
-    let wallet_ref = wallet.as_mut().expect("wallet instance");
-    let name = "main".to_string();
-    if wallet_ref.get_did_document(&name).is_none() {
-        wallet_ref.initialize_keys(name, did).unwrap()
-    } else {
-        did_document()
-    }
-}
-
-pub fn create_signed_expression<T: Serialize>(data: T) -> Result<Expression<T>, AnyError> {
-    create_signed_expression_for_context(data, &AgentContext::main_agent())
-}
-
-pub fn sign(payload: &[u8]) -> Result<Vec<u8>, AnyError> {
-    sign_for_context(payload, &AgentContext::main_agent())
-}
-
-// Context-aware agent functions
-
 pub fn did_document_for_context(context: &AgentContext) -> Result<did_key::Document, AnyError> {
     // For user contexts, ensure the key exists
     if context.is_main_agent {
@@ -166,10 +130,37 @@ pub fn sign_for_context(payload: &[u8], context: &AgentContext) -> Result<Vec<u8
     Ok(signature)
 }
 
-pub fn create_signed_expression_for_context<T: Serialize>(
-    data: T,
-    context: &AgentContext,
-) -> Result<Expression<T>, AnyError> {
+pub fn did_document() -> did_key::Document {
+    did_document_for_context(&AgentContext::main_agent())
+        .expect("Failed to get did_document for main agent")
+}
+
+pub fn signing_key_id() -> String {
+    signing_key_id_for_context(&AgentContext::main_agent())
+        .expect("Failed to get signing_key_id for main agent")
+}
+
+pub fn did() -> String {
+    did_for_context(&AgentContext::main_agent()).expect("Failed to get did for main agent")
+}
+
+pub fn sign(payload: &[u8]) -> Result<Vec<u8>, AnyError> {
+    sign_for_context(payload, &AgentContext::main_agent())
+}
+
+pub fn check_keys_and_create(did: String) -> did_key::Document {
+    let wallet_instance = Wallet::instance();
+    let mut wallet = wallet_instance.lock().expect("wallet lock");
+    let wallet_ref = wallet.as_mut().expect("wallet instance");
+    let name = "main".to_string();
+    if wallet_ref.get_did_document(&name).is_none() {
+        wallet_ref.initialize_keys(name, did).unwrap()
+    } else {
+        did_document()
+    }
+}
+
+pub fn create_signed_expression<T: Serialize>(data: T, context: &AgentContext) -> Result<Expression<T>, AnyError> {
     let timestamp = chrono::Utc::now();
     let signature = hex::encode(sign_for_context(
         &signatures::hash_data_and_timestamp(&data, &timestamp),
@@ -189,7 +180,7 @@ pub fn create_signed_expression_for_context<T: Serialize>(
 
 pub fn sign_string_hex(data: String) -> Result<String, AnyError> {
     let payload_bytes = signatures::hash_message(&data);
-    let signature = sign(&payload_bytes)?;
+    let signature = sign_for_context(&payload_bytes, &AgentContext::main_agent())?;
     let sig_hex = hex::encode(signature);
     Ok(sig_hex)
 }
@@ -322,10 +313,11 @@ impl AgentService {
     pub fn create_signed_expression<T: Serialize>(
         &self,
         data: T,
+        context: &AgentContext,
     ) -> Result<Expression<T>, AnyError> {
         self.signing_checks()?;
 
-        create_signed_expression(data)
+        create_signed_expression(data, context)
     }
 
     pub fn sign_string_hex(&self, data: String) -> Result<String, AnyError> {
@@ -535,14 +527,12 @@ impl AgentService {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
 
     use serde_json::json;
 
     use super::*;
     use crate::agent::signatures::verify_string_signed_by_did;
     use crate::test_utils::{setup_agent, setup_wallet};
-    use itertools::Itertools;
 
     use once_cell::sync::OnceCell;
 
@@ -572,7 +562,7 @@ mod tests {
     #[test]
     fn test_create_signed_expression() {
         ensure_setup();
-        let signed_expression = create_signed_expression(json!({"test": "data"}))
+        let signed_expression = create_signed_expression(json!({"test": "data"}), &AgentContext::main_agent())
             .expect("Failed to create signed expression");
         assert!(
             signatures::verify(&signed_expression).expect("Verification failed"),
@@ -611,37 +601,13 @@ mod tests {
         );
     }
 
-    //#[test]
-    fn _test_create_signed_expression_and_verify_with_changed_sorting() {
-        ensure_setup();
-        let json_value = json!({"key2": "value1", "key1": "value2"});
-        let signed_expression =
-            create_signed_expression(json_value).expect("Failed to create signed expression");
-
-        // Simulate changing the sorting of the JSON in the signed expression
-        let mut data_map = BTreeMap::new();
-        let sorted_keys = signed_expression.data.as_object().unwrap().keys().sorted();
-        for key in sorted_keys {
-            data_map.insert(key.clone(), signed_expression.data[key].clone());
-        }
-        let sorted_json = json!(data_map);
-        let mut sorted_expression = signed_expression.clone();
-        sorted_expression.data = sorted_json;
-
-        // Verify the expression with changed sorting
-        assert!(
-            signatures::verify(&sorted_expression).expect("Verification failed"),
-            "Signature verification for create_signed_expression with changed sorting should succeed"
-        );
-    }
-
     #[test]
     fn test_create_signed_expression_with_data_string() {
         ensure_setup();
         let json_value =
             serde_json::Value::String(r#"{"key2": "value1", "key1": "value2"}"#.to_string());
         let signed_expression =
-            create_signed_expression(json_value).expect("Failed to create signed expression");
+            create_signed_expression(json_value, &AgentContext::main_agent()).expect("Failed to create signed expression");
         // Verify the expression with changed sorting
         assert!(
             signatures::verify(&signed_expression).expect("Verification failed"),
@@ -726,9 +692,9 @@ mod tests {
         let test_data = json!({"test": "context_data"});
 
         // Test create_signed_expression_for_context
-        let context_expr = create_signed_expression_for_context(test_data.clone(), &context)
+        let context_expr = create_signed_expression(test_data.clone(), &context)
             .expect("Failed to create signed expression with context");
-        let static_expr = create_signed_expression(test_data)
+        let static_expr = create_signed_expression(test_data, &AgentContext::main_agent())
             .expect("Failed to create signed expression with static function");
 
         // Both expressions should be valid
@@ -767,7 +733,7 @@ mod tests {
         assert!(did_for_context(&user_context).is_ok());
         assert!(sign_for_context(b"test", &user_context).is_ok());
         assert!(
-            create_signed_expression_for_context(json!({"test": "data"}), &user_context).is_ok(),
+            create_signed_expression(json!({"test": "data"}), &user_context).is_ok(),
             "Creating signed expression should succeed once key exists"
         );
     }
@@ -891,40 +857,6 @@ mod tests {
     }
 
     #[test]
-    fn test_context_aware_functions_with_user_key_generation() {
-        ensure_setup();
-        let test_user_email = "test.context@example.com";
-
-        assert!(
-            !AgentService::user_exists(test_user_email),
-            "Fresh test user should not exist before key creation"
-        );
-
-        let user_context = AgentContext::for_user_email(test_user_email.to_string());
-
-        assert!(did_document_for_context(&user_context).is_err());
-        assert!(signing_key_id_for_context(&user_context).is_err());
-        assert!(did_for_context(&user_context).is_err());
-        assert!(sign_for_context(b"test", &user_context).is_err());
-
-        AgentService::ensure_user_key_exists(test_user_email).expect("Failed to create user key");
-
-        let did_doc = did_document_for_context(&user_context).expect("DID document should exist");
-        assert!(did_doc.id.starts_with("did:key:"));
-
-        assert!(signing_key_id_for_context(&user_context).is_ok());
-        assert!(did_for_context(&user_context).is_ok());
-        assert!(sign_for_context(b"test", &user_context).is_ok());
-
-        let test_data = json!({"test": "context_data"});
-        let signed_expr = create_signed_expression_for_context(test_data, &user_context);
-        assert!(signed_expr.is_ok());
-        if let Ok(expr) = signed_expr {
-            assert!(signatures::verify(&expr).expect("Expression verification failed"));
-        }
-    }
-
-    #[test]
     fn test_email_based_agent_context() {
         ensure_setup();
 
@@ -967,9 +899,9 @@ mod tests {
         assert_ne!(alice_did, bob_did);
 
         let test_data = json!({"message": "Email-based context test"});
-        let alice_expr = create_signed_expression_for_context(test_data.clone(), &alice_context)
+        let alice_expr = create_signed_expression(test_data.clone(), &alice_context)
             .expect("Alice expression creation failed");
-        let bob_expr = create_signed_expression_for_context(test_data.clone(), &bob_context)
+        let bob_expr = create_signed_expression(test_data.clone(), &bob_context)
             .expect("Bob expression creation failed");
 
         assert!(signatures::verify(&alice_expr).expect("Alice expression verification failed"));
@@ -1015,11 +947,11 @@ mod tests {
         let test_data =
             json!({"message": "Hello from multi-user system", "timestamp": "2024-01-01"});
 
-        let main_expr = create_signed_expression_for_context(test_data.clone(), &main_context)
+        let main_expr = create_signed_expression(test_data.clone(), &main_context)
             .expect("Main agent expression creation failed");
-        let alice_expr = create_signed_expression_for_context(test_data.clone(), &alice_context)
+        let alice_expr = create_signed_expression(test_data.clone(), &alice_context)
             .expect("Alice expression creation failed");
-        let bob_expr = create_signed_expression_for_context(test_data.clone(), &bob_context)
+        let bob_expr = create_signed_expression(test_data.clone(), &bob_context)
             .expect("Bob expression creation failed");
 
         assert!(signatures::verify(&main_expr).expect("Main expression verification failed"));

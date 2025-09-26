@@ -7,6 +7,7 @@ import chaiAsPromised from "chai-as-promised";
 import { apolloClient, sleep, startExecutor } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
+import { LinkQuery } from "@coasys/ad4m";
 
 //@ts-ignore
 global.fetch = fetch
@@ -152,7 +153,9 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("isolation1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("isolation2@example.com", "password2");
             
+            // @ts-ignore - Suppress Apollo type mismatch
             const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
+            // @ts-ignore - Suppress Apollo type mismatch
             const client2 = new Ad4mClient(apolloClient(gqlPort, token2), false);
             
             // User 1 creates a perspective
@@ -220,7 +223,9 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("access1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("access2@example.com", "password2");
             
+            // @ts-ignore - Suppress Apollo type mismatch
             const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
+            // @ts-ignore - Suppress Apollo type mismatch
             const client2 = new Ad4mClient(apolloClient(gqlPort, token2), false);
             
             // User 1 creates a perspective
@@ -239,6 +244,64 @@ describe("Multi-User Simple integration tests", () => {
                 expect(errorMessage).to.include("Access denied");
                 console.log("✅ Cross-user perspective access properly denied");
             }
+        });
+    })
+
+    describe("Link Authoring and Signatures", () => {
+        it("should have correct authors and valid signatures for user links", async () => {
+            // Create two users
+            const user1Result = await adminAd4mClient!.agent.createUser("linkauth1@example.com", "password1");
+            const user2Result = await adminAd4mClient!.agent.createUser("linkauth2@example.com", "password2");
+
+            // Login both users
+            const token1 = await adminAd4mClient!.agent.loginUser("linkauth1@example.com", "password1");
+            const token2 = await adminAd4mClient!.agent.loginUser("linkauth2@example.com", "password2");
+
+            // @ts-ignore - Suppress Apollo type mismatch
+            const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
+            // @ts-ignore - Suppress Apollo type mismatch
+            const client2 = new Ad4mClient(apolloClient(gqlPort, token2), false);
+
+            // User 1 creates perspective and adds a link
+            // @ts-ignore - Suppress Apollo type mismatch
+            const p1 = await client1.perspective.add("User 1 Test Perspective");
+            // @ts-ignore - Suppress Apollo type mismatch
+            const link1 = await client1.perspective.addLink(p1.uuid, {
+                source: "root",
+                target: "test://target1",
+                predicate: "test://predicate"
+            });
+
+            // Get the link and verify
+            // @ts-ignore - Suppress Apollo type mismatch
+            const links1 = await client1.perspective.queryLinks(p1.uuid, new LinkQuery({}));
+            expect(links1.length).to.equal(1);
+            const user1Me = await client1.agent.me();
+            expect(links1[0].author).to.equal(user1Me.did);
+            expect(links1[0].proof.valid).to.be.true;
+
+            // User 2 creates perspective and adds a link
+            // @ts-ignore - Suppress Apollo type mismatch
+            const p2 = await client2.perspective.add("User 2 Test Perspective");
+            // @ts-ignore - Suppress Apollo type mismatch
+            const link2 = await client2.perspective.addLink(p2.uuid, {
+                source: "root",
+                target: "test://target2",
+                predicate: "test://predicate"
+            });
+
+            // Get the link and verify
+            // @ts-ignore - Suppress Apollo type mismatch
+            const links2 = await client2.perspective.queryLinks(p2.uuid, new LinkQuery({}));
+            expect(links2.length).to.equal(1);
+            const user2Me = await client2.agent.me();
+            expect(links2[0].author).to.equal(user2Me.did);
+            expect(links2[0].proof.valid).to.be.true;
+
+            // Ensure authors are different
+            expect(user1Me.did).not.to.equal(user2Me.did);
+
+            console.log("✅ Link authors and signatures verified for multi-user");
         });
     })
 })

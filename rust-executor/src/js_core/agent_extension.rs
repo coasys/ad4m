@@ -2,7 +2,7 @@ use super::utils::sort_json_value;
 use crate::js_core::error::AnyhowWrapperError;
 use crate::{
     agent::{
-        create_signed_expression, did, did_document, sign, sign_string_hex, signing_key_id,
+        create_signed_expression, did, did_document, sign_for_context, sign_string_hex, signing_key_id, AgentContext,
         AgentService,
     },
     graphql::graphql_types::{Agent, AgentStatus},
@@ -35,7 +35,7 @@ fn agent_create_signed_expression(
 ) -> Result<serde_json::Value, AnyhowWrapperError> {
     let sorted_json = sort_json_value(&data);
     let signed_expression =
-        create_signed_expression(sorted_json).map_err(AnyhowWrapperError::from)?;
+        create_signed_expression(sorted_json, &AgentContext::main_agent()).map_err(AnyhowWrapperError::from)?;
     serde_json::to_value(signed_expression).map_err(AnyhowWrapperError::from)
 }
 
@@ -46,7 +46,7 @@ fn agent_create_signed_expression_stringified(
 ) -> Result<String, AnyhowWrapperError> {
     let data: serde_json::Value = serde_json::from_str(&data)?;
     let sorted_json = sort_json_value(&data);
-    let signed_expression = create_signed_expression(sorted_json)?;
+    let signed_expression = create_signed_expression(sorted_json, &AgentContext::main_agent())?;
     let stringified =
         serde_json::to_string(&signed_expression).map_err(AnyhowWrapperError::from)?;
     Ok(stringified)
@@ -55,7 +55,7 @@ fn agent_create_signed_expression_stringified(
 #[op2]
 #[serde]
 fn agent_sign(#[buffer] payload: &[u8]) -> Result<Vec<u8>, AnyhowWrapperError> {
-    sign(payload).map_err(AnyhowWrapperError::from)
+    sign_for_context(payload, &AgentContext::main_agent()).map_err(AnyhowWrapperError::from)
 }
 
 #[op2]

@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 
 use crate::{
-    agent::create_signed_expression,
+    agent::{capabilities::*, AgentService, AgentContext, create_signed_expression},
     ai_service::AIService,
     neighbourhoods::{self, install_neighbourhood},
     perspectives::{
@@ -21,7 +21,6 @@ use coasys_juniper::{graphql_object, graphql_value, FieldError, FieldResult};
 
 use super::graphql_types::*;
 use crate::{
-    agent::{self, capabilities::*, AgentService},
     entanglement_service::{
         add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs,
         sign_device_key,
@@ -231,12 +230,12 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
         let auth_info: AuthInfo = auth_info.into();
-        let request_id = agent::capabilities::request_capability(auth_info.clone()).await;
+        let request_id = request_capability(auth_info.clone()).await;
         if context.auto_permit_cap_requests {
             println!("======================================");
             println!("Got capability request: \n{:?}", auth_info);
             let random_number_challenge =
-                agent::capabilities::permit_capability(AuthInfoExtended {
+                permit_capability(AuthInfoExtended {
                     request_id: request_id.clone(),
                     auth: auth_info,
                 })?;
@@ -256,7 +255,7 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_PERMIT_CAPABILITY)?;
         let auth: AuthInfoExtended = serde_json::from_str(&auth)?;
-        let random_number_challenge = agent::capabilities::permit_capability(auth)?;
+        let random_number_challenge = permit_capability(auth)?;
         Ok(random_number_challenge)
     }
 
@@ -267,7 +266,7 @@ impl Mutation {
         request_id: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
-        let cap_token = agent::capabilities::generate_capability_token(request_id, rand).await?;
+        let cap_token = generate_capability_token(request_id, rand).await?;
         Ok(cap_token)
     }
 
@@ -287,7 +286,7 @@ impl Mutation {
         message: String,
     ) -> FieldResult<AgentSignature> {
         check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)?;
-        Ok(agent::AgentSignature::from_message(message)?.into())
+        Ok(crate::agent::AgentSignature::from_message(message)?.into())
     }
 
     async fn agent_unlock(
@@ -724,7 +723,8 @@ impl Mutation {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
         let perspective = Perspective::from(payload);
-        let perspective = create_signed_expression(perspective)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -745,18 +745,19 @@ impl Mutation {
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let perspective = Perspective {
             links: payload
                 .links
                 .into_iter()
                 .map(Link::from)
-                .map(create_signed_expression)
+                .map(|l| create_signed_expression(l, &agent_context))
                 .filter_map(Result::ok)
                 .map(LinkExpression::from)
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
-        let perspective = create_signed_expression(perspective)?;
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -778,7 +779,8 @@ impl Mutation {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
         let perspective = Perspective::from(payload);
-        let perspective = create_signed_expression(perspective)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -799,18 +801,19 @@ impl Mutation {
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let perspective = Perspective {
             links: payload
                 .links
                 .into_iter()
                 .map(Link::from)
-                .map(create_signed_expression)
+                .map(|l| create_signed_expression(l, &agent_context))
                 .filter_map(Result::ok)
                 .map(LinkExpression::from)
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
-        let perspective = create_signed_expression(perspective)?;
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -831,7 +834,8 @@ impl Mutation {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
         let perspective = Perspective::from(status);
-        let perspective = create_signed_expression(perspective)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -851,18 +855,19 @@ impl Mutation {
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let perspective = Perspective {
             links: status
                 .links
                 .into_iter()
                 .map(|l| Link::from(l).normalize())
-                .map(create_signed_expression)
+                .map(|l| create_signed_expression(l, &agent_context))
                 .filter_map(Result::ok)
                 .map(LinkExpression::from)
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
-        let perspective = create_signed_expression(perspective)?;
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -923,8 +928,9 @@ impl Mutation {
         )?;
 
         let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
-            .add_link(link.into(), link_status_from_input(status)?, batch_id)
+            .add_link(link.into(), link_status_from_input(status)?, batch_id, &agent_context)
             .await?)
     }
 
@@ -960,11 +966,13 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
         let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
             .add_links(
                 links.into_iter().map(|l| l.into()).collect(),
                 link_status_from_input(status)?,
                 batch_id,
+                &agent_context,
             )
             .await?)
     }
@@ -981,8 +989,9 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
         let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
-            .link_mutations(mutations, link_status_from_input(status)?)
+            .link_mutations(mutations, link_status_from_input(status)?, &agent_context)
             .await?)
     }
 
@@ -1077,11 +1086,13 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
         let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
             .update_link(
                 LinkExpression::from_input_without_proof(old_link),
                 new_link.into(),
                 batch_id,
+                &agent_context,
             )
             .await?)
     }
@@ -1849,7 +1860,8 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
         let mut perspective = get_perspective_with_access_control(&uuid, context)?;
-        Ok(perspective.commit_batch(batch_id).await?)
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        Ok(perspective.commit_batch(batch_id, &agent_context).await?)
     }
 
     async fn runtime_restart_holochain(&self, context: &RequestContext) -> FieldResult<bool> {
