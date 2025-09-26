@@ -1273,13 +1273,8 @@ impl PerspectiveInstance {
             target: sdna_code,
         });
 
-        self.add_links(
-            sdna_links,
-            LinkStatus::Shared,
-            None,
-            context,
-        )
-        .await?;
+        self.add_links(sdna_links, LinkStatus::Shared, None, context)
+            .await?;
         //added = true;
         //}
         // Mutex guard is automatically dropped here
@@ -1746,7 +1741,10 @@ impl PerspectiveInstance {
         // Get all required data before making service calls
         let (uuid, owner_did) = {
             let persisted_guard = self.persisted.lock().await;
-            (persisted_guard.uuid.clone(), persisted_guard.owner_did.clone())
+            (
+                persisted_guard.uuid.clone(),
+                persisted_guard.owner_did.clone(),
+            )
         };
 
         let all_links = self.get_links(&LinkQuery::default()).await?;

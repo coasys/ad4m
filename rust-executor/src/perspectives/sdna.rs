@@ -639,7 +639,11 @@ pub async fn init_engine_facts(
     lines.extend(get_data_facts(&all_links));
 
     // Add SDNA facts
-    lines.extend(get_sdna_facts(&all_links, neighbourhood_author, perspective_owner_did)?);
+    lines.extend(get_sdna_facts(
+        &all_links,
+        neighbourhood_author,
+        perspective_owner_did,
+    )?);
 
     Ok(lines)
 }

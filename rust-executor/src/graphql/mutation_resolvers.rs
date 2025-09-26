@@ -1117,7 +1117,9 @@ impl Mutation {
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let sdna_type = SdnaType::from_string(&sdna_type)
             .map_err(|e| FieldError::new(e, graphql_value!({ "invalid_sdna_type": sdna_type })))?;
-        perspective.add_sdna(name, sdna_code, sdna_type, &agent_context).await?;
+        perspective
+            .add_sdna(name, sdna_code, sdna_type, &agent_context)
+            .await?;
         Ok(true)
     }
 
@@ -1177,7 +1179,13 @@ impl Mutation {
         };
 
         perspective
-            .create_subject(subject_class, expression_address, initial_values, batch_id, &agent_context)
+            .create_subject(
+                subject_class,
+                expression_address,
+                initial_values,
+                batch_id,
+                &agent_context,
+            )
             .await?;
 
         Ok(true)

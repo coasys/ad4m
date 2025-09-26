@@ -407,7 +407,11 @@ impl PrologEnginePool {
         // For complete pools, use all facts (infrastructure + data + SDNA)
         let mut facts_to_load = get_static_infrastructure_facts();
         facts_to_load.extend(get_data_facts(&all_links));
-        facts_to_load.extend(get_sdna_facts(&all_links, neighbourhood_author.clone(), owner_did.clone())?);
+        facts_to_load.extend(get_sdna_facts(
+            &all_links,
+            neighbourhood_author.clone(),
+            owner_did.clone(),
+        )?);
 
         // Preprocess the facts to handle embeddings ONCE
         let processed_facts =
@@ -530,8 +534,13 @@ impl PrologEnginePool {
         neighbourhood_author: Option<String>,
         owner_did: Option<String>,
     ) -> Result<(), Error> {
-        self.update_all_engines_with_links_internal(module_name, all_links, neighbourhood_author, owner_did)
-            .await?;
+        self.update_all_engines_with_links_internal(
+            module_name,
+            all_links,
+            neighbourhood_author,
+            owner_did,
+        )
+        .await?;
         self.update_filtered_pools_with_links_internal().await?;
         self.update_sdna_pool_with_links_internal().await?;
         Ok(())
@@ -1544,9 +1553,14 @@ mod tests {
         ];
 
         // Use the PRODUCTION method that properly sets up the pool state
-        pool.update_all_engines_with_links("test_facts".to_string(), test_links.clone(), None, None)
-            .await
-            .unwrap();
+        pool.update_all_engines_with_links(
+            "test_facts".to_string(),
+            test_links.clone(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         // Create filtered pools for multiple users
         let was_created1 = pool
@@ -2845,9 +2859,14 @@ mod tests {
         ];
 
         // Load the data using production method - this should set up SDNA across all engines
-        pool.update_all_engines_with_links("model_data".to_string(), model_data.clone(), None, None)
-            .await
-            .unwrap();
+        pool.update_all_engines_with_links(
+            "model_data".to_string(),
+            model_data.clone(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         // Create multiple filtered pools to simulate production scenario
         for i in 1..=5 {
