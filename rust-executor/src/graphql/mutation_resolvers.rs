@@ -9,9 +9,7 @@ use crate::{
         perspective_instance::{PerspectiveInstance, SdnaType},
         remove_perspective, update_perspective, SerializedPerspective,
     },
-    types::{
-        AITask, DecoratedLinkExpression, Link, LinkExpression, ModelType,
-    },
+    types::{AITask, DecoratedLinkExpression, Link, LinkExpression, ModelType},
 };
 use crate::{
     db::Ad4mDb,
@@ -408,8 +406,15 @@ impl Mutation {
 
             // Publish the updated agent to the agent language
             let mut js_handle = context.js_handle.clone();
-            if let Err(e) = AgentService::publish_user_agent_to_language(&user_email, &agent, &mut js_handle).await {
-                log::warn!("Failed to publish updated user {} profile to agent language: {}", agent.did, e);
+            if let Err(e) =
+                AgentService::publish_user_agent_to_language(&user_email, &agent, &mut js_handle)
+                    .await
+            {
+                log::warn!(
+                    "Failed to publish updated user {} profile to agent language: {}",
+                    agent.did,
+                    e
+                );
                 // Don't fail the profile update, just log the warning
             }
 
@@ -516,12 +521,18 @@ impl Mutation {
 
         // Store the profile locally
         AgentService::store_user_agent_profile(&email, &initial_agent).map_err(|e| {
-            FieldError::new(format!("Failed to store user profile: {}", e), Value::null())
+            FieldError::new(
+                format!("Failed to store user profile: {}", e),
+                Value::null(),
+            )
         })?;
 
         // Publish the agent to the agent language
         let mut js_handle = context.js_handle.clone();
-        if let Err(e) = AgentService::publish_user_agent_to_language(&email, &initial_agent, &mut js_handle).await {
+        if let Err(e) =
+            AgentService::publish_user_agent_to_language(&email, &initial_agent, &mut js_handle)
+                .await
+        {
             log::warn!("Failed to publish user {} to agent language: {}", did, e);
             // Don't fail the user creation, just log the warning
         }

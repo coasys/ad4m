@@ -426,11 +426,15 @@ impl AgentService {
     }
 
     /// Publish agent to the agent language (decentralized storage)
-    pub async fn publish_user_agent_to_language(user_email: &str, agent: &Agent, js_handle: &mut crate::js_core::JsCoreHandle) -> Result<(), AnyError> {
+    pub async fn publish_user_agent_to_language(
+        user_email: &str,
+        agent: &Agent,
+        js_handle: &mut crate::js_core::JsCoreHandle,
+    ) -> Result<(), AnyError> {
         // Create a context-aware agent service that can sign with the user's key
         // We need to inject this into the language context temporarily
         let agent_json = serde_json::to_string(agent)?;
-        
+
         let script = format!(
             r#"
             (async () => {{
@@ -466,16 +470,23 @@ impl AgentService {
             "#,
             agent_json, user_email
         );
-        
+
         let result = js_handle.execute(script).await;
-        
+
         match result {
             Ok(_) => {
-                log::info!("Successfully published agent {} to agent language", agent.did);
+                log::info!(
+                    "Successfully published agent {} to agent language",
+                    agent.did
+                );
                 Ok(())
             }
             Err(e) => {
-                log::error!("Failed to publish agent {} to agent language: {}", agent.did, e);
+                log::error!(
+                    "Failed to publish agent {} to agent language: {}",
+                    agent.did,
+                    e
+                );
                 Err(anyhow!("Failed to publish agent to language: {}", e))
             }
         }
@@ -613,9 +624,10 @@ impl AgentService {
     }
 
     pub fn dump(&self) -> AgentStatus {
-        let did_document_str = self.did_document.as_ref().map(|doc| {
-            serde_json::to_string(doc).unwrap_or_default()
-        });
+        let did_document_str = self
+            .did_document
+            .as_ref()
+            .map(|doc| serde_json::to_string(doc).unwrap_or_default());
 
         AgentStatus {
             did: self.did.clone(),

@@ -2,14 +2,14 @@ use super::utils::sort_json_value;
 use crate::js_core::error::AnyhowWrapperError;
 use crate::{
     agent::{
-        create_signed_expression, did, did_document, did_for_context, sign_for_context, sign_string_hex,
-        signing_key_id, AgentContext, AgentService,
+        create_signed_expression, did, did_document, did_for_context, sign_for_context,
+        sign_string_hex, signing_key_id, AgentContext, AgentService,
     },
     graphql::graphql_types::{Agent, AgentStatus},
 };
 // use coasys_juniper::{FieldError, Value};
-use deno_core::op2;
 use deno_core::anyhow;
+use deno_core::op2;
 
 #[op2]
 #[serde]
@@ -61,8 +61,8 @@ fn agent_create_signed_expression_for_user(
 ) -> Result<serde_json::Value, AnyhowWrapperError> {
     let sorted_json = sort_json_value(&data);
     let agent_context = AgentContext::for_user_email(user_email);
-    let signed_expression = create_signed_expression(sorted_json, &agent_context)
-        .map_err(AnyhowWrapperError::from)?;
+    let signed_expression =
+        create_signed_expression(sorted_json, &agent_context).map_err(AnyhowWrapperError::from)?;
     serde_json::to_value(signed_expression).map_err(AnyhowWrapperError::from)
 }
 
@@ -75,14 +75,18 @@ fn agent_did_for_user(#[string] user_email: String) -> Result<String, AnyhowWrap
 
 #[op2]
 #[serde]
-fn agent_agent_for_user(#[string] user_email: String) -> Result<serde_json::Value, AnyhowWrapperError> {
+fn agent_agent_for_user(
+    #[string] user_email: String,
+) -> Result<serde_json::Value, AnyhowWrapperError> {
     let agent = AgentService::load_user_agent_profile(&user_email)
         .map_err(|_| anyhow::anyhow!("User agent profile not found"))
         .map_err(AnyhowWrapperError::from)?;
-    
+
     match agent {
         Some(agent) => serde_json::to_value(agent).map_err(AnyhowWrapperError::from),
-        None => Err(AnyhowWrapperError::from(anyhow::anyhow!("User agent profile not found")))
+        None => Err(AnyhowWrapperError::from(anyhow::anyhow!(
+            "User agent profile not found"
+        ))),
     }
 }
 
@@ -161,7 +165,6 @@ fn save_agent_profile(#[serde] agent: Agent) -> Result<(), AnyhowWrapperError> {
         Ok(())
     })
 }
-
 
 deno_core::extension!(
     agent_service,
