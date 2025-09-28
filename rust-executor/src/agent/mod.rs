@@ -405,6 +405,37 @@ impl AgentService {
         Ok(agent_data.did)
     }
 
+    /// Store agent profile for a specific user
+    pub fn store_user_agent_profile(user_email: &str, agent: &Agent) -> Result<(), AnyError> {
+        // Create user-specific profile directory
+        let app_data_path = std::env::var("APP_DATA_PATH")
+            .unwrap_or_else(|_| std::env::current_dir().unwrap().to_string_lossy().to_string());
+        let user_profile_dir = format!("{}/ad4m/users/{}", app_data_path, user_email);
+        std::fs::create_dir_all(&user_profile_dir)?;
+
+        // Store profile in user-specific file
+        let profile_path = format!("{}/profile.json", user_profile_dir);
+        let profile_json = serde_json::to_string(agent)?;
+        std::fs::write(profile_path, profile_json)?;
+
+        Ok(())
+    }
+
+    /// Load agent profile for a specific user
+    pub fn load_user_agent_profile(user_email: &str) -> Result<Option<Agent>, AnyError> {
+        let app_data_path = std::env::var("APP_DATA_PATH")
+            .unwrap_or_else(|_| std::env::current_dir().unwrap().to_string_lossy().to_string());
+        let profile_path = format!("{}/ad4m/users/{}/profile.json", app_data_path, user_email);
+
+        if !std::path::Path::new(&profile_path).exists() {
+            return Ok(None);
+        }
+
+        let profile_json = std::fs::read_to_string(profile_path)?;
+        let agent: Agent = serde_json::from_str(&profile_json)?;
+        Ok(Some(agent))
+    }
+
     pub fn store_agent_profile(&self) {
         let agent = self.agent.as_ref().expect("Agent profile not found");
         std::fs::write(

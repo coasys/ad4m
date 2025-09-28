@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 use super::graphql_types::*;
-use crate::agent::{capabilities::*, signatures};
+use crate::agent::{capabilities::*, signatures, AgentContext, did_document_for_context};
 use crate::ai_service::AIService;
 use crate::types::{AITask, ModelType};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
@@ -51,11 +51,17 @@ impl Query {
                 FieldError::new(format!("User agent not available: {}", e), Value::null())
             })?;
 
-            return Ok(Agent {
-                did: agent_data.did,
-                direct_message_language: None,
-                perspective: Some(Perspective { links: vec![] }),
-            });
+            // Try to load user-specific profile, fallback to empty profile
+            let agent = match AgentService::load_user_agent_profile(&user_email) {
+                Ok(Some(profile)) => profile,
+                Ok(None) | Err(_) => Agent {
+                    did: agent_data.did,
+                    direct_message_language: None,
+                    perspective: Some(Perspective { links: vec![] }),
+                }
+            };
+
+            return Ok(agent);
         }
 
         // Fallback to main agent for admin/legacy mode
@@ -144,9 +150,17 @@ impl Query {
                 FieldError::new(format!("User agent not available: {}", e), Value::null())
             })?;
 
+            // Generate DID document for user
+            let agent_context = AgentContext::for_user_email(user_email);
+            let did_document = did_document_for_context(&agent_context).map_err(|e| {
+                FieldError::new(format!("Failed to get DID document for user: {}", e), Value::null())
+            })?;
+
             return Ok(AgentStatus {
                 did: Some(agent_data.did),
-                did_document: None, // TODO: Generate DID document for user
+                did_document: Some(serde_json::to_string(&did_document).map_err(|e| {
+                    FieldError::new(format!("Failed to serialize DID document: {}", e), Value::null())
+                })?),
                 error: None,
                 is_initialized: true,
                 is_unlocked: true,

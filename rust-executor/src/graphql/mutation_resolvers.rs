@@ -9,7 +9,7 @@ use crate::{
         perspective_instance::{PerspectiveInstance, SdnaType},
         remove_perspective, update_perspective, SerializedPerspective,
     },
-    types::{AITask, DecoratedLinkExpression, Link, LinkExpression, ModelType},
+    types::{AITask, DecoratedLinkExpression, DecoratedExpressionProof, Link, LinkExpression, ModelType},
 };
 use crate::{
     db::Ad4mDb,
@@ -17,7 +17,7 @@ use crate::{
     runtime_service::RuntimeService,
     types::Notification,
 };
-use coasys_juniper::{graphql_object, graphql_value, FieldError, FieldResult};
+use coasys_juniper::{graphql_object, graphql_value, FieldError, FieldResult, Value};
 
 use super::graphql_types::*;
 use crate::{
@@ -372,17 +372,48 @@ impl Mutation {
         perspective: PerspectiveInput,
     ) -> FieldResult<Agent> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let perspective_json = serde_json::to_string(&perspective)?;
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentUpdatePublicPerspective", {{ perspective: {} }})
-            )"#,
-            perspective_json
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Agent> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        // For multi-user mode: extract user email from JWT token if present
+        if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
+            // Get user agent data
+            let agent_data = AgentService::get_user_agent_data(&user_email).map_err(|e| {
+                FieldError::new(format!("User agent not available: {}", e), Value::null())
+            })?;
+
+            // Convert LinkExpressionInput to DecoratedLinkExpression
+            let decorated_links: Vec<DecoratedLinkExpression> = perspective.links.iter()
+                .map(|link_input| DecoratedLinkExpression::try_from(link_input.clone()))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            // Create agent with updated perspective
+            let agent = Agent {
+                did: agent_data.did,
+                direct_message_language: None,
+                perspective: Some(Perspective {
+                    links: decorated_links,
+                }),
+            };
+
+            // Store the updated profile for the user
+            AgentService::store_user_agent_profile(&user_email, &agent).map_err(|e| {
+                FieldError::new(format!("Failed to store user profile: {}", e), Value::null())
+            })?;
+
+            Ok(agent)
+        } else {
+            // Fallback to JS implementation for main agent
+            let mut js = context.js_handle.clone();
+            let perspective_json = serde_json::to_string(&perspective)?;
+            let script = format!(
+                r#"JSON.stringify(
+                    await core.callResolver("Mutation", "agentUpdatePublicPerspective", {{ perspective: {} }})
+                )"#,
+                perspective_json
+            );
+            let result = js.execute(script).await?;
+            let result: JsResultType<Agent> = serde_json::from_str(&result)?;
+            result.get_graphql_result()
+        }
     }
 
     async fn delete_trusted_agents(
