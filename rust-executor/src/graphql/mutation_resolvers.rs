@@ -635,12 +635,37 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &EXPRESSION_CREATE_CAPABILITY)?;
         let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }})
-            )"#,
-            content, language_address
-        );
+
+        // Get user context from JWT token
+        let user_email =
+            crate::agent::capabilities::user_email_from_token(context.auth_token.clone());
+
+        let script = if let Some(user_email) = user_email {
+            // User context: set agent service context temporarily
+            format!(
+                r#"JSON.stringify(
+                    await (async () => {{
+                        const originalContext = core.agentService.getUserContext();
+                        core.agentService.setUserContext("{}");
+                        try {{
+                            return await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }});
+                        }} finally {{
+                            core.agentService.setUserContext(originalContext);
+                        }}
+                    }})()
+                )"#,
+                user_email, content, language_address
+            )
+        } else {
+            // Main agent context: call directly
+            format!(
+                r#"JSON.stringify(
+                    await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }})
+                )"#,
+                content, language_address
+            )
+        };
+
         let result = js.execute(script).await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
         result.get_graphql_result()
@@ -654,16 +679,45 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &EXPRESSION_UPDATE_CAPABILITY)?;
         let mut js = context.js_handle.clone();
+
+        // Get user context from JWT token
+        let user_email =
+            crate::agent::capabilities::user_email_from_token(context.auth_token.clone());
+
         let interaction_call_json = serde_json::to_string(&interaction_call)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "expressionInteract",
-                {{ interactionCall: {}, url: "{}" }},
-            ))"#,
-            interaction_call_json, url
-        );
+        let script = if let Some(user_email) = user_email {
+            // User context: set agent service context temporarily
+            format!(
+                r#"JSON.stringify(
+                    await (async () => {{
+                        const originalContext = core.agentService.getUserContext();
+                        core.agentService.setUserContext("{}");
+                        try {{
+                            return await core.callResolver(
+                                "Mutation",
+                                "expressionInteract",
+                                {{ interactionCall: {}, url: "{}" }},
+                            );
+                        }} finally {{
+                            core.agentService.setUserContext(originalContext);
+                        }}
+                    }})()
+                )"#,
+                user_email, interaction_call_json, url
+            )
+        } else {
+            // Main agent context: call directly
+            format!(
+                r#"JSON.stringify(
+                await core.callResolver(
+                    "Mutation",
+                    "expressionInteract",
+                    {{ interactionCall: {}, url: "{}" }},
+                ))"#,
+                interaction_call_json, url
+            )
+        };
+
         let result = js.execute(script).await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
         result.get_graphql_result()
