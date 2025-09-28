@@ -408,8 +408,12 @@ impl AgentService {
     /// Store agent profile for a specific user
     pub fn store_user_agent_profile(user_email: &str, agent: &Agent) -> Result<(), AnyError> {
         // Create user-specific profile directory
-        let app_data_path = std::env::var("APP_DATA_PATH")
-            .unwrap_or_else(|_| std::env::current_dir().unwrap().to_string_lossy().to_string());
+        let app_data_path = std::env::var("APP_DATA_PATH").unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        });
         let user_profile_dir = format!("{}/ad4m/users/{}", app_data_path, user_email);
         std::fs::create_dir_all(&user_profile_dir)?;
 
@@ -423,8 +427,12 @@ impl AgentService {
 
     /// Load agent profile for a specific user
     pub fn load_user_agent_profile(user_email: &str) -> Result<Option<Agent>, AnyError> {
-        let app_data_path = std::env::var("APP_DATA_PATH")
-            .unwrap_or_else(|_| std::env::current_dir().unwrap().to_string_lossy().to_string());
+        let app_data_path = std::env::var("APP_DATA_PATH").unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        });
         let profile_path = format!("{}/ad4m/users/{}/profile.json", app_data_path, user_email);
 
         if !std::path::Path::new(&profile_path).exists() {

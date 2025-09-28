@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 use super::graphql_types::*;
-use crate::agent::{capabilities::*, signatures, AgentContext, did_document_for_context};
+use crate::agent::{capabilities::*, did_document_for_context, signatures, AgentContext};
 use crate::ai_service::AIService;
 use crate::types::{AITask, ModelType};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
@@ -58,7 +58,7 @@ impl Query {
                     did: agent_data.did,
                     direct_message_language: None,
                     perspective: Some(Perspective { links: vec![] }),
-                }
+                },
             };
 
             return Ok(agent);
@@ -153,13 +153,19 @@ impl Query {
             // Generate DID document for user
             let agent_context = AgentContext::for_user_email(user_email);
             let did_document = did_document_for_context(&agent_context).map_err(|e| {
-                FieldError::new(format!("Failed to get DID document for user: {}", e), Value::null())
+                FieldError::new(
+                    format!("Failed to get DID document for user: {}", e),
+                    Value::null(),
+                )
             })?;
 
             return Ok(AgentStatus {
                 did: Some(agent_data.did),
                 did_document: Some(serde_json::to_string(&did_document).map_err(|e| {
-                    FieldError::new(format!("Failed to serialize DID document: {}", e), Value::null())
+                    FieldError::new(
+                        format!("Failed to serialize DID document: {}", e),
+                        Value::null(),
+                    )
                 })?),
                 error: None,
                 is_initialized: true,

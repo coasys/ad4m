@@ -9,7 +9,9 @@ use crate::{
         perspective_instance::{PerspectiveInstance, SdnaType},
         remove_perspective, update_perspective, SerializedPerspective,
     },
-    types::{AITask, DecoratedLinkExpression, DecoratedExpressionProof, Link, LinkExpression, ModelType},
+    types::{
+        AITask, DecoratedExpressionProof, DecoratedLinkExpression, Link, LinkExpression, ModelType,
+    },
 };
 use crate::{
     db::Ad4mDb,
@@ -381,7 +383,9 @@ impl Mutation {
             })?;
 
             // Convert LinkExpressionInput to DecoratedLinkExpression
-            let decorated_links: Vec<DecoratedLinkExpression> = perspective.links.iter()
+            let decorated_links: Vec<DecoratedLinkExpression> = perspective
+                .links
+                .iter()
                 .map(|link_input| DecoratedLinkExpression::try_from(link_input.clone()))
                 .collect::<Result<Vec<_>, _>>()?;
 
@@ -396,7 +400,10 @@ impl Mutation {
 
             // Store the updated profile for the user
             AgentService::store_user_agent_profile(&user_email, &agent).map_err(|e| {
-                FieldError::new(format!("Failed to store user profile: {}", e), Value::null())
+                FieldError::new(
+                    format!("Failed to store user profile: {}", e),
+                    Value::null(),
+                )
             })?;
 
             Ok(agent)
