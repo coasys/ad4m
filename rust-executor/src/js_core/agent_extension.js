@@ -1,7 +1,8 @@
 import {
     agent_did_document, agent_signing_key_id, agent_did, agent_create_signed_expression, agent_sign,
     agent_sign_string_hex, agent_load, agent, agent_is_initialized, agent_is_unlocked, agent_unlock,
-    agent_lock, agent_create_signed_expression_stringified, save_agent_profile
+    agent_lock, agent_create_signed_expression_stringified, agent_create_signed_expression_for_user, 
+    agent_did_for_user, agent_agent_for_user, save_agent_profile
 } from 'ext:core/ops';
 
 ((globalThis) => {
@@ -61,6 +62,15 @@ import {
         },
         save_agent_profile: (profile) => {
             return save_agent_profile(profile);
+        },
+        createSignedExpressionForUser: (userEmail, data) => {
+            return agent_create_signed_expression_for_user(userEmail, data);
+        },
+        didForUser: (userEmail) => {
+            return agent_did_for_user(userEmail);
+        },
+        agentForUser: (userEmail) => {
+            return agent_agent_for_user(userEmail);
         }
     };
 })(globalThis);

@@ -425,6 +425,62 @@ impl AgentService {
         Ok(())
     }
 
+    /// Publish agent to the agent language (decentralized storage)
+    pub async fn publish_user_agent_to_language(user_email: &str, agent: &Agent, js_handle: &mut crate::js_core::JsCoreHandle) -> Result<(), AnyError> {
+        // Create a context-aware agent service that can sign with the user's key
+        // We need to inject this into the language context temporarily
+        let agent_json = serde_json::to_string(agent)?;
+        
+        let script = format!(
+            r#"
+            (async () => {{
+                // Get the agent language
+                const agentLanguage = core.languageController.getAgentLanguage();
+                if (!agentLanguage || !agentLanguage.expressionAdapter) {{
+                    throw new Error("Agent language not available");
+                }}
+                
+                const userAgent = {};
+                
+                // Set the agent service context to this user temporarily
+                // The agent language uses the same agent service instance from core
+                const originalContext = core.agentService.getUserContext();
+                core.agentService.setUserContext("{}");
+                
+                try {{
+                    // Get the putAdapter like in storeAgentProfile()
+                    const putAdapter = agentLanguage.expressionAdapter.putAdapter;
+                    if (!putAdapter) {{
+                        throw new Error("No putAdapter found in agent language");
+                    }}
+                    
+                    // Now call createPublic - the agent service will return the user's DID and sign with user's key
+                    await putAdapter.createPublic(userAgent);
+                    
+                    return "success";
+                }} finally {{
+                    // Restore the original context
+                    core.agentService.setUserContext(originalContext);
+                }}
+            }})()
+            "#,
+            agent_json, user_email
+        );
+        
+        let result = js_handle.execute(script).await;
+        
+        match result {
+            Ok(_) => {
+                log::info!("Successfully published agent {} to agent language", agent.did);
+                Ok(())
+            }
+            Err(e) => {
+                log::error!("Failed to publish agent {} to agent language: {}", agent.did, e);
+                Err(anyhow!("Failed to publish agent to language: {}", e))
+            }
+        }
+    }
+
     /// Load agent profile for a specific user
     pub fn load_user_agent_profile(user_email: &str) -> Result<Option<Agent>, AnyError> {
         let app_data_path = std::env::var("APP_DATA_PATH").unwrap_or_else(|_| {
@@ -557,9 +613,13 @@ impl AgentService {
     }
 
     pub fn dump(&self) -> AgentStatus {
+        let did_document_str = self.did_document.as_ref().map(|doc| {
+            serde_json::to_string(doc).unwrap_or_default()
+        });
+
         AgentStatus {
             did: self.did.clone(),
-            did_document: self.did_document.clone(),
+            did_document: did_document_str,
             is_initialized: self.is_initialized(),
             is_unlocked: self.is_unlocked(),
             error: None,

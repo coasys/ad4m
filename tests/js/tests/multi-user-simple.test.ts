@@ -587,6 +587,63 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("✅ Agent profile privacy is maintained between users");
         });
+
+        it("should publish managed users to the agent language", async () => {
+            // Create two users
+            const user1Result = await adminAd4mClient!.agent.createUser("agentlang1@example.com", "password1");
+            const user2Result = await adminAd4mClient!.agent.createUser("agentlang2@example.com", "password2");
+
+            // Login both users to trigger any agent language publishing
+            const token1 = await adminAd4mClient!.agent.loginUser("agentlang1@example.com", "password1");
+            const token2 = await adminAd4mClient!.agent.loginUser("agentlang2@example.com", "password2");
+
+            // @ts-ignore - Suppress Apollo type mismatch
+            const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
+            // @ts-ignore - Suppress Apollo type mismatch  
+            const client2 = new Ad4mClient(apolloClient(gqlPort, token2), false);
+
+            // Get the DIDs for both users
+            const user1Agent = await client1.agent.me();
+            const user2Agent = await client2.agent.me();
+
+            console.log("User 1 DID:", user1Agent.did);
+            console.log("User 2 DID:", user2Agent.did);
+
+            // Wait a moment for the agents to be fully published
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            // Try to retrieve the users from the agent language by their DIDs
+            // This should work if they were properly published to the agent language
+            try {
+                console.log("Attempting to retrieve user 1 with DID:", user1Agent.did);
+                const retrievedUser1 = await adminAd4mClient!.agent.byDID(user1Agent.did);
+                console.log("Retrieved user 1:", retrievedUser1);
+                
+                console.log("Attempting to retrieve user 2 with DID:", user2Agent.did);
+                const retrievedUser2 = await adminAd4mClient!.agent.byDID(user2Agent.did);
+                console.log("Retrieved user 2:", retrievedUser2);
+
+                expect(retrievedUser1).to.not.be.null;
+                expect(retrievedUser2).to.not.be.null;
+
+                // The retrieved agents should have the correct DIDs
+                if (retrievedUser1) {
+                    expect(retrievedUser1.did).to.equal(user1Agent.did);
+                    console.log("✅ User 1 successfully retrieved from agent language");
+                }
+
+                if (retrievedUser2) {
+                    expect(retrievedUser2.did).to.equal(user2Agent.did);
+                    console.log("✅ User 2 successfully retrieved from agent language");
+                }
+
+                console.log("✅ Managed users are properly published to agent language");
+            } catch (error) {
+                console.log("❌ Failed to retrieve users from agent language:", error);
+                // For now, we expect this to fail until we implement the functionality
+                expect.fail("Managed users are not being published to the agent language - this needs to be implemented");
+            }
+        });
     });
 })
 

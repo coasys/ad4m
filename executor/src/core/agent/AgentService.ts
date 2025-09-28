@@ -15,9 +15,20 @@ import { getPubSub, tagExpressionSignatureStatus } from "../utils";
 export default class AgentService {
   #agentLanguage?: Language;
   #pubSub: PubSub;
+  #currentUserContext?: string; // Email of the current user context
 
   constructor(rootConfigPath: string, adminCredential?: string) {
     this.#pubSub = getPubSub();
+  }
+
+  // Set the current user context for this AgentService instance
+  setUserContext(userEmail?: string) {
+    this.#currentUserContext = userEmail;
+  }
+
+  // Get the current user context
+  getUserContext(): string | undefined {
+    return this.#currentUserContext;
   }
 
   getTaggedAgentCopy(): Agent {
@@ -33,14 +44,26 @@ export default class AgentService {
   }
 
   createSignedExpression(data: any): Expression {
+    if (this.#currentUserContext) {
+      // @ts-ignore - New function from Rust
+      return AGENT.createSignedExpressionForUser(this.#currentUserContext, data);
+    }
     return AGENT.createSignedExpression(data);
   }
 
   get did(): string {
+    if (this.#currentUserContext) {
+      // @ts-ignore - New function from Rust
+      return AGENT.didForUser(this.#currentUserContext);
+    }
     return AGENT.did();
   }
 
   get agent(): Agent {
+    if (this.#currentUserContext) {
+      // @ts-ignore - New function from Rust
+      return AGENT.agentForUser(this.#currentUserContext);
+    }
     return AGENT.agent();
   }
 

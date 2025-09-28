@@ -10,7 +10,7 @@ use crate::{
         remove_perspective, update_perspective, SerializedPerspective,
     },
     types::{
-        AITask, DecoratedExpressionProof, DecoratedLinkExpression, Link, LinkExpression, ModelType,
+        AITask, DecoratedLinkExpression, Link, LinkExpression, ModelType,
     },
 };
 use crate::{
@@ -406,6 +406,13 @@ impl Mutation {
                 )
             })?;
 
+            // Publish the updated agent to the agent language
+            let mut js_handle = context.js_handle.clone();
+            if let Err(e) = AgentService::publish_user_agent_to_language(&user_email, &agent, &mut js_handle).await {
+                log::warn!("Failed to publish updated user {} profile to agent language: {}", agent.did, e);
+                // Don't fail the profile update, just log the warning
+            }
+
             Ok(agent)
         } else {
             // Fallback to JS implementation for main agent
@@ -498,6 +505,25 @@ impl Mutation {
             db_ref.add_user(&user).map_err(|e| {
                 FieldError::new(format!("Failed to add user: {}", e), graphql_value!(null))
             })?;
+        }
+
+        // Create initial agent profile for the user
+        let initial_agent = Agent {
+            did: did.clone(),
+            direct_message_language: None,
+            perspective: Some(Perspective { links: vec![] }),
+        };
+
+        // Store the profile locally
+        AgentService::store_user_agent_profile(&email, &initial_agent).map_err(|e| {
+            FieldError::new(format!("Failed to store user profile: {}", e), Value::null())
+        })?;
+
+        // Publish the agent to the agent language
+        let mut js_handle = context.js_handle.clone();
+        if let Err(e) = AgentService::publish_user_agent_to_language(&email, &initial_agent, &mut js_handle).await {
+            log::warn!("Failed to publish user {} to agent language: {}", did, e);
+            // Don't fail the user creation, just log the warning
         }
 
         Ok(UserCreationResult {
