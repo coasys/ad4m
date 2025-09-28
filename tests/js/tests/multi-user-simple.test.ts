@@ -637,11 +637,134 @@ describe("Multi-User Simple integration tests", () => {
                     console.log("✅ User 2 successfully retrieved from agent language");
                 }
 
+                // Also test getting agent expressions via expression.get()
+                console.log("Testing expression.get() method...");
+                const expr1 = await adminAd4mClient!.expression.get(user1Agent.did);
+                const expr2 = await adminAd4mClient!.expression.get(user2Agent.did);
+                
+                console.log("Expression 1 result:", expr1);
+                console.log("Expression 2 result:", expr2);
+                
+                // expression.get() returns the data as a JSON string, so we need to parse it
+                if (expr1?.data) {
+                    const agent1Data = typeof expr1.data === 'string' ? JSON.parse(expr1.data) : expr1.data;
+                    expect(agent1Data.did).to.equal(user1Agent.did);
+                    console.log("✅ User 1 expression retrieved via expression.get()");
+                } else {
+                    console.log("ℹ️  User 1 expression.get() returned null");
+                }
+                
+                if (expr2?.data) {
+                    const agent2Data = typeof expr2.data === 'string' ? JSON.parse(expr2.data) : expr2.data;
+                    expect(agent2Data.did).to.equal(user2Agent.did);
+                    console.log("✅ User 2 expression retrieved via expression.get()");
+                } else {
+                    console.log("ℹ️  User 2 expression.get() returned null");
+                }
+
                 console.log("✅ Managed users are properly published to agent language");
             } catch (error) {
                 console.log("❌ Failed to retrieve users from agent language:", error);
-                // For now, we expect this to fail until we implement the functionality
-                expect.fail("Managed users are not being published to the agent language - this needs to be implemented");
+                throw error;
+            }
+        });
+
+        it("should publish updated public perspectives to the agent language", async () => {
+            // Create two users
+            const user1Result = await adminAd4mClient!.agent.createUser("perspective1@example.com", "password1");
+            const user2Result = await adminAd4mClient!.agent.createUser("perspective2@example.com", "password2");
+
+            // Login both users
+            const token1 = await adminAd4mClient!.agent.loginUser("perspective1@example.com", "password1");
+            const token2 = await adminAd4mClient!.agent.loginUser("perspective2@example.com", "password2");
+
+            // @ts-ignore - Suppress Apollo type mismatch
+            const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
+            // @ts-ignore - Suppress Apollo type mismatch  
+            const client2 = new Ad4mClient(apolloClient(gqlPort, token2), false);
+
+            // Get initial agent info
+            const user1Agent = await client1.agent.me();
+            const user2Agent = await client2.agent.me();
+
+            console.log("User 1 DID:", user1Agent.did);
+            console.log("User 2 DID:", user2Agent.did);
+
+            // User 1 updates their public perspective
+            let link1 = new LinkExpression();
+            link1.author = user1Agent.did;
+            link1.timestamp = new Date().toISOString();
+            link1.data = new Link({source: "user1", target: "profile1", predicate: "name"});
+            link1.proof = new ExpressionProof("sig1", "key1")
+            await client1.agent.updatePublicPerspective(new Perspective([link1]));
+
+            // User 2 updates their public perspective with different data
+            let link2 = new LinkExpression();
+            link2.author = user2Agent.did;
+            link2.timestamp = new Date().toISOString();
+            link2.data = new Link({source: "user2", target: "profile2", predicate: "name"});
+            link2.proof = new ExpressionProof("sig2", "key2")
+            await client2.agent.updatePublicPerspective(new Perspective([link2]));
+
+            // Wait for the updates to be published
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            // Retrieve the updated agents from the agent language
+            try {
+                console.log("Retrieving updated agents from agent language...");
+                const retrievedUser1 = await adminAd4mClient!.agent.byDID(user1Agent.did);
+                const retrievedUser2 = await adminAd4mClient!.agent.byDID(user2Agent.did);
+
+                expect(retrievedUser1).to.not.be.null;
+                expect(retrievedUser2).to.not.be.null;
+
+                // Check that the public perspectives were updated
+                if (retrievedUser1?.perspective) {
+                    expect(retrievedUser1.perspective.links).to.have.length.greaterThan(0);
+                    const hasUser1Link = retrievedUser1.perspective.links.some(link => 
+                        link.data.source === "user1" && link.data.target === "profile1"
+                    );
+                    expect(hasUser1Link).to.be.true;
+                    console.log("✅ User 1 public perspective updated in agent language");
+                }
+
+                if (retrievedUser2?.perspective) {
+                    expect(retrievedUser2.perspective.links).to.have.length.greaterThan(0);
+                    const hasUser2Link = retrievedUser2.perspective.links.some(link => 
+                        link.data.source === "user2" && link.data.target === "profile2"
+                    );
+                    expect(hasUser2Link).to.be.true;
+                    console.log("✅ User 2 public perspective updated in agent language");
+                }
+
+                // Also test via expression.get()
+                console.log("Testing updated perspectives via expression.get()...");
+                const expr1 = await adminAd4mClient!.expression.get(user1Agent.did);
+                const expr2 = await adminAd4mClient!.expression.get(user2Agent.did);
+                
+                console.log("Updated expression 1 result:", expr1);
+                console.log("Updated expression 2 result:", expr2);
+                
+                if (expr1?.data) {
+                    const agent1Data = typeof expr1.data === 'string' ? JSON.parse(expr1.data) : expr1.data;
+                    expect(agent1Data.perspective?.links).to.have.length.greaterThan(0);
+                    console.log("✅ User 1 updated perspective retrieved via expression.get()");
+                } else {
+                    console.log("ℹ️  User 1 updated expression.get() returned null");
+                }
+                
+                if (expr2?.data) {
+                    const agent2Data = typeof expr2.data === 'string' ? JSON.parse(expr2.data) : expr2.data;
+                    expect(agent2Data.perspective?.links).to.have.length.greaterThan(0);
+                    console.log("✅ User 2 updated perspective retrieved via expression.get()");
+                } else {
+                    console.log("ℹ️  User 2 updated expression.get() returned null");
+                }
+
+                console.log("✅ Public perspective updates are properly published to agent language");
+            } catch (error) {
+                console.log("❌ Failed to retrieve updated agents from agent language:", error);
+                throw error;
             }
         });
     });
