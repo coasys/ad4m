@@ -248,6 +248,18 @@ impl Ad4mDb {
             [],
         );
 
+        // Add owners column for multi-user neighbourhood support
+        let _ = conn.execute(
+            "ALTER TABLE perspective_handle ADD COLUMN owners TEXT DEFAULT '[]'",
+            [],
+        );
+
+        // Migrate existing owner_did values to owners array
+        let _ = conn.execute(
+            "UPDATE perspective_handle SET owners = json_array(owner_did) WHERE owner_did IS NOT NULL AND owners = '[]'",
+            [],
+        );
+
         Ok(Self { conn })
     }
 
@@ -656,8 +668,10 @@ impl Ad4mDb {
     }
 
     pub fn add_perspective(&self, perspective: &PerspectiveHandle) -> Ad4mDbResult<()> {
+        let owners_json = serde_json::to_string(&perspective.owners.clone().unwrap_or_default())?;
+        
         self.conn.execute(
-            "INSERT INTO perspective_handle (name, uuid, neighbourhood, shared_url, state, owner_did)
+            "INSERT INTO perspective_handle (name, uuid, neighbourhood, shared_url, state, owners)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 perspective.name,
@@ -668,7 +682,7 @@ impl Ad4mDb {
                     .and_then(|n| serde_json::to_string(n).ok()),
                 perspective.shared_url,
                 serde_json::to_string(&perspective.state)?,
-                perspective.owner_did,
+                owners_json,
             ],
         )?;
         Ok(())
@@ -676,11 +690,16 @@ impl Ad4mDb {
 
     pub fn _get_perspective(&self, uuid: &str) -> Ad4mDbResult<Option<PerspectiveHandle>> {
         let mut stmt = self.conn.prepare(
-            "SELECT name, uuid, neighbourhood, shared_url, state, owner_did FROM perspective_handle WHERE uuid = ?1",
+            "SELECT name, uuid, neighbourhood, shared_url, state, owners FROM perspective_handle WHERE uuid = ?1",
         )?;
 
         let found_perspective = stmt
             .query_map([uuid], |row| {
+                let owners_json: Option<String> = row.get(5)?;
+                let owners = owners_json
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .or_else(|| Some(Vec::new()));
+                    
                 Ok(PerspectiveHandle {
                     name: row.get(0)?,
                     uuid: row.get(1)?,
@@ -690,7 +709,7 @@ impl Ad4mDb {
                     shared_url: row.get(3)?,
                     state: serde_json::from_str(row.get::<usize, String>(4)?.as_str())
                         .expect("Could not deserialize perspective state from DB"),
-                    owner_did: row.get(5)?,
+                    owners,
                 })
             })?
             .map(|p| p.ok())
@@ -703,9 +722,14 @@ impl Ad4mDb {
 
     pub fn get_all_perspectives(&self) -> Ad4mDbResult<Vec<PerspectiveHandle>> {
         let mut stmt = self.conn.prepare(
-            "SELECT name, uuid, neighbourhood, shared_url, state, owner_did FROM perspective_handle",
+            "SELECT name, uuid, neighbourhood, shared_url, state, owners FROM perspective_handle",
         )?;
         let perspective_iter = stmt.query_map([], |row| {
+            let owners_json: Option<String> = row.get(5)?;
+            let owners = owners_json
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .or_else(|| Some(Vec::new()));
+                
             Ok(PerspectiveHandle {
                 name: row.get(0)?,
                 uuid: row.get(1)?,
@@ -715,7 +739,7 @@ impl Ad4mDb {
                 shared_url: row.get(3)?,
                 state: serde_json::from_str(row.get::<usize, String>(4)?.as_str())
                     .expect("Could not deserialize perspective state from DB"),
-                owner_did: row.get(5)?,
+                owners,
             })
         })?;
 
@@ -728,17 +752,58 @@ impl Ad4mDb {
     }
 
     pub fn update_perspective(&self, perspective: &PerspectiveHandle) -> Ad4mDbResult<()> {
+        let owners_json = serde_json::to_string(&perspective.owners.clone().unwrap_or_default())?;
+        
         self.conn.execute(
-            "UPDATE perspective_handle SET name = ?1, neighbourhood = ?2, shared_url = ?3, state = ?4 WHERE uuid = ?5",
+            "UPDATE perspective_handle SET name = ?1, neighbourhood = ?2, shared_url = ?3, state = ?4, owners = ?5 WHERE uuid = ?6",
             params![
                 perspective.name,
                 perspective.neighbourhood.as_ref().and_then(|n| serde_json::to_string(n).ok()),
                 perspective.shared_url,
                 serde_json::to_string(&perspective.state)?,
+                owners_json,
                 perspective.uuid,
             ],
         )?;
         Ok(())
+    }
+
+    pub fn add_owner_to_neighbourhood(&self, neighbourhood_url: &str, user_did: &str) -> Ad4mDbResult<()> {
+        // Get current owners
+        let current_owners: Vec<String> = self.conn
+            .prepare("SELECT owners FROM perspective_handle WHERE shared_url = ?1")?
+            .query_row([neighbourhood_url], |row| {
+                let owners_json: String = row.get(0)?;
+                Ok(serde_json::from_str(&owners_json).unwrap_or_default())
+            })
+            .unwrap_or_default();
+        
+        // Add new owner if not already present
+        let mut updated_owners = current_owners;
+        if !updated_owners.contains(&user_did.to_string()) {
+            updated_owners.push(user_did.to_string());
+        }
+        
+        // Update database
+        let owners_json = serde_json::to_string(&updated_owners)?;
+        self.conn.execute(
+            "UPDATE perspective_handle SET owners = ?1 WHERE shared_url = ?2",
+            params![owners_json, neighbourhood_url],
+        )?;
+        
+        Ok(())
+    }
+
+    pub fn get_neighbourhood_owners(&self, neighbourhood_url: &str) -> Ad4mDbResult<Vec<String>> {
+        let owners: Vec<String> = self.conn
+            .prepare("SELECT owners FROM perspective_handle WHERE shared_url = ?1")?
+            .query_row([neighbourhood_url], |row| {
+                let owners_json: String = row.get(0)?;
+                Ok(serde_json::from_str(&owners_json).unwrap_or_default())
+            })
+            .unwrap_or_default();
+        
+        Ok(owners)
     }
 
     pub fn remove_perspective(&self, uuid: &str) -> Ad4mDbResult<()> {
@@ -1622,14 +1687,14 @@ impl Ad4mDb {
                             .expect("to serialize PerspectiveState");
 
                             self.conn.execute(
-                                "INSERT INTO perspective_handle (uuid, name, neighbourhood, shared_url, state, owner_did) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                                "INSERT INTO perspective_handle (uuid, name, neighbourhood, shared_url, state, owners) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                                 params![
                                     perspective["uuid"].as_str().unwrap_or(Uuid::new_v4().to_string().as_str()),
                                     perspective["name"].as_str(),
                                     perspective.get("neighbourhood").and_then(|n| n.as_str()),
                                     perspective["shared_url"].as_str(),
                                     perspective["state"].as_str().unwrap_or(state.as_str()),
-                                    perspective.get("owner_did").and_then(|o| o.as_str())
+                                    serde_json::to_string(&Vec::<String>::new()).unwrap_or_else(|_| "[]".to_string())
                                 ],
                             )
                         };
@@ -2134,9 +2199,10 @@ impl Ad4mDb {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::graphql::graphql_types::{PerspectiveHandle, PerspectiveState};
     use crate::{
         graphql::graphql_types::{LocalModelInput, ModelApiInput, TokenizerSourceInput},
         types::{ExpressionProof, Link, LinkExpression, ModelApiType, ModelType},
@@ -2211,7 +2277,7 @@ mod tests {
             neighbourhood: None,
             shared_url: None,
             state: PerspectiveState::Private,
-            owner_did: None,
+            owners: None,
         };
         let perspective2 = PerspectiveHandle {
             uuid: Uuid::new_v4().to_string(),
@@ -2219,7 +2285,7 @@ mod tests {
             neighbourhood: Some(test_neighbourhood),
             shared_url: Some("test-shared-url".to_string()),
             state: PerspectiveState::Synced,
-            owner_did: None,
+            owners: None,
         };
 
         db.add_perspective(&perspective1).unwrap();
@@ -3249,5 +3315,53 @@ mod tests {
         }
 
         println!("✅ User password handling tests passed");
+    }
+
+    #[test]
+    fn test_neighbourhood_owners_management() {
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+        
+        // Create a neighbourhood perspective
+        let neighbourhood_url = "neighbourhood://test123";
+        let perspective = PerspectiveHandle {
+            uuid: Uuid::new_v4().to_string(),
+            name: Some("Test Neighbourhood".to_string()),
+            neighbourhood: None,
+            shared_url: Some(neighbourhood_url.to_string()),
+            state: PerspectiveState::Synced,
+            owners: Some(vec!["did:key:user1".to_string()]),
+        };
+        
+        // Add perspective to database
+        db.add_perspective(&perspective).unwrap();
+        
+        // Test adding owners
+        db.add_owner_to_neighbourhood(neighbourhood_url, "did:key:user2").unwrap();
+        db.add_owner_to_neighbourhood(neighbourhood_url, "did:key:user3").unwrap();
+        
+        // Test duplicate owner (should not add twice)
+        db.add_owner_to_neighbourhood(neighbourhood_url, "did:key:user2").unwrap();
+        
+        // Retrieve owners
+        let owners = db.get_neighbourhood_owners(neighbourhood_url).unwrap();
+        
+        // Verify owners
+        assert_eq!(owners.len(), 3);
+        assert!(owners.contains(&"did:key:user1".to_string()));
+        assert!(owners.contains(&"did:key:user2".to_string()));
+        assert!(owners.contains(&"did:key:user3".to_string()));
+        
+        // Test retrieving perspective with owners
+        let all_perspectives = db.get_all_perspectives().unwrap();
+        let retrieved_perspective = all_perspectives.iter()
+            .find(|p| p.shared_url.as_ref() == Some(&neighbourhood_url.to_string()))
+            .unwrap();
+        
+        assert_eq!(retrieved_perspective.get_owners().len(), 3);
+        assert!(retrieved_perspective.is_owned_by("did:key:user2"));
+        assert!(!retrieved_perspective.is_owned_by("did:key:user4"));
+        
+        println!("✅ Neighbourhood owners management tests passed");
     }
 }

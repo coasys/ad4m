@@ -1289,7 +1289,7 @@ impl PerspectiveInstance {
         let service = get_prolog_service().await;
         let persisted = self.persisted.lock().await;
         let uuid = persisted.uuid.clone();
-        let owner_did = persisted.owner_did.clone();
+        let owner_did = persisted.get_primary_owner();
         drop(persisted); // Release the lock early
 
         if !service.has_perspective_pool(uuid.clone()).await
@@ -1743,7 +1743,7 @@ impl PerspectiveInstance {
             let persisted_guard = self.persisted.lock().await;
             (
                 persisted_guard.uuid.clone(),
-                persisted_guard.owner_did.clone(),
+                persisted_guard.get_primary_owner(),
             )
         };
 
@@ -2939,7 +2939,7 @@ mod tests {
                 shared_url: None,
                 neighbourhood: None,
                 state: PerspectiveState::Private,
-                owner_did: None,
+                owners: None,
             },
             None,
         )

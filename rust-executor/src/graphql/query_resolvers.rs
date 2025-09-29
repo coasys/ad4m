@@ -19,24 +19,21 @@ pub struct Query;
 // Helper function to check if a user can access a perspective
 pub fn can_access_perspective(
     user_email: &Option<String>,
-    perspective_owner: &Option<String>,
+    perspective: &PerspectiveHandle,
 ) -> bool {
-    match (user_email, perspective_owner) {
-        // User context: only allow access to own perspectives
-        (Some(email), Some(owner_did)) => {
-            // Convert email to DID for comparison
+    match user_email {
+        Some(email) => {
+            // User context: check if user is in owners list
             if let Ok(user_did) = AgentService::get_user_did_by_email(email) {
-                user_did == *owner_did
+                perspective.is_owned_by(&user_did)
             } else {
-                false // Failed to get user DID
+                false
             }
         }
-        // Main agent context: allow access to unowned perspectives only
-        (None, None) => true,
-        // Main agent context: don't allow access to user-owned perspectives
-        (None, Some(_owner)) => false,
-        // User context: don't allow access to unowned perspectives (proper isolation)
-        (Some(_), None) => false,
+        None => {
+            // Main agent context: only access unowned perspectives
+            perspective.is_unowned()
+        }
     }
 }
 
@@ -397,7 +394,7 @@ impl Query {
             // Check if user has access to this perspective
             let user_email = user_email_from_token(context.auth_token.clone());
 
-            if can_access_perspective(&user_email, &handle.owner_did) {
+            if can_access_perspective(&user_email, &handle) {
                 Ok(Some(handle))
             } else {
                 Ok(None) // No access to this perspective
@@ -485,7 +482,7 @@ impl Query {
             let handle = p.persisted.lock().await.clone();
 
             // Filter perspectives based on ownership
-            if can_access_perspective(&user_email, &handle.owner_did) {
+            if can_access_perspective(&user_email, &handle) {
                 result.push(handle);
             }
         }
@@ -694,3 +691,4 @@ impl Query {
         }
     }
 }
+

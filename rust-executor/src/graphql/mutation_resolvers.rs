@@ -3,7 +3,7 @@
 use crate::{
     agent::{capabilities::*, create_signed_expression, AgentContext, AgentService},
     ai_service::AIService,
-    neighbourhoods::{self, install_neighbourhood},
+    neighbourhoods::{self, install_neighbourhood, install_neighbourhood_with_context},
     perspectives::{
         self, add_perspective, export_perspective, get_perspective, import_perspective,
         perspective_instance::{PerspectiveInstance, SdnaType},
@@ -43,7 +43,7 @@ fn get_perspective_with_access_control(
 
     // Check access to the perspective
     let handle = futures::executor::block_on(perspective.persisted.lock()).clone();
-    if !can_access_perspective(&user_email, &handle.owner_did) {
+    if !can_access_perspective(&user_email, &handle) {
         return Err(FieldError::new(
             "Access denied: You don't have permission to access this perspective",
             graphql_value!(null),
@@ -820,7 +820,8 @@ impl Mutation {
         url: String,
     ) -> FieldResult<PerspectiveHandle> {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
-        Ok(install_neighbourhood(url).await?)
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        Ok(install_neighbourhood_with_context(url, &agent_context).await?)
     }
 
     async fn neighbourhood_publish_from_perspective(

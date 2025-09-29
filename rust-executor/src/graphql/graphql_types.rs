@@ -480,10 +480,51 @@ pub struct PerspectiveHandle {
     pub state: PerspectiveState,
     #[graphql(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner_did: Option<String>,
+    pub owners: Option<Vec<String>>, // List of owner DIDs - supports both single and multi-user ownership
 }
 
 impl PerspectiveHandle {
+    /// Add a user DID to the owners list
+    pub fn add_owner(&mut self, user_did: &str) {
+        if self.owners.is_none() {
+            self.owners = Some(Vec::new());
+        }
+        
+        let owners = self.owners.as_mut().unwrap();
+        if !owners.contains(&user_did.to_string()) {
+            owners.push(user_did.to_string());
+        }
+    }
+    
+    /// Check if a user DID is in the owners list
+    pub fn is_owned_by(&self, user_did: &str) -> bool {
+        self.owners.as_ref()
+            .map(|owners| owners.contains(&user_did.to_string()))
+            .unwrap_or(false)
+    }
+    
+    /// Check if this perspective has no owners (unowned)
+    pub fn is_unowned(&self) -> bool {
+        self.owners.as_ref()
+            .map(|owners| owners.is_empty())
+            .unwrap_or(true)
+    }
+    
+    /// Get the primary owner (first owner in the list) for backward compatibility
+    pub fn get_primary_owner(&self) -> Option<String> {
+        self.owners.as_ref()?.first().cloned()
+    }
+    
+    /// Get all owners
+    pub fn get_owners(&self) -> Vec<String> {
+        self.owners.clone().unwrap_or_default()
+    }
+    
+    /// Check if this is a neighbourhood (shared perspective)
+    pub fn is_neighbourhood(&self) -> bool {
+        self.shared_url.is_some()
+    }
+
     pub fn new(
         uuid: String,
         name: Option<String>,
@@ -497,7 +538,7 @@ impl PerspectiveHandle {
             neighbourhood,
             shared_url,
             state,
-            owner_did: None,
+            owners: None,
         }
     }
 
@@ -508,7 +549,7 @@ impl PerspectiveHandle {
             neighbourhood: None,
             shared_url: None,
             state: PerspectiveState::Private,
-            owner_did: None,
+            owners: None,
         }
     }
 
@@ -519,7 +560,7 @@ impl PerspectiveHandle {
             neighbourhood: None,
             shared_url: None,
             state: PerspectiveState::Private,
-            owner_did: Some(owner_did),
+            owners: Some(vec![owner_did]), // Initialize with the owner
         }
     }
 }

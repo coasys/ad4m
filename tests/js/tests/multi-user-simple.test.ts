@@ -8,6 +8,7 @@ import { apolloClient, sleep, startExecutor } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
 import { LinkQuery } from "@coasys/ad4m";
+import { v4 as uuidv4 } from 'uuid';
 
 //@ts-ignore
 global.fetch = fetch
@@ -17,6 +18,7 @@ chai.use(chaiAsPromised);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 
 describe("Multi-User Simple integration tests", () => {
     const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
@@ -38,6 +40,7 @@ describe("Multi-User Simple integration tests", () => {
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
             gqlPort, hcAdminPort, hcAppPort, false);
 
+        // @ts-ignore - Suppress Apollo type mismatch
         adminAd4mClient = new Ad4mClient(apolloClient(gqlPort), false)
         
         // Generate initial admin agent (needed for JWT signing)
@@ -91,6 +94,7 @@ describe("Multi-User Simple integration tests", () => {
             const userToken = await adminAd4mClient!.agent.loginUser("charlie@example.com", "password789");
 
             // Create authenticated client
+            // @ts-ignore - Suppress Apollo type mismatch
             const userClient = new Ad4mClient(apolloClient(gqlPort, userToken), false);
             
             // Test agent.me
@@ -109,11 +113,13 @@ describe("Multi-User Simple integration tests", () => {
             
             // Login first time
             const token1 = await adminAd4mClient!.agent.loginUser("dave@example.com", "passwordABC");
+            // @ts-ignore - Suppress Apollo type mismatch
             const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
             const agent1 = await client1.agent.me();
 
             // Login second time
             const token2 = await adminAd4mClient!.agent.loginUser("dave@example.com", "passwordABC");
+            // @ts-ignore - Suppress Apollo type mismatch
             const client2 = new Ad4mClient(apolloClient(gqlPort, token2), false);
             const agent2 = await client2.agent.me();
 
@@ -193,6 +199,7 @@ describe("Multi-User Simple integration tests", () => {
             // Create a user and their perspective
             const userResult = await adminAd4mClient!.agent.createUser("mainisolation@example.com", "password");
             const userToken = await adminAd4mClient!.agent.loginUser("mainisolation@example.com", "password");
+            // @ts-ignore - Suppress Apollo type mismatch
             const userClient = new Ad4mClient(apolloClient(gqlPort, userToken), false);
             
             const userPerspective = await userClient.perspective.add("User Isolated Perspective");
@@ -829,6 +836,108 @@ describe("Multi-User Simple integration tests", () => {
             // The actual testing would need a custom language with interaction capabilities
             console.log("ℹ️  Expression interaction context test skipped - requires custom language with interactions");
             console.log("✅ Expression interaction context handling implemented");
+        });
+    });
+
+    describe("Multi-User Neighbourhood Sharing", () => {
+        it("should allow multiple local users to share the same neighbourhood", async () => {
+            // Create two users
+            const user1Result = await adminAd4mClient!.agent.createUser("nh1@example.com", "password1");
+            const user2Result = await adminAd4mClient!.agent.createUser("nh2@example.com", "password2");
+
+            // Login both users
+            const token1 = await adminAd4mClient!.agent.loginUser("nh1@example.com", "password1");
+            const token2 = await adminAd4mClient!.agent.loginUser("nh2@example.com", "password2");
+
+            // @ts-ignore - Suppress Apollo type mismatch
+            const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
+            // @ts-ignore - Suppress Apollo type mismatch  
+            const client2 = new Ad4mClient(apolloClient(gqlPort, token2), false);
+
+            // Get the DIDs for both users
+            const user1Agent = await client1.agent.me();
+            const user2Agent = await client2.agent.me();
+
+            console.log("User 1 DID:", user1Agent.did);
+            console.log("User 2 DID:", user2Agent.did);
+
+            // User 1 creates a perspective and shares it as a neighbourhood
+            const perspective1 = await client1.perspective.add("Shared Neighbourhood");
+            console.log("User 1 created perspective:", perspective1.uuid);
+
+            // Add some initial links to the perspective
+            const link1 = new Link({source: "user1", target: "data1", predicate: "test://created"});
+            await client1.perspective.addLink(perspective1.uuid, link1);
+
+            console.log("Cloning link language...");
+            const linkLanguage = await client1.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Multi-User Neighbourhood Sharing"}));
+            console.log("Link language cloned:", linkLanguage.address);
+
+            // Publish the neighbourhood using the centralized link language
+            console.log("Publishing neighbourhood...");
+            const neighbourhoodUrl = await client1.neighbourhood.publishFromPerspective(
+                perspective1.uuid,
+                linkLanguage.address,
+                new Perspective([])
+            );
+            console.log("User 1 published neighbourhood:", neighbourhoodUrl);
+
+            // Wait for neighbourhood to be fully set up
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            // User 2 joins the same neighbourhood
+            const joinResult = await client2.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            console.log("User 2 joined neighbourhood:", joinResult);
+            //console.log("User 2 joined neighbourhood uuid:", joinResult.uuid);
+
+            // Wait for neighbourhood sync
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            // Verify both users can see the shared perspective
+            const user1Perspectives = await client1.perspective.all();
+            const user2Perspectives = await client2.perspective.all();
+
+            const user1SharedPerspective = user1Perspectives.find(p => p.sharedUrl === neighbourhoodUrl);
+            const user2SharedPerspective = user2Perspectives.find(p => p.sharedUrl === neighbourhoodUrl);
+
+            console.log("User 1 perspectives:", user1Perspectives);
+            console.log("User 2 perspectives:", user2Perspectives);
+
+            expect(user1SharedPerspective).to.not.be.null;
+            expect(user2SharedPerspective).to.not.be.null;
+
+            console.log("✅ Both users can access the shared neighbourhood");
+
+            // User 2 adds a link to the shared perspective
+            const link2 = new Link({source: "user2", target: "data2", predicate: "test://added"});
+            await client2.perspective.addLink(user2SharedPerspective!.uuid, link2);
+
+            // Wait for sync
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            // User 1 should see User 2's link
+            const user1Links = await client1.perspective.queryLinks(user1SharedPerspective!.uuid, new LinkQuery({}));
+            const user2Links = await client2.perspective.queryLinks(user2SharedPerspective!.uuid, new LinkQuery({}));
+
+            console.log("User 1 sees links:", user1Links.length);
+            console.log("User 2 sees links:", user2Links.length);
+
+            // Both users should see both links
+            expect(user1Links.length).to.be.greaterThan(1);
+            expect(user2Links.length).to.be.greaterThan(1);
+
+            // Verify specific links exist
+            const user1SeesUser2Link = user1Links.some(l => 
+                l.data.source === "user2" && l.data.target === "data2"
+            );
+            const user2SeesUser1Link = user2Links.some(l => 
+                l.data.source === "user1" && l.data.target === "data1"
+            );
+
+            expect(user1SeesUser2Link).to.be.true;
+            expect(user2SeesUser1Link).to.be.true;
+
+            console.log("✅ Local neighbourhood sharing works correctly");
         });
     });
 })

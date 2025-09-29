@@ -2,6 +2,7 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use uuid::Uuid;
 
+use crate::agent::{AgentContext, did_for_context};
 use crate::graphql::graphql_types::{
     Neighbourhood, Perspective, PerspectiveHandle, PerspectiveState,
 };
@@ -48,12 +49,37 @@ pub async fn neighbourhood_publish_from_perspective(
 }
 
 pub async fn install_neighbourhood(url: String) -> Result<PerspectiveHandle, AnyError> {
+    install_neighbourhood_with_context(url, &crate::agent::AgentContext::main_agent()).await
+}
+
+pub async fn install_neighbourhood_with_context(url: String, context: &crate::agent::AgentContext) -> Result<PerspectiveHandle, AnyError> {
     let perspectives = all_perspectives();
 
+    // Check if neighbourhood already exists
     for p in perspectives.iter() {
-        let handle = p.persisted.lock().await;
+        let mut handle = p.persisted.lock().await.clone();
         if handle.shared_url == Some(url.clone()) {
-            return Err(anyhow!("Neighbourhood with URL {} already installed", url));
+            // Neighbourhood exists - add this user as owner if it's a user context
+            log::info!("Adding user {:?} to existing neighbourhood {}", context.user_email, url);
+            if let Some(user_email) = &context.user_email {
+                let user_did = crate::agent::AgentService::get_user_did_by_email(user_email)?;
+                
+                // Update database
+                crate::db::Ad4mDb::with_global_instance(|db| {
+                    db.add_owner_to_neighbourhood(&url, &user_did)
+                })?;
+                
+                // Add user to owners list
+                // Update in-memory handle
+                handle.add_owner(&user_did);
+                
+                update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
+                log::info!("Added user {} to existing neighbourhood {}", user_email, url);
+                return Ok(handle.clone());
+            } else {
+                // Main agent trying to join existing neighbourhood
+                return Ok(handle.clone());
+            }
         }
     }
 
@@ -85,13 +111,15 @@ pub async fn install_neighbourhood(url: String) -> Result<PerspectiveHandle, Any
         state
     );
 
+    let owner_did = did_for_context(context)?;
+
     let handle = PerspectiveHandle {
         uuid: Uuid::new_v4().to_string(),
         name: Some(url.clone()),
         shared_url: Some(url.clone()),
         neighbourhood: Some(neighbourhood),
         state,
-        owner_did: None, // Neighbourhood perspectives are not user-owned
+        owners: Some(vec![owner_did]), // Initialize owners list with creator
     };
     add_perspective(handle.clone(), Some(true))
         .await
