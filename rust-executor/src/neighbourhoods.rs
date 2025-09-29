@@ -78,6 +78,19 @@ pub async fn install_neighbourhood_with_context(url: String, context: &crate::ag
                 return Ok(handle.clone());
             } else {
                 // Main agent trying to join existing neighbourhood
+                // Add main agent to owners list for access control
+                let main_agent_did = crate::agent::did_for_context(context)?;
+                
+                // Update database
+                crate::db::Ad4mDb::with_global_instance(|db| {
+                    db.add_owner_to_neighbourhood(&url, &main_agent_did)
+                })?;
+                
+                // Add main agent to owners list in memory
+                handle.add_owner(&main_agent_did);
+                
+                update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
+                log::info!("Added main agent to existing neighbourhood {}", url);
                 return Ok(handle.clone());
             }
         }

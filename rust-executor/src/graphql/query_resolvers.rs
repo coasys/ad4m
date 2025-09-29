@@ -31,8 +31,19 @@ pub fn can_access_perspective(
             }
         }
         None => {
-            // Main agent context: only access unowned perspectives
-            perspective.is_unowned()
+            // Main agent context: access unowned perspectives OR perspectives owned by main agent
+            if perspective.is_unowned() {
+                true
+            } else {
+                // Check if the main agent owns this perspective
+                AgentService::with_global_instance(|agent_service| {
+                    if let Some(main_agent_did) = &agent_service.did {
+                        perspective.is_owned_by(main_agent_did)
+                    } else {
+                        false
+                    }
+                })
+            }
         }
     }
 }
