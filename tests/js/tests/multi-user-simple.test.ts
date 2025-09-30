@@ -1,5 +1,5 @@
 import path from "path";
-import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
+import { Ad4mClient, Ad4mModel, ExpressionProof, Link, LinkExpression, ModelOptions, Perspective, Property } from "@coasys/ad4m";
 import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
@@ -938,6 +938,111 @@ describe("Multi-User Simple integration tests", () => {
             expect(user2SeesUser1Link).to.be.true;
 
             console.log("✅ Local neighbourhood sharing works correctly");
+        });
+
+        it("should use separate prolog pools for different users in shared neighbourhood", async () => {
+            // Create two users
+            const user1Result = await adminAd4mClient!.agent.createUser("prolog1@example.com", "password1");
+            const user2Result = await adminAd4mClient!.agent.createUser("prolog2@example.com", "password2");
+
+            // Login both users
+            const token1 = await adminAd4mClient!.agent.loginUser("prolog1@example.com", "password1");
+            const token2 = await adminAd4mClient!.agent.loginUser("prolog2@example.com", "password2");
+
+            // @ts-ignore - Suppress Apollo type mismatch
+            const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
+            // @ts-ignore - Suppress Apollo type mismatch  
+            const client2 = new Ad4mClient(apolloClient(gqlPort, token2), false);
+
+            console.log("User 1 creates neighbourhood and adds initial SDNA...");
+
+            // User 1 creates a perspective and shares it as a neighbourhood
+            const perspective1 = await client1.perspective.add("Prolog Pool Test");
+
+            @ModelOptions({
+                name: "User1Model"
+            })
+            class User1Model extends Ad4mModel {
+                @Property({
+                    through: "test://user1-property",
+                    writable: true,
+                    initial: "test://user1-initial",
+                    resolveLanguage: "literal"
+                })
+                user1Property: string = "";
+            }
+
+
+            console.log("Ensuring User 1 model...");
+            await perspective1.ensureSDNASubjectClass(User1Model);
+            console.log("User 1 model ensured");
+
+            // Wait for SDNA to be processed
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            let user1Model = new User1Model(perspective1);
+            user1Model.user1Property = "User1 created this";
+            console.log("Saving User 1 model...");
+            await user1Model.save();
+            console.log("User 1 model saved");
+
+            console.log("User 1 neighbourhood setup complete, User 2 joining...");
+
+            // Clone link language and publish neighbourhood
+            const linkLanguage = await client1.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Prolog Pool Test"}));
+            const neighbourhoodUrl = await client1.neighbourhood.publishFromPerspective(
+                perspective1.uuid,
+                linkLanguage.address,
+                new Perspective([])
+            );
+
+            // User 2 joins the neighbourhood
+            const joinResult = await client2.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            const user2Perspectives = await client2.perspective.all();
+            const user2SharedPerspective = user2Perspectives.find(p => p.sharedUrl === neighbourhoodUrl);
+            expect(user2SharedPerspective).to.not.be.null;
+
+            console.log("User 2 joined, adding their own SDNA...");
+
+            @ModelOptions({
+                name: "User2Model"
+            })
+            class User2Model extends Ad4mModel {
+                @Property({
+                    through: "test://user2-property",
+                    writable: true,
+                    initial: "test://user2-initial",
+                    resolveLanguage: "literal"
+                })
+                user2Property: string = "";
+            }
+
+            console.log("Ensuring User 2 model...");
+            await user2SharedPerspective!.ensureSDNASubjectClass(User2Model);
+            console.log("User 2 model ensured");
+
+
+            // Wait for SDNA to be processed
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            let user2Model = new User2Model(user2SharedPerspective!);
+            user2Model.user2Property = "User2 created this";
+            console.log("Saving User 2 model...");
+            await user2Model.save();
+            console.log("User 2 model saved");
+
+            console.log("Testing prolog pool isolation...");
+
+            
+            let classesSeenByUser1 = await perspective1.subjectClasses()
+            console.log("User 1 sees classes:", classesSeenByUser1);
+            expect(classesSeenByUser1.length).to.equal(1);
+
+            let classesSeenByUser2 = await user2SharedPerspective!.subjectClasses()
+            console.log("User 2 sees classes:", classesSeenByUser2);
+            expect(classesSeenByUser2.length).to.equal(2);
+
+            console.log("✅ Prolog pool isolation working correctly - users have separate SDNA contexts");
         });
     });
 })

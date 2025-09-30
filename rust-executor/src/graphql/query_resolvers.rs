@@ -446,13 +446,14 @@ impl Query {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(prolog_resolution_to_string(
             get_perspective(&uuid)
                 .ok_or(FieldError::from(format!(
                     "No perspective found with uuid {}",
                     uuid
                 )))?
-                .prolog_query(query)
+                .prolog_query_with_context(query, &agent_context)
                 .await?,
         ))
     }

@@ -1342,9 +1342,10 @@ impl Mutation {
             })?;
 
         let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
         let result = perspective
-            .get_subject_data(subject_class, expression_address)
+            .get_subject_data(subject_class, expression_address, &agent_context)
             .await?;
         Ok(result)
     }

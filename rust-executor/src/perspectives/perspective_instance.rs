@@ -1354,6 +1354,20 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// Get the appropriate prolog pool ID for the given context
+    fn get_pool_id_for_context(&self, perspective_uuid: &str, context: &AgentContext) -> String {
+        match &context.user_email {
+            Some(user_email) => {
+                // User-specific pool: "uuid_user_email"
+                format!("{}_{}", perspective_uuid, user_email)
+            }
+            None => {
+                // Main agent pool: just the uuid
+                perspective_uuid.to_string()
+            }
+        }
+    }
+
     /// Common helper for executing prolog queries with configurable pool, lock, and executor
     async fn prolog_query_helper<F, Fut>(
         &self,
@@ -1425,11 +1439,32 @@ impl PerspectiveInstance {
     /// Executes a Prolog query against the perspective's main pool
     /// locks the prolog_update_mutex
     /// uses run_query_smart
-    pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
+    // pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
+    //     self.prolog_query_helper(
+    //         query,
+    //         true,
+    //         |uuid| uuid.clone(),
+    //         |service, pool, q| async move { service.run_query_smart(pool, q).await },
+    //     )
+    //     .await
+    // }
+
+    /// Executes a Prolog query with user context - uses context-specific pool
+    /// locks the prolog_update_mutex
+    /// uses run_query_smart
+    pub async fn prolog_query_with_context(&self, query: String, context: &AgentContext) -> Result<QueryResolution, AnyError> {
+        let perspective_uuid = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
+        
+        // Ensure the user-specific pool exists
+        self.ensure_prolog_engine_pool_for_context(context).await?;
+        
         self.prolog_query_helper(
             query,
             true,
-            |uuid| uuid.clone(),
+            |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
             |service, pool, q| async move { service.run_query_smart(pool, q).await },
         )
         .await
@@ -1451,6 +1486,28 @@ impl PerspectiveInstance {
         .await
     }
 
+    /// Executes a Prolog subscription query with user context - uses context-specific pool
+    /// locks the prolog_update_mutex
+    /// uses run_query_subscription
+    pub async fn prolog_query_subscription_with_context(
+        &self,
+        query: String,
+        context: &AgentContext,
+    ) -> Result<QueryResolution, AnyError> {
+        let perspective_uuid = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
+        
+        self.prolog_query_helper(
+            query,
+            true,
+            |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
+            |service, pool, q| async move { service.run_query_subscription(pool, q).await },
+        )
+        .await
+    }
+
     /// Executes a Prolog query directly on the SDNA pool for maximum performance
     ///
     /// This bypasses all smart routing logic and goes directly to the SDNA pool.
@@ -1467,6 +1524,67 @@ impl PerspectiveInstance {
             |service, pool, q| async move { service.run_query_sdna(pool, q).await },
         )
         .await
+    }
+
+    /// Executes a Prolog query directly on the SDNA pool with user context
+    /// This ensures the SDNA pool has the correct owner_did for SDNA fact filtering
+    ///
+    /// does not lock the prolog_update_mutex
+    /// uses run_query_sdna
+    pub async fn prolog_query_sdna_with_context(&self, query: String, context: &AgentContext) -> Result<QueryResolution, AnyError> {
+        let perspective_uuid = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
+        
+        // Ensure the user-specific pool exists
+        self.ensure_prolog_engine_pool_for_context(context).await?;
+        
+        self.prolog_query_helper(
+            query,
+            false,
+            |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
+            |service, pool, q| async move { service.run_query_sdna(pool, q).await },
+        )
+        .await
+    }
+
+    /// Ensure prolog engine pool exists for the given context with correct owner_did
+    pub async fn ensure_prolog_engine_pool_for_context(&self, context: &AgentContext) -> Result<(), AnyError> {
+        let (perspective_uuid, neighbourhood_author) = {
+            let persisted_guard = self.persisted.lock().await;
+            let neighbourhood_author = persisted_guard.neighbourhood.as_ref()
+                .map(|n| n.author.clone());
+            (persisted_guard.uuid.clone(), neighbourhood_author)
+        };
+        
+        let pool_id = self.get_pool_id_for_context(&perspective_uuid, context);
+        let owner_did = if let Some(user_email) = &context.user_email {
+            crate::agent::AgentService::get_user_did_by_email(user_email)?
+        } else {
+            crate::agent::AgentService::with_global_instance(|service| {
+                service.did.clone().unwrap_or_default()
+            })
+        };
+        
+        // Ensure pool exists
+        let service = get_prolog_service().await;
+        service.ensure_perspective_pool(pool_id.clone(), None).await?;
+        
+        // Initialize user pool with correct neighbourhood author for SDNA governance
+        // This ensures users can see SDNA from both themselves and the neighbourhood creator
+        let links = self.get_links(&crate::graphql::graphql_types::LinkQuery::default()).await?;
+        
+        
+        service.update_perspective_links(
+            pool_id, 
+            "facts".to_string(), // module_name
+            links, // already DecoratedLinkExpression
+            neighbourhood_author, // neighbourhood_author for SDNA governance
+            Some(owner_did), // owner_did for SDNA
+        ).await?;
+        
+        Ok(())
     }
 
     /// Executes a Prolog query against the notification pool
@@ -2040,6 +2158,7 @@ impl PerspectiveInstance {
     async fn subject_class_option_to_class_name(
         &mut self,
         subject_class: SubjectClassOption,
+        context: &AgentContext,
     ) -> Result<String, AnyError> {
         //let method_start = std::time::Instant::now();
         //log::info!("🔍 SUBJECT CLASS: Starting class name resolution...");
@@ -2056,7 +2175,7 @@ impl PerspectiveInstance {
             //let query_start = std::time::Instant::now();
 
             let result = self
-                .prolog_query_sdna(query.to_string())
+                .prolog_query_sdna_with_context(query.to_string(), context)
                 .await
                 .map_err(|e| {
                     log::error!("Error creating subject: {:?}", e);
@@ -2073,8 +2192,9 @@ impl PerspectiveInstance {
     async fn get_actions_from_prolog(
         &self,
         query: String,
+        context: &AgentContext,
     ) -> Result<Option<Vec<Command>>, AnyError> {
-        let result = self.prolog_query_sdna(query).await?;
+        let result = self.prolog_query_sdna_with_context(query, context).await?;
 
         if let Some(actions_str) = prolog_get_first_string_binding(&result, "Actions") {
             // json5 seems to have a bug, blocking when a property is set to undefined
@@ -2087,7 +2207,7 @@ impl PerspectiveInstance {
         }
     }
 
-    async fn get_constructor_actions(&self, class_name: &str) -> Result<Vec<Command>, AnyError> {
+    async fn get_constructor_actions(&self, class_name: &str, context: &AgentContext) -> Result<Vec<Command>, AnyError> {
         //let method_start = std::time::Instant::now();
         //log::info!("🏗️ CONSTRUCTOR: Getting constructor actions for class '{}'", class_name);
 
@@ -2102,7 +2222,7 @@ impl PerspectiveInstance {
         //log::info!("🏗️ CONSTRUCTOR: Prolog query completed in {:?} (total: {:?})",
         //    query_start.elapsed(), method_start.elapsed());
 
-        self.get_actions_from_prolog(query)
+        self.get_actions_from_prolog(query, context)
             .await?
             .ok_or(anyhow!("No constructor found for class: {}", class_name))
     }
@@ -2111,6 +2231,7 @@ impl PerspectiveInstance {
         &self,
         class_name: &str,
         property: &str,
+        context: &AgentContext,
     ) -> Result<Option<Vec<Command>>, AnyError> {
         //let method_start = std::time::Instant::now();
         //log::info!("🔧 PROPERTY SETTER: Getting setter for class '{}', property '{}'", class_name, property);
@@ -2126,7 +2247,7 @@ impl PerspectiveInstance {
         //log::info!("🔧 PROPERTY SETTER: Prolog query completed in {:?} (total: {:?})",
         //    query_start.elapsed(), method_start.elapsed());
 
-        self.get_actions_from_prolog(query).await
+        self.get_actions_from_prolog(query, context).await
     }
 
     async fn resolve_property_value(
@@ -2134,11 +2255,12 @@ impl PerspectiveInstance {
         class_name: &str,
         property: &str,
         value: &serde_json::Value,
+        context: &AgentContext,
     ) -> Result<String, AnyError> {
-        let resolve_result = self.prolog_query(format!(
+        let resolve_result = self.prolog_query_with_context(format!(
             r#"subject_class("{}", C), property_resolve(C, "{}"), property_resolve_language(C, "{}", Language)"#,
             class_name, property, property
-        )).await?;
+        ), context).await?;
 
         if let Some(resolve_language) = prolog_get_first_string_binding(&resolve_result, "Language")
         {
@@ -2179,12 +2301,12 @@ impl PerspectiveInstance {
 
         //let class_name_start = std::time::Instant::now();
         let class_name = self
-            .subject_class_option_to_class_name(subject_class)
+            .subject_class_option_to_class_name(subject_class, context)
             .await?;
         //log::info!("🎯 CREATE SUBJECT: Got class name '{}' in {:?}", class_name, class_name_start.elapsed());
 
         //let constructor_start = std::time::Instant::now();
-        let mut commands = self.get_constructor_actions(&class_name).await?;
+        let mut commands = self.get_constructor_actions(&class_name, context).await?;
         //log::info!("🎯 CREATE SUBJECT: Got {} constructor actions in {:?}",
         //    commands.len(), constructor_start.elapsed());
 
@@ -2196,10 +2318,10 @@ impl PerspectiveInstance {
                 for (prop, value) in obj.iter() {
                     //let prop_start = std::time::Instant::now();
                     if let Some(setter_commands) =
-                        self.get_property_setter_actions(&class_name, prop).await?
+                        self.get_property_setter_actions(&class_name, prop, context).await?
                     {
                         let target_value = self
-                            .resolve_property_value(&class_name, prop, value)
+                            .resolve_property_value(&class_name, prop, value, context)
                             .await?;
 
                         //log::info!("🎯 CREATE SUBJECT: Property '{}' setter resolved in {:?}",
@@ -2255,10 +2377,10 @@ impl PerspectiveInstance {
         let mut instance_check_passed = false;
         while !instance_check_passed && tries < 50 {
             match self
-                .prolog_query(format!(
+                .prolog_query_with_context(format!(
                     "subject_class(\"{}\", C), instance(C, \"{}\").",
-                    class_name, expression_address
-                ))
+                    class_name, expression_address,
+                ), context)
                 .await
             {
                 Ok(QueryResolution::True) => instance_check_passed = true,
@@ -2287,6 +2409,7 @@ impl PerspectiveInstance {
         &mut self,
         subject_class: SubjectClassOption,
         base_expression: String,
+        context: &AgentContext,
     ) -> Result<String, AnyError> {
         let mut object: HashMap<String, String> = HashMap::new();
 
@@ -2309,13 +2432,13 @@ impl PerspectiveInstance {
         );
 
         let class_name = self
-            .subject_class_option_to_class_name(subject_class)
+            .subject_class_option_to_class_name(subject_class, context)
             .await?;
         let result = self
-            .prolog_query(format!(
+            .prolog_query_with_context(format!(
                 "subject_class(\"{}\", C), instance(C, \"{}\").",
                 class_name, base_expression
-            ))
+            ), context)
             .await?;
 
         if let QueryResolution::False = result {
@@ -2332,28 +2455,28 @@ impl PerspectiveInstance {
         }
 
         let properties_result = self
-            .prolog_query(format!(
+            .prolog_query_with_context(format!(
                 r#"subject_class("{}", C), property(C, Property)."#,
                 class_name
-            ))
+            ), context)
             .await?;
         let properties: Vec<String> =
             prolog_get_all_string_bindings(&properties_result, "Property");
 
         for p in &properties {
             let property_values_result = self
-                .prolog_query(format!(
+                .prolog_query_with_context(format!(
                     r#"subject_class("{}", C), property_getter(C, "{}", "{}", Value)"#,
                     class_name, base_expression, p
-                ))
+                ), context)
                 .await?;
             if let Some(property_value) = prolog_get_first_binding(&property_values_result, "Value")
             {
                 let result = self
-                    .prolog_query(format!(
+                    .prolog_query_with_context(format!(
                         r#"subject_class("{}", C), property_resolve(C, "{}")"#,
                         class_name, p
-                    ))
+                    ), context)
                     .await?;
                 //println!("resolve query result for {}: {:?}", p, result);
                 let resolve_expression_uri = QueryResolution::False != result;
@@ -2400,20 +2523,20 @@ impl PerspectiveInstance {
         }
 
         let collections_results = self
-            .prolog_query(format!(
+            .prolog_query_with_context(format!(
                 r#"subject_class("{}", C), collection(C, Collection)"#,
                 class_name
-            ))
+            ), context)
             .await?;
         let collections: Vec<String> =
             prolog_get_all_string_bindings(&collections_results, "Collection");
 
         for c in collections {
             let collection_values_result = self
-                .prolog_query(format!(
+                .prolog_query_with_context(format!(
                     r#"subject_class("{}", C), collection_getter(C, "{}", "{}", Value)"#,
                     class_name, base_expression, c
-                ))
+                ), context)
                 .await?;
             if let Some(collection_value) =
                 prolog_get_first_binding(&collection_values_result, "Value")
@@ -2951,6 +3074,33 @@ mod tests {
             target: format!("https://{}.org", Faker.fake::<String>()),
             predicate: Some(format!("https://{}.net", Faker.fake::<String>())),
         }
+    }
+
+    #[tokio::test]
+    async fn test_context_aware_prolog_pools() {
+        let perspective = setup();
+        
+        // Test main agent context
+        let main_context = crate::agent::AgentContext::main_agent();
+        let main_pool_id = perspective.get_pool_id_for_context("test-uuid", &main_context);
+        assert_eq!(main_pool_id, "test-uuid");
+        
+        // Test user context
+        let user_context = crate::agent::AgentContext::for_user_email("test@example.com".to_string());
+        let user_pool_id = perspective.get_pool_id_for_context("test-uuid", &user_context);
+        assert_eq!(user_pool_id, "test-uuid_test@example.com");
+        
+        // Test different users get different pools
+        let user2_context = crate::agent::AgentContext::for_user_email("test2@example.com".to_string());
+        let user2_pool_id = perspective.get_pool_id_for_context("test-uuid", &user2_context);
+        assert_eq!(user2_pool_id, "test-uuid_test2@example.com");
+        
+        // Verify they're all different
+        assert_ne!(main_pool_id, user_pool_id);
+        assert_ne!(user_pool_id, user2_pool_id);
+        assert_ne!(main_pool_id, user2_pool_id);
+        
+        println!("✅ Context-aware prolog pool selection tests passed");
     }
 
     #[tokio::test]
