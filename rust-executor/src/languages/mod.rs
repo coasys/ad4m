@@ -57,23 +57,52 @@ impl LanguageController {
     }
 
     pub async fn create_neighbourhood(neighbourhood: Neighbourhood) -> Result<Address, AnyError> {
+        Self::create_neighbourhood_with_context(neighbourhood, &crate::agent::AgentContext::main_agent()).await
+    }
+
+    pub async fn create_neighbourhood_with_context(neighbourhood: Neighbourhood, context: &crate::agent::AgentContext) -> Result<Address, AnyError> {
         Self::global_instance()
             .js_core
             .execute("await core.waitForLanguages()".into())
             .await?;
 
         let neighbourhood_json = serde_json::to_string(&neighbourhood)?;
-        let script = format!(
-            r#"
-            await core
-                    .languageController
-                    .getNeighbourhoodLanguage()
-                    .expressionAdapter
-                    .putAdapter
-                    .createPublic({})
-            "#,
-            neighbourhood_json,
-        );
+        
+        // Set user context for neighbourhood creation if it's a managed user
+        let script = if let Some(user_email) = &context.user_email {
+            format!(
+                r#"
+                (async () => {{
+                    const originalContext = core.agentService.getUserContext();
+                    core.agentService.setUserContext("{}");
+                    try {{
+                        return await core
+                                .languageController
+                                .getNeighbourhoodLanguage()
+                                .expressionAdapter
+                                .putAdapter
+                                .createPublic({});
+                    }} finally {{
+                        core.agentService.setUserContext(originalContext);
+                    }}
+                }})()
+                "#,
+                user_email, neighbourhood_json,
+            )
+        } else {
+            format!(
+                r#"
+                await core
+                        .languageController
+                        .getNeighbourhoodLanguage()
+                        .expressionAdapter
+                        .putAdapter
+                        .createPublic({})
+                "#,
+                neighbourhood_json,
+            )
+        };
+        
         let result: String = Self::global_instance().js_core.execute(script).await?;
         Ok(result)
     }

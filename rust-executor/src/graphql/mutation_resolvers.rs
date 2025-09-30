@@ -832,10 +832,12 @@ impl Mutation {
         #[allow(non_snake_case)] perspectiveUUID: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_CREATE_CAPABILITY)?;
-        let url = neighbourhoods::neighbourhood_publish_from_perspective(
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        let url = neighbourhoods::neighbourhood_publish_from_perspective_with_context(
             &perspectiveUUID,
             link_language,
             meta.into(),
+            &agent_context,
         )
         .await?;
 

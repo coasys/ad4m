@@ -15,6 +15,15 @@ pub async fn neighbourhood_publish_from_perspective(
     link_language: String,
     meta: Perspective,
 ) -> Result<String, AnyError> {
+    neighbourhood_publish_from_perspective_with_context(uuid, link_language, meta, &AgentContext::main_agent()).await
+}
+
+pub async fn neighbourhood_publish_from_perspective_with_context(
+    uuid: &str,
+    link_language: String,
+    meta: Perspective,
+    context: &AgentContext,
+) -> Result<String, AnyError> {
     let perspective = get_perspective(uuid).ok_or(anyhow!("Perspective not found"))?;
 
     LanguageController::install_language(link_language.clone()).await?;
@@ -24,8 +33,8 @@ pub async fn neighbourhood_publish_from_perspective(
         meta,
     };
 
-    // Create neighbourhood
-    let neighbourhood_address = LanguageController::create_neighbourhood(neighbourhood).await?;
+    // Create neighbourhood with context
+    let neighbourhood_address = LanguageController::create_neighbourhood_with_context(neighbourhood, context).await?;
 
     let neighbourhood_url = format!("neighbourhood://{}", neighbourhood_address);
     let neighbourhood_exp = LanguageController::get_neighbourhood(neighbourhood_address)
