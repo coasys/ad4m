@@ -2,7 +2,7 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use uuid::Uuid;
 
-use crate::agent::{AgentContext, did_for_context};
+use crate::agent::{did_for_context, AgentContext};
 use crate::graphql::graphql_types::{
     Neighbourhood, Perspective, PerspectiveHandle, PerspectiveState,
 };
@@ -15,7 +15,13 @@ pub async fn neighbourhood_publish_from_perspective(
     link_language: String,
     meta: Perspective,
 ) -> Result<String, AnyError> {
-    neighbourhood_publish_from_perspective_with_context(uuid, link_language, meta, &AgentContext::main_agent()).await
+    neighbourhood_publish_from_perspective_with_context(
+        uuid,
+        link_language,
+        meta,
+        &AgentContext::main_agent(),
+    )
+    .await
 }
 
 pub async fn neighbourhood_publish_from_perspective_with_context(
@@ -34,7 +40,8 @@ pub async fn neighbourhood_publish_from_perspective_with_context(
     };
 
     // Create neighbourhood with context
-    let neighbourhood_address = LanguageController::create_neighbourhood_with_context(neighbourhood, context).await?;
+    let neighbourhood_address =
+        LanguageController::create_neighbourhood_with_context(neighbourhood, context).await?;
 
     let neighbourhood_url = format!("neighbourhood://{}", neighbourhood_address);
     let neighbourhood_exp = LanguageController::get_neighbourhood(neighbourhood_address)
@@ -61,7 +68,10 @@ pub async fn install_neighbourhood(url: String) -> Result<PerspectiveHandle, Any
     install_neighbourhood_with_context(url, &crate::agent::AgentContext::main_agent()).await
 }
 
-pub async fn install_neighbourhood_with_context(url: String, context: &crate::agent::AgentContext) -> Result<PerspectiveHandle, AnyError> {
+pub async fn install_neighbourhood_with_context(
+    url: String,
+    context: &crate::agent::AgentContext,
+) -> Result<PerspectiveHandle, AnyError> {
     let perspectives = all_perspectives();
 
     // Check if neighbourhood already exists
@@ -69,35 +79,43 @@ pub async fn install_neighbourhood_with_context(url: String, context: &crate::ag
         let mut handle = p.persisted.lock().await.clone();
         if handle.shared_url == Some(url.clone()) {
             // Neighbourhood exists - add this user as owner if it's a user context
-            log::info!("Adding user {:?} to existing neighbourhood {}", context.user_email, url);
+            log::info!(
+                "Adding user {:?} to existing neighbourhood {}",
+                context.user_email,
+                url
+            );
             if let Some(user_email) = &context.user_email {
                 let user_did = crate::agent::AgentService::get_user_did_by_email(user_email)?;
-                
+
                 // Update database
                 crate::db::Ad4mDb::with_global_instance(|db| {
                     db.add_owner_to_neighbourhood(&url, &user_did)
                 })?;
-                
+
                 // Add user to owners list
                 // Update in-memory handle
                 handle.add_owner(&user_did);
-                
+
                 update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
-                log::info!("Added user {} to existing neighbourhood {}", user_email, url);
+                log::info!(
+                    "Added user {} to existing neighbourhood {}",
+                    user_email,
+                    url
+                );
                 return Ok(handle.clone());
             } else {
                 // Main agent trying to join existing neighbourhood
                 // Add main agent to owners list for access control
                 let main_agent_did = crate::agent::did_for_context(context)?;
-                
+
                 // Update database
                 crate::db::Ad4mDb::with_global_instance(|db| {
                     db.add_owner_to_neighbourhood(&url, &main_agent_did)
                 })?;
-                
+
                 // Add main agent to owners list in memory
                 handle.add_owner(&main_agent_did);
-                
+
                 update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
                 log::info!("Added main agent to existing neighbourhood {}", url);
                 return Ok(handle.clone());

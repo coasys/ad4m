@@ -95,7 +95,7 @@ impl Subscription {
                 let topic = &NEIGHBOURHOOD_SIGNAL_TOPIC;
 
                 // Get the agent DID from the context to filter signals by recipient
-                use crate::agent::{AgentContext, did_for_context};
+                use crate::agent::{did_for_context, AgentContext};
                 let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
                 let agent_did = did_for_context(&agent_context).ok();
 

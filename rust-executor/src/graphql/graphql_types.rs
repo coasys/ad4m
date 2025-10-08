@@ -489,37 +489,39 @@ impl PerspectiveHandle {
         if self.owners.is_none() {
             self.owners = Some(Vec::new());
         }
-        
+
         let owners = self.owners.as_mut().unwrap();
         if !owners.contains(&user_did.to_string()) {
             owners.push(user_did.to_string());
         }
     }
-    
+
     /// Check if a user DID is in the owners list
     pub fn is_owned_by(&self, user_did: &str) -> bool {
-        self.owners.as_ref()
+        self.owners
+            .as_ref()
             .map(|owners| owners.contains(&user_did.to_string()))
             .unwrap_or(false)
     }
-    
+
     /// Check if this perspective has no owners (unowned)
     pub fn is_unowned(&self) -> bool {
-        self.owners.as_ref()
+        self.owners
+            .as_ref()
             .map(|owners| owners.is_empty())
             .unwrap_or(true)
     }
-    
+
     /// Get the primary owner (first owner in the list) for backward compatibility
     pub fn get_primary_owner(&self) -> Option<String> {
         self.owners.as_ref()?.first().cloned()
     }
-    
+
     /// Get all owners
     pub fn get_owners(&self) -> Vec<String> {
         self.owners.clone().unwrap_or_default()
     }
-    
+
     /// Check if this is a neighbourhood (shared perspective)
     pub fn is_neighbourhood(&self) -> bool {
         self.shared_url.is_some()
