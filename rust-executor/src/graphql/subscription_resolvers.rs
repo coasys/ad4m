@@ -93,10 +93,23 @@ impl Subscription {
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &NEIGHBOURHOOD_SIGNAL_TOPIC;
+
+                // Get the agent DID from the context to filter signals by recipient
+                use crate::agent::{AgentContext, did_for_context};
+                let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+                let agent_did = did_for_context(&agent_context).ok();
+
+                // Create composite filter: perspective_uuid|agent_did
+                let filter = if let Some(did) = agent_did {
+                    Some(format!("{}|{}", perspectiveUUID, did))
+                } else {
+                    Some(perspectiveUUID)
+                };
+
                 subscribe_and_process::<NeighbourhoodSignalFilter>(
                     pubsub,
                     topic.to_string(),
-                    Some(perspectiveUUID),
+                    filter,
                 )
                 .await
             }

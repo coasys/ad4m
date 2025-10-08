@@ -689,6 +689,14 @@ impl PerspectiveInstance {
     pub async fn telepresence_signal_from_link_language(&self, mut signal: PerspectiveExpression) {
         signal.verify_signatures();
         let handle = self.persisted.lock().await.clone();
+
+        // Determine the recipient - it's the owner of this perspective instance
+        let recipient = if let Some(owners) = &handle.owners {
+            owners.first().cloned()
+        } else {
+            None
+        };
+
         get_global_pubsub()
             .await
             .publish(
@@ -696,6 +704,7 @@ impl PerspectiveInstance {
                 &serde_json::to_string(&NeighbourhoodSignalFilter {
                     perspective: handle,
                     signal,
+                    recipient,
                 })
                 .unwrap(),
             )
@@ -1967,6 +1976,56 @@ impl PerspectiveInstance {
         remote_agent_did: String,
         payload: PerspectiveExpression,
     ) -> Result<(), AnyError> {
+        // Check if the recipient is a locally managed user
+        use crate::agent::AgentService;
+
+        let current_perspective_handle = self.persisted.lock().await.clone();
+
+        // Check if this perspective is part of a neighbourhood
+        if current_perspective_handle.shared_url.is_some() {
+            // Get all local user emails
+            if let Ok(user_emails) = AgentService::list_user_emails() {
+                // Check if any local user has the recipient DID
+                for user_email in user_emails {
+                    if let Ok(user_did) = AgentService::get_user_did_by_email(&user_email) {
+                        if user_did == remote_agent_did {
+                            // This is a locally managed user!
+                            // Check if they own a perspective for this neighbourhood
+                            if let Some(owners) = &current_perspective_handle.owners {
+                                if owners.contains(&remote_agent_did) {
+                                    // The recipient owns this perspective (they're in the same neighbourhood)
+                                    // Send signal directly via local pubsub
+                                    log::info!("Routing signal locally to user {} in neighbourhood {:?}",
+                                        user_email, current_perspective_handle.shared_url);
+
+                                    let handle = self.persisted.lock().await.clone();
+                                    let mut signal = payload.clone();
+                                    signal.verify_signatures();
+
+                                    get_global_pubsub()
+                                        .await
+                                        .publish(
+                                            &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                                            &serde_json::to_string(&NeighbourhoodSignalFilter {
+                                                perspective: handle,
+                                                signal,
+                                                recipient: Some(remote_agent_did.clone()),
+                                            })
+                                            .unwrap(),
+                                        )
+                                        .await;
+
+                                    // Signal delivered locally, no need to go through link language
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // If not a local user in this neighbourhood, send through link language
         let mut link_language_guard = self.link_language.lock().await;
         if let Some(link_language) = link_language_guard.as_mut() {
             link_language.send_signal(remote_agent_did, payload).await

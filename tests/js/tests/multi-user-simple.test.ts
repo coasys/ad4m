@@ -1,5 +1,5 @@
 import path from "path";
-import { Ad4mClient, Ad4mModel, ExpressionProof, Link, LinkExpression, ModelOptions, Perspective, Property } from "@coasys/ad4m";
+import { Ad4mClient, Ad4mModel, ExpressionProof, Link, LinkExpression, LinkInput, ModelOptions, Perspective, PerspectiveUnsignedInput, Property } from "@coasys/ad4m";
 import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
@@ -1043,6 +1043,111 @@ describe("Multi-User Simple integration tests", () => {
             expect(classesSeenByUser2.length).to.equal(2);
 
             console.log("✅ Prolog pool isolation working correctly - users have separate SDNA contexts");
+        });
+
+        it("should route neighbourhood signals locally between users on the same node", async () => {
+            // Create two users
+            const user1Result = await adminAd4mClient!.agent.createUser("signal1@example.com", "password1");
+            const user2Result = await adminAd4mClient!.agent.createUser("signal2@example.com", "password2");
+
+            // Login both users
+            const token1 = await adminAd4mClient!.agent.loginUser("signal1@example.com", "password1");
+            const token2 = await adminAd4mClient!.agent.loginUser("signal2@example.com", "password2");
+
+            // @ts-ignore - Suppress Apollo type mismatch
+            const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
+            // @ts-ignore - Suppress Apollo type mismatch  
+            const client2 = new Ad4mClient(apolloClient(gqlPort, token2), false);
+
+            // Get user DIDs
+            const user1Status = await client1.agent.status();
+            const user2Status = await client2.agent.status();
+            const user1Did = user1Status.did!;
+            const user2Did = user2Status.did!;
+
+            console.log("User 1 DID:", user1Did);
+            console.log("User 2 DID:", user2Did);
+
+            // User 1 creates a perspective and shares it as a neighbourhood
+            const perspective1 = await client1.perspective.add("Signal Test Neighbourhood");
+
+            // Clone link language and publish neighbourhood
+            const linkLanguage = await client1.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Signal Test"}));
+            const neighbourhoodUrl = await client1.neighbourhood.publishFromPerspective(
+                perspective1.uuid,
+                linkLanguage.address,
+                new Perspective([])
+            );
+
+            console.log("User 1 created neighbourhood:", neighbourhoodUrl);
+
+            // User 2 joins the neighbourhood
+            const joinResult = await client2.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            const user2Perspectives = await client2.perspective.all();
+            const user2SharedPerspective = user2Perspectives.find(p => p.sharedUrl === neighbourhoodUrl);
+            expect(user2SharedPerspective).to.not.be.null;
+
+            console.log("User 2 joined neighbourhood");
+
+            // Wait a bit for neighbourhood to be fully set up
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            // Get neighbourhood proxy for User 2
+            const user2Neighbourhood = await user2SharedPerspective!.getNeighbourhoodProxy();
+            expect(user2Neighbourhood).to.not.be.null;
+
+            // Set up signal listener for User 2
+            const receivedSignals: any[] = [];
+            const signalSubscription = user2Neighbourhood!.addSignalHandler((signal) => {
+                console.log("User 2 received signal:", signal);
+                receivedSignals.push(signal);
+            });
+
+            console.log("User 2 signal listener set up");
+
+            // Wait a bit to ensure subscription is active
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            // Get neighbourhood proxy for User 1
+            const user1Neighbourhood = await perspective1.getNeighbourhoodProxy();
+            expect(user1Neighbourhood).to.not.be.null;
+
+            // User 1 sends a signal to User 2
+            const testSignalPayload = new PerspectiveUnsignedInput([
+                {
+                    source: "test://signal",
+                    predicate: "test://from",
+                    target: user1Did
+                }
+            ]);
+
+            console.log("User 1 sending signal to User 2...");
+            await user1Neighbourhood!.sendSignalU(
+                user2Did,
+                testSignalPayload
+            );
+
+            console.log("Signal sent, waiting for delivery...");
+
+            // Wait for signal to be received (with timeout)
+            const maxWaitTime = 5000; // 5 seconds
+            const startTime = Date.now();
+            while (receivedSignals.length === 0 && (Date.now() - startTime) < maxWaitTime) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+
+            // Verify signal was received
+            expect(receivedSignals.length).to.be.greaterThan(0, "User 2 should have received at least one signal");
+
+            console.log("Received signals:", receivedSignals);
+            
+            const receivedSignal = receivedSignals[0];
+            expect(receivedSignal.data.links).to.have.lengthOf(1);
+            expect(receivedSignal.data.links[0].data.source).to.equal("test://signal");
+            expect(receivedSignal.data.links[0].data.predicate).to.equal("test://from");
+            expect(receivedSignal.data.links[0].data.target).to.equal(user1Did);
+
+            console.log("✅ Local signal routing working correctly - signal delivered without link language");
         });
     });
 })

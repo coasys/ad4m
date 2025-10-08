@@ -639,6 +639,7 @@ pub struct UserCreationResult {
 pub struct NeighbourhoodSignalFilter {
     pub perspective: PerspectiveHandle,
     pub signal: PerspectiveExpression,
+    pub recipient: Option<String>, // DID of the recipient agent for this signal
 }
 
 #[derive(Default, Debug, Deserialize, Serialize)]
@@ -847,7 +848,12 @@ impl GetValue for NeighbourhoodSignalFilter {
 // Implement the trait for the `NeighbourhoodSignalFilter` struct
 impl GetFilter for NeighbourhoodSignalFilter {
     fn get_filter(&self) -> Option<String> {
-        Some(self.perspective.uuid.clone())
+        // Create a composite filter: perspective_uuid|recipient_did
+        // If recipient is None, just use perspective_uuid for backwards compatibility
+        match &self.recipient {
+            Some(recipient_did) => Some(format!("{}|{}", self.perspective.uuid, recipient_did)),
+            None => Some(self.perspective.uuid.clone()),
+        }
     }
 }
 
