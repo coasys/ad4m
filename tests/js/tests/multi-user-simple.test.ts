@@ -1097,20 +1097,29 @@ describe("Multi-User Simple integration tests", () => {
             expect(user2Neighbourhood).to.not.be.null;
 
             // Set up signal listener for User 2
-            const receivedSignals: any[] = [];
-            const signalSubscription = user2Neighbourhood!.addSignalHandler((signal) => {
-                console.log("User 2 received signal:", signal);
-                receivedSignals.push(signal);
+            const user2ReceivedSignals: any[] = [];
+            const user2SignalSubscription = user2Neighbourhood!.addSignalHandler((signal) => {
+                //console.log("User 2 received signal:", signal);
+                user2ReceivedSignals.push(signal);
             });
 
             console.log("User 2 signal listener set up");
 
-            // Wait a bit to ensure subscription is active
-            await new Promise(resolve => setTimeout(resolve, 500));
-
             // Get neighbourhood proxy for User 1
             const user1Neighbourhood = await perspective1.getNeighbourhoodProxy();
             expect(user1Neighbourhood).to.not.be.null;
+
+            // Set up signal listener for User 1 to verify they DON'T receive User 2's signals
+            const user1ReceivedSignals: any[] = [];
+            const user1SignalSubscription = user1Neighbourhood!.addSignalHandler((signal) => {
+                //console.log("User 1 received signal:", signal);
+                user1ReceivedSignals.push(signal);
+            });
+
+            console.log("User 1 signal listener set up");
+
+            // Wait a bit to ensure subscriptions are active
+            await new Promise(resolve => setTimeout(resolve, 500));
 
             // User 1 sends a signal to User 2
             const testSignalPayload = new PerspectiveUnsignedInput([
@@ -1131,23 +1140,65 @@ describe("Multi-User Simple integration tests", () => {
 
             // Wait for signal to be received (with timeout)
             const maxWaitTime = 5000; // 5 seconds
-            const startTime = Date.now();
-            while (receivedSignals.length === 0 && (Date.now() - startTime) < maxWaitTime) {
+            let startTime = Date.now();
+            while (user2ReceivedSignals.length === 0 && (Date.now() - startTime) < maxWaitTime) {
                 await new Promise(resolve => setTimeout(resolve, 100));
             }
 
-            // Verify signal was received
-            expect(receivedSignals.length).to.be.greaterThan(0, "User 2 should have received at least one signal");
+            // Verify User 2 received the signal
+            expect(user2ReceivedSignals.length).to.be.greaterThan(0, "User 2 should have received at least one signal");
 
-            console.log("Received signals:", receivedSignals);
-            
-            const receivedSignal = receivedSignals[0];
-            expect(receivedSignal.data.links).to.have.lengthOf(1);
-            expect(receivedSignal.data.links[0].data.source).to.equal("test://signal");
-            expect(receivedSignal.data.links[0].data.predicate).to.equal("test://from");
-            expect(receivedSignal.data.links[0].data.target).to.equal(user1Did);
+            console.log("User 2 received signals:", user2ReceivedSignals);
 
-            console.log("✅ Local signal routing working correctly - signal delivered without link language");
+            const user2ReceivedSignal = user2ReceivedSignals[0];
+            expect(user2ReceivedSignal.data.links).to.have.lengthOf(1);
+            expect(user2ReceivedSignal.data.links[0].data.source).to.equal("test://signal");
+            expect(user2ReceivedSignal.data.links[0].data.predicate).to.equal("test://from");
+            expect(user2ReceivedSignal.data.links[0].data.target).to.equal(user1Did);
+
+            console.log("✅ User 2 received signal from User 1");
+
+            // Verify User 1 did NOT receive the signal (it was meant for User 2)
+            expect(user1ReceivedSignals.length).to.equal(0, "User 1 should NOT have received the signal meant for User 2");
+            console.log("✅ User 1 correctly did not receive signal meant for User 2");
+
+            // Now test the reverse: User 2 sends a signal to User 1
+            const reverseSignalPayload = new PerspectiveUnsignedInput([
+                {
+                    source: "test://reverse-signal",
+                    predicate: "test://from",
+                    target: user2Did
+                }
+            ]);
+
+            console.log("User 2 sending signal to User 1...");
+            await user2Neighbourhood!.sendSignalU(
+                user1Did,
+                reverseSignalPayload
+            );
+
+            // Wait for signal to be received
+            startTime = Date.now();
+            while (user1ReceivedSignals.length === 0 && (Date.now() - startTime) < maxWaitTime) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+
+            // Verify User 1 received the signal
+            expect(user1ReceivedSignals.length).to.be.greaterThan(0, "User 1 should have received at least one signal");
+
+            const user1ReceivedSignal = user1ReceivedSignals[0];
+            expect(user1ReceivedSignal.data.links).to.have.lengthOf(1);
+            expect(user1ReceivedSignal.data.links[0].data.source).to.equal("test://reverse-signal");
+            expect(user1ReceivedSignal.data.links[0].data.predicate).to.equal("test://from");
+            expect(user1ReceivedSignal.data.links[0].data.target).to.equal(user2Did);
+
+            console.log("✅ User 1 received signal from User 2");
+
+            // Verify User 2 did NOT receive their own signal back (User 1 should have only 1 signal from first send)
+            expect(user2ReceivedSignals.length).to.equal(1, "User 2 should still only have 1 signal (not their own reverse signal)");
+            console.log("✅ User 2 correctly did not receive signal meant for User 1");
+
+            console.log("✅ Local signal routing working correctly - signals properly isolated between users");
         });
     });
 })
