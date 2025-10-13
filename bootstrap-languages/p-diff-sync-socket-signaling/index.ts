@@ -34,13 +34,21 @@ export default async function create(context: LanguageContext): Promise<Language
         [ZOME_NAME, "create_did_pub_key_link"],
       ]
     }],
-    async (signal) => { 
+    async (signal) => {
       //@ts-ignore
       if (signal.payload.diff || (signal.payload.additions && signal.payload.removals)) {
         await linksAdapter.handleHolochainSignal(signal)
       } else {
-        for (const callback of telepresenceAdapter.signalCallbacks) {
-          await callback(signal.payload);
+        // For multi-user support: check if signal has recipient_did and filter accordingly
+        const recipientDid = signal.payload.recipient_did;
+        const actualPayload = signal.payload.payload || signal.payload;
+
+        // If there's a recipient DID specified, only deliver to that user
+        // Otherwise (broadcast), deliver to all users
+        if (!recipientDid || recipientDid === agent.did) {
+          for (const callback of telepresenceAdapter.signalCallbacks) {
+            await callback(actualPayload);
+          }
         }
       }
     }
