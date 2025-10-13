@@ -375,20 +375,7 @@ The second parameter to `fromJSONSchema()` accepts these options:
 interface JSONSchemaToModelOptions {
   // Model configuration
   name: string;               // Class name (required)
-  namespace?: string;         // Base namespace for predicates (e.g., "recipe://")
-
-  // Global property settings
-  resolveLanguage?: string;   // Default language for all properties
-  local?: boolean;            // Whether properties are stored locally
-
-  // Property-specific overrides (per-property decorator options)
-  propertyOptions?: Record<string, {
-    through?: string;         // Custom predicate URI
-    resolveLanguage?: string; // Override for this property
-    local?: boolean;          // Override for this property
-    writable?: boolean;       // Override for this property (default true)
-    initial?: any;            // Initial value (generates constructor action)
-  }>;
+  namespace?: string;         // Base namespace for predicates (optional: falls back to x-ad4m.namespace → schema.title → schema.$id)
 
   // Predicate generation helpers
   // 1) Direct mapping: propertyName -> predicate URI
@@ -399,6 +386,15 @@ interface JSONSchemaToModelOptions {
 
   // 3) Generator callback: receives schema title and property name
   predicateGenerator?: (title: string, property: string) => string;
+
+  // Global property settings (applied to all properties unless overridden)
+  resolveLanguage?: string;   // Default language for all properties
+  local?: boolean;            // Whether properties are stored locally
+
+  // Property-specific overrides
+  // Accepts any PropertyOptions fields: through, initial, required, writable,
+  // resolveLanguage, getter, setter, local, transform
+  propertyOptions?: Record<string, Partial<PropertyOptions>>;
 }
 ```
 
@@ -509,7 +505,7 @@ const advancedSchema = {
   "required": ["email"]
 };
 
-const User = Ad4mModel.fromJSONSchema(advancedSchema);
+const User = Ad4mModel.fromJSONSchema(advancedSchema, { name: "User" });
 ```
 
 #### Complex Object Handling
