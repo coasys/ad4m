@@ -369,12 +369,12 @@ await post.save();
 
 ### Configuration Options
 
-The second parameter to `fromJSONSchema()` accepts these options:
+The second parameter to `fromJSONSchema()` is optional and accepts these options:
 
 ```typescript
 interface JSONSchemaToModelOptions {
   // Model configuration
-  name: string;               // Class name (required)
+  name?: string;              // Class name override (optional: falls back to x-ad4m.className → schema.title → schema.$id)
   namespace?: string;         // Base namespace for predicates (optional: falls back to x-ad4m.namespace → schema.title → schema.$id)
 
   // Predicate generation helpers
@@ -398,12 +398,53 @@ interface JSONSchemaToModelOptions {
 }
 ```
 
+### Class Name Resolution (Cascading Priority)
+
+The class name is determined using this priority order:
+
+1. **Explicit `options.name`** (highest priority)
+2. **`x-ad4m.className` metadata in schema**
+3. **Schema `title`**
+4. **Schema `$id`** (extracted from URI)
+5. **Error** if none found (lowest priority)
+
+```typescript
+// Priority 1: Explicit name override
+const Model1 = Ad4mModel.fromJSONSchema(schema, {
+  name: "CustomModelName"
+});
+
+// Priority 2: x-ad4m.className metadata
+const schemaWithClassName = {
+  "title": "Person",
+  "x-ad4m": {
+    "className": "PersonModel"
+  },
+  "properties": { /* ... */ }
+};
+const PersonClass = Ad4mModel.fromJSONSchema(schemaWithClassName);
+
+// Priority 3: Inferred from title
+const schemaWithTitle = {
+  "title": "BlogPost",  // becomes "BlogPost" class name
+  "properties": { /* ... */ }
+};
+const BlogPostClass = Ad4mModel.fromJSONSchema(schemaWithTitle);
+
+// Priority 4: Inferred from $id
+const schemaWithId = {
+  "$id": "https://example.com/schemas/product.schema.json",  // becomes "Product"
+  "properties": { /* ... */ }
+};
+const ProductClass = Ad4mModel.fromJSONSchema(schemaWithId);
+```
+
 ### Namespace Resolution (Cascading Priority)
 
 The namespace is determined using this priority order:
 
 1. **Explicit `options.namespace`** (highest priority)
-2. **`x-ad4m` metadata in schema** 
+2. **`x-ad4m.namespace` metadata in schema**
 3. **Schema `title`** (converted to namespace)
 4. **Schema `$id`** (extracted from URI)
 5. **Error** if none found (lowest priority)
@@ -414,7 +455,7 @@ const Model1 = Ad4mModel.fromJSONSchema(schema, {
   namespace: "custom://"
 });
 
-// Priority 2: x-ad4m metadata
+// Priority 2: x-ad4m.namespace metadata
 const schemaWithMetadata = {
   "title": "Person",
   "x-ad4m": {
