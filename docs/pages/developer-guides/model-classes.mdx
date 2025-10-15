@@ -476,11 +476,10 @@ const schemaWithTitle = {
 Each property's predicate URI is determined by (highest to lowest precedence):
 
 1. **`options.propertyMapping[name]`** (explicit mapping)
-2. **`options.propertyOptions[name].through`** (per-property override)
-3. **`x-ad4m.through` in property schema**
-4. **`predicateTemplate`** (supports `${scheme}`, `${namespace}`/`${ns}`, `${title}`, `${property}`)
-5. **`predicateGenerator(title, property)`**
-6. **Default**: `${namespace}/${propertyName}` (normalized)
+2. **`x-ad4m.through` in property schema**
+3. **`predicateTemplate`** (supports `${scheme}`, `${namespace}`/`${ns}`, `${title}`, `${property}`)
+4. **`predicateGenerator(title, property)`**
+5. **Default**: `${namespace}/${propertyName}` (normalized)
 
 ```typescript
 const schema = {
