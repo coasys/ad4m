@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { apolloClient, sleep, startExecutor } from "../utils/utils";
+import { apolloClient, sleep, startExecutor, runHcLocalServices } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
 import { LinkQuery } from "@coasys/ad4m";
@@ -31,18 +31,28 @@ describe("Multi-User Simple integration tests", () => {
     let executorProcess: ChildProcess | null = null
     let adminAd4mClient: Ad4mClient | null = null
 
+    let proxyUrl: string | null = null;
+    let bootstrapUrl: string | null = null;
+    let localServicesProcess: ChildProcess | null = null;
+
     before(async () => {
         if (!fs.existsSync(appDataPath)) {
             fs.mkdirSync(appDataPath, { recursive: true });
         }
 
-        // Start executor (no admin credential for this test - all tokens have admin capabilities)
+        // Start local Holochain services
+        let localServices = await runHcLocalServices();
+        proxyUrl = localServices.proxyUrl;
+        bootstrapUrl = localServices.bootstrapUrl;
+        localServicesProcess = localServices.process;
+
+        // Start executor with local services
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-            gqlPort, hcAdminPort, hcAppPort, false);
+            gqlPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!);
 
         // @ts-ignore - Suppress Apollo type mismatch
         adminAd4mClient = new Ad4mClient(apolloClient(gqlPort), false)
-        
+
         // Generate initial admin agent (needed for JWT signing)
         await adminAd4mClient.agent.generate("passphrase")
     })
@@ -52,7 +62,14 @@ describe("Multi-User Simple integration tests", () => {
             while (!executorProcess?.killed) {
                 let status = executorProcess?.kill();
                 console.log("killed executor with", status);
-                await sleep(500); 
+                await sleep(500);
+            }
+        }
+        if (localServicesProcess) {
+            while (!localServicesProcess?.killed) {
+                let status = localServicesProcess?.kill();
+                console.log("killed local services with", status);
+                await sleep(500);
             }
         }
     })
@@ -1232,14 +1249,17 @@ describe("Multi-User Simple integration tests", () => {
                 fs.mkdirSync(node2AppDataPath, { recursive: true });
             }
 
-            // Start node 2 executor
+            // Start node 2 executor with local services
             node2ExecutorProcess = await startExecutor(
                 node2AppDataPath,
                 bootstrapSeedPath,
                 node2GqlPort,
                 node2HcAdminPort,
                 node2HcAppPort,
-                false
+                false,
+                undefined,
+                proxyUrl!,
+                bootstrapUrl!
             );
 
             // @ts-ignore
