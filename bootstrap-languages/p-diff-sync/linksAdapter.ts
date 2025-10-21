@@ -61,19 +61,19 @@ export class LinkAdapter implements LinkSyncAdapter {
     if (this.agent && typeof this.agent.getAllLocalUserDIDs === 'function') {
       try {
         const localDIDs: DID[] = await this.agent.getAllLocalUserDIDs();
-        console.log(`[p-diff-sync LinkAdapter] Found ${localDIDs.length} local DIDs:`, localDIDs);
+        //console.log(`[p-diff-sync LinkAdapter] Found ${localDIDs.length} local DIDs:`, localDIDs);
         for (const did of localDIDs) {
           if (!LinkAdapter.didsWithLinksCreated.has(did)) {
             try {
-              console.log(`[p-diff-sync LinkAdapter] Creating DID link for user: ${did}`);
+              //console.log(`[p-diff-sync LinkAdapter] Creating DID link for user: ${did}`);
               await this.hcDna.call(DNA_ROLE, ZOME_NAME, "create_did_pub_key_link", did);
               LinkAdapter.didsWithLinksCreated.add(did);
-              console.log(`[p-diff-sync LinkAdapter] Successfully created DID link for user: ${did}`);
+              //console.log(`[p-diff-sync LinkAdapter] Successfully created DID link for user: ${did}`);
             } catch (e) {
               console.error(`[p-diff-sync LinkAdapter] Failed to create DID link for user ${did}:`, e);
             }
           } else {
-            console.log(`[p-diff-sync LinkAdapter] DID link already exists for user: ${did}`);
+            //console.log(`[p-diff-sync LinkAdapter] DID link already exists for user: ${did}`);
           }
         }
       } catch (e) {
