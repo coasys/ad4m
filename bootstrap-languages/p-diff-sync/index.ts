@@ -14,9 +14,12 @@ export default async function create(context: LanguageContext): Promise<Language
   const Holochain = context.Holochain as HolochainLanguageDelegate;
   const agent = context.agent as AgentService;
 
+  console.log(`[p-diff-sync] create() called with agent DID: ${agent.did}`);
+
   const linksAdapter = new LinkAdapter(context);
   const telepresenceAdapter = new TelepresenceAdapterImplementation(context);
 
+  console.log(`[p-diff-sync] Registering DNAs for agent: ${agent.did}`);
   await Holochain.registerDNAs(
     //@ts-ignore
     [{ file: BUNDLE, nick: DNA_ROLE, zomeCalls:
