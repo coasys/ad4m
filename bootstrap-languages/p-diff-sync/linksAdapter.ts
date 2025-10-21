@@ -1,4 +1,4 @@
-import { LinkSyncAdapter, PerspectiveDiffObserver, HolochainLanguageDelegate, LanguageContext, PerspectiveDiff, 
+import { AgentService, LinkSyncAdapter, PerspectiveDiffObserver, HolochainLanguageDelegate, LanguageContext, PerspectiveDiff, 
   LinkExpression, DID, Perspective, PerspectiveState } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import type { SyncStateChangeObserver } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
 import { Mutex, withTimeout } from "https://esm.sh/async-mutex@0.4.0";
@@ -13,6 +13,7 @@ class PeerInfo {
 };
 
 export class LinkAdapter implements LinkSyncAdapter {
+  agent: AgentService;
   hcDna: HolochainLanguageDelegate;
   linkCallback?: PerspectiveDiffObserver
   syncStateChangeCallback?: SyncStateChangeObserver
@@ -21,11 +22,13 @@ export class LinkAdapter implements LinkSyncAdapter {
   me: DID
   gossipLogCount: number = 0;
   myCurrentRevision: Uint8Array | null = null;
+  static didsWithLinksCreated: Set<DID> = new Set();
 
   constructor(context: LanguageContext) {
     //@ts-ignore
     this.hcDna = context.Holochain as HolochainLanguageDelegate;
     this.me = context.agent.did;
+    this.agent = context.agent;
   }
 
   writable(): boolean {
@@ -37,10 +40,13 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async others(): Promise<DID[]> {
+    // Return ALL DIDs from Holochain without filtering
+    // The GraphQL resolver will filter out the calling user's DID
     //@ts-ignore
-    let others = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "get_others", null);
-    console.log("PerspectiveDiffSync.others(); others", others);
-    return others as DID[];
+    let allDids = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "get_others", null);
+
+    console.log("PerspectiveDiffSync.others(); returning all DIDs:", allDids);
+    return allDids as DID[];
   }
 
   async currentRevision(): Promise<string> {
@@ -51,6 +57,43 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async sync(): Promise<PerspectiveDiff> {
+    // Get all local DIDs and ensure DID link for each (multi-user support)
+    if (this.agent && typeof this.agent.getAllLocalUserDIDs === 'function') {
+      try {
+        const localDIDs: DID[] = await this.agent.getAllLocalUserDIDs();
+        console.log(`[p-diff-sync LinkAdapter] Found ${localDIDs.length} local DIDs:`, localDIDs);
+        for (const did of localDIDs) {
+          if (!LinkAdapter.didsWithLinksCreated.has(did)) {
+            try {
+              console.log(`[p-diff-sync LinkAdapter] Creating DID link for user: ${did}`);
+              await this.hcDna.call(DNA_ROLE, ZOME_NAME, "create_did_pub_key_link", did);
+              LinkAdapter.didsWithLinksCreated.add(did);
+              console.log(`[p-diff-sync LinkAdapter] Successfully created DID link for user: ${did}`);
+            } catch (e) {
+              console.error(`[p-diff-sync LinkAdapter] Failed to create DID link for user ${did}:`, e);
+            }
+          } else {
+            console.log(`[p-diff-sync LinkAdapter] DID link already exists for user: ${did}`);
+          }
+        }
+      } catch (e) {
+        console.error(`[p-diff-sync LinkAdapter] Could not get all local user DIDs:`, e);
+      }
+    } else {
+      console.log(`[p-diff-sync LinkAdapter] getAllLocalUserDIDs not available, falling back to current user only`);
+      // Fallback: ensure DID link for current user only
+      if (!LinkAdapter.didsWithLinksCreated.has(this.me)) {
+        try {
+          console.log(`[p-diff-sync LinkAdapter] Creating DID link for current user: ${this.me}`);
+          await this.hcDna.call(DNA_ROLE, ZOME_NAME, "create_did_pub_key_link", this.me);
+          LinkAdapter.didsWithLinksCreated.add(this.me);
+          console.log(`[p-diff-sync LinkAdapter] Successfully created DID link for current user: ${this.me}`);
+        } catch (e) {
+          console.error(`[p-diff-sync LinkAdapter] Failed to create DID link for current user ${this.me}:`, e);
+        }
+      }
+    }
+
     //console.log("PerspectiveDiffSync.sync(); Getting lock");
     const release = await this.generalMutex.acquire();
     //console.log("PerspectiveDiffSync.sync(); Got lock");
@@ -58,7 +101,7 @@ export class LinkAdapter implements LinkSyncAdapter {
       //@ts-ignore
       let current_revision = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "sync", null);
       if (current_revision && current_revision instanceof Uint8Array) {
-        this.myCurrentRevision = current_revision; 
+        this.myCurrentRevision = current_revision;
       }
     } catch (e) {
       console.error("PerspectiveDiffSync.sync(); got error", e);

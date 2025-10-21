@@ -379,14 +379,28 @@ impl Query {
     ) -> FieldResult<Vec<String>> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
-        get_perspective(&uuid)
+
+        // Get all DIDs from the link language
+        let all_dids = get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
                 uuid
             )))?
             .others()
             .await
-            .map_err(|e| FieldError::from(e.to_string()))
+            .map_err(|e| FieldError::from(e.to_string()))?;
+
+        // Filter out the current user's DID
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        let current_user_did = crate::agent::did_for_context(&agent_context)
+            .map_err(|e| FieldError::from(e.to_string()))?;
+
+        let others: Vec<String> = all_dids
+            .into_iter()
+            .filter(|did| did != &current_user_did)
+            .collect();
+
+        Ok(others)
     }
 
     async fn perspective(

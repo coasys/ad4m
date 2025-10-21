@@ -1387,10 +1387,45 @@ describe("Multi-User Simple integration tests", () => {
             const node2User2Proxy = await node2User2Neighbourhood!.getNeighbourhoodProxy();
 
             // Check 'others()' for each user - should see all other users' DIDs
+            // Poll with retries to account for DHT gossip delays
             console.log("\nChecking 'others()' for each user:");
 
-            const node1User1Others = await node1User1Proxy!.otherAgents();
-            console.log("Node 1 User 1 sees others:", node1User1Others);
+            // Helper function to poll until all expected DIDs are seen
+            const pollUntilAllSeen = async (proxy: any, expectedDids: string[], userLabel: string, maxAttempts = 50) => {
+                console.log(`Polling ${userLabel} for others...`);
+                console.log(`Expected DIDs:`, expectedDids);
+                for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                    const others = await proxy.otherAgents();
+                    console.log(`${userLabel} sees others (attempt ${attempt}):`, others);
+
+                    const allFound = expectedDids.every(did => {
+                        console.log(`Checking if ${did} is in ${others}`);
+                        let result = others.includes(did);
+                        console.log(`Result: ${result}`);
+                        return result;
+                    });
+                    if (allFound) {
+                        console.log(`✅ ${userLabel} sees all expected users!`);
+                        return others;
+                    }
+
+                    if (attempt < maxAttempts) {
+                        console.log(`${userLabel} waiting for DHT gossip... (${attempt}/${maxAttempts})`);
+                        await sleep(2000);
+                    }
+                }
+
+                // Return the last result even if not complete
+                const finalOthers = await proxy.otherAgents();
+                console.log(`${userLabel} final result after ${maxAttempts} attempts:`, finalOthers);
+                return finalOthers;
+            };
+
+            const node1User1Others = await pollUntilAllSeen(
+                node1User1Proxy!,
+                [node1User2Did, node2User1Did, node2User2Did],
+                "Node 1 User 1"
+            );
             expect(node1User1Others).to.include(node1User2Did, "Node 1 User 1 should see Node 1 User 2");
             expect(node1User1Others).to.include(node2User1Did, "Node 1 User 1 should see Node 2 User 1");
             expect(node1User1Others).to.include(node2User2Did, "Node 1 User 1 should see Node 2 User 2");

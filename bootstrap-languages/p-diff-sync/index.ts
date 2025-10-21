@@ -40,9 +40,27 @@ export default async function create(context: LanguageContext): Promise<Language
         const recipientDid = signal.payload.recipient_did;
         const actualPayload = signal.payload.payload || signal.payload;
 
-        // If there's a recipient DID specified, only deliver to that user
-        // Otherwise (broadcast), deliver to all users
-        if (!recipientDid || recipientDid === agent.did) {
+        // Check if this signal should be delivered to ANY local user
+        let shouldDeliver = !recipientDid; // If no recipient specified, it's a broadcast
+
+        if (recipientDid) {
+          // Check if recipient matches ANY local user DID
+          if (typeof agent.getAllLocalUserDIDs === 'function') {
+            try {
+              const localDIDs = await agent.getAllLocalUserDIDs();
+              shouldDeliver = localDIDs.includes(recipientDid);
+            } catch (e) {
+              console.error(`[p-diff-sync] Failed to get local user DIDs for signal routing:`, e);
+              // Fallback: check against current agent DID only
+              shouldDeliver = recipientDid === agent.did;
+            }
+          } else {
+            // Fallback: check against current agent DID only
+            shouldDeliver = recipientDid === agent.did;
+          }
+        }
+
+        if (shouldDeliver) {
           for (const callback of telepresenceAdapter.signalCallbacks) {
             await callback(actualPayload);
           }
@@ -51,8 +69,7 @@ export default async function create(context: LanguageContext): Promise<Language
     }
   );
 
-  //Setup the link between did and agent pub key
-  await Holochain.call(DNA_ROLE, ZOME_NAME, "create_did_pub_key_link", agent.did);
+  console.log(`[p-diff-sync] Language initialized for agent: ${agent.did}. DID link will be created in LinkAdapter.sync()`);
 
   //@ts-ignore
   return {

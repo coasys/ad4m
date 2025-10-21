@@ -218,29 +218,24 @@ pub fn get_agents_did_keys(agent: AgentPubKey) -> SocialContextResult<Vec<String
 }
 
 pub fn get_others() -> SocialContextResult<Vec<String>> {
+    // Return ALL DIDs from all active agents (including current agent)
+    // The JavaScript layer will filter out the calling user's DID
     let active_agents = get_active_agents()?;
-    let mut others = Vec::new();
-
-    // Get DIDs from other agents
-    for active_agent in active_agents {
-        // Get ALL DIDs for this agent (multi-user support)
-        let agent_dids = get_agents_did_keys(active_agent)?;
-        others.extend(agent_dids);
-    }
-
-    // Also get DIDs from OUR agent (for multi-user on same node), excluding our own DID
-    let my_did = get_my_did()?;
     let my_agent = agent_info()?.agent_initial_pubkey;
-    let my_agent_dids = get_agents_did_keys(my_agent)?;
+    let mut all_dids = Vec::new();
 
-    for did in my_agent_dids {
-        // Only include DIDs that are NOT ours
-        if Some(&did) != my_did.as_ref() {
-            others.push(did);
-        }
+    // Get DIDs from all active agents (remote agents)
+    for active_agent in active_agents {
+        let agent_dids = get_agents_did_keys(active_agent)?;
+        all_dids.extend(agent_dids);
     }
 
-    Ok(others)
+    // Also get ALL DIDs from OUR agent (for multi-user on same node)
+    // Don't exclude anything here - JavaScript will filter out the calling user's DID
+    let my_agent_dids = get_agents_did_keys(my_agent)?;
+    all_dids.extend(my_agent_dids);
+
+    Ok(all_dids)
 }
 
 pub fn get_online_agents() -> SocialContextResult<Vec<OnlineAgent>> {
