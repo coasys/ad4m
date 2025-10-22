@@ -668,6 +668,17 @@ impl Query {
         Ok(notifications_result.unwrap())
     }
 
+    async fn runtime_multi_user_enabled(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        Ad4mDb::with_global_instance(|db| {
+            db.get_multi_user_enabled()
+                .map_err(|e| FieldError::new(e.to_string(), Value::null()))
+        })
+    }
+
     async fn ai_get_models(&self, context: &RequestContext) -> FieldResult<Vec<Model>> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
         let models_result = Ad4mDb::with_global_instance(|db| db.get_models());

@@ -242,6 +242,14 @@ impl Ad4mDb {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+             )",
+            [],
+        )?;
+
         // Add owner_did column to existing perspective_handle table if it doesn't exist
         let _ = conn.execute(
             "ALTER TABLE perspective_handle ADD COLUMN owner_did TEXT",
@@ -2202,6 +2210,37 @@ impl Ad4mDb {
             })
         })?;
         Ok(user)
+    }
+
+    // Settings management functions
+    pub fn get_setting(&self, key: &str) -> Ad4mDbResult<Option<String>> {
+        let result = self
+            .conn
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(result)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_multi_user_enabled(&self) -> Ad4mDbResult<bool> {
+        match self.get_setting("multi_user_enabled")? {
+            Some(value) => Ok(value == "true"),
+            None => Ok(false), // Default to disabled
+        }
+    }
+
+    pub fn set_multi_user_enabled(&self, enabled: bool) -> Ad4mDbResult<()> {
+        self.set_setting("multi_user_enabled", if enabled { "true" } else { "false" })
     }
 }
 

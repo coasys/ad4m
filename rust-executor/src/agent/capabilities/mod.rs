@@ -71,6 +71,16 @@ pub fn user_email_from_token(token: String) -> Option<String> {
         return None;
     }
 
+    // Check if multi-user mode is enabled - if not, never return a user context
+    use crate::db::Ad4mDb;
+    let multi_user_enabled = Ad4mDb::with_global_instance(|db| {
+        db.get_multi_user_enabled().unwrap_or(false)
+    });
+
+    if !multi_user_enabled {
+        return None;
+    }
+
     // Try to decode JWT and extract user email from sub field
     if let Ok(claims) = decode_jwt(token) {
         claims.sub

@@ -15,7 +15,7 @@ mod wallet;
 pub mod agent;
 pub mod ai_service;
 mod dapp_server;
-mod db;
+pub mod db;
 pub mod init;
 pub mod languages;
 pub mod logging;

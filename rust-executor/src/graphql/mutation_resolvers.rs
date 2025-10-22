@@ -464,6 +464,20 @@ impl Mutation {
             &RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY,
         )?;
 
+        // Check if multi-user mode is enabled
+        let multi_user_enabled = Ad4mDb::with_global_instance(|db| {
+            db.get_multi_user_enabled()
+                .unwrap_or(false)
+        });
+
+        if !multi_user_enabled {
+            return Ok(UserCreationResult {
+                did: String::new(),
+                success: false,
+                error: Some("Multi-user mode is not enabled".to_string()),
+            });
+        }
+
         // Generate DID by creating a keypair in the wallet using email as key name
         use crate::agent::AgentService;
         AgentService::ensure_user_key_exists(&email).map_err(|e| {
@@ -554,6 +568,19 @@ impl Mutation {
             &context.capabilities,
             &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
         )?;
+
+        // Check if multi-user mode is enabled
+        let multi_user_enabled = Ad4mDb::with_global_instance(|db| {
+            db.get_multi_user_enabled()
+                .unwrap_or(false)
+        });
+
+        if !multi_user_enabled {
+            return Err(FieldError::new(
+                "Multi-user mode is not enabled",
+                graphql_value!(null),
+            ));
+        }
 
         // Get user from database
         let db = Ad4mDb::global_instance();
