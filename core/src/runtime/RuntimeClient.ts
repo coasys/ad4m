@@ -386,6 +386,25 @@ export class RuntimeClient {
         return runtimeImportPerspective
     }
 
+    async multiUserEnabled(): Promise<boolean> {
+        const { runtimeMultiUserEnabled } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeMultiUserEnabled {
+                runtimeMultiUserEnabled
+            }`,
+        }))
+        return runtimeMultiUserEnabled
+    }
+
+    async setMultiUserEnabled(enabled: boolean): Promise<boolean> {
+        const { runtimeSetMultiUserEnabled } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeSetMultiUserEnabled($enabled: Boolean!) {
+                runtimeSetMultiUserEnabled(enabled: $enabled)
+            }`,
+            variables: { enabled }
+        }))
+        return runtimeSetMultiUserEnabled
+    }
+
     addNotificationTriggeredCallback(cb: NotificationTriggeredCallback) {
         this.#notificationTriggeredCallbacks.push(cb)
     }

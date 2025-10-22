@@ -1621,6 +1621,19 @@ impl Mutation {
         result.get_graphql_result()
     }
 
+    async fn runtime_set_multi_user_enabled(
+        &self,
+        context: &RequestContext,
+        enabled: bool,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        Ad4mDb::with_global_instance(|db| {
+            db.set_multi_user_enabled(enabled)
+                .map_err(|e| FieldError::new(e.to_string(), Value::null()))?;
+            Ok(enabled)
+        })
+    }
+
     async fn runtime_request_install_notification(
         &self,
         context: &RequestContext,

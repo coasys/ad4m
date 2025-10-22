@@ -74,7 +74,37 @@ describe("Multi-User Simple integration tests", () => {
         }
     })
 
-    describe("Basic Multi-User Functionality", () => {
+    describe("Multi-User Configuration", () => {
+        it("should have multi-user disabled by default and require activation", async () => {
+            // Check that multi-user is disabled by default
+            const isEnabled = await adminAd4mClient!.runtime.multiUserEnabled();
+            expect(isEnabled).to.be.false;
+            console.log("✅ Multi-user mode is disabled by default");
+
+            // Attempt to create a user while multi-user is disabled (should fail)
+            const userResult = await adminAd4mClient!.agent.createUser("test@example.com", "password123");
+            expect(userResult.success).to.be.false;
+            expect(userResult.error).to.include("Multi-user mode is not enabled");
+            console.log("✅ User creation correctly blocked when multi-user is disabled");
+
+            // Enable multi-user mode
+            const setResult = await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+            expect(setResult).to.be.true;
+            console.log("✅ Multi-user mode enabled");
+
+            // Verify it's now enabled
+            const isEnabledAfter = await adminAd4mClient!.runtime.multiUserEnabled();
+            expect(isEnabledAfter).to.be.true;
+            console.log("✅ Multi-user mode status verified as enabled");
+
+            // Now user creation should work
+            const userResult2 = await adminAd4mClient!.agent.createUser("working@example.com", "password456");
+            expect(userResult2.success).to.be.true;
+            expect(userResult2.did).to.match(/^did:key:.+/);
+            console.log("✅ User creation works after enabling multi-user mode");
+        });
+    });
+
         it("should create and login users with unique DIDs", async () => {
             // Create first user
             const user1Result = await adminAd4mClient!.agent.createUser("alice@example.com", "password123");
@@ -1265,6 +1295,7 @@ describe("Multi-User Simple integration tests", () => {
             // @ts-ignore
             node2AdminClient = new Ad4mClient(apolloClient(node2GqlPort), false);
             await node2AdminClient.agent.generate("passphrase");
+            await node2AdminClient.runtime.setMultiUserEnabled(true);
 
             console.log("\n=== Creating users on Node 1 ===");
             // Create and login 2 users on node 1

@@ -426,5 +426,15 @@ export default class RuntimeResolver {
     runtimeImportPerspective(@Arg("filePath", type => String) filePath: string): boolean {
         return true
     }
+
+    @Query(returns => Boolean)
+    runtimeMultiUserEnabled(): boolean {
+        return false
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeSetMultiUserEnabled(@Arg("enabled") enabled: boolean): boolean {
+        return enabled
+    }
 }
 
