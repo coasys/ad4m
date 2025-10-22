@@ -3,7 +3,7 @@
 use crate::{
     agent::{capabilities::*, create_signed_expression, AgentContext, AgentService},
     ai_service::AIService,
-    neighbourhoods::{self, install_neighbourhood, install_neighbourhood_with_context},
+    neighbourhoods::{self, install_neighbourhood_with_context},
     perspectives::{
         self, add_perspective, export_perspective, get_perspective, import_perspective,
         perspective_instance::{PerspectiveInstance, SdnaType},

@@ -10,7 +10,7 @@ use crate::languages::LanguageController;
 use crate::perspectives::{add_perspective, all_perspectives, get_perspective, update_perspective};
 use crate::types::*;
 
-pub async fn neighbourhood_publish_from_perspective(
+pub async fn _neighbourhood_publish_from_perspective(
     uuid: &str,
     link_language: String,
     meta: Perspective,
@@ -64,7 +64,7 @@ pub async fn neighbourhood_publish_from_perspective_with_context(
     Ok(neighbourhood_url)
 }
 
-pub async fn install_neighbourhood(url: String) -> Result<PerspectiveHandle, AnyError> {
+pub async fn _install_neighbourhood(url: String) -> Result<PerspectiveHandle, AnyError> {
     install_neighbourhood_with_context(url, &crate::agent::AgentContext::main_agent()).await
 }
 
