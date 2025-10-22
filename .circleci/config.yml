@@ -138,6 +138,74 @@ jobs:
           command: cd ./tests/js && pnpm run test-main
           no_output_timeout: 30m
 
+  integration-tests-multi-user-simple:
+    docker:
+      - image: *ad4m_image
+    resource_class: xlarge
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - restore_cache:
+          keys:
+            - agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
+            - agent-language-rust-cache-
+      - restore_cache:
+          keys:
+            - direct-message-language-rust-cache-{{ checksum "bootstrap-languages/direct-message-language/hc-dna/Cargo.lock" }}
+            - direct-message-language-rust-cache-
+      - restore_cache:
+          keys:
+            - file-storage-rust-cache-{{ checksum "bootstrap-languages/file-storage/hc-dna/Cargo.lock" }}
+            - file-storage-rust-cache-
+      - restore_cache:
+          keys:
+            - p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
+            - p-diff-sync-rust-cache-
+      - restore_cache:
+          keys:
+            - p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
+            - p-diff-sync-socket-signaling-rust-cache-
+      - run:
+          name: Install specific pnpm version
+          command: npm install -g pnpm@9.15.0
+      - run:
+          name: Install dependencies
+          command: pnpm install --no-frozen-lockfile
+      - run:
+          name: Install core dependencies
+          command: cd ./core && pnpm install --no-frozen-lockfile
+      - run:
+          name: Build bootstrap languages
+          command: pnpm run build-languages
+      - save_cache:
+          key: agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
+          paths:
+            - ./bootstrap-languages/agent-language/hc-dna/target
+      - save_cache:
+          key: direct-message-language-rust-cache-{{ checksum "bootstrap-languages/direct-message-language/hc-dna/Cargo.lock" }}
+          paths:
+            - ./bootstrap-languages/direct-message-language/hc-dna/target
+      - save_cache:
+          key: file-storage-rust-cache-{{ checksum "bootstrap-languages/file-storage/hc-dna/Cargo.lock" }}
+          paths:
+            - ./bootstrap-languages/file-storage-language/hc-dna/target
+      - save_cache:
+          key: p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
+          paths:
+            - ./bootstrap-languages/p-diff-sync/hc-dna/target
+      - save_cache:
+          key: p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
+          paths:
+            - ./bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/target\
+      - run:
+          name: Install ffmpeg for transcription test
+          command: sudo apt-get update && sudo apt-get install ffmpeg --fix-missing
+      - run:
+          name: Run multi-user-simple integration tests
+          command: cd ./tests/js && ./test-multi-user-with-setup.sh
+          no_output_timeout: 30m
+
   integration-tests-cli:
     docker:
       - image: *ad4m_image
@@ -161,5 +229,8 @@ workflows:
     jobs:
       - build-and-test
       - integration-tests-js:
+          requires:
+            - build-and-test
+      - integration-tests-multi-user-simple:
           requires:
             - build-and-test
