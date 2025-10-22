@@ -100,11 +100,14 @@ impl Subscription {
                 let agent_did = did_for_context(&agent_context).ok();
 
                 // Create composite filter: perspective_uuid|agent_did
-                let filter = if let Some(did) = agent_did {
+                let filter = if let Some(ref did) = agent_did {
                     Some(format!("{}|{}", perspectiveUUID, did))
                 } else {
-                    Some(perspectiveUUID)
+                    Some(perspectiveUUID.clone())
                 };
+
+                log::debug!("neighbourhood_signal subscription: perspective={}, agent_did={:?}, filter={:?}",
+                    perspectiveUUID, agent_did, filter);
 
                 subscribe_and_process::<NeighbourhoodSignalFilter>(
                     pubsub,

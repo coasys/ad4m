@@ -97,8 +97,9 @@ pub async fn install_neighbourhood_with_context(
                 handle.add_owner(&user_did);
 
                 update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
+
                 log::info!(
-                    "Added user {} to existing neighbourhood {}",
+                    "Added user {} to existing neighbourhood {}. Link language will handle DID mapping when accessed.",
                     user_email,
                     url
                 );
@@ -117,7 +118,11 @@ pub async fn install_neighbourhood_with_context(
                 handle.add_owner(&main_agent_did);
 
                 update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
-                log::info!("Added main agent to existing neighbourhood {}", url);
+
+                log::info!(
+                    "Added main agent to existing neighbourhood {}. Link language will handle DID mapping when accessed.",
+                    url
+                );
                 return Ok(handle.clone());
             }
         }
@@ -157,13 +162,19 @@ pub async fn install_neighbourhood_with_context(
         uuid: Uuid::new_v4().to_string(),
         name: Some(url.clone()),
         shared_url: Some(url.clone()),
-        neighbourhood: Some(neighbourhood),
+        neighbourhood: Some(neighbourhood.clone()),
         state,
-        owners: Some(vec![owner_did]), // Initialize owners list with creator
+        owners: Some(vec![owner_did.clone()]), // Initialize owners list with creator
     };
     add_perspective(handle.clone(), Some(true))
         .await
         .map_err(|e| anyhow!(e))?;
+
+    log::info!(
+        "Created new perspective for neighbourhood {}. Link language will handle DID mapping when accessed by user {}",
+        url,
+        owner_did
+    );
 
     Ok(handle)
 }
