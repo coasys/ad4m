@@ -686,7 +686,11 @@ impl PerspectiveInstance {
         self.pubsub_publish_diff(decorated_diff).await;
     }
 
-    pub async fn telepresence_signal_from_link_language(&self, mut signal: PerspectiveExpression, recipient_did: Option<String>) {
+    pub async fn telepresence_signal_from_link_language(
+        &self,
+        mut signal: PerspectiveExpression,
+        recipient_did: Option<String>,
+    ) {
         signal.verify_signatures();
         let handle = self.persisted.lock().await.clone();
 
@@ -2028,7 +2032,10 @@ impl PerspectiveInstance {
         // Check if the recipient is a locally managed user
         use crate::agent::AgentService;
 
-        log::debug!("🔔 SEND SIGNAL: Sending signal to remote agent {}", remote_agent_did);
+        log::debug!(
+            "🔔 SEND SIGNAL: Sending signal to remote agent {}",
+            remote_agent_did
+        );
 
         let current_perspective_handle = self.persisted.lock().await.clone();
 
@@ -2079,7 +2086,9 @@ impl PerspectiveInstance {
             }
         }
 
-        log::debug!("🔔 SEND SIGNAL: Not a local user in this neighbourhood, sending through link language");
+        log::debug!(
+            "🔔 SEND SIGNAL: Not a local user in this neighbourhood, sending through link language"
+        );
 
         // If not a local user in this neighbourhood, send through link language
         let mut link_language_guard = self.link_language.lock().await;

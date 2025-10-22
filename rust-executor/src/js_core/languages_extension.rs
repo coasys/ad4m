@@ -24,7 +24,11 @@ fn telepresence_signal_received(
     #[string] language_address: String,
     #[string] recipient_did: Option<String>,
 ) {
-    crate::perspectives::handle_telepresence_signal_from_link_language(signal, language_address, recipient_did);
+    crate::perspectives::handle_telepresence_signal_from_link_language(
+        signal,
+        language_address,
+        recipient_did,
+    );
 }
 
 deno_core::extension!(
