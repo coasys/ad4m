@@ -1324,7 +1324,7 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         it("should return all DIDs in 'others()' for each user", async function() {
-            this.timeout(30000);
+            this.timeout(90000); // Increased to allow initial wait + polling time
 
             console.log("\n=== Testing 'others()' functionality ===");
 
@@ -1491,6 +1491,36 @@ describe("Multi-User Simple integration tests", () => {
 
             await sleep(500); // Let handlers initialize
 
+
+            // Node 1 User 1 sends a signal to Node 2 User 1
+            console.log(`\nNode 2 User 1 (${node1User1Did.substring(0, 20)}...) sending signal to Node 2 User 2 (${node2User1Did.substring(0, 20)}...)`);
+            await node2User1Proxy!.sendSignalU(node2User2Did, new PerspectiveUnsignedInput([
+                {
+                    source: "test://signal0",
+                    predicate: "test://from",
+                    target: node1User1Did
+                }
+            ]));
+
+            // Wait for signal delivery
+            console.log("Waiting for signal delivery...");
+            const maxWaitTime = 10000;
+            let startTime = Date.now();
+            while (node2User2ReceivedSignals.length === 0 && (Date.now() - startTime) < maxWaitTime) {
+                await sleep(100);
+                console.log(".");
+            }
+
+            console.log("Signal delivery complete");
+
+            // Verify Node 2 User 1 received the signal
+            console.log("Node 2 User 2 received signals:", node2User2ReceivedSignals);
+            expect(node2User2ReceivedSignals.length).to.be.greaterThan(0, "Node 2 User 2 should have received signal");
+            expect(node2User2ReceivedSignals[0].author).to.equal(node2User1Did);
+            console.log("✅ Node 2 User 2 received signal from Node 2 User 1");
+
+            let node2user2signalCount = node2User2ReceivedSignals.length;
+
             // Node 1 User 1 sends a signal to Node 2 User 1
             console.log(`\nNode 1 User 1 (${node1User1Did.substring(0, 20)}...) sending signal to Node 2 User 1 (${node2User1Did.substring(0, 20)}...)`);
             await node1User1Proxy!.sendSignalU(node2User1Did, new PerspectiveUnsignedInput([
@@ -1502,19 +1532,22 @@ describe("Multi-User Simple integration tests", () => {
             ]));
 
             // Wait for signal delivery
-            const maxWaitTime = 10000;
-            let startTime = Date.now();
+            startTime = Date.now();
+            console.log("Waiting for signal delivery...");
             while (node2User1ReceivedSignals.length === 0 && (Date.now() - startTime) < maxWaitTime) {
                 await sleep(100);
+                console.log(".");
             }
+            console.log("Signal delivery complete");
 
             // Verify Node 2 User 1 received the signal
+            console.log("Node 2 User 1 received signals:", node2User1ReceivedSignals);
             expect(node2User1ReceivedSignals.length).to.be.greaterThan(0, "Node 2 User 1 should have received signal");
             expect(node2User1ReceivedSignals[0].author).to.equal(node1User1Did);
             console.log("✅ Node 2 User 1 received signal from Node 1 User 1");
 
             // Verify Node 2 User 2 did NOT receive the signal (it was meant for Node 2 User 1)
-            expect(node2User2ReceivedSignals.length).to.equal(0, "Node 2 User 2 should NOT have received signal meant for Node 2 User 1");
+            expect(node2User2ReceivedSignals.length).to.equal(node2user2signalCount, "Node 2 User 2 should NOT have received signal meant for Node 2 User 1");
             console.log("✅ Node 2 User 2 correctly did not receive signal");
 
             // Now test the reverse: Node 2 User 1 sends to Node 1 User 1

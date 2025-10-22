@@ -686,29 +686,60 @@ impl PerspectiveInstance {
         self.pubsub_publish_diff(decorated_diff).await;
     }
 
-    pub async fn telepresence_signal_from_link_language(&self, mut signal: PerspectiveExpression) {
+    pub async fn telepresence_signal_from_link_language(&self, mut signal: PerspectiveExpression, recipient_did: Option<String>) {
         signal.verify_signatures();
         let handle = self.persisted.lock().await.clone();
 
-        // Determine the recipient - it's the owner of this perspective instance
-        let recipient = if let Some(owners) = &handle.owners {
-            owners.first().cloned()
-        } else {
-            None
-        };
+        log::debug!("telepresence_signal_from_link_language: perspective={}, recipient_did={:?}, signal_author={}",
+            handle.uuid, recipient_did, signal.author);
 
-        get_global_pubsub()
-            .await
-            .publish(
-                &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                &serde_json::to_string(&NeighbourhoodSignalFilter {
-                    perspective: handle,
-                    signal,
-                    recipient,
-                })
-                .unwrap(),
-            )
-            .await;
+        // If recipient_did is specified, only publish to that specific recipient
+        // Otherwise, publish to all owners (broadcast)
+        if let Some(recipient) = recipient_did {
+            log::debug!("Publishing signal to specific recipient: {}", recipient);
+            get_global_pubsub()
+                .await
+                .publish(
+                    &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                    &serde_json::to_string(&NeighbourhoodSignalFilter {
+                        perspective: handle.clone(),
+                        signal: signal.clone(),
+                        recipient: Some(recipient),
+                    })
+                    .unwrap(),
+                )
+                .await;
+        } else if let Some(owners) = &handle.owners {
+            // Broadcast to all owners
+            for owner_did in owners {
+                get_global_pubsub()
+                    .await
+                    .publish(
+                        &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                        &serde_json::to_string(&NeighbourhoodSignalFilter {
+                            perspective: handle.clone(),
+                            signal: signal.clone(),
+                            recipient: Some(owner_did.clone()),
+                        })
+                        .unwrap(),
+                    )
+                    .await;
+            }
+        } else {
+            // No owners - publish without recipient for backwards compatibility
+            get_global_pubsub()
+                .await
+                .publish(
+                    &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                    &serde_json::to_string(&NeighbourhoodSignalFilter {
+                        perspective: handle,
+                        signal,
+                        recipient: None,
+                    })
+                    .unwrap(),
+                )
+                .await;
+        }
     }
 
     pub async fn add_link(
@@ -1997,6 +2028,8 @@ impl PerspectiveInstance {
         // Check if the recipient is a locally managed user
         use crate::agent::AgentService;
 
+        log::debug!("🔔 SEND SIGNAL: Sending signal to remote agent {}", remote_agent_did);
+
         let current_perspective_handle = self.persisted.lock().await.clone();
 
         // Check if this perspective is part of a neighbourhood
@@ -2013,7 +2046,7 @@ impl PerspectiveInstance {
                                 if owners.contains(&remote_agent_did) {
                                     // The recipient owns this perspective (they're in the same neighbourhood)
                                     // Send signal directly via local pubsub
-                                    log::info!(
+                                    log::debug!(
                                         "Routing signal locally to user {} in neighbourhood {:?}",
                                         user_email,
                                         current_perspective_handle.shared_url
@@ -2046,9 +2079,12 @@ impl PerspectiveInstance {
             }
         }
 
+        log::debug!("🔔 SEND SIGNAL: Not a local user in this neighbourhood, sending through link language");
+
         // If not a local user in this neighbourhood, send through link language
         let mut link_language_guard = self.link_language.lock().await;
         if let Some(link_language) = link_language_guard.as_mut() {
+            log::debug!("🔔 SEND SIGNAL: Sending signal through link language");
             link_language.send_signal(remote_agent_did, payload).await
         } else {
             Err(self.no_link_language_error().await)
@@ -2066,7 +2102,7 @@ impl PerspectiveInstance {
             let self_clone = self.clone();
             tokio::spawn(async move {
                 self_clone
-                    .telepresence_signal_from_link_language(payload_clone)
+                    .telepresence_signal_from_link_language(payload_clone, None)
                     .await;
             });
         }

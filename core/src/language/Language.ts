@@ -255,7 +255,7 @@ export class OnlineAgent {
     status: PerspectiveExpression
 }
 
-export type TelepresenceSignalCallback = (payload: PerspectiveExpression) => void;
+export type TelepresenceSignalCallback = (payload: PerspectiveExpression, recipientDid?: string) => void;
 export interface TelepresenceAdapter {
     setOnlineStatus(status: PerspectiveExpression): Promise<void>;
     getOnlineAgents(): Promise<OnlineAgent[]>;

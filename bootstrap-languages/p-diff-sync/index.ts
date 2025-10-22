@@ -20,6 +20,7 @@ export default async function create(context: LanguageContext): Promise<Language
   const telepresenceAdapter = new TelepresenceAdapterImplementation(context);
 
   console.log(`[p-diff-sync] Registering DNAs for agent: ${agent.did}`);
+
   await Holochain.registerDNAs(
     //@ts-ignore
     [{ file: BUNDLE, nick: DNA_ROLE, zomeCalls:
@@ -36,38 +37,44 @@ export default async function create(context: LanguageContext): Promise<Language
     }],
     async (signal) => {
       //@ts-ignore
-      if (signal.payload.reference || (signal.payload.additions && signal.payload.removals)) {
-        await linksAdapter.handleHolochainSignal(signal)
-      } else {
-        // For multi-user support: check if signal has recipient_did and filter accordingly
-        const recipientDid = signal.payload.recipient_did;
-        const actualPayload = signal.payload.payload || signal.payload;
+      const payload = signal.payload;
 
-        // Check if this signal should be delivered to ANY local user
-        let shouldDeliver = !recipientDid; // If no recipient specified, it's a broadcast
 
-        if (recipientDid) {
-          // Check if recipient matches ANY local user DID
-          if (typeof agent.getAllLocalUserDIDs === 'function') {
-            try {
-              const localDIDs = await agent.getAllLocalUserDIDs();
-              shouldDeliver = localDIDs.includes(recipientDid);
-            } catch (e) {
-              console.error(`[p-diff-sync] Failed to get local user DIDs for signal routing:`, e);
-              // Fallback: check against current agent DID only
-              shouldDeliver = recipientDid === agent.did;
-            }
-          } else {
-            // Fallback: check against current agent DID only
-            shouldDeliver = recipientDid === agent.did;
-          }
+      // Link updates
+      if (payload.reference || (payload.additions && payload.removals)) {
+        await linksAdapter.handleHolochainSignal(signal);
+        return;
+      }
+
+      // Routed telepresence signal (has recipient_did field from RoutedSignalPayload)
+      if (payload.recipient_did) {
+        // Check if this signal is for THIS specific user (agent.did)
+        // Each language instance is created for a specific user
+
+        const recipientDid = payload.recipient_did;
+        
+        if (! agent.getAllLocalUserDIDs().includes(recipientDid)) {
+          console.error(`[p-diff-sync] Received Signal not for user on this node. Recipient is ${payload.recipient_did}. All local user DIDs: ${agent.getAllLocalUserDIDs().join(', ')}`);
+          return; // Not for this user
         }
 
-        if (shouldDeliver) {
-          for (const callback of telepresenceAdapter.signalCallbacks) {
-            await callback(actualPayload);
-          }
+        // Reconstruct PerspectiveExpression from flattened RoutedSignalPayload
+        const perspectiveExpression = {
+          author: payload.author,
+          data: payload.data,
+          timestamp: payload.timestamp,
+          proof: payload.proof
+        };
+
+        for (const callback of telepresenceAdapter.signalCallbacks) {
+          await callback(perspectiveExpression, recipientDid);
         }
+        return;
+      }
+
+      // Regular broadcast telepresence signal (no specific recipient)
+      for (const callback of telepresenceAdapter.signalCallbacks) {
+        await callback(payload);
       }
     }
   );
