@@ -237,7 +237,8 @@ impl Ad4mDb {
             "CREATE TABLE IF NOT EXISTS users (
                 username TEXT PRIMARY KEY,
                 did TEXT NOT NULL,
-                password TEXT NOT NULL
+                password TEXT NOT NULL,
+                last_seen INTEGER
              )",
             [],
         )?;
@@ -2201,15 +2202,43 @@ impl Ad4mDb {
     pub fn get_user(&self, username: &str) -> Ad4mDbResult<User> {
         let mut stmt = self
             .conn
-            .prepare("SELECT username, did, password FROM users WHERE username = ?1")?;
+            .prepare("SELECT username, did, password, last_seen FROM users WHERE username = ?1")?;
         let user = stmt.query_row([username], |row| {
             Ok(User {
                 username: row.get(0)?,
                 did: row.get(1)?,
                 password: row.get(2)?,
+                last_seen: row.get(3).ok(),
             })
         })?;
         Ok(user)
+    }
+
+    pub fn update_user_last_seen(&self, email: &str) -> Ad4mDbResult<()> {
+        let timestamp = chrono::Utc::now().timestamp() as i32;
+        self.conn.execute(
+            "UPDATE users SET last_seen = ?1 WHERE username = ?2",
+            params![timestamp, email],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_users(&self) -> Ad4mDbResult<Vec<User>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT username, did, password, last_seen FROM users ORDER BY last_seen DESC NULLS LAST"
+        )?;
+
+        let users = stmt.query_map([], |row| {
+            Ok(User {
+                username: row.get(0)?,
+                did: row.get(1)?,
+                password: row.get(2)?,
+                last_seen: row.get(3).ok(),
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(users)
     }
 
     // Settings management functions
@@ -3205,6 +3234,7 @@ mod tests {
             username: "test@example.com".to_string(),
             did: "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp".to_string(),
             password: "testpassword123".to_string(),
+            last_seen: None,
         };
 
         // Add user should succeed
@@ -3250,12 +3280,14 @@ mod tests {
             username: "user1@example.com".to_string(),
             did: "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp".to_string(),
             password: "password1".to_string(),
+            last_seen: None,
         };
 
         let user2 = User {
             username: "user2@example.com".to_string(),
             did: "did:key:z6MkjRagNiMu4CWTaH5SBDeKHyYoPP2ooXqPoy3GmASHLtF6".to_string(),
             password: "password2".to_string(),
+            last_seen: None,
         };
 
         // Add both users
@@ -3325,16 +3357,19 @@ mod tests {
                 username: "user_simple@example.com".to_string(),
                 did: "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp".to_string(),
                 password: "simple".to_string(),
+                last_seen: None,
             },
             User {
                 username: "user_complex@example.com".to_string(),
                 did: "did:key:z6MkjRagNiMu4CWTaH5SBDeKHyYoPP2ooXqPoy3GmASHLtF6".to_string(),
                 password: "Complex!Password123@#$".to_string(),
+                last_seen: None,
             },
             User {
                 username: "user_unicode@example.com".to_string(),
                 did: "did:key:z6MkrJVnaZjsXc2WrVjsXc2WrVjsXc2WrVjsXc2WrVjsXc2W".to_string(),
                 password: "пароль🔐密码".to_string(),
+                last_seen: None,
             },
         ];
 
@@ -3412,5 +3447,107 @@ mod tests {
         assert!(!retrieved_perspective.is_owned_by("did:key:user4"));
 
         println!("✅ Neighbourhood owners management tests passed");
+    }
+
+    #[test]
+    fn test_user_last_seen_tracking() {
+        use crate::graphql::graphql_types::User;
+
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create test user
+        let test_user = User {
+            username: "test@example.com".to_string(),
+            did: "did:key:test123".to_string(),
+            password: "hashed_password".to_string(),
+            last_seen: None,
+        };
+        db.add_user(&test_user).unwrap();
+
+        // Verify initial last_seen is None
+        let user = db.get_user("test@example.com").unwrap();
+        assert!(user.last_seen.is_none(), "Initial last_seen should be None");
+
+        // Update last_seen
+        db.update_user_last_seen("test@example.com").unwrap();
+
+        // Verify last_seen was updated
+        let user = db.get_user("test@example.com").unwrap();
+        assert!(user.last_seen.is_some(), "last_seen should be set after update");
+
+        let last_seen_timestamp = user.last_seen.unwrap();
+        let now = chrono::Utc::now().timestamp() as i32;
+        assert!(
+            (now - last_seen_timestamp).abs() < 2,
+            "last_seen should be within 2 seconds of now"
+        );
+
+        // Update again and verify it changes
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        db.update_user_last_seen("test@example.com").unwrap();
+
+        let user_updated = db.get_user("test@example.com").unwrap();
+        assert!(
+            user_updated.last_seen.unwrap() > last_seen_timestamp,
+            "last_seen should be updated to newer timestamp"
+        );
+
+        println!("✅ User last_seen tracking tests passed");
+    }
+
+    #[test]
+    fn test_list_users_ordering() {
+        use crate::graphql::graphql_types::User;
+
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create users with different last_seen times
+        let user1 = User {
+            username: "user1@example.com".to_string(),
+            did: "did:key:user1".to_string(),
+            password: "pass1".to_string(),
+            last_seen: None,
+        };
+
+        let user2 = User {
+            username: "user2@example.com".to_string(),
+            did: "did:key:user2".to_string(),
+            password: "pass2".to_string(),
+            last_seen: None,
+        };
+
+        let user3 = User {
+            username: "user3@example.com".to_string(),
+            did: "did:key:user3".to_string(),
+            password: "pass3".to_string(),
+            last_seen: None,
+        };
+
+        db.add_user(&user1).unwrap();
+        db.add_user(&user2).unwrap();
+        db.add_user(&user3).unwrap();
+
+        // Update last_seen for users in specific order
+        db.update_user_last_seen("user2@example.com").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(2)); // Sleep 2 seconds to ensure different timestamps (i32 seconds)
+        db.update_user_last_seen("user3@example.com").unwrap();
+        // user1 has no last_seen
+
+        // List users - should be ordered by last_seen DESC (most recent first, nulls last)
+        let users = db.list_users().unwrap();
+        assert_eq!(users.len(), 3);
+        assert_eq!(
+            users[0].username, "user3@example.com",
+            "Most recent should be first"
+        );
+        assert_eq!(users[1].username, "user2@example.com", "Second most recent");
+        assert_eq!(
+            users[2].username, "user1@example.com",
+            "Null last_seen should be last"
+        );
+
+        println!("✅ User list ordering tests passed");
     }
 }

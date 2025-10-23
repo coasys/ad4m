@@ -513,6 +513,7 @@ impl Mutation {
             username: email.clone(),
             did: did.clone(),
             password: password, // Store password for now (will improve with CAL-compliant key derivation later)
+            last_seen: None,
         };
 
         // Add user to database

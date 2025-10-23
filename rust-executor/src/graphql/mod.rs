@@ -111,6 +111,9 @@ pub async fn start_server(
                             }
                         };
 
+                        // Track last_seen for multi-user mode (runs on every GraphQL operation)
+                        crate::agent::capabilities::track_last_seen_from_token(auth_header.clone());
+
                         let capabilities = capabilities_from_token(
                             auth_header.clone(),
                             admin_credential_arc.as_ref().clone(),

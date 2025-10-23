@@ -627,6 +627,7 @@ pub struct User {
     pub username: String,
     pub did: String,
     pub password: String,
+    pub last_seen: Option<i32>,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -635,6 +636,15 @@ pub struct UserCreationResult {
     pub did: String,
     pub success: bool,
     pub error: Option<String>,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UserStatistics {
+    pub email: String,
+    pub did: String,
+    pub last_seen: Option<DateTime>,
+    pub perspective_count: i32,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize)]

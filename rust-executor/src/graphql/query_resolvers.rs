@@ -699,6 +699,55 @@ impl Query {
         })
     }
 
+    async fn runtime_list_users(&self, context: &RequestContext) -> FieldResult<Vec<UserStatistics>> {
+        check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)?;
+
+        // Check if multi-user mode is enabled
+        let multi_user_enabled = Ad4mDb::with_global_instance(|db| {
+            db.get_multi_user_enabled().unwrap_or(false)
+        });
+
+        if !multi_user_enabled {
+            return Ok(vec![]);
+        }
+
+        // Get all users from database
+        let users = Ad4mDb::with_global_instance(|db| {
+            db.list_users()
+        }).map_err(|e| FieldError::new(format!("Failed to list users: {}", e), Value::null()))?;
+
+        // For each user, count their perspectives
+        let mut user_stats = vec![];
+        let all_perspectives = all_perspectives();
+
+        for user in users {
+            // Count perspectives owned by this user
+            let mut perspective_count = 0;
+            for perspective in &all_perspectives {
+                let handle = perspective.persisted.lock().await.clone();
+                if let Some(owners) = &handle.owners {
+                    if owners.contains(&user.did) {
+                        perspective_count += 1;
+                    }
+                }
+            }
+
+            user_stats.push(UserStatistics {
+                email: user.username,
+                did: user.did,
+                last_seen: user.last_seen.map(|ts| {
+                    DateTime::from(
+                        chrono::DateTime::from_timestamp(ts as i64, 0)
+                            .unwrap_or_else(chrono::Utc::now)
+                    )
+                }),
+                perspective_count,
+            });
+        }
+
+        Ok(user_stats)
+    }
+
     async fn ai_get_models(&self, context: &RequestContext) -> FieldResult<Vec<Model>> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
         let models_result = Ad4mDb::with_global_instance(|db| db.get_models());

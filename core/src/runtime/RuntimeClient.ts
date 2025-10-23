@@ -1,7 +1,7 @@
 import { ApolloClient, gql } from "@apollo/client/core"
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import unwrapApolloResult from "../unwrapApolloResult"
-import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult } from "./RuntimeResolver"
+import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult, UserStatistics } from "./RuntimeResolver"
 
 const PERSPECTIVE_EXPRESSION_FIELDS = `
 author
@@ -403,6 +403,20 @@ export class RuntimeClient {
             variables: { enabled }
         }))
         return runtimeSetMultiUserEnabled
+    }
+
+    async listUsers(): Promise<UserStatistics[]> {
+        const { runtimeListUsers } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query runtimeListUsers {
+                runtimeListUsers {
+                    email
+                    did
+                    lastSeen
+                    perspectiveCount
+                }
+            }`
+        }))
+        return runtimeListUsers
     }
 
     addNotificationTriggeredCallback(cb: NotificationTriggeredCallback) {

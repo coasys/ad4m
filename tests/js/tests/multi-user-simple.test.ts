@@ -103,6 +103,146 @@ describe("Multi-User Simple integration tests", () => {
             expect(userResult2.did).to.match(/^did:key:.+/);
             console.log("✅ User creation works after enabling multi-user mode");
         });
+
+        it("should return empty array when multi-user is disabled", async () => {
+            // Disable multi-user mode temporarily
+            await adminAd4mClient!.runtime.setMultiUserEnabled(false);
+
+            // List users should return empty array
+            const users = await adminAd4mClient!.runtime.listUsers();
+            expect(users).to.be.an('array');
+            expect(users).to.have.lengthOf(0);
+            console.log("✅ listUsers returns empty array when multi-user disabled");
+
+            // Re-enable for other tests
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+        });
+
+        it("should list users with statistics", async () => {
+            // Create a few users
+            await adminAd4mClient!.agent.createUser("stats1@example.com", "password1");
+            await adminAd4mClient!.agent.createUser("stats2@example.com", "password2");
+
+            // Login one user to update their last_seen
+            const token1 = await adminAd4mClient!.agent.loginUser("stats1@example.com", "password1");
+            // @ts-ignore
+            const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
+
+            // User 1 creates a perspective
+            await client1.perspective.add("User 1 Perspective");
+
+            // Wait a moment for last_seen to be updated
+            await sleep(1000);
+
+            // List users
+            const users = await adminAd4mClient!.runtime.listUsers();
+            expect(users).to.be.an('array');
+            expect(users.length).to.be.greaterThan(0);
+
+            console.log("Users:", JSON.stringify(users, null, 2));
+
+            // Find our test users
+            const user1 = users.find(u => u.email === "stats1@example.com");
+            const user2 = users.find(u => u.email === "stats2@example.com");
+
+            expect(user1).to.not.be.undefined;
+            expect(user2).to.not.be.undefined;
+
+            // Verify structure
+            expect(user1).to.have.property('email');
+            expect(user1).to.have.property('did');
+            expect(user1).to.have.property('perspectiveCount');
+
+            // Verify user1 has a perspective
+            expect(user1!.perspectiveCount).to.equal(1);
+
+            // Verify user2 has no perspectives
+            expect(user2!.perspectiveCount).to.equal(0);
+
+            // Verify user1 has last_seen set (they logged in)
+            expect(user1).to.have.property('lastSeen');
+            console.log("User 1 last seen:", user1!.lastSeen);
+
+            // Verify DIDs are different
+            expect(user1!.did).to.not.equal(user2!.did);
+
+            console.log("✅ User statistics correctly returned");
+        });
+
+        it("should track last_seen timestamps", async () => {
+            // Ensure multi-user is enabled
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+
+            // Create a user
+            await adminAd4mClient!.agent.createUser("lastseen@example.com", "password");
+
+            // List users before login
+            let users = await adminAd4mClient!.runtime.listUsers();
+            let user = users.find(u => u.email === "lastseen@example.com");
+            expect(user).to.not.be.undefined;
+
+            // Initially might not have last_seen
+            const initialLastSeen = user!.lastSeen;
+            console.log("Initial last_seen:", initialLastSeen);
+
+            // Login the user (this should trigger last_seen tracking)
+            const token = await adminAd4mClient!.agent.loginUser("lastseen@example.com", "password");
+            // @ts-ignore
+            const userClient = new Ad4mClient(apolloClient(gqlPort, token), false);
+
+            console.log("========================HERE================================");
+            // Make a request to trigger last_seen update
+            await userClient.agent.me();
+
+            console.log("========================HERE 2================================");
+
+            // Wait for middleware to process (async task needs time)
+            await sleep(2000);
+
+            // List users again
+            users = await adminAd4mClient!.runtime.listUsers();
+            user = users.find(u => u.email === "lastseen@example.com");
+
+            // Now last_seen should be set
+            expect(user!.lastSeen).to.not.be.undefined;
+            console.log("Updated last_seen:", user!.lastSeen);
+
+            // Parse the timestamp - could be ISO string or Unix timestamp in seconds
+            let lastSeenDate: Date;
+            const lastSeenValue = user!.lastSeen!;
+
+            // Handle both number and string timestamp formats
+            if (typeof lastSeenValue === 'number') {
+                console.log("Last seen value is a number Unix timestamp in seconds, converting to milliseconds");
+                lastSeenDate = new Date(lastSeenValue * 1000);
+            } else {
+                console.log("Last seen value is a string, checking if it's a Unix timestamp in seconds");
+                console.log("Last seen value:", lastSeenValue);
+                if (/^\d+(\.\d+)?$/.test(lastSeenValue)) {
+                    console.log("Last seen value is a Unix timestamp in seconds, converting to milliseconds");
+                    lastSeenDate = new Date(parseInt(lastSeenValue) * 1000);
+                } else {
+                    console.log("Last seen value is a ISO string, converting to Date"); 
+                    lastSeenDate = new Date(lastSeenValue);
+                }
+            }
+
+            const now = new Date();
+
+            // Should be recent (within last 5 seconds)
+            const diffMs = now.getTime() - lastSeenDate.getTime();
+            const diffSeconds = Math.abs(diffMs) / 1000;
+            console.log("Time difference:", {
+                nowMs: now.getTime(),
+                lastSeenMs: lastSeenDate.getTime(),
+                diffMs,
+                diffSeconds,
+                lastSeenValue
+            });
+            expect(diffSeconds).to.be.lessThan(5);
+
+            console.log("✅ Last seen timestamp is recent:", diffSeconds, "seconds ago");
+        });
     });
 
         it("should create and login users with unique DIDs", async () => {
