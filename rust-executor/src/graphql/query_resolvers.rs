@@ -380,25 +380,49 @@ impl Query {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
 
-        // Get all DIDs from the link language
-        let all_dids = get_perspective(&uuid)
-            .ok_or(FieldError::from(format!(
-                "No perspective found with uuid {}",
-                uuid
-            )))?
-            .others()
-            .await
-            .map_err(|e| FieldError::from(e.to_string()))?;
-
-        // Filter out the current user's DID
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let current_user_did = crate::agent::did_for_context(&agent_context)
             .map_err(|e| FieldError::from(e.to_string()))?;
 
+        log::debug!("others() for current_user_did: {}", current_user_did);
+        log::debug!("main agent did: {}", crate::agent::did());
+
+        // Check if the current user is an owner of the perspective
+        let perspective = get_perspective(&uuid)
+            .ok_or(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid
+            )))?;
+
+        let owners = perspective
+            .persisted
+            .lock()
+            .await
+            .owners
+            .clone()
+            .ok_or(FieldError::from("Perspective has no owners"))?;
+
+        if !owners.contains(&current_user_did) {
+            return Err(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid)));
+        }
+
+        // Get all DIDs from the link language
+        let all_dids = perspective
+            .others()
+            .await
+            .map_err(|e| FieldError::from(e.to_string()))?;
+
+
+        log::debug!("all_dids: {:?}", all_dids);
+        log::debug!("current_user_did: {}", current_user_did);
         let others: Vec<String> = all_dids
             .into_iter()
             .filter(|did| did != &current_user_did)
             .collect();
+
+        log::debug!("others: {:?}", others);
 
         Ok(others)
     }

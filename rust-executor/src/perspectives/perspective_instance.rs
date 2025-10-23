@@ -237,7 +237,15 @@ impl PerspectiveInstance {
                     .clone();
 
                 match LanguageController::language_by_address(nh.data.link_language.clone()).await {
-                    Ok(Some(language)) => {
+                    Ok(Some(mut language)) => {
+                        // Set local agents before storing the language
+                        if let Some(owners) = &self.persisted.lock().await.owners {
+                            log::debug!("Setting local agents for link language: {:?}", owners);
+                            if let Err(e) = language.set_local_agents(owners.clone()).await {
+                                log::error!("Failed to set local agents on link language: {:?}", e);
+                            }
+                        }
+
                         {
                             let mut link_language_guard = self.link_language.lock().await;
                             *link_language_guard = Some(language);
@@ -2121,6 +2129,18 @@ impl PerspectiveInstance {
             link_language.send_broadcast(payload).await
         } else {
             Err(self.no_link_language_error().await)
+        }
+    }
+
+    pub async fn update_local_agents(&self, agents: Vec<String>) {
+        log::debug!("Updating local agents for perspective: {:?}", agents);
+        let mut link_language_guard = self.link_language.lock().await;
+        if let Some(link_language) = link_language_guard.as_mut() {
+            if let Err(e) = link_language.set_local_agents(agents).await {
+                log::error!("Failed to update local agents on link language: {:?}", e);
+            }
+        } else {
+            log::warn!("Cannot update local agents: link language not initialized");
         }
     }
 

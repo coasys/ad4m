@@ -98,8 +98,13 @@ pub async fn install_neighbourhood_with_context(
 
                 update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
 
+                // Update link language with new owners list
+                if let Some(owners) = &handle.owners {
+                    p.update_local_agents(owners.clone()).await;
+                }
+
                 log::info!(
-                    "Added user {} to existing neighbourhood {}. Link language will handle DID mapping when accessed.",
+                    "Added user {} to existing neighbourhood {}. Link language has been updated with new owners.",
                     user_email,
                     url
                 );
@@ -119,8 +124,13 @@ pub async fn install_neighbourhood_with_context(
 
                 update_perspective(&handle).await.map_err(|e| anyhow!(e))?;
 
+                // Update link language with new owners list
+                if let Some(owners) = &handle.owners {
+                    p.update_local_agents(owners.clone()).await;
+                }
+
                 log::info!(
-                    "Added main agent to existing neighbourhood {}. Link language will handle DID mapping when accessed.",
+                    "Added main agent to existing neighbourhood {}. Link language has been updated with new owners.",
                     url
                 );
                 return Ok(handle.clone());

@@ -93,7 +93,7 @@ fn agent_get_all_local_user_dids() -> Result<Vec<String>, AnyhowWrapperError> {
     // Add main agent DID
     dids.push(did());
 
-    // Add all user DIDs
+    // Add all managed user DIDs
     let user_emails = AgentService::list_user_emails().map_err(AnyhowWrapperError::from)?;
     for email in user_emails {
         let user_did =

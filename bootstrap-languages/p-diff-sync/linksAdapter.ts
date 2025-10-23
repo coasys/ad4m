@@ -23,12 +23,18 @@ export class LinkAdapter implements LinkSyncAdapter {
   gossipLogCount: number = 0;
   myCurrentRevision: Uint8Array | null = null;
   static didsWithLinksCreated: Set<DID> = new Set();
+  localAgents: Set<DID> = new Set(); // DIDs of agents that own this perspective
 
   constructor(context: LanguageContext) {
     //@ts-ignore
     this.hcDna = context.Holochain as HolochainLanguageDelegate;
     this.me = context.agent.did;
     this.agent = context.agent;
+  }
+
+  setLocalAgents(agents: DID[]): void {
+    console.debug(`[p-diff-sync LinkAdapter] setLocalAgents called with:`, agents);
+    this.localAgents = new Set(agents);
   }
 
   writable(): boolean {
@@ -45,51 +51,35 @@ export class LinkAdapter implements LinkSyncAdapter {
     //@ts-ignore
     let allDids = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "get_others", null);
 
-    console.log("PerspectiveDiffSync.others(); returning all DIDs:", allDids);
+    console.debug("[p-diff-sync LinkAdapter] others() -> ", allDids);
     return allDids as DID[];
   }
 
   async currentRevision(): Promise<string> {
     //@ts-ignore
     let res = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "current_revision", null);
-    console.log("PerspectiveDiffSync.currentRevision(); res", res);
+    console.debug("[p-diff-sync LinkAdapter] currentRevision -> ", res);
     return res as string;
   }
 
   async sync(): Promise<PerspectiveDiff> {
-    // Get all local DIDs and ensure DID link for each (multi-user support)
-    if (this.agent && typeof this.agent.getAllLocalUserDIDs === 'function') {
-      try {
-        const localDIDs: DID[] = await this.agent.getAllLocalUserDIDs();
-        //console.log(`[p-diff-sync LinkAdapter] Found ${localDIDs.length} local DIDs:`, localDIDs);
-        for (const did of localDIDs) {
-          if (!LinkAdapter.didsWithLinksCreated.has(did)) {
-            try {
-              //console.log(`[p-diff-sync LinkAdapter] Creating DID link for user: ${did}`);
-              await this.hcDna.call(DNA_ROLE, ZOME_NAME, "create_did_pub_key_link", did);
-              LinkAdapter.didsWithLinksCreated.add(did);
-              //console.log(`[p-diff-sync LinkAdapter] Successfully created DID link for user: ${did}`);
-            } catch (e) {
-              console.error(`[p-diff-sync LinkAdapter] Failed to create DID link for user ${did}:`, e);
-            }
-          } else {
-            //console.log(`[p-diff-sync LinkAdapter] DID link already exists for user: ${did}`);
-          }
-        }
-      } catch (e) {
-        console.error(`[p-diff-sync LinkAdapter] Could not get all local user DIDs:`, e);
-      }
-    } else {
-      console.log(`[p-diff-sync LinkAdapter] getAllLocalUserDIDs not available, falling back to current user only`);
-      // Fallback: ensure DID link for current user only
-      if (!LinkAdapter.didsWithLinksCreated.has(this.me)) {
+    // Create DID links only for agents that own this perspective (localAgents)
+    // If localAgents is empty, fall back to creating link for all local users
+    const agentsToRegister = this.localAgents.size > 0
+      ? Array.from(this.localAgents)
+      : (this.agent && typeof this.agent.getAllLocalUserDIDs === 'function')
+        ? await this.agent.getAllLocalUserDIDs()
+        : [this.me];
+
+    for (const did of agentsToRegister) {
+      if (!LinkAdapter.didsWithLinksCreated.has(did)) {
         try {
-          console.log(`[p-diff-sync LinkAdapter] Creating DID link for current user: ${this.me}`);
-          await this.hcDna.call(DNA_ROLE, ZOME_NAME, "create_did_pub_key_link", this.me);
-          LinkAdapter.didsWithLinksCreated.add(this.me);
-          console.log(`[p-diff-sync LinkAdapter] Successfully created DID link for current user: ${this.me}`);
+          console.debug(`[p-diff-sync LinkAdapter] Creating DID link for owner: ${did}`);
+          await this.hcDna.call(DNA_ROLE, ZOME_NAME, "create_did_pub_key_link", did);
+          LinkAdapter.didsWithLinksCreated.add(did);
+          console.debug(`[p-diff-sync LinkAdapter] Successfully created DID link for owner: ${did}`);
         } catch (e) {
-          console.error(`[p-diff-sync LinkAdapter] Failed to create DID link for current user ${this.me}:`, e);
+          console.error(`[p-diff-sync LinkAdapter] Failed to create DID link for ${did}:`, e);
         }
       }
     }
