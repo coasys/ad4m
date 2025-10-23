@@ -7,7 +7,7 @@ use lazy_static::lazy_static;
 
 use perspective_diff_sync_integrity::{
     HashBroadcast, OnlineAgent, OnlineAgentAndAction, Perspective, PerspectiveDiff,
-    PerspectiveExpression, PullResult,
+    PerspectiveExpression, PullResult, RoutedSignalPayload,
 };
 
 mod errors;
@@ -101,21 +101,32 @@ pub fn update_current_revision(_hash: Hash) -> ExternResult<()> {
 
 #[hdk_extern]
 fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
-    //Check if its a normal diff expression signal
-    match HashBroadcast::try_from(signal.clone()) {
-        Ok(broadcast) => {
-            debug!("recv_remote_signal broadcast: {:?} from {}", broadcast.reference_hash, broadcast.broadcast_author);
-            link_adapter::pull::handle_broadcast::<retriever::HolochainRetreiver>(broadcast)
-                .map_err(|err| utils::err(&format!("{}", err)))?;
-        }
-        //Check if its a broadcast message
-        Err(_) => match PerspectiveExpression::try_from(signal.clone()) {
-            Ok(sig) => emit_signal(sig)?,
-            //Check if its an online ping
-            Err(_) => return Err(utils::err(&format!("Signal not recognized: {:?}", signal))),
-        },
-    };
-    Ok(())
+    debug!("recv_remote_signal called, signal size: {} bytes", signal.bytes().len());
+
+    // Check if it's a RoutedSignalPayload (multi-user routing)
+    if let Ok(routed) = RoutedSignalPayload::try_from(signal.clone()) {
+        debug!("recv_remote_signal: Emitting RoutedSignalPayload for recipient: {}", routed.recipient_did);
+        emit_signal(routed)?;
+        return Ok(());
+    }
+
+    // Check if it's a HashBroadcast (link sync)
+    if let Ok(broadcast) = HashBroadcast::try_from(signal.clone()) {
+        debug!("recv_remote_signal: Handling HashBroadcast");
+        link_adapter::pull::handle_broadcast::<retriever::HolochainRetreiver>(broadcast)
+            .map_err(|err| utils::err(&format!("{}", err)))?;
+        return Ok(());
+    }
+
+    // Check if it's a regular PerspectiveExpression (broadcast telepresence)
+    if let Ok(sig) = PerspectiveExpression::try_from(signal.clone()) {
+        debug!("recv_remote_signal: Emitting broadcast PerspectiveExpression from {}", sig.author);
+        emit_signal(sig)?;
+        return Ok(());
+    }
+
+    debug!("recv_remote_signal: Signal not recognized");
+    Err(utils::err("Signal not recognized"))
 }
 
 // Telepresence implementation

@@ -1,9 +1,9 @@
 #![allow(non_snake_case)]
 
 use crate::{
-    agent::create_signed_expression,
+    agent::{capabilities::*, create_signed_expression, AgentContext, AgentService},
     ai_service::AIService,
-    neighbourhoods::{self, install_neighbourhood},
+    neighbourhoods::{self, install_neighbourhood_with_context},
     perspectives::{
         self, add_perspective, export_perspective, get_perspective, import_perspective,
         perspective_instance::{PerspectiveInstance, SdnaType},
@@ -17,11 +17,10 @@ use crate::{
     runtime_service::RuntimeService,
     types::Notification,
 };
-use coasys_juniper::{graphql_object, graphql_value, FieldError, FieldResult};
+use coasys_juniper::{graphql_object, graphql_value, FieldError, FieldResult, Value};
 
 use super::graphql_types::*;
 use crate::{
-    agent::{self, capabilities::*, AgentService},
     entanglement_service::{
         add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs,
         sign_device_key,
@@ -30,6 +29,29 @@ use crate::{
     pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC},
 };
 use base64::prelude::*;
+
+// Use the shared can_access_perspective function from query_resolvers
+use super::query_resolvers::can_access_perspective;
+
+// Helper function to get perspective with access control
+fn get_perspective_with_access_control(
+    uuid: &str,
+    context: &RequestContext,
+) -> FieldResult<PerspectiveInstance> {
+    let perspective = get_perspective_with_uuid_field_error(uuid)?;
+    let user_email = user_email_from_token(context.auth_token.clone());
+
+    // Check access to the perspective
+    let handle = futures::executor::block_on(perspective.persisted.lock()).clone();
+    if !can_access_perspective(&user_email, &handle) {
+        return Err(FieldError::new(
+            "Access denied: You don't have permission to access this perspective",
+            graphql_value!(null),
+        ));
+    }
+
+    Ok(perspective)
+}
 
 pub struct Mutation;
 
@@ -208,15 +230,14 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
         let auth_info: AuthInfo = auth_info.into();
-        let request_id = agent::capabilities::request_capability(auth_info.clone()).await;
+        let request_id = request_capability(auth_info.clone()).await;
         if context.auto_permit_cap_requests {
             println!("======================================");
             println!("Got capability request: \n{:?}", auth_info);
-            let random_number_challenge =
-                agent::capabilities::permit_capability(AuthInfoExtended {
-                    request_id: request_id.clone(),
-                    auth: auth_info,
-                })?;
+            let random_number_challenge = permit_capability(AuthInfoExtended {
+                request_id: request_id.clone(),
+                auth: auth_info,
+            })?;
             println!("--------------------------------------");
             println!("Random number challenge: {}", random_number_challenge);
             println!("======================================");
@@ -233,7 +254,7 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_PERMIT_CAPABILITY)?;
         let auth: AuthInfoExtended = serde_json::from_str(&auth)?;
-        let random_number_challenge = agent::capabilities::permit_capability(auth)?;
+        let random_number_challenge = permit_capability(auth)?;
         Ok(random_number_challenge)
     }
 
@@ -244,7 +265,7 @@ impl Mutation {
         request_id: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
-        let cap_token = agent::capabilities::generate_capability_token(request_id, rand).await?;
+        let cap_token = generate_capability_token(request_id, rand).await?;
         Ok(cap_token)
     }
 
@@ -264,7 +285,7 @@ impl Mutation {
         message: String,
     ) -> FieldResult<AgentSignature> {
         check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)?;
-        Ok(agent::AgentSignature::from_message(message)?.into())
+        Ok(crate::agent::AgentSignature::from_message(message)?.into())
     }
 
     async fn agent_unlock(
@@ -351,17 +372,67 @@ impl Mutation {
         perspective: PerspectiveInput,
     ) -> FieldResult<Agent> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let perspective_json = serde_json::to_string(&perspective)?;
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentUpdatePublicPerspective", {{ perspective: {} }})
-            )"#,
-            perspective_json
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Agent> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        // For multi-user mode: extract user email from JWT token if present
+        if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
+            // Get user agent data
+            let agent_data = AgentService::get_user_agent_data(&user_email).map_err(|e| {
+                FieldError::new(format!("User agent not available: {}", e), Value::null())
+            })?;
+
+            // Convert LinkExpressionInput to DecoratedLinkExpression
+            let decorated_links: Vec<DecoratedLinkExpression> = perspective
+                .links
+                .iter()
+                .map(|link_input| DecoratedLinkExpression::try_from(link_input.clone()))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            // Create agent with updated perspective
+            let agent = Agent {
+                did: agent_data.did,
+                direct_message_language: None,
+                perspective: Some(Perspective {
+                    links: decorated_links,
+                }),
+            };
+
+            // Store the updated profile for the user
+            AgentService::store_user_agent_profile(&user_email, &agent).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to store user profile: {}", e),
+                    Value::null(),
+                )
+            })?;
+
+            // Publish the updated agent to the agent language
+            let mut js_handle = context.js_handle.clone();
+            if let Err(e) =
+                AgentService::publish_user_agent_to_language(&user_email, &agent, &mut js_handle)
+                    .await
+            {
+                log::warn!(
+                    "Failed to publish updated user {} profile to agent language: {}",
+                    agent.did,
+                    e
+                );
+                // Don't fail the profile update, just log the warning
+            }
+
+            Ok(agent)
+        } else {
+            // Fallback to JS implementation for main agent
+            let mut js = context.js_handle.clone();
+            let perspective_json = serde_json::to_string(&perspective)?;
+            let script = format!(
+                r#"JSON.stringify(
+                    await core.callResolver("Mutation", "agentUpdatePublicPerspective", {{ perspective: {} }})
+                )"#,
+                perspective_json
+            );
+            let result = js.execute(script).await?;
+            let result: JsResultType<Agent> = serde_json::from_str(&result)?;
+            result.get_graphql_result()
+        }
     }
 
     async fn delete_trusted_agents(
@@ -381,6 +452,219 @@ impl Mutation {
         })
     }
 
+    // Simple user management mutations for multi-user mode
+    async fn runtime_create_user(
+        &self,
+        context: &RequestContext,
+        email: String,
+        password: String,
+    ) -> FieldResult<UserCreationResult> {
+        // Check if multi-user mode is enabled first
+        let multi_user_enabled =
+            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+
+        if !multi_user_enabled {
+            return Ok(UserCreationResult {
+                did: String::new(),
+                success: false,
+                error: Some("Multi-user mode is not enabled".to_string()),
+            });
+        }
+
+        // In multi-user mode, allow user creation without authentication
+        // (this enables signup flow for new users)
+        // Otherwise, require the user management capability
+        if !context.auth_token.is_empty() {
+            // If there's a token, verify it has the right capability
+            check_capability(
+                &context.capabilities,
+                &RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY,
+            )?;
+        }
+        // If no token (empty), we allow it when multi-user mode is enabled (checked above)
+
+        // Generate DID by creating a keypair in the wallet using email as key name
+        use crate::agent::AgentService;
+        AgentService::ensure_user_key_exists(&email).map_err(|e| {
+            FieldError::new(
+                format!("Failed to create user key: {}", e),
+                graphql_value!(null),
+            )
+        })?;
+
+        let did = AgentService::get_user_did_by_email(&email).map_err(|e| {
+            FieldError::new(
+                format!("Failed to retrieve user DID: {}", e),
+                graphql_value!(null),
+            )
+        })?;
+
+        // Check if user already exists
+        let db = Ad4mDb::global_instance();
+        let existing_user = {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref.get_user(&email).ok()
+        };
+
+        if existing_user.is_some() {
+            return Ok(UserCreationResult {
+                did: String::new(),
+                success: false,
+                error: Some("User already exists".to_string()),
+            });
+        }
+
+        // Create new user
+        let user = User {
+            username: email.clone(),
+            did: did.clone(),
+            password: password, // Store password for now (will improve with CAL-compliant key derivation later)
+            last_seen: None,
+        };
+
+        // Add user to database
+        {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref.add_user(&user).map_err(|e| {
+                FieldError::new(format!("Failed to add user: {}", e), graphql_value!(null))
+            })?;
+        }
+
+        // Create initial agent profile for the user
+        let initial_agent = Agent {
+            did: did.clone(),
+            direct_message_language: None,
+            perspective: Some(Perspective { links: vec![] }),
+        };
+
+        // Store the profile locally
+        AgentService::store_user_agent_profile(&email, &initial_agent).map_err(|e| {
+            FieldError::new(
+                format!("Failed to store user profile: {}", e),
+                Value::null(),
+            )
+        })?;
+
+        // Publish the agent to the agent language
+        let mut js_handle = context.js_handle.clone();
+        if let Err(e) =
+            AgentService::publish_user_agent_to_language(&email, &initial_agent, &mut js_handle)
+                .await
+        {
+            log::warn!("Failed to publish user {} to agent language: {}", did, e);
+            // Don't fail the user creation, just log the warning
+        }
+
+        Ok(UserCreationResult {
+            did,
+            success: true,
+            error: None,
+        })
+    }
+
+    async fn runtime_login_user(
+        &self,
+        context: &RequestContext,
+        email: String,
+        password: String,
+    ) -> FieldResult<String> {
+        // Check if multi-user mode is enabled first
+        let multi_user_enabled =
+            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+
+        if !multi_user_enabled {
+            return Err(FieldError::new(
+                "Multi-user mode is not enabled",
+                graphql_value!(null),
+            ));
+        }
+
+        // In multi-user mode, allow user login without authentication
+        // (this enables login flow for existing users)
+        // Otherwise, require the user management capability
+        if !context.auth_token.is_empty() {
+            // If there's a token, verify it has the right capability
+            check_capability(
+                &context.capabilities,
+                &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
+            )?;
+        }
+        // If no token (empty), we allow it when multi-user mode is enabled (checked above)
+
+        // Get user from database
+        let db = Ad4mDb::global_instance();
+        let user = {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref.get_user(&email).map_err(|e| {
+                FieldError::new(format!("User not found: {}", e), graphql_value!(null))
+            })?
+        };
+
+        // Verify password (simple comparison for now)
+        if user.password != password {
+            return Err(FieldError::new("Invalid credentials", graphql_value!(null)));
+        }
+
+        if !AgentService::user_exists(&email) {
+            return Err(FieldError::new(
+                "User key not found on executor",
+                graphql_value!(null),
+            ));
+        }
+
+        // Extract app info from the current capability token if available
+        let auth_info = if context.auth_token.is_empty() {
+            // Admin context - use default app info
+            AuthInfo {
+                app_name: "multi-user-app".to_string(),
+                app_desc: "Multi-user application".to_string(),
+                app_domain: Some("multi-user".to_string()),
+                app_url: Some("https://multi-user.app".to_string()),
+                app_icon_path: None,
+                capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+                user_email: Some(user.username.clone()),
+            }
+        } else {
+            // App context - preserve the original app info and add user supposed to be the same as the caller
+            match decode_jwt(context.auth_token.clone()) {
+                Ok(current_claims) => {
+                    let mut auth_info = current_claims.capabilities;
+                    auth_info.user_email = Some(user.username.clone());
+                    auth_info
+                }
+                Err(_) => {
+                    // Fallback if token decode fails
+                    AuthInfo {
+                        app_name: "multi-user-app".to_string(),
+                        app_desc: "Multi-user application".to_string(),
+                        app_domain: Some("multi-user".to_string()),
+                        app_url: Some("https://multi-user.app".to_string()),
+                        app_icon_path: None,
+                        capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+                        user_email: Some(user.username.clone()),
+                    }
+                }
+            }
+        };
+
+        let cap_token = token::generate_jwt(
+            auth_info.app_name.clone(),
+            DEFAULT_TOKEN_VALID_PERIOD,
+            auth_info,
+        )
+        .map_err(|e| {
+            FieldError::new(
+                format!("Failed to generate token: {}", e),
+                graphql_value!(null),
+            )
+        })?;
+
+        Ok(cap_token)
+    }
+
     async fn expression_create(
         &self,
         context: &RequestContext,
@@ -389,12 +673,37 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &EXPRESSION_CREATE_CAPABILITY)?;
         let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }})
-            )"#,
-            content, language_address
-        );
+
+        // Get user context from JWT token
+        let user_email =
+            crate::agent::capabilities::user_email_from_token(context.auth_token.clone());
+
+        let script = if let Some(user_email) = user_email {
+            // User context: set agent service context temporarily
+            format!(
+                r#"JSON.stringify(
+                    await (async () => {{
+                        const originalContext = core.agentService.getUserContext();
+                        core.agentService.setUserContext("{}");
+                        try {{
+                            return await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }});
+                        }} finally {{
+                            core.agentService.setUserContext(originalContext);
+                        }}
+                    }})()
+                )"#,
+                user_email, content, language_address
+            )
+        } else {
+            // Main agent context: call directly
+            format!(
+                r#"JSON.stringify(
+                    await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }})
+                )"#,
+                content, language_address
+            )
+        };
+
         let result = js.execute(script).await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
         result.get_graphql_result()
@@ -408,16 +717,45 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &EXPRESSION_UPDATE_CAPABILITY)?;
         let mut js = context.js_handle.clone();
+
+        // Get user context from JWT token
+        let user_email =
+            crate::agent::capabilities::user_email_from_token(context.auth_token.clone());
+
         let interaction_call_json = serde_json::to_string(&interaction_call)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "expressionInteract",
-                {{ interactionCall: {}, url: "{}" }},
-            ))"#,
-            interaction_call_json, url
-        );
+        let script = if let Some(user_email) = user_email {
+            // User context: set agent service context temporarily
+            format!(
+                r#"JSON.stringify(
+                    await (async () => {{
+                        const originalContext = core.agentService.getUserContext();
+                        core.agentService.setUserContext("{}");
+                        try {{
+                            return await core.callResolver(
+                                "Mutation",
+                                "expressionInteract",
+                                {{ interactionCall: {}, url: "{}" }},
+                            );
+                        }} finally {{
+                            core.agentService.setUserContext(originalContext);
+                        }}
+                    }})()
+                )"#,
+                user_email, interaction_call_json, url
+            )
+        } else {
+            // Main agent context: call directly
+            format!(
+                r#"JSON.stringify(
+                await core.callResolver(
+                    "Mutation",
+                    "expressionInteract",
+                    {{ interactionCall: {}, url: "{}" }},
+                ))"#,
+                interaction_call_json, url
+            )
+        };
+
         let result = js.execute(script).await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
         result.get_graphql_result()
@@ -520,7 +858,8 @@ impl Mutation {
         url: String,
     ) -> FieldResult<PerspectiveHandle> {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
-        Ok(install_neighbourhood(url).await?)
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        Ok(install_neighbourhood_with_context(url, &agent_context).await?)
     }
 
     async fn neighbourhood_publish_from_perspective(
@@ -531,10 +870,12 @@ impl Mutation {
         #[allow(non_snake_case)] perspectiveUUID: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_CREATE_CAPABILITY)?;
-        let url = neighbourhoods::neighbourhood_publish_from_perspective(
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        let url = neighbourhoods::neighbourhood_publish_from_perspective_with_context(
             &perspectiveUUID,
             link_language,
             meta.into(),
+            &agent_context,
         )
         .await?;
 
@@ -551,7 +892,8 @@ impl Mutation {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
         let perspective = Perspective::from(payload);
-        let perspective = create_signed_expression(perspective)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -572,18 +914,19 @@ impl Mutation {
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let perspective = Perspective {
             links: payload
                 .links
                 .into_iter()
                 .map(Link::from)
-                .map(create_signed_expression)
+                .map(|l| create_signed_expression(l, &agent_context))
                 .filter_map(Result::ok)
                 .map(LinkExpression::from)
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
-        let perspective = create_signed_expression(perspective)?;
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -605,7 +948,8 @@ impl Mutation {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
         let perspective = Perspective::from(payload);
-        let perspective = create_signed_expression(perspective)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -626,18 +970,19 @@ impl Mutation {
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let perspective = Perspective {
             links: payload
                 .links
                 .into_iter()
                 .map(Link::from)
-                .map(create_signed_expression)
+                .map(|l| create_signed_expression(l, &agent_context))
                 .filter_map(Result::ok)
                 .map(LinkExpression::from)
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
-        let perspective = create_signed_expression(perspective)?;
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -658,7 +1003,8 @@ impl Mutation {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
         let perspective = Perspective::from(status);
-        let perspective = create_signed_expression(perspective)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -678,18 +1024,19 @@ impl Mutation {
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let perspective = Perspective {
             links: status
                 .links
                 .into_iter()
                 .map(|l| Link::from(l).normalize())
-                .map(create_signed_expression)
+                .map(|l| create_signed_expression(l, &agent_context))
                 .filter_map(Result::ok)
                 .map(LinkExpression::from)
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
-        let perspective = create_signed_expression(perspective)?;
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -707,7 +1054,31 @@ impl Mutation {
         name: String,
     ) -> FieldResult<PerspectiveHandle> {
         check_capability(&context.capabilities, &PERSPECTIVE_CREATE_CAPABILITY)?;
-        let handle = PerspectiveHandle::new_from_name(name.clone());
+
+        // Determine owner DID based on user context
+        let user_email_opt = user_email_from_token(context.auth_token.clone());
+
+        let owner_did = if let Some(user_email) = user_email_opt {
+            // Multi-user mode: set owner to the authenticated user's DID
+            Some(
+                AgentService::get_user_did_by_email(&user_email).map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to get user DID: {}", e),
+                        graphql_value!(null),
+                    )
+                })?,
+            )
+        } else {
+            // Main agent mode: set owner to main agent DID if available
+            None // For now, don't assign ownership to main agent perspectives
+        };
+
+        let handle = if let Some(owner) = &owner_did {
+            PerspectiveHandle::new_with_owner(name.clone(), owner.clone())
+        } else {
+            PerspectiveHandle::new_from_name(name.clone())
+        };
+
         add_perspective(handle.clone(), None).await?;
         Ok(handle)
     }
@@ -725,9 +1096,15 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
-            .add_link(link.into(), link_status_from_input(status)?, batch_id)
+            .add_link(
+                link.into(),
+                link_status_from_input(status)?,
+                batch_id,
+                &agent_context,
+            )
             .await?)
     }
 
@@ -743,7 +1120,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
         let link = crate::types::LinkExpression::try_from(link)?;
         Ok(perspective
             .add_link_expression(link, link_status_from_input(status)?, batch_id)
@@ -762,12 +1139,14 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
             .add_links(
                 links.into_iter().map(|l| l.into()).collect(),
                 link_status_from_input(status)?,
                 batch_id,
+                &agent_context,
             )
             .await?)
     }
@@ -783,9 +1162,10 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
-            .link_mutations(mutations, link_status_from_input(status)?)
+            .link_mutations(mutations, link_status_from_input(status)?, &agent_context)
             .await?)
     }
 
@@ -824,7 +1204,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
         let link = crate::types::LinkExpression::try_from(link)?;
         perspective.remove_link(link, batch_id).await?;
         Ok(true)
@@ -841,7 +1221,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
         let links = links
             .into_iter()
             .map(LinkExpression::try_from)
@@ -860,7 +1240,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let perspective = get_perspective_with_access_control(&uuid, context)?;
         let mut handle = perspective.persisted.lock().await.clone();
         handle.name = Some(name);
         update_perspective(&handle).await?;
@@ -879,12 +1259,14 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
             .update_link(
                 LinkExpression::from_input_without_proof(old_link),
                 new_link.into(),
                 batch_id,
+                &agent_context,
             )
             .await?)
     }
@@ -901,10 +1283,13 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let sdna_type = SdnaType::from_string(&sdna_type)
             .map_err(|e| FieldError::new(e, graphql_value!({ "invalid_sdna_type": sdna_type })))?;
-        perspective.add_sdna(name, sdna_code, sdna_type).await?;
+        perspective
+            .add_sdna(name, sdna_code, sdna_type, &agent_context)
+            .await?;
         Ok(true)
     }
 
@@ -922,7 +1307,8 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
         let commands: Vec<Command> = serde_json::from_str(&commands)?;
         let parameters: Vec<Parameter> = if let Some(parameters) = parameters {
@@ -932,7 +1318,7 @@ impl Mutation {
         };
 
         perspective
-            .execute_commands(commands, expression, parameters, batch_id)
+            .execute_commands(commands, expression, parameters, batch_id, &agent_context)
             .await?;
 
         Ok(true)
@@ -952,7 +1338,8 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
         let subject_class: SubjectClassOption = serde_json::from_str(&subject_class)?;
         let initial_values = if let Some(initial_values) = initial_values {
@@ -962,7 +1349,13 @@ impl Mutation {
         };
 
         perspective
-            .create_subject(subject_class, expression_address, initial_values, batch_id)
+            .create_subject(
+                subject_class,
+                expression_address,
+                initial_values,
+                batch_id,
+                &agent_context,
+            )
             .await?;
 
         Ok(true)
@@ -988,10 +1381,11 @@ impl Mutation {
                 )
             })?;
 
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
         let result = perspective
-            .get_subject_data(subject_class, expression_address)
+            .get_subject_data(subject_class, expression_address, &agent_context)
             .await?;
         Ok(result)
     }
@@ -1007,7 +1401,7 @@ impl Mutation {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let perspective = get_perspective_with_access_control(&uuid, context)?;
         let (subscription_id, result_string) = perspective.subscribe_and_query(query).await?;
 
         Ok(QuerySubscription {
@@ -1027,7 +1421,7 @@ impl Mutation {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let perspective = get_perspective_with_access_control(&uuid, context)?;
         perspective.keepalive_query(subscription_id).await?;
         Ok(true)
     }
@@ -1043,7 +1437,7 @@ impl Mutation {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let perspective = get_perspective_with_access_control(&uuid, context)?;
         Ok(perspective
             .dispose_query_subscription(subscription_id)
             .await?)
@@ -1236,6 +1630,19 @@ impl Mutation {
         let result = js.execute(script).await?;
         let result: JsResultType<bool> = serde_json::from_str(&result)?;
         result.get_graphql_result()
+    }
+
+    async fn runtime_set_multi_user_enabled(
+        &self,
+        context: &RequestContext,
+        enabled: bool,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        Ad4mDb::with_global_instance(|db| {
+            db.set_multi_user_enabled(enabled)
+                .map_err(|e| FieldError::new(e.to_string(), Value::null()))?;
+            Ok(enabled)
+        })
     }
 
     async fn runtime_request_install_notification(
@@ -1637,7 +2044,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let perspective = get_perspective_with_access_control(&uuid, context)?;
         Ok(perspective.create_batch().await)
     }
 
@@ -1651,8 +2058,9 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        Ok(perspective.commit_batch(batch_id).await?)
+        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        Ok(perspective.commit_batch(batch_id, &agent_context).await?)
     }
 
     async fn runtime_restart_holochain(&self, context: &RequestContext) -> FieldResult<bool> {

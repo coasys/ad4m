@@ -24,8 +24,13 @@ export class TelepresenceAdapterImplementation implements TelepresenceAdapter {
     }
 
     async sendSignal(remoteAgentDid: string, payload: PerspectiveExpression): Promise<object> {
-        let res = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "send_signal", {remote_agent_did: remoteAgentDid, payload});
-        return res;
+        try {
+            let res = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "send_signal", {remote_agent_did: remoteAgentDid, payload});
+            return res;
+        } catch (error) {
+            console.error(`🔔 SEND SIGNAL: Error sending signal: ${error}`);
+            throw error;
+        }
     }
 
     async sendBroadcast(payload: PerspectiveExpression): Promise<object> {

@@ -228,20 +228,23 @@ pub async fn handle_sync_state_changed_from_link_language_impl(
 pub fn handle_telepresence_signal_from_link_language(
     signal: PerspectiveExpression,
     language_address: String,
+    recipient_did: Option<String>,
 ) {
     tokio::spawn(handle_telepresence_signal_from_link_language_impl(
         signal,
         language_address,
+        recipient_did,
     ));
 }
 
 pub async fn handle_telepresence_signal_from_link_language_impl(
     signal: PerspectiveExpression,
     language_address: String,
+    recipient_did: Option<String>,
 ) {
     if let Some(perspective) = perspective_by_link_language(language_address.clone()).await {
         perspective
-            .telepresence_signal_from_link_language(signal)
+            .telepresence_signal_from_link_language(signal, recipient_did)
             .await;
     }
 }

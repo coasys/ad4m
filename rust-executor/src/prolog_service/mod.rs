@@ -269,6 +269,7 @@ impl PrologService {
         module_name: String,
         all_links: Vec<DecoratedLinkExpression>,
         neighbourhood_author: Option<String>,
+        owner_did: Option<String>,
     ) -> Result<(), Error> {
         let service_start = std::time::Instant::now();
         log::debug!("🔗 PROLOG SERVICE: Starting update_perspective_links for perspective '{}' - {} links, module: {}", 
@@ -291,7 +292,7 @@ impl PrologService {
 
         let update_start = std::time::Instant::now();
         let result = pool
-            .update_all_engines_with_links(module_name, all_links, neighbourhood_author)
+            .update_all_engines_with_links(module_name, all_links, neighbourhood_author, owner_did)
             .await;
 
         match &result {
@@ -391,6 +392,7 @@ mod prolog_test {
                 perspective_id.clone(),
                 "facts".to_string(),
                 test_links,
+                None,
                 None,
             )
             .await;

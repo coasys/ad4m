@@ -4,6 +4,7 @@ use super::utils::{
     prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string,
 };
 use crate::agent::create_signed_expression;
+use crate::agent::AgentContext;
 use crate::graphql::graphql_types::{
     DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery,
     LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle,
@@ -236,7 +237,15 @@ impl PerspectiveInstance {
                     .clone();
 
                 match LanguageController::language_by_address(nh.data.link_language.clone()).await {
-                    Ok(Some(language)) => {
+                    Ok(Some(mut language)) => {
+                        // Set local agents before storing the language
+                        if let Some(owners) = &self.persisted.lock().await.owners {
+                            log::debug!("Setting local agents for link language: {:?}", owners);
+                            if let Err(e) = language.set_local_agents(owners.clone()).await {
+                                log::error!("Failed to set local agents on link language: {:?}", e);
+                            }
+                        }
+
                         {
                             let mut link_language_guard = self.link_language.lock().await;
                             *link_language_guard = Some(language);
@@ -685,20 +694,64 @@ impl PerspectiveInstance {
         self.pubsub_publish_diff(decorated_diff).await;
     }
 
-    pub async fn telepresence_signal_from_link_language(&self, mut signal: PerspectiveExpression) {
+    pub async fn telepresence_signal_from_link_language(
+        &self,
+        mut signal: PerspectiveExpression,
+        recipient_did: Option<String>,
+    ) {
         signal.verify_signatures();
         let handle = self.persisted.lock().await.clone();
-        get_global_pubsub()
-            .await
-            .publish(
-                &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                &serde_json::to_string(&NeighbourhoodSignalFilter {
-                    perspective: handle,
-                    signal,
-                })
-                .unwrap(),
-            )
-            .await;
+
+        log::debug!("telepresence_signal_from_link_language: perspective={}, recipient_did={:?}, signal_author={}",
+            handle.uuid, recipient_did, signal.author);
+
+        // If recipient_did is specified, only publish to that specific recipient
+        // Otherwise, publish to all owners (broadcast)
+        if let Some(recipient) = recipient_did {
+            log::debug!("Publishing signal to specific recipient: {}", recipient);
+            get_global_pubsub()
+                .await
+                .publish(
+                    &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                    &serde_json::to_string(&NeighbourhoodSignalFilter {
+                        perspective: handle.clone(),
+                        signal: signal.clone(),
+                        recipient: Some(recipient),
+                    })
+                    .unwrap(),
+                )
+                .await;
+        } else if let Some(owners) = &handle.owners {
+            // Broadcast to all owners
+            for owner_did in owners {
+                get_global_pubsub()
+                    .await
+                    .publish(
+                        &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                        &serde_json::to_string(&NeighbourhoodSignalFilter {
+                            perspective: handle.clone(),
+                            signal: signal.clone(),
+                            recipient: Some(owner_did.clone()),
+                        })
+                        .unwrap(),
+                    )
+                    .await;
+            }
+        } else {
+            // No owners - publish without recipient for backwards compatibility
+            get_global_pubsub()
+                .await
+                .publish(
+                    &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                    &serde_json::to_string(&NeighbourhoodSignalFilter {
+                        perspective: handle,
+                        signal,
+                        recipient: None,
+                    })
+                    .unwrap(),
+                )
+                .await;
+        }
     }
 
     pub async fn add_link(
@@ -706,8 +759,9 @@ impl PerspectiveInstance {
         link: Link,
         status: LinkStatus,
         batch_id: Option<String>,
+        context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
-        let link_expr: LinkExpression = create_signed_expression(link)?.into();
+        let link_expr: LinkExpression = create_signed_expression(link, context)?.into();
         self.add_link_expression(link_expr, status, batch_id).await
     }
 
@@ -835,10 +889,11 @@ impl PerspectiveInstance {
         links: Vec<Link>,
         status: LinkStatus,
         batch_id: Option<String>,
+        context: &AgentContext,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let link_expressions: Result<Vec<_>, _> = links
             .into_iter()
-            .map(|l| create_signed_expression(l).map(LinkExpression::from))
+            .map(|l| create_signed_expression(l, context).map(LinkExpression::from))
             .collect();
         let link_expressions = link_expressions?;
 
@@ -888,13 +943,14 @@ impl PerspectiveInstance {
         &mut self,
         mutations: LinkMutations,
         status: LinkStatus,
+        context: &AgentContext,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
         let handle = self.persisted.lock().await.clone();
         let additions = mutations
             .additions
             .into_iter()
             .map(Link::from)
-            .map(create_signed_expression)
+            .map(|l| create_signed_expression(l, context))
             .map(|r| r.map(LinkExpression::from))
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
         let removals = mutations
@@ -940,6 +996,7 @@ impl PerspectiveInstance {
         old_link: LinkExpression,
         new_link: Link,
         batch_id: Option<String>,
+        context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
         let handle = self.persisted.lock().await.clone();
         let link_option = Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &old_link))?;
@@ -960,7 +1017,8 @@ impl PerspectiveInstance {
             }
         };
 
-        let new_link_expression = LinkExpression::from(create_signed_expression(new_link)?);
+        let new_link_expression =
+            LinkExpression::from(create_signed_expression(new_link, context)?);
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
@@ -1215,6 +1273,7 @@ impl PerspectiveInstance {
         name: String,
         mut sdna_code: String,
         sdna_type: SdnaType,
+        context: &AgentContext,
     ) -> Result<bool, AnyError> {
         //let mut added = false;
         let mutex = self.sdna_change_mutex.clone();
@@ -1266,7 +1325,8 @@ impl PerspectiveInstance {
             target: sdna_code,
         });
 
-        self.add_links(sdna_links, LinkStatus::Shared, None).await?;
+        self.add_links(sdna_links, LinkStatus::Shared, None, context)
+            .await?;
         //added = true;
         //}
         // Mutex guard is automatically dropped here
@@ -1279,7 +1339,10 @@ impl PerspectiveInstance {
 
         // Get service reference before taking any locks
         let service = get_prolog_service().await;
-        let uuid = self.persisted.lock().await.uuid.clone();
+        let persisted = self.persisted.lock().await;
+        let uuid = persisted.uuid.clone();
+        let owner_did = persisted.get_primary_owner();
+        drop(persisted); // Release the lock early
 
         if !service.has_perspective_pool(uuid.clone()).await
             || !service
@@ -1313,6 +1376,7 @@ impl PerspectiveInstance {
                         "facts".to_string(),
                         all_links.clone(),
                         neighbourhood_author.clone(),
+                        owner_did.clone(),
                     )
                     .await?;
             }
@@ -1333,12 +1397,27 @@ impl PerspectiveInstance {
                         "facts".to_string(),
                         all_links,
                         neighbourhood_author,
+                        owner_did,
                     )
                     .await?;
             }
         }
 
         Ok(())
+    }
+
+    /// Get the appropriate prolog pool ID for the given context
+    fn get_pool_id_for_context(&self, perspective_uuid: &str, context: &AgentContext) -> String {
+        match &context.user_email {
+            Some(user_email) => {
+                // User-specific pool: "uuid_user_email"
+                format!("{}_{}", perspective_uuid, user_email)
+            }
+            None => {
+                // Main agent pool: just the uuid
+                perspective_uuid.to_string()
+            }
+        }
     }
 
     /// Common helper for executing prolog queries with configurable pool, lock, and executor
@@ -1412,11 +1491,36 @@ impl PerspectiveInstance {
     /// Executes a Prolog query against the perspective's main pool
     /// locks the prolog_update_mutex
     /// uses run_query_smart
-    pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
+    // pub async fn prolog_query(&self, query: String) -> Result<QueryResolution, AnyError> {
+    //     self.prolog_query_helper(
+    //         query,
+    //         true,
+    //         |uuid| uuid.clone(),
+    //         |service, pool, q| async move { service.run_query_smart(pool, q).await },
+    //     )
+    //     .await
+    // }
+
+    /// Executes a Prolog query with user context - uses context-specific pool
+    /// locks the prolog_update_mutex
+    /// uses run_query_smart
+    pub async fn prolog_query_with_context(
+        &self,
+        query: String,
+        context: &AgentContext,
+    ) -> Result<QueryResolution, AnyError> {
+        let perspective_uuid = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
+
+        // Ensure the user-specific pool exists
+        self.ensure_prolog_engine_pool_for_context(context).await?;
+
         self.prolog_query_helper(
             query,
             true,
-            |uuid| uuid.clone(),
+            |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
             |service, pool, q| async move { service.run_query_smart(pool, q).await },
         )
         .await
@@ -1438,6 +1542,28 @@ impl PerspectiveInstance {
         .await
     }
 
+    /// Executes a Prolog subscription query with user context - uses context-specific pool
+    /// locks the prolog_update_mutex
+    /// uses run_query_subscription
+    pub async fn prolog_query_subscription_with_context(
+        &self,
+        query: String,
+        context: &AgentContext,
+    ) -> Result<QueryResolution, AnyError> {
+        let perspective_uuid = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
+
+        self.prolog_query_helper(
+            query,
+            true,
+            |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
+            |service, pool, q| async move { service.run_query_subscription(pool, q).await },
+        )
+        .await
+    }
+
     /// Executes a Prolog query directly on the SDNA pool for maximum performance
     ///
     /// This bypasses all smart routing logic and goes directly to the SDNA pool.
@@ -1454,6 +1580,81 @@ impl PerspectiveInstance {
             |service, pool, q| async move { service.run_query_sdna(pool, q).await },
         )
         .await
+    }
+
+    /// Executes a Prolog query directly on the SDNA pool with user context
+    /// This ensures the SDNA pool has the correct owner_did for SDNA fact filtering
+    ///
+    /// does not lock the prolog_update_mutex
+    /// uses run_query_sdna
+    pub async fn prolog_query_sdna_with_context(
+        &self,
+        query: String,
+        context: &AgentContext,
+    ) -> Result<QueryResolution, AnyError> {
+        let perspective_uuid = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
+
+        // Ensure the user-specific pool exists
+        self.ensure_prolog_engine_pool_for_context(context).await?;
+
+        self.prolog_query_helper(
+            query,
+            false,
+            |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
+            |service, pool, q| async move { service.run_query_sdna(pool, q).await },
+        )
+        .await
+    }
+
+    /// Ensure prolog engine pool exists for the given context with correct owner_did
+    pub async fn ensure_prolog_engine_pool_for_context(
+        &self,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let (perspective_uuid, neighbourhood_author) = {
+            let persisted_guard = self.persisted.lock().await;
+            let neighbourhood_author = persisted_guard
+                .neighbourhood
+                .as_ref()
+                .map(|n| n.author.clone());
+            (persisted_guard.uuid.clone(), neighbourhood_author)
+        };
+
+        let pool_id = self.get_pool_id_for_context(&perspective_uuid, context);
+        let owner_did = if let Some(user_email) = &context.user_email {
+            crate::agent::AgentService::get_user_did_by_email(user_email)?
+        } else {
+            crate::agent::AgentService::with_global_instance(|service| {
+                service.did.clone().unwrap_or_default()
+            })
+        };
+
+        // Ensure pool exists
+        let service = get_prolog_service().await;
+        service
+            .ensure_perspective_pool(pool_id.clone(), None)
+            .await?;
+
+        // Initialize user pool with correct neighbourhood author for SDNA governance
+        // This ensures users can see SDNA from both themselves and the neighbourhood creator
+        let links = self
+            .get_links(&crate::graphql::graphql_types::LinkQuery::default())
+            .await?;
+
+        service
+            .update_perspective_links(
+                pool_id,
+                "facts".to_string(),  // module_name
+                links,                // already DecoratedLinkExpression
+                neighbourhood_author, // neighbourhood_author for SDNA governance
+                Some(owner_did),      // owner_did for SDNA
+            )
+            .await?;
+
+        Ok(())
     }
 
     /// Executes a Prolog query against the notification pool
@@ -1726,9 +1927,12 @@ impl PerspectiveInstance {
 
     async fn update_prolog_engine_facts(&self) -> Result<(), AnyError> {
         // Get all required data before making service calls
-        let uuid = {
+        let (uuid, owner_did) = {
             let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
+            (
+                persisted_guard.uuid.clone(),
+                persisted_guard.get_primary_owner(),
+            )
         };
 
         let all_links = self.get_links(&LinkQuery::default()).await?;
@@ -1748,6 +1952,7 @@ impl PerspectiveInstance {
                 "facts".to_string(),
                 all_links.clone(),
                 neighbourhood_author.clone(),
+                owner_did.clone(),
             )
             .await?;
         let service_clone = service.clone();
@@ -1758,6 +1963,7 @@ impl PerspectiveInstance {
                     "facts".to_string(),
                     all_links,
                     neighbourhood_author,
+                    owner_did,
                 )
                 .await;
         });
@@ -1831,8 +2037,71 @@ impl PerspectiveInstance {
         remote_agent_did: String,
         payload: PerspectiveExpression,
     ) -> Result<(), AnyError> {
+        // Check if the recipient is a locally managed user
+        use crate::agent::AgentService;
+
+        log::debug!(
+            "🔔 SEND SIGNAL: Sending signal to remote agent {}",
+            remote_agent_did
+        );
+
+        let current_perspective_handle = self.persisted.lock().await.clone();
+
+        // Check if this perspective is part of a neighbourhood
+        if current_perspective_handle.shared_url.is_some() {
+            // Get all local user emails
+            if let Ok(user_emails) = AgentService::list_user_emails() {
+                // Check if any local user has the recipient DID
+                for user_email in user_emails {
+                    if let Ok(user_did) = AgentService::get_user_did_by_email(&user_email) {
+                        if user_did == remote_agent_did {
+                            // This is a locally managed user!
+                            // Check if they own a perspective for this neighbourhood
+                            if let Some(owners) = &current_perspective_handle.owners {
+                                if owners.contains(&remote_agent_did) {
+                                    // The recipient owns this perspective (they're in the same neighbourhood)
+                                    // Send signal directly via local pubsub
+                                    log::debug!(
+                                        "Routing signal locally to user {} in neighbourhood {:?}",
+                                        user_email,
+                                        current_perspective_handle.shared_url
+                                    );
+
+                                    let handle = self.persisted.lock().await.clone();
+                                    let mut signal = payload.clone();
+                                    signal.verify_signatures();
+
+                                    get_global_pubsub()
+                                        .await
+                                        .publish(
+                                            &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                                            &serde_json::to_string(&NeighbourhoodSignalFilter {
+                                                perspective: handle,
+                                                signal,
+                                                recipient: Some(remote_agent_did.clone()),
+                                            })
+                                            .unwrap(),
+                                        )
+                                        .await;
+
+                                    // Signal delivered locally, no need to go through link language
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        log::debug!(
+            "🔔 SEND SIGNAL: Not a local user in this neighbourhood, sending through link language"
+        );
+
+        // If not a local user in this neighbourhood, send through link language
         let mut link_language_guard = self.link_language.lock().await;
         if let Some(link_language) = link_language_guard.as_mut() {
+            log::debug!("🔔 SEND SIGNAL: Sending signal through link language");
             link_language.send_signal(remote_agent_did, payload).await
         } else {
             Err(self.no_link_language_error().await)
@@ -1850,7 +2119,7 @@ impl PerspectiveInstance {
             let self_clone = self.clone();
             tokio::spawn(async move {
                 self_clone
-                    .telepresence_signal_from_link_language(payload_clone)
+                    .telepresence_signal_from_link_language(payload_clone, None)
                     .await;
             });
         }
@@ -1863,12 +2132,25 @@ impl PerspectiveInstance {
         }
     }
 
+    pub async fn update_local_agents(&self, agents: Vec<String>) {
+        log::debug!("Updating local agents for perspective: {:?}", agents);
+        let mut link_language_guard = self.link_language.lock().await;
+        if let Some(link_language) = link_language_guard.as_mut() {
+            if let Err(e) = link_language.set_local_agents(agents).await {
+                log::error!("Failed to update local agents on link language: {:?}", e);
+            }
+        } else {
+            log::warn!("Cannot update local agents: link language not initialized");
+        }
+    }
+
     pub async fn execute_commands(
         &mut self,
         commands: Vec<Command>,
         expression: String,
         parameters: Vec<Parameter>,
         batch_id: Option<String>,
+        context: &AgentContext,
     ) -> Result<(), AnyError> {
         //let execute_start = std::time::Instant::now();
         //log::info!("⚙️ EXECUTE COMMANDS: Starting execution of {} commands for expression '{}', batch_id: {:?}",
@@ -1926,6 +2208,7 @@ impl PerspectiveInstance {
                         },
                         status,
                         batch_id.clone(),
+                        context,
                     )
                     .await?;
                 }
@@ -1974,6 +2257,7 @@ impl PerspectiveInstance {
                         },
                         status,
                         batch_id.clone(),
+                        context,
                     )
                     .await?;
                 }
@@ -2003,6 +2287,7 @@ impl PerspectiveInstance {
                             .collect(),
                         status,
                         batch_id.clone(),
+                        context,
                     )
                     .await?;
                 }
@@ -2018,6 +2303,7 @@ impl PerspectiveInstance {
     async fn subject_class_option_to_class_name(
         &mut self,
         subject_class: SubjectClassOption,
+        context: &AgentContext,
     ) -> Result<String, AnyError> {
         //let method_start = std::time::Instant::now();
         //log::info!("🔍 SUBJECT CLASS: Starting class name resolution...");
@@ -2034,7 +2320,7 @@ impl PerspectiveInstance {
             //let query_start = std::time::Instant::now();
 
             let result = self
-                .prolog_query_sdna(query.to_string())
+                .prolog_query_sdna_with_context(query.to_string(), context)
                 .await
                 .map_err(|e| {
                     log::error!("Error creating subject: {:?}", e);
@@ -2051,8 +2337,9 @@ impl PerspectiveInstance {
     async fn get_actions_from_prolog(
         &self,
         query: String,
+        context: &AgentContext,
     ) -> Result<Option<Vec<Command>>, AnyError> {
-        let result = self.prolog_query_sdna(query).await?;
+        let result = self.prolog_query_sdna_with_context(query, context).await?;
 
         if let Some(actions_str) = prolog_get_first_string_binding(&result, "Actions") {
             // json5 seems to have a bug, blocking when a property is set to undefined
@@ -2065,7 +2352,11 @@ impl PerspectiveInstance {
         }
     }
 
-    async fn get_constructor_actions(&self, class_name: &str) -> Result<Vec<Command>, AnyError> {
+    async fn get_constructor_actions(
+        &self,
+        class_name: &str,
+        context: &AgentContext,
+    ) -> Result<Vec<Command>, AnyError> {
         //let method_start = std::time::Instant::now();
         //log::info!("🏗️ CONSTRUCTOR: Getting constructor actions for class '{}'", class_name);
 
@@ -2080,7 +2371,7 @@ impl PerspectiveInstance {
         //log::info!("🏗️ CONSTRUCTOR: Prolog query completed in {:?} (total: {:?})",
         //    query_start.elapsed(), method_start.elapsed());
 
-        self.get_actions_from_prolog(query)
+        self.get_actions_from_prolog(query, context)
             .await?
             .ok_or(anyhow!("No constructor found for class: {}", class_name))
     }
@@ -2089,6 +2380,7 @@ impl PerspectiveInstance {
         &self,
         class_name: &str,
         property: &str,
+        context: &AgentContext,
     ) -> Result<Option<Vec<Command>>, AnyError> {
         //let method_start = std::time::Instant::now();
         //log::info!("🔧 PROPERTY SETTER: Getting setter for class '{}', property '{}'", class_name, property);
@@ -2104,7 +2396,7 @@ impl PerspectiveInstance {
         //log::info!("🔧 PROPERTY SETTER: Prolog query completed in {:?} (total: {:?})",
         //    query_start.elapsed(), method_start.elapsed());
 
-        self.get_actions_from_prolog(query).await
+        self.get_actions_from_prolog(query, context).await
     }
 
     async fn resolve_property_value(
@@ -2112,11 +2404,12 @@ impl PerspectiveInstance {
         class_name: &str,
         property: &str,
         value: &serde_json::Value,
+        context: &AgentContext,
     ) -> Result<String, AnyError> {
-        let resolve_result = self.prolog_query(format!(
+        let resolve_result = self.prolog_query_with_context(format!(
             r#"subject_class("{}", C), property_resolve(C, "{}"), property_resolve_language(C, "{}", Language)"#,
             class_name, property, property
-        )).await?;
+        ), context).await?;
 
         if let Some(resolve_language) = prolog_get_first_string_binding(&resolve_result, "Language")
         {
@@ -2149,6 +2442,7 @@ impl PerspectiveInstance {
         expression_address: String,
         initial_values: Option<serde_json::Value>,
         batch_id: Option<String>,
+        context: &AgentContext,
     ) -> Result<(), AnyError> {
         //let create_start = std::time::Instant::now();
         //log::info!("🎯 CREATE SUBJECT: Starting create_subject for expression '{}' - batch_id: {:?}",
@@ -2156,12 +2450,12 @@ impl PerspectiveInstance {
 
         //let class_name_start = std::time::Instant::now();
         let class_name = self
-            .subject_class_option_to_class_name(subject_class)
+            .subject_class_option_to_class_name(subject_class, context)
             .await?;
         //log::info!("🎯 CREATE SUBJECT: Got class name '{}' in {:?}", class_name, class_name_start.elapsed());
 
         //let constructor_start = std::time::Instant::now();
-        let mut commands = self.get_constructor_actions(&class_name).await?;
+        let mut commands = self.get_constructor_actions(&class_name, context).await?;
         //log::info!("🎯 CREATE SUBJECT: Got {} constructor actions in {:?}",
         //    commands.len(), constructor_start.elapsed());
 
@@ -2172,11 +2466,12 @@ impl PerspectiveInstance {
             if let serde_json::Value::Object(obj) = obj {
                 for (prop, value) in obj.iter() {
                     //let prop_start = std::time::Instant::now();
-                    if let Some(setter_commands) =
-                        self.get_property_setter_actions(&class_name, prop).await?
+                    if let Some(setter_commands) = self
+                        .get_property_setter_actions(&class_name, prop, context)
+                        .await?
                     {
                         let target_value = self
-                            .resolve_property_value(&class_name, prop, value)
+                            .resolve_property_value(&class_name, prop, value, context)
                             .await?;
 
                         //log::info!("🎯 CREATE SUBJECT: Property '{}' setter resolved in {:?}",
@@ -2216,6 +2511,7 @@ impl PerspectiveInstance {
             expression_address.clone(),
             vec![],
             batch_id.clone(),
+            context,
         )
         .await?;
 
@@ -2231,10 +2527,13 @@ impl PerspectiveInstance {
         let mut instance_check_passed = false;
         while !instance_check_passed && tries < 50 {
             match self
-                .prolog_query(format!(
-                    "subject_class(\"{}\", C), instance(C, \"{}\").",
-                    class_name, expression_address
-                ))
+                .prolog_query_with_context(
+                    format!(
+                        "subject_class(\"{}\", C), instance(C, \"{}\").",
+                        class_name, expression_address,
+                    ),
+                    context,
+                )
                 .await
             {
                 Ok(QueryResolution::True) => instance_check_passed = true,
@@ -2263,6 +2562,7 @@ impl PerspectiveInstance {
         &mut self,
         subject_class: SubjectClassOption,
         base_expression: String,
+        context: &AgentContext,
     ) -> Result<String, AnyError> {
         let mut object: HashMap<String, String> = HashMap::new();
 
@@ -2285,13 +2585,16 @@ impl PerspectiveInstance {
         );
 
         let class_name = self
-            .subject_class_option_to_class_name(subject_class)
+            .subject_class_option_to_class_name(subject_class, context)
             .await?;
         let result = self
-            .prolog_query(format!(
-                "subject_class(\"{}\", C), instance(C, \"{}\").",
-                class_name, base_expression
-            ))
+            .prolog_query_with_context(
+                format!(
+                    "subject_class(\"{}\", C), instance(C, \"{}\").",
+                    class_name, base_expression
+                ),
+                context,
+            )
             .await?;
 
         if let QueryResolution::False = result {
@@ -2308,28 +2611,37 @@ impl PerspectiveInstance {
         }
 
         let properties_result = self
-            .prolog_query(format!(
-                r#"subject_class("{}", C), property(C, Property)."#,
-                class_name
-            ))
+            .prolog_query_with_context(
+                format!(
+                    r#"subject_class("{}", C), property(C, Property)."#,
+                    class_name
+                ),
+                context,
+            )
             .await?;
         let properties: Vec<String> =
             prolog_get_all_string_bindings(&properties_result, "Property");
 
         for p in &properties {
             let property_values_result = self
-                .prolog_query(format!(
-                    r#"subject_class("{}", C), property_getter(C, "{}", "{}", Value)"#,
-                    class_name, base_expression, p
-                ))
+                .prolog_query_with_context(
+                    format!(
+                        r#"subject_class("{}", C), property_getter(C, "{}", "{}", Value)"#,
+                        class_name, base_expression, p
+                    ),
+                    context,
+                )
                 .await?;
             if let Some(property_value) = prolog_get_first_binding(&property_values_result, "Value")
             {
                 let result = self
-                    .prolog_query(format!(
-                        r#"subject_class("{}", C), property_resolve(C, "{}")"#,
-                        class_name, p
-                    ))
+                    .prolog_query_with_context(
+                        format!(
+                            r#"subject_class("{}", C), property_resolve(C, "{}")"#,
+                            class_name, p
+                        ),
+                        context,
+                    )
                     .await?;
                 //println!("resolve query result for {}: {:?}", p, result);
                 let resolve_expression_uri = QueryResolution::False != result;
@@ -2376,20 +2688,26 @@ impl PerspectiveInstance {
         }
 
         let collections_results = self
-            .prolog_query(format!(
-                r#"subject_class("{}", C), collection(C, Collection)"#,
-                class_name
-            ))
+            .prolog_query_with_context(
+                format!(
+                    r#"subject_class("{}", C), collection(C, Collection)"#,
+                    class_name
+                ),
+                context,
+            )
             .await?;
         let collections: Vec<String> =
             prolog_get_all_string_bindings(&collections_results, "Collection");
 
         for c in collections {
             let collection_values_result = self
-                .prolog_query(format!(
-                    r#"subject_class("{}", C), collection_getter(C, "{}", "{}", Value)"#,
-                    class_name, base_expression, c
-                ))
+                .prolog_query_with_context(
+                    format!(
+                        r#"subject_class("{}", C), collection_getter(C, "{}", "{}", Value)"#,
+                        class_name, base_expression, c
+                    ),
+                    context,
+                )
                 .await?;
             if let Some(collection_value) =
                 prolog_get_first_binding(&collection_values_result, "Value")
@@ -2724,6 +3042,7 @@ impl PerspectiveInstance {
     pub async fn commit_batch(
         &mut self,
         batch_uuid: String,
+        context: &AgentContext,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
         //let commit_start = std::time::Instant::now();
         //log::info!("🔄 BATCH COMMIT: Starting batch commit for batch_uuid: {}", batch_uuid);
@@ -2755,7 +3074,7 @@ impl PerspectiveInstance {
         // Process additions
         for link in diff.additions {
             let status = link.status.unwrap_or(LinkStatus::Shared);
-            let signed_expr = create_signed_expression(link.data)?;
+            let signed_expr = create_signed_expression(link.data, context)?;
             let decorated =
                 DecoratedLinkExpression::from((LinkExpression::from(signed_expr), status.clone()));
 
@@ -2914,6 +3233,7 @@ mod tests {
                 shared_url: None,
                 neighbourhood: None,
                 state: PerspectiveState::Private,
+                owners: None,
             },
             None,
         )
@@ -2928,6 +3248,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_context_aware_prolog_pools() {
+        let perspective = setup();
+
+        // Test main agent context
+        let main_context = crate::agent::AgentContext::main_agent();
+        let main_pool_id = perspective.get_pool_id_for_context("test-uuid", &main_context);
+        assert_eq!(main_pool_id, "test-uuid");
+
+        // Test user context
+        let user_context =
+            crate::agent::AgentContext::for_user_email("test@example.com".to_string());
+        let user_pool_id = perspective.get_pool_id_for_context("test-uuid", &user_context);
+        assert_eq!(user_pool_id, "test-uuid_test@example.com");
+
+        // Test different users get different pools
+        let user2_context =
+            crate::agent::AgentContext::for_user_email("test2@example.com".to_string());
+        let user2_pool_id = perspective.get_pool_id_for_context("test-uuid", &user2_context);
+        assert_eq!(user2_pool_id, "test-uuid_test2@example.com");
+
+        // Verify they're all different
+        assert_ne!(main_pool_id, user_pool_id);
+        assert_ne!(user_pool_id, user2_pool_id);
+        assert_ne!(main_pool_id, user2_pool_id);
+
+        println!("✅ Context-aware prolog pool selection tests passed");
+    }
+
+    #[tokio::test]
     async fn test_get_all_links_after_adding_five() {
         let mut perspective = setup();
         let mut all_links = Vec::new();
@@ -2935,7 +3284,12 @@ mod tests {
         for _ in 0..5 {
             let link = create_link();
             let expression = perspective
-                .add_link(link.clone(), LinkStatus::Local, None)
+                .add_link(
+                    link.clone(),
+                    LinkStatus::Local,
+                    None,
+                    &AgentContext::main_agent(),
+                )
                 .await
                 .unwrap();
             all_links.push(expression);
@@ -2972,7 +3326,12 @@ mod tests {
             }
 
             let expression = perspective
-                .add_link(link.clone(), LinkStatus::Shared, None)
+                .add_link(
+                    link.clone(),
+                    LinkStatus::Shared,
+                    None,
+                    &AgentContext::main_agent(),
+                )
                 .await
                 .unwrap();
             all_links.push(expression);
@@ -3009,7 +3368,7 @@ mod tests {
 
         // Add a link to the perspective
         let expression = perspective
-            .add_link(link.clone(), status, None)
+            .add_link(link.clone(), status, None, &AgentContext::main_agent())
             .await
             .unwrap();
 
@@ -3039,7 +3398,8 @@ mod tests {
         for i in 0..5 {
             let mut link = create_link();
             link.target = format!("lang://test-target {}", i);
-            let mut link = create_signed_expression(link).expect("Failed to create link");
+            let mut link = create_signed_expression(link, &AgentContext::main_agent())
+                .expect("Failed to create link");
             link.timestamp = (now - chrono::Duration::minutes(5)
                 + chrono::Duration::minutes(i as i64))
             .to_rfc3339();
@@ -3152,7 +3512,12 @@ mod tests {
         let batch_id = perspective.create_batch().await;
 
         perspective
-            .add_link(link.clone(), LinkStatus::Shared, Some(batch_id.clone()))
+            .add_link(
+                link.clone(),
+                LinkStatus::Shared,
+                Some(batch_id.clone()),
+                &AgentContext::main_agent(),
+            )
             .await
             .unwrap();
 
@@ -3161,7 +3526,10 @@ mod tests {
         assert_eq!(links.len(), 0);
 
         // Commit the batch
-        let diff = perspective.commit_batch(batch_id).await.unwrap();
+        let diff = perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .unwrap();
         assert_eq!(diff.additions.len(), 1);
 
         // Verify links are now in DB
@@ -3177,7 +3545,12 @@ mod tests {
 
         // Add initial link
         perspective
-            .add_link(link.clone(), LinkStatus::Shared, None)
+            .add_link(
+                link.clone(),
+                LinkStatus::Shared,
+                None,
+                &AgentContext::main_agent(),
+            )
             .await
             .unwrap();
 
@@ -3194,12 +3567,16 @@ mod tests {
                 links[0].clone().into(),
                 new_link.clone(),
                 Some(batch_id.clone()),
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
 
         // Commit the batch
-        perspective.commit_batch(batch_id).await.unwrap();
+        perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .unwrap();
 
         // Verify final state in DB
         let links = perspective.get_links(&query).await.unwrap();
@@ -3214,7 +3591,12 @@ mod tests {
         // one link outside the batch, for removal
         let link0 = create_link();
         let link0_expression = perspective
-            .add_link(link0.clone(), LinkStatus::Shared, None)
+            .add_link(
+                link0.clone(),
+                LinkStatus::Shared,
+                None,
+                &AgentContext::main_agent(),
+            )
             .await
             .unwrap();
 
@@ -3227,11 +3609,21 @@ mod tests {
 
         // Add two links in batch
         perspective
-            .add_link(link1.clone(), LinkStatus::Shared, Some(batch_id.clone()))
+            .add_link(
+                link1.clone(),
+                LinkStatus::Shared,
+                Some(batch_id.clone()),
+                &AgentContext::main_agent(),
+            )
             .await
             .unwrap();
         perspective
-            .add_link(link2.clone(), LinkStatus::Shared, Some(batch_id.clone()))
+            .add_link(
+                link2.clone(),
+                LinkStatus::Shared,
+                Some(batch_id.clone()),
+                &AgentContext::main_agent(),
+            )
             .await
             .unwrap();
         perspective
@@ -3245,7 +3637,10 @@ mod tests {
         assert_eq!(links_before.len(), 1);
 
         // Commit the batch
-        let diff = perspective.commit_batch(batch_id).await.unwrap();
+        let diff = perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .unwrap();
         assert_eq!(diff.additions.len(), 2); // link1 and link2
         assert_eq!(diff.removals.len(), 1); // link1
 
@@ -3258,7 +3653,9 @@ mod tests {
         let mut perspective = setup();
 
         // Try to commit non-existent batch
-        let result = perspective.commit_batch("non-existent".to_string()).await;
+        let result = perspective
+            .commit_batch("non-existent".to_string(), &AgentContext::main_agent())
+            .await;
         assert!(result.is_err());
 
         // Create a batch
@@ -3287,6 +3684,7 @@ mod tests {
                 create_link(),
                 LinkStatus::Shared,
                 Some("invalid".to_string()),
+                &AgentContext::main_agent(),
             )
             .await;
         assert!(result.is_err());
@@ -3322,6 +3720,7 @@ mod tests {
                 "test://expression".to_string(),
                 vec![],
                 Some(batch_id.clone()),
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -3339,7 +3738,10 @@ mod tests {
         assert_eq!(links.len(), 0);
 
         // Commit batch and verify links are now visible
-        let diff = perspective.commit_batch(batch_id).await.unwrap();
+        let diff = perspective
+            .commit_batch(batch_id, &AgentContext::main_agent())
+            .await
+            .unwrap();
         assert_eq!(diff.additions.len(), 2);
         assert_eq!(diff.removals.len(), 0);
 

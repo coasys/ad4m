@@ -66,6 +66,57 @@ pub fn check_token_revoked(token: &String) -> Result<(), String> {
     Ok(())
 }
 
+pub fn user_email_from_token(token: String) -> Option<String> {
+    if token.is_empty() {
+        return None;
+    }
+
+    // Check if multi-user mode is enabled - if not, never return a user context
+    use crate::db::Ad4mDb;
+    let multi_user_enabled =
+        Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+
+    if !multi_user_enabled {
+        return None;
+    }
+
+    // Try to decode JWT and extract user email from sub field
+    if let Ok(claims) = decode_jwt(token) {
+        claims.sub
+    } else {
+        None
+    }
+}
+
+/// Update last_seen timestamp for the user from the auth token
+/// This is throttled to only update once every 5 minutes to reduce database writes
+pub fn track_last_seen_from_token(token: String) {
+    use crate::db::Ad4mDb;
+
+    if let Some(user_email) = user_email_from_token(token) {
+        log::debug!("Tracking last_seen for user: {}", user_email);
+
+        // Check if we should update (throttle to every 5 minutes)
+        let should_update = Ad4mDb::with_global_instance(|db| {
+            if let Ok(user) = db.get_user(&user_email) {
+                if let Some(last_seen) = user.last_seen {
+                    let five_min_ago = (chrono::Utc::now().timestamp() - 300) as i32;
+                    last_seen < five_min_ago
+                } else {
+                    true // Never updated, do it now
+                }
+            } else {
+                false // User not found
+            }
+        });
+
+        if should_update {
+            log::debug!("Updating last_seen for user: {}", user_email);
+            let _ = Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&user_email));
+        }
+    }
+}
+
 pub fn capabilities_from_token(
     token: String,
     admin_credential: Option<String>,

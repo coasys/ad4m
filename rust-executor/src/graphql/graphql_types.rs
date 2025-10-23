@@ -17,6 +17,7 @@ pub struct RequestContext {
     pub capabilities: Result<Vec<Capability>, String>,
     pub js_handle: JsCoreHandle,
     pub auto_permit_cap_requests: bool,
+    pub auth_token: String,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -69,6 +70,8 @@ pub struct AuthInfoInput {
     pub app_url: Option<String>,
     #[graphql(name = "capabilities")]
     pub capabilities: Option<Vec<CapabilityInput>>,
+    #[graphql(name = "userDid")]
+    pub user_did: Option<String>,
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -475,9 +478,55 @@ pub struct PerspectiveHandle {
     pub neighbourhood: Option<DecoratedNeighbourhoodExpression>,
     pub shared_url: Option<String>,
     pub state: PerspectiveState,
+    #[graphql(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owners: Option<Vec<String>>, // List of owner DIDs - supports both single and multi-user ownership
 }
 
 impl PerspectiveHandle {
+    /// Add a user DID to the owners list
+    pub fn add_owner(&mut self, user_did: &str) {
+        if self.owners.is_none() {
+            self.owners = Some(Vec::new());
+        }
+
+        let owners = self.owners.as_mut().unwrap();
+        if !owners.contains(&user_did.to_string()) {
+            owners.push(user_did.to_string());
+        }
+    }
+
+    /// Check if a user DID is in the owners list
+    pub fn is_owned_by(&self, user_did: &str) -> bool {
+        self.owners
+            .as_ref()
+            .map(|owners| owners.contains(&user_did.to_string()))
+            .unwrap_or(false)
+    }
+
+    /// Check if this perspective has no owners (unowned)
+    pub fn is_unowned(&self) -> bool {
+        self.owners
+            .as_ref()
+            .map(|owners| owners.is_empty())
+            .unwrap_or(true)
+    }
+
+    /// Get the primary owner (first owner in the list) for backward compatibility
+    pub fn get_primary_owner(&self) -> Option<String> {
+        self.owners.as_ref()?.first().cloned()
+    }
+
+    /// Get all owners
+    pub fn get_owners(&self) -> Vec<String> {
+        self.owners.clone().unwrap_or_default()
+    }
+
+    /// Check if this is a neighbourhood (shared perspective)
+    pub fn is_neighbourhood(&self) -> bool {
+        self.shared_url.is_some()
+    }
+
     pub fn new(
         uuid: String,
         name: Option<String>,
@@ -491,6 +540,7 @@ impl PerspectiveHandle {
             neighbourhood,
             shared_url,
             state,
+            owners: None,
         }
     }
 
@@ -501,6 +551,18 @@ impl PerspectiveHandle {
             neighbourhood: None,
             shared_url: None,
             state: PerspectiveState::Private,
+            owners: None,
+        }
+    }
+
+    pub fn new_with_owner(name: String, owner_did: String) -> Self {
+        PerspectiveHandle {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            name: Some(name),
+            neighbourhood: None,
+            shared_url: None,
+            state: PerspectiveState::Private,
+            owners: Some(vec![owner_did]), // Initialize with the owner
         }
     }
 }
@@ -559,10 +621,37 @@ pub struct SentMessage {
     pub recipient: String,
 }
 
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct User {
+    pub username: String,
+    pub did: String,
+    pub password: String,
+    pub last_seen: Option<i32>,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UserCreationResult {
+    pub did: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UserStatistics {
+    pub email: String,
+    pub did: String,
+    pub last_seen: Option<DateTime>,
+    pub perspective_count: i32,
+}
+
 #[derive(Default, Debug, Deserialize, Serialize)]
 pub struct NeighbourhoodSignalFilter {
     pub perspective: PerspectiveHandle,
     pub signal: PerspectiveExpression,
+    pub recipient: Option<String>, // DID of the recipient agent for this signal
 }
 
 #[derive(Default, Debug, Deserialize, Serialize)]
@@ -771,7 +860,12 @@ impl GetValue for NeighbourhoodSignalFilter {
 // Implement the trait for the `NeighbourhoodSignalFilter` struct
 impl GetFilter for NeighbourhoodSignalFilter {
     fn get_filter(&self) -> Option<String> {
-        Some(self.perspective.uuid.clone())
+        // Create a composite filter: perspective_uuid|recipient_did
+        // If recipient is None, just use perspective_uuid for backwards compatibility
+        match &self.recipient {
+            Some(recipient_did) => Some(format!("{}|{}", self.perspective.uuid, recipient_did)),
+            None => Some(self.perspective.uuid.clone()),
+        }
     }
 }
 

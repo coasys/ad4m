@@ -62,16 +62,23 @@ pub fn get_online_status() -> SocialContextResult<OnlineAgentAndAction> {
 
 pub fn create_did_pub_key_link(did: String) -> SocialContextResult<()> {
     debug!("PerspectiveDiffSync.create_did_pub_key_link({:?})", did);
-    let agent_key = agent_info()?.agent_latest_pubkey;
+    let agent_key = agent_info()?.agent_initial_pubkey;
     debug!("PerspectiveDiffSync.create_did_pub_key_link() agent_key: {:?}", agent_key);
-    let input = GetLinksInputBuilder::try_new(agent_key.clone(), LinkTypes::DidLink).unwrap().get_options(GetStrategy::Network).build();
-    let did_links = get_links(input)?;
-    debug!("PerspectiveDiffSync.create_did_pub_key_link() did_links: {:?}", did_links);
-    if did_links.len() == 0 {
 
-        let entry = EntryTypes::Anchor(Anchor(did));
-        let _did_entry = create_entry(&entry)?;
-        let did_entry_hash = hash_entry(entry)?;
+    // For multi-user support: check if THIS SPECIFIC DID already has a link, not just any DID
+    let did_entry = EntryTypes::Anchor(Anchor(did.clone()));
+    let did_entry_hash = hash_entry(&did_entry)?;
+
+    let input = GetLinksInputBuilder::try_new(did_entry_hash.clone(), LinkTypes::DidLink)
+        .unwrap()
+        .get_options(GetStrategy::Network)
+        .build();
+    let existing_links = get_links(input)?;
+
+    // Only create the link if this specific DID doesn't already have one
+    if existing_links.len() == 0 {
+        debug!("PerspectiveDiffSync.create_did_pub_key_link() creating new link for DID: {:?}", did);
+        let _did_entry = create_entry(&did_entry)?;
         create_link(
             agent_key.clone(),
             did_entry_hash.clone(),
@@ -84,13 +91,15 @@ pub fn create_did_pub_key_link(did: String) -> SocialContextResult<()> {
             LinkTypes::DidLink,
             LinkTag::new("did_link"),
         )?;
+    } else {
+        debug!("PerspectiveDiffSync.create_did_pub_key_link() link already exists for DID: {:?}", did);
     }
     Ok(())
 }
 
 pub fn get_my_did() -> SocialContextResult<Option<String>> {
     let input = GetLinksInputBuilder::try_new(
-        agent_info()?.agent_latest_pubkey,
+        agent_info()?.agent_initial_pubkey,
         LinkTypes::DidLink
     )
     .unwrap()
@@ -172,14 +181,47 @@ pub fn get_agents_did_key(agent: AgentPubKey) -> SocialContextResult<Option<Stri
     }
 }
 
+/// Get ALL DIDs associated with an agent (for multi-user support)
+/// In multi-user scenarios, one Holochain agent can have multiple DIDs
+pub fn get_agents_did_keys(agent: AgentPubKey) -> SocialContextResult<Vec<String>> {
+    let input = GetLinksInputBuilder::try_new(
+        agent,
+        LinkTypes::DidLink
+    )
+    .unwrap()
+    .get_options(GetStrategy::Network)
+    .build();
+    let did_links = get_links(input)?;
+
+    let mut dids = Vec::new();
+    for link in did_links {
+        let entry_hash = link.target.into_entry_hash();
+        if entry_hash.is_none() {
+            continue;
+        }
+
+        let did_result = get(
+            entry_hash.unwrap(),
+            GetOptions::network(),
+        )?;
+
+        if let Some(record) = did_result {
+            if let Some(anchor) = record.entry().to_app_option::<Anchor>()? {
+                dids.push(anchor.0);
+            }
+        }
+    }
+
+    Ok(dids)
+}
+
 pub fn get_others() -> SocialContextResult<Vec<String>> {
     let active_agents = get_active_agents()?;
     let mut others = Vec::new();
     for active_agent in active_agents {
-        let did_key = get_agents_did_key(active_agent)?;
-        if did_key.is_some() {
-            others.push(did_key.unwrap());
-        }
+        // Get ALL DIDs for this agent (multi-user support)
+        let agent_dids = get_agents_did_keys(active_agent)?;
+        others.extend(agent_dids);
     }
     Ok(others)
 }
@@ -226,6 +268,10 @@ pub fn get_agents_status(agent: AgentPubKey) -> Option<OnlineAgent> {
             }
             ZomeCallResponse::CountersigningSession(_) => {
                 debug!("Agent {} had countersigning session error", agent);
+                None
+            }
+            ZomeCallResponse::AuthenticationFailed(_, _) => {
+                debug!("Agent {} had authentication failed error", agent);
                 None
             }
         }

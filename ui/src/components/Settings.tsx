@@ -54,8 +54,8 @@ const Profile = (props: Props) => {
   } = useContext(AgentContext);
 
   const {
-    state: { url, did, client, expertMode, isInitialized },
-    methods: { toggleExpertMode },
+    state: { url, did, client, expertMode, isInitialized, multiUserEnabled },
+    methods: { toggleExpertMode, setMultiUserEnabled },
   } = useContext(Ad4minContext);
 
   const [appState, setAppState] = useState({} as any);
@@ -96,7 +96,7 @@ const Profile = (props: Props) => {
   const [showAgentInfos, setShowAgentInfos] = useState(false);
 
   const [restartingHolochain, setRestartingHolochain] = useState(false);
-  
+
   const [logConfig, setLogConfig] = useState<Record<string, string>>({});
   const [newCrateName, setNewCrateName] = useState<string>("");
   const [newCrateLevel, setNewCrateLevel] = useState<string>("info");
@@ -493,6 +493,19 @@ const Profile = (props: Props) => {
       <j-box px="500" my="500">
         <j-toggle full="" checked={expertMode} onChange={(e) => toggleExpertMode()}>
           Advanced mode
+        </j-toggle>
+      </j-box>
+
+      <j-box px="500" my="500">
+        <j-toggle full="" checked={multiUserEnabled} onChange={async (e) => {
+          try {
+            await setMultiUserEnabled(e.target.checked);
+          } catch (error) {
+            console.error("Failed to toggle multi-user mode:", error);
+            e.target.checked = !e.target.checked; // Revert on error
+          }
+        }}>
+          Multi-user mode
         </j-toggle>
       </j-box>
 

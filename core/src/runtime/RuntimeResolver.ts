@@ -192,6 +192,21 @@ export class ImportResult {
     knownLinkLanguages: ImportStats;
 }
 
+@ObjectType()
+export class UserStatistics {
+    @Field()
+    email: string;
+
+    @Field()
+    did: string;
+
+    @Field({nullable: true})
+    lastSeen?: string;
+
+    @Field(type => Int)
+    perspectiveCount: number;
+}
+
 /**
  * Resolver classes are used here to define the GraphQL schema 
  * (through the type-graphql annotations)
@@ -425,6 +440,26 @@ export default class RuntimeResolver {
     @Mutation()
     runtimeImportPerspective(@Arg("filePath", type => String) filePath: string): boolean {
         return true
+    }
+
+    @Query(returns => Boolean)
+    runtimeMultiUserEnabled(): boolean {
+        return false
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeSetMultiUserEnabled(@Arg("enabled") enabled: boolean): boolean {
+        return enabled
+    }
+
+    @Query(returns => [UserStatistics])
+    runtimeListUsers(): UserStatistics[] {
+        return [{
+            email: "test@example.com",
+            did: "did:key:test123",
+            lastSeen: new Date().toISOString(),
+            perspectiveCount: 5
+        }]
     }
 }
 

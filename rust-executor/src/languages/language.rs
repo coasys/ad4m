@@ -205,10 +205,10 @@ impl Language {
         let script = format!(
             r#"
                 JSON.stringify(
-                    await core.languageController.languageByRef({{address:"{}"}}) 
-                    ? 
+                    await core.languageController.languageByRef({{address:"{}"}})
+                    ?
                     await (await core.languageController.languageByRef({{address:"{}"}})).telepresenceAdapter.sendBroadcast({})
-                    : 
+                    :
                     null
                 )
             "#,
@@ -217,6 +217,32 @@ impl Language {
             serde_json::to_string(&payload)?,
         );
         let _result: String = self.js_core.execute(script).await?;
+        Ok(())
+    }
+
+    pub async fn set_local_agents(&mut self, agents: Vec<String>) -> Result<(), AnyError> {
+        log::debug!("set_local_agents: agents: {:?}", agents);
+        let script = format!(
+            r#"
+                JSON.stringify(
+                    await core.languageController.languageByRef({{address:"{}"}})
+                    && (await core.languageController.languageByRef({{address:"{}"}})).linksAdapter
+                    && (await core.languageController.languageByRef({{address:"{}"}})).linksAdapter.setLocalAgents
+                    ?
+                    await (await core.languageController.languageByRef({{address:"{}"}})).linksAdapter.setLocalAgents({})
+                    :
+                    null
+                )
+            "#,
+            self.address,
+            self.address,
+            self.address,
+            self.address,
+            serde_json::to_string(&agents)?,
+        );
+        log::debug!("set_local_agents script: {}", script);
+        let _result: String = self.js_core.execute(script).await?;
+        log::debug!("set_local_agents result: {}", _result);
         Ok(())
     }
 }

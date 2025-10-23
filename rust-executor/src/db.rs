@@ -1,6 +1,7 @@
 use crate::graphql::graphql_types::{
     AIModelLoadingStatus, EntanglementProof, ImportResult, LinkStatus, ModelInput,
     NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage,
+    User,
 };
 use crate::types::{
     AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
@@ -228,9 +229,45 @@ impl Ad4mDb {
             "CREATE TABLE IF NOT EXISTS default_models (
                 model_type TEXT PRIMARY KEY,
                 model_id TEXT NOT NULL
-            )",
+             )",
             [],
         )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                did TEXT NOT NULL,
+                password TEXT NOT NULL,
+                last_seen INTEGER
+             )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+             )",
+            [],
+        )?;
+
+        // Add owner_did column to existing perspective_handle table if it doesn't exist
+        let _ = conn.execute(
+            "ALTER TABLE perspective_handle ADD COLUMN owner_did TEXT",
+            [],
+        );
+
+        // Add owners column for multi-user neighbourhood support
+        let _ = conn.execute(
+            "ALTER TABLE perspective_handle ADD COLUMN owners TEXT DEFAULT '[]'",
+            [],
+        );
+
+        // Migrate existing owner_did values to owners array
+        let _ = conn.execute(
+            "UPDATE perspective_handle SET owners = json_array(owner_did) WHERE owner_did IS NOT NULL AND owners = '[]'",
+            [],
+        );
 
         Ok(Self { conn })
     }
@@ -640,9 +677,11 @@ impl Ad4mDb {
     }
 
     pub fn add_perspective(&self, perspective: &PerspectiveHandle) -> Ad4mDbResult<()> {
+        let owners_json = serde_json::to_string(&perspective.owners.clone().unwrap_or_default())?;
+
         self.conn.execute(
-            "INSERT INTO perspective_handle (name, uuid, neighbourhood, shared_url, state)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO perspective_handle (name, uuid, neighbourhood, shared_url, state, owners)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 perspective.name,
                 perspective.uuid,
@@ -652,6 +691,7 @@ impl Ad4mDb {
                     .and_then(|n| serde_json::to_string(n).ok()),
                 perspective.shared_url,
                 serde_json::to_string(&perspective.state)?,
+                owners_json,
             ],
         )?;
         Ok(())
@@ -659,20 +699,26 @@ impl Ad4mDb {
 
     pub fn _get_perspective(&self, uuid: &str) -> Ad4mDbResult<Option<PerspectiveHandle>> {
         let mut stmt = self.conn.prepare(
-            "SELECT name, uuid, neighbourhood, shared_url, state FROM perspective_handle WHERE uuid = ?1",
+            "SELECT name, uuid, neighbourhood, shared_url, state, owners FROM perspective_handle WHERE uuid = ?1",
         )?;
 
         let found_perspective = stmt
             .query_map([uuid], |row| {
+                let owners_json: Option<String> = row.get(5)?;
+                let owners = owners_json
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .or_else(|| Some(Vec::new()));
+
                 Ok(PerspectiveHandle {
                     name: row.get(0)?,
                     uuid: row.get(1)?,
                     neighbourhood: row
-                        .get::<usize, Option<String>>(3)?
+                        .get::<usize, Option<String>>(2)?
                         .and_then(|n| serde_json::from_str(&n).ok()),
-                    shared_url: row.get(4)?,
-                    state: serde_json::from_str(row.get::<usize, String>(5)?.as_str())
+                    shared_url: row.get(3)?,
+                    state: serde_json::from_str(row.get::<usize, String>(4)?.as_str())
                         .expect("Could not deserialize perspective state from DB"),
+                    owners,
                 })
             })?
             .map(|p| p.ok())
@@ -685,9 +731,14 @@ impl Ad4mDb {
 
     pub fn get_all_perspectives(&self) -> Ad4mDbResult<Vec<PerspectiveHandle>> {
         let mut stmt = self.conn.prepare(
-            "SELECT name, uuid, neighbourhood, shared_url, state FROM perspective_handle",
+            "SELECT name, uuid, neighbourhood, shared_url, state, owners FROM perspective_handle",
         )?;
         let perspective_iter = stmt.query_map([], |row| {
+            let owners_json: Option<String> = row.get(5)?;
+            let owners = owners_json
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .or_else(|| Some(Vec::new()));
+
             Ok(PerspectiveHandle {
                 name: row.get(0)?,
                 uuid: row.get(1)?,
@@ -697,6 +748,7 @@ impl Ad4mDb {
                 shared_url: row.get(3)?,
                 state: serde_json::from_str(row.get::<usize, String>(4)?.as_str())
                     .expect("Could not deserialize perspective state from DB"),
+                owners,
             })
         })?;
 
@@ -709,17 +761,64 @@ impl Ad4mDb {
     }
 
     pub fn update_perspective(&self, perspective: &PerspectiveHandle) -> Ad4mDbResult<()> {
+        let owners_json = serde_json::to_string(&perspective.owners.clone().unwrap_or_default())?;
+
         self.conn.execute(
-            "UPDATE perspective_handle SET name = ?1, neighbourhood = ?2, shared_url = ?3, state = ?4 WHERE uuid = ?5",
+            "UPDATE perspective_handle SET name = ?1, neighbourhood = ?2, shared_url = ?3, state = ?4, owners = ?5 WHERE uuid = ?6",
             params![
                 perspective.name,
                 perspective.neighbourhood.as_ref().and_then(|n| serde_json::to_string(n).ok()),
                 perspective.shared_url,
                 serde_json::to_string(&perspective.state)?,
+                owners_json,
                 perspective.uuid,
             ],
         )?;
         Ok(())
+    }
+
+    pub fn add_owner_to_neighbourhood(
+        &self,
+        neighbourhood_url: &str,
+        user_did: &str,
+    ) -> Ad4mDbResult<()> {
+        // Get current owners
+        let current_owners: Vec<String> = self
+            .conn
+            .prepare("SELECT owners FROM perspective_handle WHERE shared_url = ?1")?
+            .query_row([neighbourhood_url], |row| {
+                let owners_json: String = row.get(0)?;
+                Ok(serde_json::from_str(&owners_json).unwrap_or_default())
+            })
+            .unwrap_or_default();
+
+        // Add new owner if not already present
+        let mut updated_owners = current_owners;
+        if !updated_owners.contains(&user_did.to_string()) {
+            updated_owners.push(user_did.to_string());
+        }
+
+        // Update database
+        let owners_json = serde_json::to_string(&updated_owners)?;
+        self.conn.execute(
+            "UPDATE perspective_handle SET owners = ?1 WHERE shared_url = ?2",
+            params![owners_json, neighbourhood_url],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn get_neighbourhood_owners(&self, neighbourhood_url: &str) -> Ad4mDbResult<Vec<String>> {
+        let owners: Vec<String> = self
+            .conn
+            .prepare("SELECT owners FROM perspective_handle WHERE shared_url = ?1")?
+            .query_row([neighbourhood_url], |row| {
+                let owners_json: String = row.get(0)?;
+                Ok(serde_json::from_str(&owners_json).unwrap_or_default())
+            })
+            .unwrap_or_default();
+
+        Ok(owners)
     }
 
     pub fn remove_perspective(&self, uuid: &str) -> Ad4mDbResult<()> {
@@ -1603,13 +1702,14 @@ impl Ad4mDb {
                             .expect("to serialize PerspectiveState");
 
                             self.conn.execute(
-                                "INSERT INTO perspective_handle (uuid, name, neighbourhood, shared_url, state) VALUES (?1, ?2, ?3, ?4, ?5)",
+                                "INSERT INTO perspective_handle (uuid, name, neighbourhood, shared_url, state, owners) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                                 params![
                                     perspective["uuid"].as_str().unwrap_or(Uuid::new_v4().to_string().as_str()),
                                     perspective["name"].as_str(),
                                     perspective.get("neighbourhood").and_then(|n| n.as_str()),
                                     perspective["shared_url"].as_str(),
-                                    perspective["state"].as_str().unwrap_or(state.as_str())
+                                    perspective["state"].as_str().unwrap_or(state.as_str()),
+                                    serde_json::to_string(&Vec::<String>::new()).unwrap_or_else(|_| "[]".to_string())
                                 ],
                             )
                         };
@@ -2089,11 +2189,95 @@ impl Ad4mDb {
 
         Ok(result)
     }
+
+    // User management functions
+    pub fn add_user(&self, user: &User) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "INSERT INTO users (username, did, password) VALUES (?1, ?2, ?3)",
+            params![user.username, user.did, user.password],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_user(&self, username: &str) -> Ad4mDbResult<User> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT username, did, password, last_seen FROM users WHERE username = ?1")?;
+        let user = stmt.query_row([username], |row| {
+            Ok(User {
+                username: row.get(0)?,
+                did: row.get(1)?,
+                password: row.get(2)?,
+                last_seen: row.get(3).ok(),
+            })
+        })?;
+        Ok(user)
+    }
+
+    pub fn update_user_last_seen(&self, email: &str) -> Ad4mDbResult<()> {
+        let timestamp = chrono::Utc::now().timestamp() as i32;
+        self.conn.execute(
+            "UPDATE users SET last_seen = ?1 WHERE username = ?2",
+            params![timestamp, email],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_users(&self) -> Ad4mDbResult<Vec<User>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT username, did, password, last_seen FROM users ORDER BY last_seen DESC NULLS LAST"
+        )?;
+
+        let users = stmt
+            .query_map([], |row| {
+                Ok(User {
+                    username: row.get(0)?,
+                    did: row.get(1)?,
+                    password: row.get(2)?,
+                    last_seen: row.get(3).ok(),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(users)
+    }
+
+    // Settings management functions
+    pub fn get_setting(&self, key: &str) -> Ad4mDbResult<Option<String>> {
+        let result = self
+            .conn
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(result)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_multi_user_enabled(&self) -> Ad4mDbResult<bool> {
+        match self.get_setting("multi_user_enabled")? {
+            Some(value) => Ok(value == "true"),
+            None => Ok(false), // Default to disabled
+        }
+    }
+
+    pub fn set_multi_user_enabled(&self, enabled: bool) -> Ad4mDbResult<()> {
+        self.set_setting("multi_user_enabled", if enabled { "true" } else { "false" })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graphql::graphql_types::{PerspectiveHandle, PerspectiveState};
     use crate::{
         graphql::graphql_types::{LocalModelInput, ModelApiInput, TokenizerSourceInput},
         types::{ExpressionProof, Link, LinkExpression, ModelApiType, ModelType},
@@ -2168,6 +2352,7 @@ mod tests {
             neighbourhood: None,
             shared_url: None,
             state: PerspectiveState::Private,
+            owners: None,
         };
         let perspective2 = PerspectiveHandle {
             uuid: Uuid::new_v4().to_string(),
@@ -2175,6 +2360,7 @@ mod tests {
             neighbourhood: Some(test_neighbourhood),
             shared_url: Some("test-shared-url".to_string()),
             state: PerspectiveState::Synced,
+            owners: None,
         };
 
         db.add_perspective(&perspective1).unwrap();
@@ -3035,5 +3221,337 @@ mod tests {
         assert_eq!(full_ids.len(), 10);
         assert_eq!(full_diffs.additions.len(), 50); // 10 diffs * 5 additions
         assert_eq!(full_diffs.removals.len(), 50); // 10 diffs * 5 removals
+    }
+
+    #[test]
+    fn test_user_management() {
+        use crate::graphql::graphql_types::User;
+
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Test user creation
+        let test_user = User {
+            username: "test@example.com".to_string(),
+            did: "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp".to_string(),
+            password: "testpassword123".to_string(),
+            last_seen: None,
+        };
+
+        // Add user should succeed
+        let add_result = db.add_user(&test_user);
+        assert!(
+            add_result.is_ok(),
+            "Failed to add user: {:?}",
+            add_result.err()
+        );
+
+        // Get user should return the same user
+        let retrieved_user = db.get_user(&test_user.username).unwrap();
+        assert_eq!(retrieved_user.username, test_user.username);
+        assert_eq!(retrieved_user.did, test_user.did);
+        assert_eq!(retrieved_user.password, test_user.password);
+
+        // Test duplicate user creation should fail
+        let duplicate_result = db.add_user(&test_user);
+        assert!(
+            duplicate_result.is_err(),
+            "Duplicate user creation should fail"
+        );
+
+        // Test getting non-existent user should fail
+        let non_existent_result = db.get_user("nonexistent@example.com");
+        assert!(
+            non_existent_result.is_err(),
+            "Getting non-existent user should fail"
+        );
+
+        println!("✅ User management tests passed");
+    }
+
+    #[test]
+    fn test_multiple_users() {
+        use crate::graphql::graphql_types::User;
+
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create multiple test users
+        let user1 = User {
+            username: "user1@example.com".to_string(),
+            did: "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp".to_string(),
+            password: "password1".to_string(),
+            last_seen: None,
+        };
+
+        let user2 = User {
+            username: "user2@example.com".to_string(),
+            did: "did:key:z6MkjRagNiMu4CWTaH5SBDeKHyYoPP2ooXqPoy3GmASHLtF6".to_string(),
+            password: "password2".to_string(),
+            last_seen: None,
+        };
+
+        // Add both users
+        db.add_user(&user1).unwrap();
+        db.add_user(&user2).unwrap();
+
+        // Verify both users can be retrieved independently
+        let retrieved_user1 = db.get_user(&user1.username).unwrap();
+        let retrieved_user2 = db.get_user(&user2.username).unwrap();
+
+        assert_eq!(retrieved_user1.username, user1.username);
+        assert_eq!(retrieved_user1.did, user1.did);
+        assert_eq!(retrieved_user1.password, user1.password);
+
+        assert_eq!(retrieved_user2.username, user2.username);
+        assert_eq!(retrieved_user2.did, user2.did);
+        assert_eq!(retrieved_user2.password, user2.password);
+
+        // Verify users have different DIDs
+        assert_ne!(retrieved_user1.did, retrieved_user2.did);
+
+        println!("✅ Multiple users management tests passed");
+    }
+
+    #[test]
+    fn test_user_table_schema() {
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Verify the users table was created by trying to query it
+        let result = db
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'");
+        assert!(result.is_ok(), "Users table should exist");
+
+        let mut stmt = result.unwrap();
+        let table_exists = stmt.query_row([], |row| {
+            let table_name: String = row.get(0)?;
+            Ok(table_name == "users")
+        });
+
+        assert!(
+            table_exists.is_ok() && table_exists.unwrap(),
+            "Users table should exist and be named 'users'"
+        );
+
+        // Verify table schema by checking column info
+        let schema_result = db.conn.prepare("PRAGMA table_info(users)");
+        assert!(
+            schema_result.is_ok(),
+            "Should be able to get users table schema"
+        );
+
+        println!("✅ User table schema tests passed");
+    }
+
+    #[test]
+    fn test_user_password_handling() {
+        use crate::graphql::graphql_types::User;
+
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Test user with various password formats
+        let users = vec![
+            User {
+                username: "user_simple@example.com".to_string(),
+                did: "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp".to_string(),
+                password: "simple".to_string(),
+                last_seen: None,
+            },
+            User {
+                username: "user_complex@example.com".to_string(),
+                did: "did:key:z6MkjRagNiMu4CWTaH5SBDeKHyYoPP2ooXqPoy3GmASHLtF6".to_string(),
+                password: "Complex!Password123@#$".to_string(),
+                last_seen: None,
+            },
+            User {
+                username: "user_unicode@example.com".to_string(),
+                did: "did:key:z6MkrJVnaZjsXc2WrVjsXc2WrVjsXc2WrVjsXc2WrVjsXc2W".to_string(),
+                password: "пароль🔐密码".to_string(),
+                last_seen: None,
+            },
+        ];
+
+        // Add all users
+        for user in &users {
+            let result = db.add_user(user);
+            assert!(
+                result.is_ok(),
+                "Failed to add user {}: {:?}",
+                user.username,
+                result.err()
+            );
+        }
+
+        // Verify all users can be retrieved with correct passwords
+        for user in &users {
+            let retrieved = db.get_user(&user.username).unwrap();
+            assert_eq!(
+                retrieved.password, user.password,
+                "Password should be stored and retrieved correctly for {}",
+                user.username
+            );
+        }
+
+        println!("✅ User password handling tests passed");
+    }
+
+    #[test]
+    fn test_neighbourhood_owners_management() {
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create a neighbourhood perspective
+        let neighbourhood_url = "neighbourhood://test123";
+        let perspective = PerspectiveHandle {
+            uuid: Uuid::new_v4().to_string(),
+            name: Some("Test Neighbourhood".to_string()),
+            neighbourhood: None,
+            shared_url: Some(neighbourhood_url.to_string()),
+            state: PerspectiveState::Synced,
+            owners: Some(vec!["did:key:user1".to_string()]),
+        };
+
+        // Add perspective to database
+        db.add_perspective(&perspective).unwrap();
+
+        // Test adding owners
+        db.add_owner_to_neighbourhood(neighbourhood_url, "did:key:user2")
+            .unwrap();
+        db.add_owner_to_neighbourhood(neighbourhood_url, "did:key:user3")
+            .unwrap();
+
+        // Test duplicate owner (should not add twice)
+        db.add_owner_to_neighbourhood(neighbourhood_url, "did:key:user2")
+            .unwrap();
+
+        // Retrieve owners
+        let owners = db.get_neighbourhood_owners(neighbourhood_url).unwrap();
+
+        // Verify owners
+        assert_eq!(owners.len(), 3);
+        assert!(owners.contains(&"did:key:user1".to_string()));
+        assert!(owners.contains(&"did:key:user2".to_string()));
+        assert!(owners.contains(&"did:key:user3".to_string()));
+
+        // Test retrieving perspective with owners
+        let all_perspectives = db.get_all_perspectives().unwrap();
+        let retrieved_perspective = all_perspectives
+            .iter()
+            .find(|p| p.shared_url.as_ref() == Some(&neighbourhood_url.to_string()))
+            .unwrap();
+
+        assert_eq!(retrieved_perspective.get_owners().len(), 3);
+        assert!(retrieved_perspective.is_owned_by("did:key:user2"));
+        assert!(!retrieved_perspective.is_owned_by("did:key:user4"));
+
+        println!("✅ Neighbourhood owners management tests passed");
+    }
+
+    #[test]
+    fn test_user_last_seen_tracking() {
+        use crate::graphql::graphql_types::User;
+
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create test user
+        let test_user = User {
+            username: "test@example.com".to_string(),
+            did: "did:key:test123".to_string(),
+            password: "hashed_password".to_string(),
+            last_seen: None,
+        };
+        db.add_user(&test_user).unwrap();
+
+        // Verify initial last_seen is None
+        let user = db.get_user("test@example.com").unwrap();
+        assert!(user.last_seen.is_none(), "Initial last_seen should be None");
+
+        // Update last_seen
+        db.update_user_last_seen("test@example.com").unwrap();
+
+        // Verify last_seen was updated
+        let user = db.get_user("test@example.com").unwrap();
+        assert!(
+            user.last_seen.is_some(),
+            "last_seen should be set after update"
+        );
+
+        let last_seen_timestamp = user.last_seen.unwrap();
+        let now = chrono::Utc::now().timestamp() as i32;
+        assert!(
+            (now - last_seen_timestamp).abs() < 2,
+            "last_seen should be within 2 seconds of now"
+        );
+
+        // Update again and verify it changes
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        db.update_user_last_seen("test@example.com").unwrap();
+
+        let user_updated = db.get_user("test@example.com").unwrap();
+        assert!(
+            user_updated.last_seen.unwrap() > last_seen_timestamp,
+            "last_seen should be updated to newer timestamp"
+        );
+
+        println!("✅ User last_seen tracking tests passed");
+    }
+
+    #[test]
+    fn test_list_users_ordering() {
+        use crate::graphql::graphql_types::User;
+
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create users with different last_seen times
+        let user1 = User {
+            username: "user1@example.com".to_string(),
+            did: "did:key:user1".to_string(),
+            password: "pass1".to_string(),
+            last_seen: None,
+        };
+
+        let user2 = User {
+            username: "user2@example.com".to_string(),
+            did: "did:key:user2".to_string(),
+            password: "pass2".to_string(),
+            last_seen: None,
+        };
+
+        let user3 = User {
+            username: "user3@example.com".to_string(),
+            did: "did:key:user3".to_string(),
+            password: "pass3".to_string(),
+            last_seen: None,
+        };
+
+        db.add_user(&user1).unwrap();
+        db.add_user(&user2).unwrap();
+        db.add_user(&user3).unwrap();
+
+        // Update last_seen for users in specific order
+        db.update_user_last_seen("user2@example.com").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(2)); // Sleep 2 seconds to ensure different timestamps (i32 seconds)
+        db.update_user_last_seen("user3@example.com").unwrap();
+        // user1 has no last_seen
+
+        // List users - should be ordered by last_seen DESC (most recent first, nulls last)
+        let users = db.list_users().unwrap();
+        assert_eq!(users.len(), 3);
+        assert_eq!(
+            users[0].username, "user3@example.com",
+            "Most recent should be first"
+        );
+        assert_eq!(users[1].username, "user2@example.com", "Second most recent");
+        assert_eq!(
+            users[2].username, "user1@example.com",
+            "Null last_seen should be last"
+        );
+
+        println!("✅ User list ordering tests passed");
     }
 }

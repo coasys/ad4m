@@ -168,10 +168,10 @@ export interface LinkSyncAdapter {
     /** What revision are we on now -> what changes are included in output of render() */
     currentRevision(): Promise<string>;
 
-    /** 
-     * Check for and get new changes, 
+    /**
+     * Check for and get new changes,
      * notify others of local changes.
-     * This function will be called every 
+     * This function will be called every
      * few seconds by the ad4m-executor.
      *  */
     sync(): Promise<PerspectiveDiff>;
@@ -187,6 +187,18 @@ export interface LinkSyncAdapter {
 
     /** Add a sync state callback method */
     addSyncStateChangeCallback(callback: SyncStateChangeObserver);
+
+    /**
+     * Set the local agents (DIDs) that own this perspective/neighbourhood.
+     * This is used to determine which agents should be registered in the DHT.
+     * Optional - if not implemented, all local agents may be registered.
+     * 
+     * This is a temporary hack to support multiple users on one node joining the same neighbourhood.
+     * Once we migrate the LanguageController to Rust and run Languages per user, each user will get their
+     * own language instance and we won't need to explicitly set local agents. This will provide better
+     * isolation and avoid the need to share language state between users.
+     */
+    setLocalAgents?(agents: DID[]): void;
 }
 
 export type MessageCallback = (message: PerspectiveExpression) => void;
@@ -255,7 +267,7 @@ export class OnlineAgent {
     status: PerspectiveExpression
 }
 
-export type TelepresenceSignalCallback = (payload: PerspectiveExpression) => void;
+export type TelepresenceSignalCallback = (payload: PerspectiveExpression, recipientDid?: string) => void;
 export interface TelepresenceAdapter {
     setOnlineStatus(status: PerspectiveExpression): Promise<void>;
     getOnlineAgents(): Promise<OnlineAgent[]>;

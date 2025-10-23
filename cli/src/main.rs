@@ -156,7 +156,11 @@ enum Domain {
         #[arg(short, long, action)]
         connect_holochain: Option<bool>,
         #[arg(long, action)]
-        admin_credential: Option<String>
+        admin_credential: Option<String>,
+        #[arg(long, action)]
+        enable_multi_user: bool
+    },
+        enable_multi_user: bool
     },
     RunLocalHcServices {},
     Eve {
@@ -233,11 +237,13 @@ async fn main() -> Result<()> {
         hc_proxy_url,
         hc_bootstrap_url,
         connect_holochain,
-        admin_credential
+        admin_credential,
+        enable_multi_user
     } = args.domain
     {
+        let enable_multi_user_flag = enable_multi_user;
         let _ = tokio::spawn(async move {
-            rust_executor::run(Ad4mConfig {
+            let handle = rust_executor::run(Ad4mConfig {
                 app_data_path,
                 network_bootstrap_seed,
                 language_language_only,
@@ -254,6 +260,18 @@ async fn main() -> Result<()> {
                 connect_holochain,
                 admin_credential
             }).await;
+
+            // If multi-user flag is set, enable it in the database
+            if enable_multi_user_flag {
+                use rust_executor::db::Ad4mDb;
+                if let Err(e) = Ad4mDb::with_global_instance(|db| {
+                    db.set_multi_user_enabled(true)
+                }) {
+                    eprintln!("Failed to enable multi-user mode: {}", e);
+                }
+            }
+
+            handle
         }).await;
         
         let _ = ctrlc::set_handler(move || {
@@ -320,7 +338,8 @@ async fn main() -> Result<()> {
             hc_proxy_url: _,
             hc_bootstrap_url: _,
             connect_holochain: _,
-            admin_credential: _
+            admin_credential: _,
+            enable_multi_user: _
         } => unreachable!(),
         Domain::RunLocalHcServices {} => unreachable!(),
         Domain::Eve { command: _ } => unreachable!(),

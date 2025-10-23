@@ -208,10 +208,10 @@ export default class LanguageController {
         })
     }
 
-    callTelepresenceSignalObservers(signal: PerspectiveExpression, ref: LanguageRef) {
-        LANGUAGE_CONTROLLER.telepresenceSignalReceived(signal, ref.address)
+    callTelepresenceSignalObservers(signal: PerspectiveExpression, ref: LanguageRef, recipientDid?: string) {
+        LANGUAGE_CONTROLLER.telepresenceSignalReceived(signal, ref.address, recipientDid)
         this.#telepresenceSignalObservers.forEach(o => {
-            o(signal, ref)
+            o(signal, ref, recipientDid)
         })
     }
 
@@ -281,9 +281,9 @@ export default class LanguageController {
         }
 
         if(language.telepresenceAdapter) {
-            language.telepresenceAdapter.registerSignalCallback(async (payload: PerspectiveExpression) => {
+            language.telepresenceAdapter.registerSignalCallback(async (payload: PerspectiveExpression, recipientDid?: string) => {
                 await this.tagPerspectiveExpressionSignatureStatus(payload)
-                this.callTelepresenceSignalObservers(payload, {address: hash, name: language.name} as LanguageRef);
+                this.callTelepresenceSignalObservers(payload, {address: hash, name: language.name} as LanguageRef, recipientDid);
             })
         }
 
@@ -330,9 +330,9 @@ export default class LanguageController {
         }
 
         if(language.telepresenceAdapter) {
-            language.telepresenceAdapter.registerSignalCallback(async (payload: PerspectiveExpression) => {
+            language.telepresenceAdapter.registerSignalCallback(async (payload: PerspectiveExpression, recipientDid?: string) => {
                 await this.tagPerspectiveExpressionSignatureStatus(payload)
-                this.callTelepresenceSignalObservers(payload, {address: hash, name: language.name} as LanguageRef);
+                this.callTelepresenceSignalObservers(payload, {address: hash, name: language.name} as LanguageRef, recipientDid);
             })
         }
 

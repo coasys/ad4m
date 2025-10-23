@@ -340,7 +340,8 @@ impl FilteredPrologPool {
                     self.source_filter
                 ))?;
             let neighbourhood_author = complete_pool_state.current_neighbourhood_author.clone();
-            get_sdna_facts(all_links, neighbourhood_author)?
+            let owner_did = complete_pool_state.current_owner_did.clone();
+            get_sdna_facts(all_links, neighbourhood_author, owner_did)?
         };
 
         log::debug!(
@@ -870,7 +871,7 @@ mod tests {
         // Populate complete pool with test data
         let test_links = create_test_links();
         complete_pool
-            .update_all_engines_with_links("facts".to_string(), test_links, None)
+            .update_all_engines_with_links("facts".to_string(), test_links, None, None)
             .await
             .unwrap();
 
@@ -925,7 +926,7 @@ mod tests {
         // Populate complete pool with initial data
         let test_links = create_test_links();
         complete_pool
-            .update_all_engines_with_links("facts".to_string(), test_links, None)
+            .update_all_engines_with_links("facts".to_string(), test_links, None, None)
             .await
             .unwrap();
 
@@ -1121,7 +1122,7 @@ mod tests {
         // Test 3: Populate complete pool and test normal error recovery
         let test_links = create_test_links();
         complete_pool
-            .update_all_engines_with_links("facts".to_string(), test_links, None)
+            .update_all_engines_with_links("facts".to_string(), test_links, None, None)
             .await
             .unwrap();
 
@@ -1187,7 +1188,7 @@ mod tests {
 
             let populate_start = std::time::Instant::now();
             complete_pool
-                .update_all_engines_with_links(format!("facts_{}", size), large_dataset, None)
+                .update_all_engines_with_links(format!("facts_{}", size), large_dataset, None, None)
                 .await
                 .unwrap();
             let populate_time = populate_start.elapsed();
@@ -1261,7 +1262,7 @@ mod tests {
         // Set up initial data
         let test_links = create_test_links();
         complete_pool
-            .update_all_engines_with_links("facts".to_string(), test_links, None)
+            .update_all_engines_with_links("facts".to_string(), test_links, None, None)
             .await
             .unwrap();
 

@@ -27,6 +27,7 @@ type State = {
   connected: boolean;
   connectedLoading: boolean;
   expertMode: boolean;
+  multiUserEnabled: boolean;
   notifications: NotificationType[];
 };
 
@@ -38,6 +39,7 @@ type ContextProps = {
     handleTrustAgent: (str: string) => void;
     handleLogin: (client: Ad4mClient, login: Boolean, did: string) => void;
     toggleExpertMode: () => void;
+    setMultiUserEnabled: (enabled: boolean) => void;
     handleNotification: (notification: NotificationType) => void;
   };
 };
@@ -55,6 +57,7 @@ const initialState: ContextProps = {
     connected: false,
     connectedLoading: true,
     expertMode: getForVersion("expertMode") === "true",
+    multiUserEnabled: false,
     notifications: [],
   },
   methods: {
@@ -63,6 +66,7 @@ const initialState: ContextProps = {
     handleTrustAgent: () => null,
     handleLogin: () => null,
     toggleExpertMode: () => null,
+    setMultiUserEnabled: () => null,
     handleNotification: () => null,
   },
 };
@@ -81,6 +85,21 @@ export function Ad4minProvider({ children }: any) {
       ...prevState,
       expertMode: !prevState.expertMode,
     }));
+  };
+
+  const setMultiUserEnabled = async (enabled: boolean) => {
+    if (state.client) {
+      try {
+        await state.client.runtime.setMultiUserEnabled(enabled);
+        setState((prevState) => ({
+          ...prevState,
+          multiUserEnabled: enabled,
+        }));
+      } catch (error) {
+        console.error("Failed to set multi-user mode:", error);
+        throw error;
+      }
+    }
   };
 
   const checkConnection = useCallback(
@@ -306,6 +325,24 @@ export function Ad4minProvider({ children }: any) {
     }
   }, [state.url]);
 
+  // Load multi-user state when client is available
+  useEffect(() => {
+    const loadMultiUserState = async () => {
+      if (state.client) {
+        try {
+          const enabled = await state.client.runtime.multiUserEnabled();
+          setState((prev) => ({
+            ...prev,
+            multiUserEnabled: enabled,
+          }));
+        } catch (error) {
+          console.error("Failed to load multi-user state:", error);
+        }
+      }
+    };
+    loadMultiUserState();
+  }, [state.client]);
+
   return (
     <Ad4minContext.Provider
       value={{
@@ -316,6 +353,7 @@ export function Ad4minProvider({ children }: any) {
           resetEndpoint,
           handleLogin,
           toggleExpertMode,
+          setMultiUserEnabled,
           handleNotification,
         },
       }}
