@@ -138,9 +138,19 @@ export default class Ad4mConnect {
   // If url is explicit , don't search for open ports
   async connect(url?: string): Promise<Ad4mClient> {
     try {
-      // Multi-user mode: connect to backend and login with email/password
-      if (this.options.multiUser && this.options.backendUrl && this.options.userEmail && this.options.userPassword) {
-        return await this.connectMultiUser();
+      // Multi-user mode: completely override regular handshake
+      // Skip local connection attempts and go straight to multi-user auth
+      if (this.options.multiUser && this.options.backendUrl) {
+        // If credentials are already provided, connect immediately
+        if (this.options.userEmail && this.options.userPassword) {
+          return await this.connectMultiUser();
+        }
+
+        // Otherwise, just indicate we need authentication
+        // The UI will show the signup/login form
+        this.notifyConnectionChange("not_connected");
+        this.notifyAuthChange("unauthenticated");
+        return null;
       }
 
       if (url) {

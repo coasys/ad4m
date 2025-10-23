@@ -16,6 +16,7 @@ import Header from "./components/Header";
 import Hosting from "./components/Hosting";
 import Loading from "./components/Loading";
 import MobileAppLogoButton from "./components/MobileAppLogoButton";
+import MultiUserAuth from "./components/MultiUserAuth";
 import RequestCapability from "./components/RequestCapability";
 import ScanQRCode from "./components/ScanQRCode";
 import Settings from "./components/Settings";
@@ -488,6 +489,21 @@ export class Ad4mConnectElement extends LitElement {
   private _isHostingLoading = false;
 
   @state()
+  private _multiUserEmail = "";
+
+  @state()
+  private _multiUserPassword = "";
+
+  @state()
+  private _multiUserError: string | null = null;
+
+  @state()
+  private _multiUserLoading = false;
+
+  @state()
+  private _multiUserTab: "login" | "signup" = "login";
+
+  @state()
   private uiState:
     | "settings"
     | "start"
@@ -496,7 +512,8 @@ export class Ad4mConnectElement extends LitElement {
     | "verifycode"
     | "disconnected"
     | "hosting"
-    | "agentlocked" = "start";
+    | "agentlocked"
+    | "multiuser_auth" = "start";
 
   @property({ type: String, reflect: true })
   appName = null;
@@ -530,6 +547,12 @@ export class Ad4mConnectElement extends LitElement {
   // TODO: localstorage doesnt work here
   @property({ type: String, reflect: true })
   url = getForVersion("ad4murl") || "";
+
+  @property({ type: Boolean, reflect: true })
+  multiUser = false;
+
+  @property({ type: String, reflect: true })
+  backendUrl = "";
 
   get authState(): AuthStates {
     return this._client.authState;
@@ -577,8 +600,10 @@ export class Ad4mConnectElement extends LitElement {
     this._client.on("connectionstatechange", this.handleConnectionChange);
 
     this.loadFont();
-    
+
     // Automatically try to connect on component load
+    // In multi-user mode, this will skip local connection attempts
+    // and show the signup/login form instead
     this._client.connect();
   }
 
@@ -594,6 +619,69 @@ export class Ad4mConnectElement extends LitElement {
     } catch (e) {
       console.log(e);
     }
+  }
+
+  private async handleMultiUserSignup() {
+    try {
+      this._multiUserLoading = true;
+      this._multiUserError = null;
+
+      // Use the existing connectMultiUser method with credentials
+      this._client.options.userEmail = this._multiUserEmail;
+      this._client.options.userPassword = this._multiUserPassword;
+      this._client.options.backendUrl = this.backendUrl;
+
+      const client = await this._client.connectMultiUser();
+
+      // Success! Clear form and close modal
+      this._multiUserEmail = "";
+      this._multiUserPassword = "";
+      this._isOpen = false;
+      this.changeUIState("connected");
+    } catch (e) {
+      this._multiUserError = e.message || "Failed to create account. Please try again.";
+    } finally {
+      this._multiUserLoading = false;
+    }
+  }
+
+  private async handleMultiUserLogin() {
+    try {
+      this._multiUserLoading = true;
+      this._multiUserError = null;
+
+      // Use the existing connectMultiUser method with credentials
+      this._client.options.userEmail = this._multiUserEmail;
+      this._client.options.userPassword = this._multiUserPassword;
+      this._client.options.backendUrl = this.backendUrl;
+
+      const client = await this._client.connectMultiUser();
+
+      // Success! Clear form and close modal
+      this._multiUserEmail = "";
+      this._multiUserPassword = "";
+      this._isOpen = false;
+      this.changeUIState("connected");
+    } catch (e) {
+      this._multiUserError = e.message || "Failed to log in. Please check your credentials.";
+    } finally {
+      this._multiUserLoading = false;
+    }
+  }
+
+  private changeMultiUserEmail(email: string) {
+    this._multiUserEmail = email;
+    this._multiUserError = null; // Clear error when user types
+  }
+
+  private changeMultiUserPassword(password: string) {
+    this._multiUserPassword = password;
+    this._multiUserError = null; // Clear error when user types
+  }
+
+  private setMultiUserTab(tab: "login" | "signup") {
+    this._multiUserTab = tab;
+    this._multiUserError = null; // Clear error when switching tabs
   }
 
   private async loginToHosting() {
@@ -707,7 +795,12 @@ export class Ad4mConnectElement extends LitElement {
     }
     if (event === "not_connected") {
       this._isOpen = true;
-      this.changeUIState("start");
+      // If multi-user mode is enabled, show multi-user auth instead of start
+      if (this.multiUser && this.backendUrl) {
+        this.changeUIState("multiuser_auth");
+      } else {
+        this.changeUIState("start");
+      }
     }
     const customEvent = new CustomEvent("connectionstatechange", {
       detail: event,
@@ -822,6 +915,21 @@ export class Ad4mConnectElement extends LitElement {
   renderViews() {
     if (this.connectionState === "connecting") {
       return Loading();
+    }
+
+    if (this.uiState === "multiuser_auth") {
+      return MultiUserAuth({
+        email: this._multiUserEmail,
+        password: this._multiUserPassword,
+        error: this._multiUserError,
+        isLoading: this._multiUserLoading,
+        changeEmail: this.changeMultiUserEmail,
+        changePassword: this.changeMultiUserPassword,
+        onLogin: this.handleMultiUserLogin,
+        onSignup: this.handleMultiUserSignup,
+        activeTab: this._multiUserTab,
+        setActiveTab: this.setMultiUserTab,
+      });
     }
 
     if (this.uiState === "hosting") {
