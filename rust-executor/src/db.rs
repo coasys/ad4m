@@ -2228,15 +2228,16 @@ impl Ad4mDb {
             "SELECT username, did, password, last_seen FROM users ORDER BY last_seen DESC NULLS LAST"
         )?;
 
-        let users = stmt.query_map([], |row| {
-            Ok(User {
-                username: row.get(0)?,
-                did: row.get(1)?,
-                password: row.get(2)?,
-                last_seen: row.get(3).ok(),
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        let users = stmt
+            .query_map([], |row| {
+                Ok(User {
+                    username: row.get(0)?,
+                    did: row.get(1)?,
+                    password: row.get(2)?,
+                    last_seen: row.get(3).ok(),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(users)
     }
@@ -3474,7 +3475,10 @@ mod tests {
 
         // Verify last_seen was updated
         let user = db.get_user("test@example.com").unwrap();
-        assert!(user.last_seen.is_some(), "last_seen should be set after update");
+        assert!(
+            user.last_seen.is_some(),
+            "last_seen should be set after update"
+        );
 
         let last_seen_timestamp = user.last_seen.unwrap();
         let now = chrono::Utc::now().timestamp() as i32;

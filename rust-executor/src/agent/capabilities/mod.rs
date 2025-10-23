@@ -112,9 +112,7 @@ pub fn track_last_seen_from_token(token: String) {
 
         if should_update {
             log::debug!("Updating last_seen for user: {}", user_email);
-            let _ = Ad4mDb::with_global_instance(|db| {
-                db.update_user_last_seen(&user_email)
-            });
+            let _ = Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&user_email));
         }
     }
 }

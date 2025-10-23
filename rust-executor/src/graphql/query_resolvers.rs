@@ -699,22 +699,26 @@ impl Query {
         })
     }
 
-    async fn runtime_list_users(&self, context: &RequestContext) -> FieldResult<Vec<UserStatistics>> {
-        check_capability(&context.capabilities, &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY)?;
+    async fn runtime_list_users(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<Vec<UserStatistics>> {
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
+        )?;
 
         // Check if multi-user mode is enabled
-        let multi_user_enabled = Ad4mDb::with_global_instance(|db| {
-            db.get_multi_user_enabled().unwrap_or(false)
-        });
+        let multi_user_enabled =
+            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
 
         if !multi_user_enabled {
             return Ok(vec![]);
         }
 
         // Get all users from database
-        let users = Ad4mDb::with_global_instance(|db| {
-            db.list_users()
-        }).map_err(|e| FieldError::new(format!("Failed to list users: {}", e), Value::null()))?;
+        let users = Ad4mDb::with_global_instance(|db| db.list_users())
+            .map_err(|e| FieldError::new(format!("Failed to list users: {}", e), Value::null()))?;
 
         // For each user, count their perspectives
         let mut user_stats = vec![];
@@ -738,7 +742,7 @@ impl Query {
                 last_seen: user.last_seen.map(|ts| {
                     DateTime::from(
                         chrono::DateTime::from_timestamp(ts as i64, 0)
-                            .unwrap_or_else(chrono::Utc::now)
+                            .unwrap_or_else(chrono::Utc::now),
                     )
                 }),
                 perspective_count,
