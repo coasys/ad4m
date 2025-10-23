@@ -465,10 +465,8 @@ impl Mutation {
         )?;
 
         // Check if multi-user mode is enabled
-        let multi_user_enabled = Ad4mDb::with_global_instance(|db| {
-            db.get_multi_user_enabled()
-                .unwrap_or(false)
-        });
+        let multi_user_enabled =
+            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
 
         if !multi_user_enabled {
             return Ok(UserCreationResult {
@@ -570,10 +568,8 @@ impl Mutation {
         )?;
 
         // Check if multi-user mode is enabled
-        let multi_user_enabled = Ad4mDb::with_global_instance(|db| {
-            db.get_multi_user_enabled()
-                .unwrap_or(false)
-        });
+        let multi_user_enabled =
+            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
 
         if !multi_user_enabled {
             return Err(FieldError::new(

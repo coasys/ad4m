@@ -388,11 +388,10 @@ impl Query {
         log::debug!("main agent did: {}", crate::agent::did());
 
         // Check if the current user is an owner of the perspective
-        let perspective = get_perspective(&uuid)
-            .ok_or(FieldError::from(format!(
-                "No perspective found with uuid {}",
-                uuid
-            )))?;
+        let perspective = get_perspective(&uuid).ok_or(FieldError::from(format!(
+            "No perspective found with uuid {}",
+            uuid
+        )))?;
 
         let owners = perspective
             .persisted
@@ -405,7 +404,8 @@ impl Query {
         if !owners.contains(&current_user_did) {
             return Err(FieldError::from(format!(
                 "No perspective found with uuid {}",
-                uuid)));
+                uuid
+            )));
         }
 
         // Get all DIDs from the link language
@@ -413,7 +413,6 @@ impl Query {
             .others()
             .await
             .map_err(|e| FieldError::from(e.to_string()))?;
-
 
         log::debug!("all_dids: {:?}", all_dids);
         log::debug!("current_user_did: {}", current_user_did);
@@ -692,10 +691,7 @@ impl Query {
         Ok(notifications_result.unwrap())
     }
 
-    async fn runtime_multi_user_enabled(
-        &self,
-        context: &RequestContext,
-    ) -> FieldResult<bool> {
+    async fn runtime_multi_user_enabled(&self, context: &RequestContext) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
         Ad4mDb::with_global_instance(|db| {
             db.get_multi_user_enabled()
