@@ -42,13 +42,14 @@ async fn add_link(perspective: &PerspectiveProxy, line: &str) -> bool {
     }
 }
 
-async fn link_query(perspective: &PerspectiveProxy, line: &str) -> bool {
-    // query(source, predicate, target)
-    let link_query =
-        Regex::new(r"query\(\s*(?P<source>\S+)?(,\s*(?P<predicate>\S+))?(,\s*(?P<target>\S+))?\)")
-            .expect("Error parsing link_query regex");
+async fn get_links(perspective: &PerspectiveProxy, line: &str) -> bool {
+    // get_links(source, predicate, target)
+    let get_links_regex = Regex::new(
+        r"get_links\(\s*(?P<source>\S+)?(,\s*(?P<predicate>\S+))?(,\s*(?P<target>\S+))?\)",
+    )
+    .expect("Error parsing get_links regex");
 
-    let caps = link_query.captures(line);
+    let caps = get_links_regex.captures(line);
     if let Some(caps) = caps {
         let source = caps
             .name("source")
@@ -72,7 +73,24 @@ async fn link_query(perspective: &PerspectiveProxy, line: &str) -> bool {
                     print_link(link.into());
                 }
             }
-            Err(e) => println!("Error querying links: {}", e),
+            Err(e) => println!("Error getting links: {}", e),
+        }
+        true
+    } else {
+        false
+    }
+}
+
+async fn all_links(perspective: &PerspectiveProxy, line: &String) -> bool {
+    if line == "all-links" {
+        match perspective.get(None, None, None, None, None, None).await {
+            Ok(links) => {
+                println!("\x1b[36mAll links in perspective:\x1b[0m");
+                for link in links {
+                    print_link(link.into());
+                }
+            }
+            Err(e) => println!("Error getting all links: {}", e),
         }
         true
     } else {
@@ -81,7 +99,7 @@ async fn link_query(perspective: &PerspectiveProxy, line: &str) -> bool {
 }
 
 async fn subject_classes(perspective: &PerspectiveProxy, line: &String) -> bool {
-    if line == "subject.classes" {
+    if line == "classes" {
         if let Ok(classes) = perspective.subject_classes().await {
             for class in classes {
                 println!("\x1b[36mSubject Class: \x1b[97m{}", class);
@@ -93,26 +111,368 @@ async fn subject_classes(perspective: &PerspectiveProxy, line: &String) -> bool 
     }
 }
 
+async fn help_command(_perspective: &PerspectiveProxy, line: &String) -> bool {
+    if line == "help" || line == "?" {
+        println!("\x1b[97m================");
+        println!("\x1b[36mAD4M Perspective REPL Commands");
+        println!("\x1b[97m================");
+        println!();
+
+        println!("\x1b[36m📚 Link Management:");
+        println!("\x1b[97m  add_link(<source>, <predicate>, <status>, <target>)");
+        println!("\x1b[90m    Add a new link to the perspective");
+        println!("\x1b[90m    Use _ to omit predicate or status (source and target are required)");
+        println!();
+        println!("\x1b[97m  get_links(<source>, <predicate>, <target>)");
+        println!("\x1b[90m    Get links with optional variables (use _ for any value)");
+        println!("\x1b[90m    Call get_links() with no parameters to get all links");
+        println!();
+        println!("\x1b[97m  all-links");
+        println!("\x1b[90m    Show all links in the perspective (same as get_links())");
+        println!();
+
+        println!("\x1b[36m🧬 SDNA & Subject Classes:");
+        println!("\x1b[97m  classes");
+        println!("\x1b[90m    List all available subject classes");
+        println!();
+        println!("\x1b[97m  sdna [<class>]");
+        println!("\x1b[90m    Show SDNA code in the perspective with authorship info");
+        println!("\x1b[90m    Without <class>: show all SDNA classes");
+        println!("\x1b[90m    With <class>: show only the specified class");
+        println!(
+            "\x1b[90m    Classes are grouped to avoid duplication when multiple name links exist"
+        );
+        println!("\x1b[90m    Each class shows consolidated authorship from all related links");
+        println!();
+        println!("\x1b[97m  sdna-authors");
+        println!("\x1b[90m    Show authorship information for all SDNA (debugging)");
+        println!(
+            "\x1b[90m    Classes are grouped to avoid duplication, showing consolidated authorship"
+        );
+        println!("\x1b[90m    Useful for troubleshooting SDNA loading issues");
+        println!();
+
+        println!("\x1b[36m🏗️  Subject Management:");
+        println!("\x1b[97m  new <class>(<base>)");
+        println!("\x1b[90m    Create a new subject instance of the given class");
+        println!();
+        println!("\x1b[97m  subject(<base>)[<property>] = <value>");
+        println!("\x1b[90m    Set a property value on a subject");
+        println!();
+        println!("\x1b[97m  subject(<base>)[<collection>] <= <value>");
+        println!("\x1b[90m    Add a value to a collection property");
+        println!();
+        println!("\x1b[97m  subject(<base>)");
+        println!("\x1b[90m    Display all properties and collections of a subject");
+        println!();
+
+        println!("\x1b[36m🔍 Prolog Queries:");
+        println!("\x1b[97m  <prolog_query>");
+        println!("\x1b[90m    Run any valid Prolog query against the perspective");
+        println!("\x1b[90m    Examples:");
+        println!("\x1b[90m      subject(X, 'Person')");
+        println!("\x1b[90m      hasProperty(Subject, 'name', Name)");
+        println!("\x1b[90m      friend(X, Y), hobby(Y, 'coding')");
+        println!();
+
+        println!("\x1b[36m🚪 System:");
+        println!("\x1b[97m  help, ?");
+        println!("\x1b[90m    Show this help message");
+        println!();
+        println!("\x1b[97m  clear");
+        println!("\x1b[90m    Clear the screen");
+        println!();
+        println!("\x1b[97m  version");
+        println!("\x1b[90m    Show detailed version and build information");
+        println!();
+        println!("\x1b[97m  exit");
+        println!("\x1b[90m    Exit the REPL");
+        println!();
+
+        println!("\x1b[97m================");
+        println!("\x1b[90mTip: Use uppercase letters for variables in Prolog queries");
+        println!("\x1b[90mExample: ?Person knows Bob");
+        println!("\x1b[97m================");
+        true
+    } else {
+        false
+    }
+}
+
+async fn system_commands(_perspective: &PerspectiveProxy, line: &String) -> bool {
+    match line.as_str() {
+        "clear" => {
+            // Clear the screen by printing multiple newlines
+            for _ in 0..50 {
+                println!();
+            }
+            true
+        }
+        "version" => {
+            println!(
+                "\x1b[36mAD4M CLI Version: \x1b[97m{}",
+                env!("CARGO_PKG_VERSION")
+            );
+            println!("\x1b[36mPackage: \x1b[97m{}", env!("CARGO_PKG_NAME"));
+
+            let git_commit = option_env!("GIT_COMMIT_HASH").unwrap_or("unknown");
+            let git_dirty = option_env!("GIT_DIRTY").unwrap_or("N/A");
+            println!("\x1b[36mGit Commit: \x1b[97m{} ({})", git_commit, git_dirty);
+
+            println!("\x1b[36mHomepage: \x1b[97m{}", env!("CARGO_PKG_HOMEPAGE"));
+            println!(
+                "\x1b[36mRepository: \x1b[97m{}",
+                env!("CARGO_PKG_REPOSITORY")
+            );
+            println!("\x1b[36mLicense: \x1b[97m{}", env!("CARGO_PKG_LICENSE"));
+            true
+        }
+        _ => false,
+    }
+}
+
 async fn sdna(perspective: &PerspectiveProxy, line: &String) -> bool {
-    if line == "sdna" {
+    if line == "sdna" || line.starts_with("sdna ") {
+        // Parse the class name if provided
+        let filter_class = if line.starts_with("sdna ") {
+            Some(line[5..].trim().to_string())
+        } else {
+            None
+        };
+
         match perspective.get_dna().await {
             Ok(dna_zomes) => {
                 // Load these once at the start of your program
                 let ps = SyntaxSet::load_defaults_newlines();
                 let ts = ThemeSet::load_defaults();
 
-                let syntax = ps.find_syntax_by_extension("pl").unwrap();
-                let mut h = HighlightLines::new(syntax, &ts.themes["Solarized (light)"]);
+                let syntax = ps
+                    .find_syntax_by_extension("pl")
+                    .unwrap_or_else(|| ps.find_syntax_by_name("Plain Text").unwrap());
 
-                for zome in dna_zomes {
-                    println!("\x1b[97m================");
-                    for line in LinesWithEndings::from(&zome) {
-                        let ranges: Vec<(Style, &str)> = h.highlight_line(line, &ps).unwrap();
-                        let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
-                        print!("{}", escaped);
+                // Filter by class name if specified
+                let filtered_zomes: Vec<_> = if let Some(filter_class) = &filter_class {
+                    dna_zomes
+                        .iter()
+                        .filter(|(class_name, _, _, _)| class_name == filter_class)
+                        .collect()
+                } else {
+                    dna_zomes.iter().collect()
+                };
+
+                if filtered_zomes.is_empty() {
+                    if let Some(filter_class) = &filter_class {
+                        println!("\x1b[31mNo SDNA found for class: \x1b[97m{}", filter_class);
+                    } else {
+                        println!("\x1b[31mNo SDNA found in perspective");
                     }
+                    return true;
+                }
+
+                let title = if filter_class.is_some() {
+                    format!("SDNA for class: {}", filter_class.as_ref().unwrap())
+                } else {
+                    "SDNA Summary (Grouped by Class)".to_string()
+                };
+
+                println!("\x1b[97m================");
+                println!("\x1b[36m{}", title);
+                println!("\x1b[90mNote: Each class is shown once with consolidated authorship");
+                println!("\x1b[97m================");
+
+                for (class_name, sdna_codes_with_authors, name_authors, code_authors) in
+                    filtered_zomes
+                {
+                    println!("\x1b[97m================");
+                    println!("\x1b[36mSDNA Class: \x1b[97m{}", class_name);
+                    println!("\x1b[90mName Authors: \x1b[97m{}", name_authors.join(", "));
+                    println!("\x1b[90mCode Authors: \x1b[97m{}", code_authors.join(", "));
+
+                    // Show authorship context
+                    let name_set: std::collections::HashSet<_> = name_authors.iter().collect();
+                    let code_set: std::collections::HashSet<_> = code_authors.iter().collect();
+
+                    if name_set == code_set {
+                        println!("\x1b[32m✓ Same authors for name and code");
+                    } else {
+                        println!("\x1b[33m⚠ Different authors for name and code");
+                    }
+
+                    // Show additional author count information
+                    if name_authors.len() > 1 {
+                        println!(
+                            "\x1b[35m📝 Multiple name authors: {} agents have defined this class",
+                            name_authors.len()
+                        );
+                    }
+                    if code_authors.len() > 1 {
+                        println!("\x1b[35m📝 Multiple code authors: {} agents have contributed SDNA code", code_authors.len());
+                    }
+
+                    // Check if there are multiple SDNA code instances
+                    if sdna_codes_with_authors.len() > 1 {
+                        println!(
+                            "\x1b[35m📝 Multiple SDNA code instances: {} different code versions",
+                            sdna_codes_with_authors.len()
+                        );
+
+                        // Show individual code instance authors
+                        for (i, (_, code_author)) in sdna_codes_with_authors.iter().enumerate() {
+                            println!(
+                                "\x1b[90m    Code Instance {}: \x1b[97m{}",
+                                i + 1,
+                                code_author
+                            );
+                        }
+                    }
+
+                    println!("\x1b[97m================");
+
+                    // Display each code snippet with its author
+                    for (i, (sdna_code, code_author)) in sdna_codes_with_authors.iter().enumerate()
+                    {
+                        if i > 0 {
+                            println!("\x1b[97m% --- Next SDNA Instance ---");
+                            println!();
+                        }
+
+                        // Check if this SDNA code is loaded in Prolog
+                        let is_loaded = match perspective.is_sdna_loaded(sdna_code).await {
+                            Ok(loaded) => loaded,
+                            Err(_) => false, // If check fails, assume not loaded
+                        };
+
+                        // Show author and loading status with appropriate colors
+                        if is_loaded {
+                            println!("\x1b[90m% Author: \x1b[97m{} \x1b[32m✓ LOADED", code_author);
+                        } else {
+                            println!(
+                                "\x1b[90m% Author: \x1b[97m{} \x1b[31m✗ NOT LOADED",
+                                code_author
+                            );
+                        }
+                        println!();
+
+                        // Display the code with different themes based on loading status
+                        if is_loaded {
+                            // Loaded code: use the bright Solarized theme with safe fallback
+                            let theme = ts
+                                .themes
+                                .get("Solarized (light)")
+                                .or_else(|| ts.themes.get("Solarized"))
+                                .or_else(|| ts.themes.get("default"))
+                                .unwrap_or_else(|| ts.themes.values().next().unwrap());
+
+                            let mut h = HighlightLines::new(syntax, theme);
+                            for line in LinesWithEndings::from(sdna_code) {
+                                match h.highlight_line(line, &ps) {
+                                    Ok(ranges) => {
+                                        let escaped =
+                                            as_24_bit_terminal_escaped(&ranges[..], false);
+                                        print!("{}", escaped);
+                                    }
+                                    Err(_) => {
+                                        // Fallback to uncolored text if highlighting fails
+                                        print!("{}", line);
+                                    }
+                                }
+                            }
+                        } else {
+                            // Not loaded code: no syntax highlighting, just dark gray text
+                            for line in LinesWithEndings::from(sdna_code) {
+                                print!("\x1b[90m{}", line);
+                            }
+                        }
+                        println!();
+                    }
+
                     println!("\x1b[97m================");
                 }
+            }
+            Err(e) => println!("Error getting dna: {}", e),
+        }
+        true
+    } else if line == "sdna-authors" {
+        // sdna-authors - show authorship information for all SDNA without code content
+        match perspective.get_dna().await {
+            Ok(dna_zomes) => {
+                println!("\x1b[97m================");
+                println!("\x1b[36mSDNA Authorship Summary (Grouped by Class)");
+                println!("\x1b[90mNote: Each class is shown once with consolidated authorship");
+                println!("\x1b[97m================");
+
+                for (class_name, sdna_codes_with_authors, name_authors, code_authors) in
+                    dna_zomes.iter()
+                {
+                    println!("\x1b[36mSDNA Class: \x1b[97m{}", class_name);
+                    println!(
+                        "\x1b[90m  Name Authors: \x1b[97m{}",
+                        name_authors.join(", ")
+                    );
+                    println!(
+                        "\x1b[90m  Code Authors: \x1b[97m{}",
+                        code_authors.join(", ")
+                    );
+
+                    let name_set: std::collections::HashSet<_> = name_authors.iter().collect();
+                    let code_set: std::collections::HashSet<_> = code_authors.iter().collect();
+
+                    if name_set == code_set {
+                        println!("\x1b[32m  ✓ Same authors for name and code");
+                    } else {
+                        println!("\x1b[33m  ⚠ Different authors for name and code");
+                    }
+
+                    // Show additional author count information
+                    if name_authors.len() > 1 {
+                        println!(
+                            "\x1b[35m  📝 Multiple name authors: {} agents have defined this class",
+                            name_authors.len()
+                        );
+                    }
+                    if code_authors.len() > 1 {
+                        println!("\x1b[35m  📝 Multiple code authors: {} agents have contributed SDNA code", code_authors.len());
+                    }
+
+                    // Check if there are multiple SDNA code instances
+                    if sdna_codes_with_authors.len() > 1 {
+                        println!(
+                            "\x1b[35m  📝 Multiple SDNA code instances: {} different code versions",
+                            sdna_codes_with_authors.len()
+                        );
+
+                        // Show individual code instance authors and loading status
+                        for (i, (sdna_code, code_author)) in
+                            sdna_codes_with_authors.iter().enumerate()
+                        {
+                            let is_loaded = match perspective.is_sdna_loaded(sdna_code).await {
+                                Ok(loaded) => loaded,
+                                Err(_) => false, // If check fails, assume not loaded
+                            };
+                            if is_loaded {
+                                println!(
+                                    "\x1b[90m    Code Instance {}: \x1b[97m{} \x1b[32m✓ LOADED",
+                                    i + 1,
+                                    code_author
+                                );
+                            } else {
+                                println!(
+                                    "\x1b[90m    Code Instance {}: \x1b[97m{} \x1b[31m✗ NOT LOADED",
+                                    i + 1,
+                                    code_author
+                                );
+                            }
+                        }
+                    }
+
+                    println!();
+                }
+
+                println!("\x1b[97m================");
+                println!("\x1b[90mNote: This shows authorship information for debugging SDNA loading issues.");
+                println!("\x1b[90mOnly SDNA from local user or neighborhood creator will be loaded into Prolog.");
+                println!("\x1b[90mClasses are grouped to avoid duplication when multiple name links exist.");
+                println!("\x1b[97m================");
             }
             Err(e) => println!("Error getting dna: {}", e),
         }
@@ -309,6 +669,16 @@ async fn subject_print(perspective: &PerspectiveProxy, line: &str) -> Result<boo
 
 pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
     let mut rl = Editor::<()>::new()?;
+
+    // Welcome message
+    println!("\x1b[97m================");
+    println!("\x1b[36mWelcome to AD4M Perspective REPL!");
+    println!("\x1b[90mType 'help' or '?' to see available commands");
+    println!("\x1b[90mUse ↑/↓ arrows to navigate command history");
+    println!("\x1b[90mType 'exit' to quit");
+    println!("\x1b[97m================");
+    println!();
+
     loop {
         let line = rl.readline("\x1b[97m> ")?;
         rl.add_history_entry(line.as_str());
@@ -321,11 +691,23 @@ pub async fn repl_loop(perspective: PerspectiveProxy) -> Result<()> {
             continue;
         }
 
-        if link_query(&perspective, &line).await {
+        if get_links(&perspective, &line).await {
+            continue;
+        }
+
+        if all_links(&perspective, &line).await {
             continue;
         }
 
         if subject_classes(&perspective, &line).await {
+            continue;
+        }
+
+        if help_command(&perspective, &line).await {
+            continue;
+        }
+
+        if system_commands(&perspective, &line).await {
             continue;
         }
 

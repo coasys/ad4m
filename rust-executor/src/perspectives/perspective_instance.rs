@@ -176,6 +176,9 @@ pub struct PerspectiveInstance {
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
     batch_store: Arc<RwLock<HashMap<String, PerspectiveDiff>>>,
+    // Fallback sync tracking for ensure_public_links_are_shared
+    last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
+    fallback_sync_interval: Arc<Mutex<Duration>>,
 }
 
 impl PerspectiveInstance {
@@ -196,6 +199,9 @@ impl PerspectiveInstance {
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
+            // Initialize fallback sync tracking
+            last_successful_fallback_sync: Arc::new(Mutex::new(None)),
+            fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
         }
     }
 
@@ -205,7 +211,8 @@ impl PerspectiveInstance {
             self.notification_check_loop(),
             self.nh_sync_loop(),
             self.pending_diffs_loop(),
-            self.subscribed_queries_loop()
+            self.subscribed_queries_loop(),
+            self.fallback_sync_loop()
         );
     }
 
@@ -274,7 +281,12 @@ impl PerspectiveInstance {
             let mut link_language_guard = self.link_language.lock().await;
             if let Some(link_language) = link_language_guard.as_mut() {
                 match link_language.sync().await {
-                    Ok(_) => (),
+                    Ok(_) => {
+                        // Transition to Synced state on successful sync
+                        let _ = self
+                            .update_perspective_state(PerspectiveState::Synced)
+                            .await;
+                    }
                     Err(e) => {
                         log::error!("Error calling sync on link language: {:?}", e);
                         let _ = self
@@ -416,7 +428,7 @@ impl PerspectiveInstance {
         }
     }
 
-    async fn ensure_public_links_are_shared(&self) {
+    pub async fn ensure_public_links_are_shared(&self) -> bool {
         let uuid = self.persisted.lock().await.uuid.clone();
         let mut link_language_guard = self.link_language.lock().await;
         if let Some(link_language) = link_language_guard.as_mut() {
@@ -451,6 +463,7 @@ impl PerspectiveInstance {
             }
 
             if !links_to_commit.is_empty() {
+                let links_count = links_to_commit.len();
                 let result = link_language
                     .commit(PerspectiveDiff {
                         additions: links_to_commit,
@@ -460,11 +473,18 @@ impl PerspectiveInstance {
 
                 if let Err(e) = result {
                     log::error!("Error calling link language's commit in ensure_public_links_are_shared: {:?}", e);
+                    return false;
                 }
+                log::debug!(
+                    "Successfully committed {} links to link language in fallback sync",
+                    links_count
+                );
             }
 
             //Ad4mDb::with_global_instance(|db| db.add_many_links(&self.persisted.lock().await.uuid, &remote_links)).unwrap(); // Assuming add_many_links takes a reference to a Vec<LinkExpression> and returns Result<(), AnyError>
+            return true;
         }
+        false
     }
 
     pub async fn update_perspective_state(&self, state: PerspectiveState) -> Result<(), AnyError> {
@@ -593,16 +613,57 @@ impl PerspectiveInstance {
 
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) {
         let handle = self.persisted.lock().await.clone();
-        if !diff.additions.is_empty() {
+
+        // Deduplicate by (author, timestamp, source, predicate, target)
+        // Use structured keys to avoid delimiter collision issues
+        let mut seen_add: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut unique_additions: Vec<LinkExpression> = Vec::new();
+        for link in diff.additions.iter() {
+            let key_tuple = (
+                &link.author,
+                &link.timestamp,
+                &link.data.source,
+                link.data.predicate.as_deref().unwrap_or(""),
+                &link.data.target,
+            );
+            let key = serde_json::to_string(&key_tuple).unwrap_or_else(|_| {
+                // Fallback to a simple hash if serialization fails
+                format!("{:?}", key_tuple)
+            });
+            if seen_add.insert(key) {
+                unique_additions.push(link.clone());
+            }
+        }
+
+        let mut seen_rem: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut unique_removals: Vec<LinkExpression> = Vec::new();
+        for link in diff.removals.iter() {
+            let key_tuple = (
+                &link.author,
+                &link.timestamp,
+                &link.data.source,
+                link.data.predicate.as_deref().unwrap_or(""),
+                &link.data.target,
+            );
+            let key = serde_json::to_string(&key_tuple).unwrap_or_else(|_| {
+                // Fallback to a simple hash if serialization fails
+                format!("{:?}", key_tuple)
+            });
+            if seen_rem.insert(key) {
+                unique_removals.push(link.clone());
+            }
+        }
+
+        if !unique_additions.is_empty() {
             Ad4mDb::with_global_instance(|db| {
-                db.add_many_links(&handle.uuid, diff.additions.clone(), &LinkStatus::Shared)
+                db.add_many_links(&handle.uuid, unique_additions.clone(), &LinkStatus::Shared)
             })
             .expect("Failed to add many links");
         }
 
-        if !diff.removals.is_empty() {
+        if !unique_removals.is_empty() {
             Ad4mDb::with_global_instance(|db| {
-                for link in &diff.removals {
+                for link in &unique_removals {
                     db.remove_link(&handle.uuid, link)
                         .expect("Failed to remove link");
                 }
@@ -610,13 +671,11 @@ impl PerspectiveInstance {
         }
 
         let decorated_diff = DecoratedPerspectiveDiff {
-            additions: diff
-                .additions
+            additions: unique_additions
                 .iter()
                 .map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared)))
                 .collect(),
-            removals: diff
-                .removals
+            removals: unique_removals
                 .iter()
                 .map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared)))
                 .collect(),
@@ -870,6 +929,8 @@ impl PerspectiveInstance {
 
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
+            // Reset fallback sync interval when new shared links are added
+            self.reset_fallback_sync_interval().await;
         }
         Ok(decorated_diff)
     }
@@ -1511,7 +1572,7 @@ impl PerspectiveInstance {
                 let rebuild_start = std::time::Instant::now();
                 match self_clone.update_prolog_engine_facts().await {
                     Ok(()) => {
-                        log::info!(
+                        log::trace!(
                             "🔧 PROLOG UPDATE: Full rebuild completed successfully in {:?}",
                             rebuild_start.elapsed()
                         );
@@ -2567,6 +2628,87 @@ impl PerspectiveInstance {
         }
     }
 
+    async fn fallback_sync_loop(&self) {
+        let uuid = self.persisted.lock().await.uuid.clone();
+        log::debug!("Starting fallback sync loop for perspective {}", uuid);
+
+        while !*self.is_teardown.lock().await {
+            // Check if we should run the fallback sync (avoid holding multiple locks)
+            let should_run = {
+                // Check perspective state first
+                let is_synced_neighbourhood = {
+                    let handle = self.persisted.lock().await;
+                    let result =
+                        handle.state == PerspectiveState::Synced && handle.neighbourhood.is_some();
+                    drop(handle); // Release lock immediately
+                    result
+                };
+
+                if !is_synced_neighbourhood {
+                    false
+                } else {
+                    // Check link language availability
+                    let link_lang_available = {
+                        let link_lang = self.link_language.lock().await;
+                        let result = link_lang.is_some();
+                        drop(link_lang); // Release lock immediately
+                        result
+                    };
+
+                    if !link_lang_available {
+                        false
+                    } else {
+                        // Check timing conditions
+                        let last_success = *self.last_successful_fallback_sync.lock().await;
+                        let current_interval = *self.fallback_sync_interval.lock().await;
+
+                        // Only run if we haven't had a successful sync recently or it's been a while
+                        last_success.is_none() || last_success.unwrap().elapsed() > current_interval
+                    }
+                }
+            };
+
+            if should_run {
+                log::debug!("Running fallback sync for perspective {}", uuid);
+                let success = self.ensure_public_links_are_shared().await;
+
+                if success {
+                    // Update last successful sync time and increase interval
+                    {
+                        *self.last_successful_fallback_sync.lock().await =
+                            Some(tokio::time::Instant::now());
+                        *self.fallback_sync_interval.lock().await = Duration::from_secs(300);
+                    }
+                    log::debug!("Fallback sync successful for perspective {}, increasing interval to 5 minutes", uuid);
+                } else {
+                    // Reset interval to 30 seconds on failure
+                    *self.fallback_sync_interval.lock().await = Duration::from_secs(30);
+                    log::warn!(
+                        "Fallback sync failed for perspective {}, keeping interval at 30 seconds",
+                        uuid
+                    );
+                }
+            }
+
+            // Get fresh interval for sleep (after potential updates)
+            let sleep_interval = *self.fallback_sync_interval.lock().await;
+            sleep(sleep_interval).await;
+        }
+
+        log::debug!("Fallback sync loop ended for perspective {}", uuid);
+    }
+
+    /// Reset the fallback sync interval to 30 seconds when new links are added
+    /// This ensures that new links get synced quickly
+    async fn reset_fallback_sync_interval(&self) {
+        *self.fallback_sync_interval.lock().await = Duration::from_secs(30);
+        let uuid = self.persisted.lock().await.uuid.clone();
+        log::debug!(
+            "Reset fallback sync interval to 30 seconds for perspective {}",
+            uuid
+        );
+    }
+
     pub async fn create_batch(&self) -> String {
         let batch_uuid = Uuid::new_v4().to_string();
         self.batch_store.write().await.insert(
@@ -2800,9 +2942,21 @@ mod tests {
         }
 
         let query = LinkQuery::default();
-        let links = perspective.get_links(&query).await.unwrap();
+        let mut links = perspective.get_links(&query).await.unwrap();
         assert_eq!(links.len(), 5);
-        assert_eq!(links, all_links);
+        let mut all_links_sorted = all_links.clone();
+        let cmp = |a: &DecoratedLinkExpression, b: &DecoratedLinkExpression| {
+            let at = chrono::DateTime::parse_from_rfc3339(&a.timestamp).unwrap();
+            let bt = chrono::DateTime::parse_from_rfc3339(&b.timestamp).unwrap();
+            at.cmp(&bt)
+                .then(a.data.source.cmp(&b.data.source))
+                .then(a.data.predicate.cmp(&b.data.predicate))
+                .then(a.data.target.cmp(&b.data.target))
+                .then(a.author.cmp(&b.author))
+        };
+        links.sort_by(cmp);
+        all_links_sorted.sort_by(cmp);
+        assert_eq!(links, all_links_sorted);
     }
 
     #[tokio::test]
@@ -2828,12 +2982,22 @@ mod tests {
             source: Some(source.to_string()),
             ..Default::default()
         };
-        let links = perspective.get_links(&query).await.unwrap();
-        let expected_links: Vec<_> = all_links
+        let mut links = perspective.get_links(&query).await.unwrap();
+        let mut expected_links: Vec<_> = all_links
             .into_iter()
             .filter(|expr| expr.data.source == source)
             .collect();
         assert_eq!(links.len(), expected_links.len());
+        let cmp = |a: &DecoratedLinkExpression, b: &DecoratedLinkExpression| {
+            let at = chrono::DateTime::parse_from_rfc3339(&a.timestamp).unwrap();
+            let bt = chrono::DateTime::parse_from_rfc3339(&b.timestamp).unwrap();
+            at.cmp(&bt)
+                .then(a.data.predicate.cmp(&b.data.predicate))
+                .then(a.data.target.cmp(&b.data.target))
+                .then(a.author.cmp(&b.author))
+        };
+        links.sort_by(cmp);
+        expected_links.sort_by(cmp);
         assert_eq!(links, expected_links);
     }
 

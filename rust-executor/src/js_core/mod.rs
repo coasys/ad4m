@@ -285,9 +285,10 @@ impl JsCore {
                             }
                         }
                     });
+                } else {
+                    // No more requests available, add a small delay to prevent busy-waiting
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                 }
-                //sleep(std::time::Duration::from_millis(10)).await;
-                tokio::task::yield_now().await;
             }
         }
     }
@@ -370,8 +371,10 @@ impl JsCore {
                                         }
                                     }
                                 });
+                            } else {
+                                // No more module load requests, add small delay to prevent busy-waiting
+                                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                             }
-                            tokio::task::yield_now().await;
                         }
                     };
 
@@ -415,9 +418,14 @@ impl JsCore {
                                             info!("Received system signal");
                                         }
                                     }
+                                } else {
+                                    // No signal received, add small delay to prevent busy-waiting
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                                 }
+                            } else {
+                                // Holochain service not available, add delay to prevent busy-waiting
+                                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                             }
-                            tokio::task::yield_now().await;
                         }
                     };
 

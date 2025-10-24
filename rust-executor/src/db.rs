@@ -87,6 +87,20 @@ impl Ad4mDb {
              )",
             [],
         )?;
+        // Ensure we don't have duplicate link expressions and enforce uniqueness going forward
+        conn.execute(
+            "DELETE FROM link
+             WHERE id NOT IN (
+               SELECT MIN(id) FROM link
+               GROUP BY perspective, source, predicate, target, author, timestamp
+             )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS link_unique_idx
+             ON link (perspective, source, predicate, target, author, timestamp)",
+            [],
+        )?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS expression (
@@ -733,7 +747,7 @@ impl Ad4mDb {
         status: &LinkStatus,
     ) -> Ad4mDbResult<()> {
         self.conn.execute(
-            "INSERT INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status)
+            "INSERT OR IGNORE INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 perspective_uuid,
@@ -758,7 +772,7 @@ impl Ad4mDb {
     ) -> Ad4mDbResult<()> {
         for link in links.iter() {
             self.conn.execute(
-                "INSERT INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status)
+                "INSERT OR IGNORE INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     perspective_uuid,
@@ -877,7 +891,7 @@ impl Ad4mDb {
         perspective_uuid: &str,
     ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1",
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 ORDER BY timestamp, source, predicate, target, author",
         )?;
         let link_iter = stmt.query_map(params![perspective_uuid], |row| {
             let status: LinkStatus =
@@ -914,7 +928,7 @@ impl Ad4mDb {
         source: &str,
     ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND source = ?2",
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND source = ?2 ORDER BY timestamp, predicate, target, author",
         )?;
         let link_iter = stmt.query_map(params![perspective_uuid, source], |row| {
             let status: LinkStatus =
@@ -951,7 +965,7 @@ impl Ad4mDb {
         target: &str,
     ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND target = ?2",
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND target = ?2 ORDER BY timestamp, source, predicate, author",
         )?;
         let link_iter = stmt.query_map(params![perspective_uuid, target], |row| {
             let status: LinkStatus =
@@ -1640,7 +1654,7 @@ impl Ad4mDb {
                     log::debug!("Importing {} links", links.len());
                     for (link, signature, key) in links {
                         match self.conn.execute(
-                            "INSERT INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                            "INSERT OR IGNORE INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                             params![
                                 link.perspective,
                                 link.source,
