@@ -192,12 +192,7 @@ export default class Ad4mConnect {
       // Connect to the multi-user backend
       const backendUrl = this.options.backendUrl!;
       console.debug("[Ad4m Connect] Connecting to backend:", backendUrl);
-      try {
-        await connectWebSocket(backendUrl);
-      } catch (error) {
-        console.debug("[Ad4m Connect] Failed to connect to backend:", error);
-        console.debug("[Ad4m Connect] Trying to continue anyway...");
-      }
+      await connectWebSocket(backendUrl);
       
       this.setUrl(backendUrl);
       // Build client for user management operations (without token initially)
@@ -210,10 +205,11 @@ export default class Ad4mConnect {
         token = await tempClient.agent.loginUser(this.options.userEmail!, this.options.userPassword!);
         console.debug("[Ad4m Connect] Login successful");
       } catch (loginError) {
+        console.debug("[Ad4m Connect] Login error:", loginError);
         // User doesn't exist, try to create
         console.debug("[Ad4m Connect] User does not exist, trying to create user:", this.options.userEmail!);
         try {
-          console.debug("[Ad4m Connect] Creating user:", this.options.userEmail!, this.options.userPassword!);
+          console.debug("[Ad4m Connect] Creating user:", this.options.userEmail!);
           try {
             const createResult = await tempClient.agent.createUser(this.options.userEmail!, this.options.userPassword!);
             console.debug("[Ad4m Connect] Create result:", createResult);
@@ -225,7 +221,7 @@ export default class Ad4mConnect {
           }
 
           // Now login
-          console.debug("[Ad4m Connect] Logging in user after creation:", this.options.userEmail!, this.options.userPassword!);
+          console.debug("[Ad4m Connect] Logging in user after creation:", this.options.userEmail!);
           token = await tempClient.agent.loginUser(this.options.userEmail!, this.options.userPassword!);
           console.log("[Ad4m Connect] Successfully created and logged in user");
         } catch (createError) {
