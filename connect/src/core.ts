@@ -227,7 +227,7 @@ export default class Ad4mConnect {
           // Now login
           console.debug("[Ad4m Connect] Logging in user after creation:", this.options.userEmail!, this.options.userPassword!);
           token = await tempClient.agent.loginUser(this.options.userEmail!, this.options.userPassword!);
-          console.log("[Ad4m Connect] Successfully created and logged in user);
+          console.log("[Ad4m Connect] Successfully created and logged in user");
         } catch (createError) {
           throw new Error(`Failed to create/login user: ${createError.message}`);
         }

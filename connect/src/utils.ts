@@ -15,20 +15,32 @@ function Timeout() {
 export async function connectWebSocket(url, timeout = 10000) {
   return Promise.race([
     new Promise((resolve, reject) => {
+      let websocket;
       try {
-        if (!url.includes("localhost")) {
-          resolve(new WebSocket(url));
-        }
-        const websocket = new WebSocket(url);
+        // Use the same subprotocol that graphql-ws uses
+        websocket = new WebSocket(url, "graphql-transport-ws");
 
         websocket.onopen = () => {
+          // Connection successful - close it immediately since we're just checking
+          websocket.close();
           resolve(websocket);
         };
 
         websocket.onerror = (error) => {
           reject(error);
         };
+
+        websocket.onclose = (event) => {
+          // If we get a close event before onopen fired, the connection failed
+          // onopen will have already resolved if connection was successful
+          if (event.code !== 1000) {
+            reject(new Error(`WebSocket closed with code ${event.code}: ${event.reason}`));
+          }
+        };
       } catch (e) {
+        if (websocket) {
+          websocket.close();
+        }
         reject(e);
       }
     }),

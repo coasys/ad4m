@@ -712,9 +712,10 @@ export class Ad4mConnectElement extends LitElement {
 
   private async detectLocal() {
     try {
-      await connectWebSocket(`ws://localhost:${this.port}/graphql`, 1000);
+      await connectWebSocket(`ws://localhost:${this.port}/graphql`, 3000);
       this._localDetected = true;
-    } catch {
+    } catch (error) {
+      console.log("[Ad4m Connect] Local detection failed:", error);
       this._localDetected = false;
     }
   }
