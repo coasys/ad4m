@@ -397,7 +397,10 @@ impl Mutation {
             };
 
             // Store the updated profile for the user
-            AgentService::store_user_agent_profile(&user_email, &agent).map_err(|e| {
+            AgentService::with_global_instance(|agent_service| {
+                agent_service.store_user_agent_profile(&user_email, &agent)
+            })
+            .map_err(|e| {
                 FieldError::new(
                     format!("Failed to store user profile: {}", e),
                     Value::null(),
@@ -459,7 +462,13 @@ impl Mutation {
         email: String,
         password: String,
     ) -> FieldResult<UserCreationResult> {
-        // Check if multi-user mode is enabled first
+        // Check capability (empty tokens get user management caps in multi-user mode)
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY,
+        )?;
+
+        // Check if multi-user mode is enabled
         let multi_user_enabled =
             Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
 
@@ -470,18 +479,6 @@ impl Mutation {
                 error: Some("Multi-user mode is not enabled".to_string()),
             });
         }
-
-        // In multi-user mode, allow user creation without authentication
-        // (this enables signup flow for new users)
-        // Otherwise, require the user management capability
-        if !context.auth_token.is_empty() {
-            // If there's a token, verify it has the right capability
-            check_capability(
-                &context.capabilities,
-                &RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY,
-            )?;
-        }
-        // If no token (empty), we allow it when multi-user mode is enabled (checked above)
 
         // Generate DID by creating a keypair in the wallet using email as key name
         use crate::agent::AgentService;
@@ -540,7 +537,10 @@ impl Mutation {
         };
 
         // Store the profile locally
-        AgentService::store_user_agent_profile(&email, &initial_agent).map_err(|e| {
+        AgentService::with_global_instance(|agent_service| {
+            agent_service.store_user_agent_profile(&email, &initial_agent)
+        })
+        .map_err(|e| {
             FieldError::new(
                 format!("Failed to store user profile: {}", e),
                 Value::null(),
@@ -570,7 +570,13 @@ impl Mutation {
         email: String,
         password: String,
     ) -> FieldResult<String> {
-        // Check if multi-user mode is enabled first
+        // Check capability (empty tokens get user management caps in multi-user mode)
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
+        )?;
+
+        // Check if multi-user mode is enabled
         let multi_user_enabled =
             Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
 
@@ -580,18 +586,6 @@ impl Mutation {
                 graphql_value!(null),
             ));
         }
-
-        // In multi-user mode, allow user login without authentication
-        // (this enables login flow for existing users)
-        // Otherwise, require the user management capability
-        if !context.auth_token.is_empty() {
-            // If there's a token, verify it has the right capability
-            check_capability(
-                &context.capabilities,
-                &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
-            )?;
-        }
-        // If no token (empty), we allow it when multi-user mode is enabled (checked above)
 
         // Get user from database
         let db = Ad4mDb::global_instance();

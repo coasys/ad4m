@@ -10,6 +10,7 @@ import Ad4mConnect, {
 
 import autoBind from "auto-bind";
 import AgentLocked from "./components/AgentLocked";
+import ConnectionOverview from "./components/ConnectionOverview";
 import CouldNotMakeRequest from "./components/CouldNotMakeRequest";
 import Disconnected from "./components/Disconnected";
 import Header from "./components/Header";
@@ -17,12 +18,13 @@ import Hosting from "./components/Hosting";
 import Loading from "./components/Loading";
 import MobileAppLogoButton from "./components/MobileAppLogoButton";
 import MultiUserAuth from "./components/MultiUserAuth";
+import RemoteConnection from "./components/RemoteConnection";
 import RequestCapability from "./components/RequestCapability";
 import ScanQRCode from "./components/ScanQRCode";
 import Settings from "./components/Settings";
 import Start from "./components/Start";
 import VerifyCode from "./components/VerifyCode";
-import { DEFAULT_PORT, getForVersion, removeForVersion, setForVersion } from "./utils";
+import { connectWebSocket, DEFAULT_PORT, getForVersion, removeForVersion, setForVersion } from "./utils";
 
 export { getAd4mClient } from "./utils";
 
@@ -504,7 +506,24 @@ export class Ad4mConnectElement extends LitElement {
   private _multiUserTab: "login" | "signup" = "login";
 
   @state()
+  private _localDetected = false;
+
+  @state()
+  private _remoteUrl = "";
+
+  @state()
+  private _remoteMultiUserDetected: boolean | null = null;
+
+  @state()
+  private _remoteDetecting = false;
+
+  @state()
+  private _remoteError: string | null = null;
+
+  @state()
   private uiState:
+    | "connection_overview"
+    | "remote_connection"
     | "settings"
     | "start"
     | "qr"
@@ -513,7 +532,7 @@ export class Ad4mConnectElement extends LitElement {
     | "disconnected"
     | "hosting"
     | "agentlocked"
-    | "multiuser_auth" = "start";
+    | "multiuser_auth" = "connection_overview";
 
   @property({ type: String, reflect: true })
   appName = null;
@@ -601,10 +620,17 @@ export class Ad4mConnectElement extends LitElement {
 
     this.loadFont();
 
-    // Automatically try to connect on component load
-    // In multi-user mode, this will skip local connection attempts
-    // and show the signup/login form instead
-    this._client.connect();
+    const storedToken = this.token || getForVersion("ad4mtoken");
+
+    if (storedToken) {
+      // If we have a stored token, try to auto-connect
+      this._client.connect();
+    } else {
+      // No stored token - show connection overview
+      this.detectLocal();
+      this.changeUIState("connection_overview");
+      this._isOpen = true;
+    }
   }
 
   private async checkEmail() {
@@ -682,6 +708,89 @@ export class Ad4mConnectElement extends LitElement {
   private setMultiUserTab(tab: "login" | "signup") {
     this._multiUserTab = tab;
     this._multiUserError = null; // Clear error when switching tabs
+  }
+
+  private async detectLocal() {
+    try {
+      await connectWebSocket(`ws://localhost:${this.port}/graphql`, 1000);
+      this._localDetected = true;
+    } catch {
+      this._localDetected = false;
+    }
+  }
+
+  private async detectRemoteMultiUser(url: string): Promise<boolean> {
+    try {
+      console.log("[Ad4m Connect] Detecting multi-user mode for URL:", url);
+      const tempClient = this._client.buildTempClient(url);
+      console.log("[Ad4m Connect] Temp client:", tempClient);
+      const multiUserEnabled = await tempClient.runtime.multiUserEnabled();
+      console.log("[Ad4m Connect] Multi-user detection result:", multiUserEnabled);
+      return multiUserEnabled;
+    } catch (error) {
+      console.error("[Ad4m Connect] Failed to detect multi-user mode:", error);
+      console.error("[Ad4m Connect] Error details:", error.message, error.stack);
+      return false;
+    }
+  }
+
+  private async handleConnectLocal() {
+    try {
+      this.changeUIState("requestcap");
+      await this._client.connect();
+    } catch (error) {
+      console.error("Failed to connect to local AD4M:", error);
+      this.changeUIState("connection_overview");
+    }
+  }
+
+  private handleShowRemoteConnection() {
+    // Use configured URL in priority order: backendUrl, url, or empty
+    this._remoteUrl = this.backendUrl || this.url || "";
+    this._remoteMultiUserDetected = null;
+    this._remoteError = null;
+    this.changeUIState("remote_connection");
+  }
+
+  private handleRemoteUrlChange(url: string) {
+    this._remoteUrl = url;
+    this._remoteError = null;
+  }
+
+  private async handleRemoteConnect() {
+    if (!this._remoteUrl) {
+      this._remoteError = "Please enter a URL";
+      return;
+    }
+
+    this._remoteDetecting = true;
+    this._remoteError = null;
+
+    try {
+      // Detect if multi-user
+      const isMultiUser = await this.detectRemoteMultiUser(this._remoteUrl);
+      this._remoteMultiUserDetected = isMultiUser;
+      this._remoteDetecting = false;
+    } catch (error) {
+      this._remoteError = error.message || "Failed to connect to remote executor";
+      this._remoteDetecting = false;
+    }
+  }
+
+  private async handleRemoteMultiUserAuth() {
+    // Set the backend URL and show multi-user auth
+    this.backendUrl = this._remoteUrl;
+    this.changeUIState("multiuser_auth");
+  }
+
+  private async handleRemoteRequestCapability() {
+    try {
+      this.changeUIState("requestcap");
+      await this._client.connect(this._remoteUrl);
+    } catch (error) {
+      this._remoteError = error.message || "Failed to connect";
+      this.changeUIState("remote_connection");
+    }
   }
 
   private async loginToHosting() {
@@ -917,12 +1026,41 @@ export class Ad4mConnectElement extends LitElement {
       return Loading();
     }
 
+    if (this.uiState === "connection_overview") {
+      return ConnectionOverview({
+        localDetected: this._localDetected,
+        multiUserConfigured: this.multiUser && !!this.backendUrl,
+        backendUrl: this.backendUrl,
+        configuredUrl: this.url,
+        isMobile: this._isMobile,
+        onConnectLocal: this.handleConnectLocal,
+        onConnectRemote: this.handleShowRemoteConnection,
+        onScanQR: () => { this.startCamera(null); },
+        onDownloadAd4m: () => { window.open("https://github.com/coasys/ad4m/releases"); },
+      });
+    }
+
+    if (this.uiState === "remote_connection") {
+      return RemoteConnection({
+        initialUrl: this._remoteUrl,
+        detecting: this._remoteDetecting,
+        multiUserDetected: this._remoteMultiUserDetected,
+        error: this._remoteError,
+        onBack: () => this.changeUIState("connection_overview"),
+        onUrlChange: this.handleRemoteUrlChange,
+        onConnect: this.handleRemoteConnect,
+        onMultiUserAuth: this.handleRemoteMultiUserAuth,
+        onRequestCapability: this.handleRemoteRequestCapability,
+      });
+    }
+
     if (this.uiState === "multiuser_auth") {
       return MultiUserAuth({
         email: this._multiUserEmail,
         password: this._multiUserPassword,
         error: this._multiUserError,
         isLoading: this._multiUserLoading,
+        backendUrl: this.backendUrl,
         changeEmail: this.changeMultiUserEmail,
         changePassword: this.changeMultiUserPassword,
         onLogin: this.handleMultiUserLogin,

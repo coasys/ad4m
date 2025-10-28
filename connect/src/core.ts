@@ -87,7 +87,8 @@ export default class Ad4mConnect {
     this.url = options.url || `ws://localhost:${this.port}/graphql`;
     this.token = options.token || this.token;
     this.isHosting = options.hosting || false;
-    this.buildClient();
+    // Don't auto-connect - let the UI decide when to connect
+    // this.buildClient();
   }
 
   private notifyConfigChange(val: ConfigStates, data: string | number) {
@@ -135,24 +136,36 @@ export default class Ad4mConnect {
     this.listeners[event].push(cb);
   }
 
+  // Build a temporary client for detection/queries without changing state
+  buildTempClient(url: string): Ad4mClient {
+    const wsClient = createClient({
+      url: url,
+      connectionParams: async () => ({
+        headers: {
+          authorization: "",
+        },
+      }),
+    });
+
+    const apolloClient = new ApolloClient({
+      link: new GraphQLWsLink(wsClient),
+      cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
+      defaultOptions: {
+        watchQuery: {
+          fetchPolicy: "no-cache",
+        },
+        query: {
+          fetchPolicy: "no-cache",
+        },
+      },
+    });
+
+    return new Ad4mClient(apolloClient);
+  }
+
   // If url is explicit , don't search for open ports
   async connect(url?: string): Promise<Ad4mClient> {
     try {
-      // Multi-user mode: completely override regular handshake
-      // Skip local connection attempts and go straight to multi-user auth
-      if (this.options.multiUser && this.options.backendUrl) {
-        // If credentials are already provided, connect immediately
-        if (this.options.userEmail && this.options.userPassword) {
-          return await this.connectMultiUser();
-        }
-
-        // Otherwise, just indicate we need authentication
-        // The UI will show the signup/login form
-        this.notifyConnectionChange("not_connected");
-        this.notifyAuthChange("unauthenticated");
-        return null;
-      }
-
       if (url) {
         await connectWebSocket(url);
         this.setUrl(url);
@@ -160,20 +173,13 @@ export default class Ad4mConnect {
         await this.checkAuth();
         return client;
       } else {
-        // Try local connection first
-        this.notifyConnectionChange("checking_local");
-        try {
-          // Quick check for local agent
-          await connectWebSocket(`ws://localhost:${this.port}/graphql`, 2000);
-          const client = this.buildClient();
-          await this.checkAuth();
-          return client;
-        } catch {
-          // If local connection fails, proceed with port scanning
-          const client = await this.ensureConnection();
-          await this.checkAuth();
-          return client;
-        }
+        // Try default local port
+        const localUrl = `ws://localhost:${this.port}/graphql`;
+        await connectWebSocket(localUrl);
+        this.setUrl(localUrl);
+        const client = this.buildClient();
+        await this.checkAuth();
+        return client;
       }
     } catch {
       this.notifyConnectionChange("not_connected");
@@ -185,25 +191,43 @@ export default class Ad4mConnect {
     try {
       // Connect to the multi-user backend
       const backendUrl = this.options.backendUrl!;
-      await connectWebSocket(backendUrl);
-      this.setUrl(backendUrl);
+      console.debug("[Ad4m Connect] Connecting to backend:", backendUrl);
+      try {
+        await connectWebSocket(backendUrl);
+      } catch (error) {
+        console.debug("[Ad4m Connect] Failed to connect to backend:", error);
+        console.debug("[Ad4m Connect] Trying to continue anyway...");
+      }
       
+      this.setUrl(backendUrl);
       // Build client for user management operations (without token initially)
       const tempClient = this.buildClient();
-      
+      console.debug("[Ad4m Connect] Built client:", tempClient);
       // Try to login first, if that fails, try to create user
       let token: string;
       try {
+        console.debug("[Ad4m Connect] Logging in user:", this.options.userEmail!);
         token = await tempClient.agent.loginUser(this.options.userEmail!, this.options.userPassword!);
+        console.debug("[Ad4m Connect] Login successful");
       } catch (loginError) {
         // User doesn't exist, try to create
+        console.debug("[Ad4m Connect] User does not exist, trying to create user:", this.options.userEmail!);
         try {
-          const createResult = await tempClient.agent.createUser(this.options.userEmail!, this.options.userPassword!);
-          if (!createResult.success) {
-            throw new Error(createResult.error || "Failed to create user");
+          console.debug("[Ad4m Connect] Creating user:", this.options.userEmail!, this.options.userPassword!);
+          try {
+            const createResult = await tempClient.agent.createUser(this.options.userEmail!, this.options.userPassword!);
+            console.debug("[Ad4m Connect] Create result:", createResult);
+            if (!createResult.success) {
+              throw new Error(createResult.error || "Failed to create user");
+            }
+          } catch (createError) {
+            console.log("[Ad4m Connect] Failed to create user:", createError);
           }
+
           // Now login
+          console.debug("[Ad4m Connect] Logging in user after creation:", this.options.userEmail!, this.options.userPassword!);
           token = await tempClient.agent.loginUser(this.options.userEmail!, this.options.userPassword!);
+          console.log("[Ad4m Connect] Successfully created and logged in user);
         } catch (createError) {
           throw new Error(`Failed to create/login user: ${createError.message}`);
         }

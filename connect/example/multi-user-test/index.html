@@ -91,7 +91,7 @@
 
       <div class="info">
         <h2>Test Configuration</h2>
-        <p><strong>Backend URL:</strong> <code id="backend-url-display">ws://localhost:4000/graphql</code></p>
+        <p><strong>Backend URL:</strong> <code id="backend-url-display">ws://localhost:12000/graphql</code></p>
         <p><strong>Multi-User Mode:</strong> <code>Enabled</code></p>
         <p><strong>Flow:</strong> Signup → Login → Connect</p>
       </div>
@@ -106,7 +106,7 @@
 
       <div class="info">
         <h2>Instructions</h2>
-        <p>1. Make sure you have an AD4M executor running on <code>localhost:4000</code> with multi-user mode enabled</p>
+        <p>1. Make sure you have an AD4M executor running on <code>localhost:12000</code> with multi-user mode enabled</p>
         <p>2. The signup/login dialog should appear automatically</p>
         <p>3. Try creating a new account or logging in with existing credentials</p>
         <p>4. Watch the status above for connection and authentication state changes</p>
@@ -130,24 +130,23 @@
       };
 
       try {
-        updateStatus("Initializing AD4M Connect with multi-user mode...", "info");
+        updateStatus("Initializing AD4M Connect...", "info");
 
         const ui = Ad4mConnectUI({
           appName: "multi-user-test",
-          appDesc: "Testing multi-user signup and login flow",
+          appDesc: "Testing AD4M connection flows",
           appDomain: "test.ad4m.multiuser",
           appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
+          backendUrl: BACKEND_URL,
           capabilities: [
             {
               with: { domain: "*", pointers: ["*"] },
               can: ["*"],
             },
           ],
-          multiUser: true,
-          backendUrl: BACKEND_URL,
         });
 
-        updateStatus("AD4M Connect initialized. Dialog should appear...", "info");
+        updateStatus("AD4M Connect initialized. Choose your connection method...", "info");
 
         // Listen for state changes
         ui.addEventListener("connectionstatechange", (e) => {

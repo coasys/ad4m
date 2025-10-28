@@ -60,7 +60,9 @@ impl Query {
             })?;
 
             // Try to load user-specific profile, fallback to empty profile
-            let agent = match AgentService::load_user_agent_profile(&user_email) {
+            let agent = match AgentService::with_global_instance(|agent_service| {
+                agent_service.load_user_agent_profile(&user_email)
+            }) {
                 Ok(Some(profile)) => profile,
                 Ok(None) | Err(_) => Agent {
                     did: agent_data.did,
@@ -692,7 +694,10 @@ impl Query {
     }
 
     async fn runtime_multi_user_enabled(&self, context: &RequestContext) -> FieldResult<bool> {
-        check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
+        )?;
         Ad4mDb::with_global_instance(|db| {
             db.get_multi_user_enabled()
                 .map_err(|e| FieldError::new(e.to_string(), Value::null()))

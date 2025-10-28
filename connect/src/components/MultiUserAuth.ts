@@ -5,6 +5,7 @@ type MultiUserAuthProps = {
   password: string;
   error: string | null;
   isLoading: boolean;
+  backendUrl?: string;
   changeEmail: (email: string) => void;
   changePassword: (password: string) => void;
   onLogin: () => void;
@@ -18,6 +19,7 @@ export default function MultiUserAuth({
   password,
   error,
   isLoading,
+  backendUrl,
   changeEmail,
   changePassword,
   onLogin,
@@ -28,8 +30,18 @@ export default function MultiUserAuth({
   return html`
     <div class="items">
       <div class="text-center">
-        <h3 class="heading">Welcome to ${window.location.hostname}</h3>
+        <h3 class="heading">Multi-User Authentication</h3>
         <p class="body">Please sign in or create an account to continue</p>
+        ${backendUrl
+          ? html`
+              <p
+                class="body"
+                style="margin-top: 10px; font-size: 12px; opacity: 0.7; font-family: monospace;"
+              >
+                ${backendUrl}
+              </p>
+            `
+          : ""}
       </div>
 
       <!-- Tab Switcher -->

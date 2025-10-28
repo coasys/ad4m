@@ -109,9 +109,11 @@ fn agent_get_all_local_user_dids() -> Result<Vec<String>, AnyhowWrapperError> {
 fn agent_agent_for_user(
     #[string] user_email: String,
 ) -> Result<serde_json::Value, AnyhowWrapperError> {
-    let agent = AgentService::load_user_agent_profile(&user_email)
-        .map_err(|_| anyhow::anyhow!("User agent profile not found"))
-        .map_err(AnyhowWrapperError::from)?;
+    let agent = AgentService::with_global_instance(|agent_service| {
+        agent_service.load_user_agent_profile(&user_email)
+    })
+    .map_err(|_| anyhow::anyhow!("User agent profile not found"))
+    .map_err(AnyhowWrapperError::from)?;
 
     match agent {
         Some(agent) => serde_json::to_value(agent).map_err(AnyhowWrapperError::from),

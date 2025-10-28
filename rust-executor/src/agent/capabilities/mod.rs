@@ -135,6 +135,20 @@ pub fn capabilities_from_token(
     }
 
     if token.is_empty() {
+        // For empty tokens, check if multi-user mode is enabled
+        // If so, allow user creation and login operations
+        use crate::db::Ad4mDb;
+        let multi_user_enabled =
+            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+
+        if multi_user_enabled {
+            return Ok(vec![
+                AGENT_AUTH_CAPABILITY.clone(),
+                RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY.clone(),
+                RUNTIME_USER_MANAGEMENT_READ_CAPABILITY.clone(),
+            ]);
+        }
+
         return Ok(vec![AGENT_AUTH_CAPABILITY.clone()]);
     }
 
