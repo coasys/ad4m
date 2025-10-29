@@ -720,17 +720,31 @@ export class Ad4mConnectElement extends LitElement {
     }
   }
 
-  private async detectRemoteMultiUser(url: string): Promise<boolean> {
+  private async verifyAd4mApi(url: string): Promise<void> {
+    console.log("[Ad4m Connect] Verifying AD4M API at URL:", url);
+    const tempClient = this._client.buildTempClient(url);
+
     try {
-      console.log("[Ad4m Connect] Detecting multi-user mode for URL:", url);
-      const tempClient = this._client.buildTempClient(url);
-      console.log("[Ad4m Connect] Temp client:", tempClient);
+      await tempClient.runtime.info();
+      console.log("[Ad4m Connect] AD4M API verified");
+    } catch (error) {
+      console.error("[Ad4m Connect] Failed to verify AD4M API:", error);
+      throw new Error("Server is reachable but doesn't appear to be an AD4M executor. Make sure the URL includes '/graphql'.");
+    }
+  }
+
+  private async detectRemoteMultiUser(url: string): Promise<boolean> {
+    console.log("[Ad4m Connect] Detecting multi-user mode for URL:", url);
+    const tempClient = this._client.buildTempClient(url);
+
+    try {
       const multiUserEnabled = await tempClient.runtime.multiUserEnabled();
       console.log("[Ad4m Connect] Multi-user detection result:", multiUserEnabled);
       return multiUserEnabled;
     } catch (error) {
       console.error("[Ad4m Connect] Failed to detect multi-user mode:", error);
       console.error("[Ad4m Connect] Error details:", error.message, error.stack);
+      // If multi-user query fails, assume single-user mode
       return false;
     }
   }
@@ -766,14 +780,25 @@ export class Ad4mConnectElement extends LitElement {
 
     this._remoteDetecting = true;
     this._remoteError = null;
+    this._remoteMultiUserDetected = null; // Reset detection state
 
     try {
-      // Detect if multi-user
+      // Step 1: Check if the server is reachable at all
+      console.log("[Ad4m Connect] Checking if server is reachable:", this._remoteUrl);
+      await connectWebSocket(this._remoteUrl, 5000);
+      console.log("[Ad4m Connect] Server is reachable");
+
+      // Step 2: Verify it's actually an AD4M API
+      await this.verifyAd4mApi(this._remoteUrl);
+
+      // Step 3: Detect if multi-user is enabled
       const isMultiUser = await this.detectRemoteMultiUser(this._remoteUrl);
       this._remoteMultiUserDetected = isMultiUser;
       this._remoteDetecting = false;
     } catch (error) {
-      this._remoteError = error.message || "Failed to connect to remote executor";
+      console.error("[Ad4m Connect] Connection/detection failed:", error);
+      this._remoteError = error.message || "Cannot reach server at this URL. Please check the URL and try again.";
+      this._remoteMultiUserDetected = null; // Keep as null to not show connection options
       this._remoteDetecting = false;
     }
   }
