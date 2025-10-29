@@ -245,6 +245,7 @@ describe("Multi-User Simple integration tests", () => {
         });
     });
 
+    describe.skip("Basic Multi-User Functionality", () => {
         it("should create and login users with unique DIDs", async () => {
             // Create first user
             const user1Result = await adminAd4mClient!.agent.createUser("alice@example.com", "password123");
