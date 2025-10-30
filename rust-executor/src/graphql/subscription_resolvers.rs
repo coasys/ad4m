@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-use coasys_juniper::{FieldResult, graphql_value};
+use coasys_juniper::{graphql_value, FieldResult};
 use futures::stream;
 use futures::stream::Stream;
 use std::pin::Pin;
@@ -131,29 +131,45 @@ impl Subscription {
 
                 // Get user email and DID for filtering
                 let user_email = user_email_from_token(context.auth_token.clone());
-                log::info!("📬 PERSPECTIVE_ADDED subscription: user_email={:?}", user_email);
+                log::info!(
+                    "📬 PERSPECTIVE_ADDED subscription: user_email={:?}",
+                    user_email
+                );
 
                 // Determine the filter (user DID or None for main agent)
                 let filter = if let Some(email) = user_email {
                     // Get user DID to filter by owner
-                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email) {
-                        log::debug!("📬 PERSPECTIVE_ADDED subscription: Filtering by user_did={}", user_did);
+                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email)
+                    {
+                        log::debug!(
+                            "📬 PERSPECTIVE_ADDED subscription: Filtering by user_did={}",
+                            user_did
+                        );
                         Some(user_did)
                     } else {
-                        log::warn!("📬 PERSPECTIVE_ADDED subscription: Could not get DID for user {}", email);
+                        log::warn!(
+                            "📬 PERSPECTIVE_ADDED subscription: Could not get DID for user {}",
+                            email
+                        );
                         None
                     }
                 } else {
                     // Main agent context - get main agent DID
-                    let main_did = crate::agent::AgentService::with_global_instance(|service| service.did.clone());
+                    let main_did = crate::agent::AgentService::with_global_instance(|service| {
+                        service.did.clone()
+                    });
                     if let Some(ref did) = main_did {
-                        log::debug!("📬 PERSPECTIVE_ADDED subscription: Filtering by main agent DID={}", did);
+                        log::debug!(
+                            "📬 PERSPECTIVE_ADDED subscription: Filtering by main agent DID={}",
+                            did
+                        );
                     }
                     main_did
                 };
 
                 // Subscribe with filter to only receive perspectives owned by this user/agent
-                subscribe_and_process::<PerspectiveWithOwner>(pubsub, topic.to_string(), filter).await
+                subscribe_and_process::<PerspectiveWithOwner>(pubsub, topic.to_string(), filter)
+                    .await
             }
         }
     }
@@ -172,7 +188,10 @@ impl Subscription {
                 // Get the perspective and verify access
                 if let Some(perspective) = crate::perspectives::get_perspective(&uuid) {
                     let handle = perspective.persisted.lock().await.clone();
-                    if !crate::graphql::query_resolvers::can_access_perspective(&user_email, &handle) {
+                    if !crate::graphql::query_resolvers::can_access_perspective(
+                        &user_email,
+                        &handle,
+                    ) {
                         // User doesn't have access to this perspective
                         return Box::pin(stream::once(async move {
                             Err(coasys_juniper::FieldError::new(
@@ -196,28 +215,33 @@ impl Subscription {
 
                 // Get user DID for filtering (or main agent DID if no user context)
                 let filter = if let Some(email) = user_email {
-                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email) {
-                        log::debug!("📬 PERSPECTIVE_LINK_ADDED subscription: Filtering by user_did={}", user_did);
+                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email)
+                    {
+                        log::debug!(
+                            "📬 PERSPECTIVE_LINK_ADDED subscription: Filtering by user_did={}",
+                            user_did
+                        );
                         Some(user_did)
                     } else {
-                        log::warn!("📬 PERSPECTIVE_LINK_ADDED subscription: Could not get DID for user {}", email);
+                        log::warn!(
+                            "📬 PERSPECTIVE_LINK_ADDED subscription: Could not get DID for user {}",
+                            email
+                        );
                         None
                     }
                 } else {
                     // Main agent context - get main agent DID
-                    let main_did = crate::agent::AgentService::with_global_instance(|service| service.did.clone());
+                    let main_did = crate::agent::AgentService::with_global_instance(|service| {
+                        service.did.clone()
+                    });
                     if let Some(ref did) = main_did {
                         log::debug!("📬 PERSPECTIVE_LINK_ADDED subscription: Filtering by main agent DID={}", did);
                     }
                     main_did
                 };
 
-                subscribe_and_process::<PerspectiveLinkWithOwner>(
-                    pubsub,
-                    topic.to_string(),
-                    filter,
-                )
-                .await
+                subscribe_and_process::<PerspectiveLinkWithOwner>(pubsub, topic.to_string(), filter)
+                    .await
             }
         }
     }
@@ -236,7 +260,10 @@ impl Subscription {
                 // Get the perspective and verify access
                 if let Some(perspective) = crate::perspectives::get_perspective(&uuid) {
                     let handle = perspective.persisted.lock().await.clone();
-                    if !crate::graphql::query_resolvers::can_access_perspective(&user_email, &handle) {
+                    if !crate::graphql::query_resolvers::can_access_perspective(
+                        &user_email,
+                        &handle,
+                    ) {
                         return Box::pin(stream::once(async move {
                             Err(coasys_juniper::FieldError::new(
                                 "Access denied: You don't have permission to subscribe to this perspective",
@@ -258,8 +285,12 @@ impl Subscription {
 
                 // Get user DID for filtering (or main agent DID if no user context)
                 let filter = if let Some(email) = user_email {
-                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email) {
-                        log::debug!("📬 PERSPECTIVE_LINK_REMOVED subscription: Filtering by user_did={}", user_did);
+                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email)
+                    {
+                        log::debug!(
+                            "📬 PERSPECTIVE_LINK_REMOVED subscription: Filtering by user_did={}",
+                            user_did
+                        );
                         Some(user_did)
                     } else {
                         log::warn!("📬 PERSPECTIVE_LINK_REMOVED subscription: Could not get DID for user {}", email);
@@ -267,19 +298,17 @@ impl Subscription {
                     }
                 } else {
                     // Main agent context - get main agent DID
-                    let main_did = crate::agent::AgentService::with_global_instance(|service| service.did.clone());
+                    let main_did = crate::agent::AgentService::with_global_instance(|service| {
+                        service.did.clone()
+                    });
                     if let Some(ref did) = main_did {
                         log::debug!("📬 PERSPECTIVE_LINK_REMOVED subscription: Filtering by main agent DID={}", did);
                     }
                     main_did
                 };
 
-                subscribe_and_process::<PerspectiveLinkWithOwner>(
-                    pubsub,
-                    topic.to_string(),
-                    filter,
-                )
-                .await
+                subscribe_and_process::<PerspectiveLinkWithOwner>(pubsub, topic.to_string(), filter)
+                    .await
             }
         }
     }
@@ -298,7 +327,10 @@ impl Subscription {
                 // Get the perspective and verify access
                 if let Some(perspective) = crate::perspectives::get_perspective(&uuid) {
                     let handle = perspective.persisted.lock().await.clone();
-                    if !crate::graphql::query_resolvers::can_access_perspective(&user_email, &handle) {
+                    if !crate::graphql::query_resolvers::can_access_perspective(
+                        &user_email,
+                        &handle,
+                    ) {
                         return Box::pin(stream::once(async move {
                             Err(coasys_juniper::FieldError::new(
                                 "Access denied: You don't have permission to subscribe to this perspective",
@@ -320,8 +352,12 @@ impl Subscription {
 
                 // Get user DID for filtering (or main agent DID if no user context)
                 let filter = if let Some(email) = user_email {
-                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email) {
-                        log::debug!("📬 PERSPECTIVE_LINK_UPDATED subscription: Filtering by user_did={}", user_did);
+                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email)
+                    {
+                        log::debug!(
+                            "📬 PERSPECTIVE_LINK_UPDATED subscription: Filtering by user_did={}",
+                            user_did
+                        );
                         Some(user_did)
                     } else {
                         log::warn!("📬 PERSPECTIVE_LINK_UPDATED subscription: Could not get DID for user {}", email);
@@ -329,7 +365,9 @@ impl Subscription {
                     }
                 } else {
                     // Main agent context - get main agent DID
-                    let main_did = crate::agent::AgentService::with_global_instance(|service| service.did.clone());
+                    let main_did = crate::agent::AgentService::with_global_instance(|service| {
+                        service.did.clone()
+                    });
                     if let Some(ref did) = main_did {
                         log::debug!("📬 PERSPECTIVE_LINK_UPDATED subscription: Filtering by main agent DID={}", did);
                     }
@@ -358,29 +396,49 @@ impl Subscription {
 
                 // Get user email and DID for filtering
                 let user_email = user_email_from_token(context.auth_token.clone());
-                log::info!("📬 PERSPECTIVE_REMOVED subscription: user_email={:?}", user_email);
+                log::info!(
+                    "📬 PERSPECTIVE_REMOVED subscription: user_email={:?}",
+                    user_email
+                );
 
                 // Determine the filter (user DID or None for main agent)
                 let filter = if let Some(email) = user_email {
                     // Get user DID to filter by owner
-                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email) {
-                        log::debug!("📬 PERSPECTIVE_REMOVED subscription: Filtering by user_did={}", user_did);
+                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email)
+                    {
+                        log::debug!(
+                            "📬 PERSPECTIVE_REMOVED subscription: Filtering by user_did={}",
+                            user_did
+                        );
                         Some(user_did)
                     } else {
-                        log::warn!("📬 PERSPECTIVE_REMOVED subscription: Could not get DID for user {}", email);
+                        log::warn!(
+                            "📬 PERSPECTIVE_REMOVED subscription: Could not get DID for user {}",
+                            email
+                        );
                         None
                     }
                 } else {
                     // Main agent context - get main agent DID
-                    let main_did = crate::agent::AgentService::with_global_instance(|service| service.did.clone());
+                    let main_did = crate::agent::AgentService::with_global_instance(|service| {
+                        service.did.clone()
+                    });
                     if let Some(ref did) = main_did {
-                        log::debug!("📬 PERSPECTIVE_REMOVED subscription: Filtering by main agent DID={}", did);
+                        log::debug!(
+                            "📬 PERSPECTIVE_REMOVED subscription: Filtering by main agent DID={}",
+                            did
+                        );
                     }
                     main_did
                 };
 
                 // Subscribe with filter to only receive removal events for perspectives owned by this user/agent
-                subscribe_and_process::<PerspectiveRemovedWithOwner>(pubsub, topic.to_string(), filter).await
+                subscribe_and_process::<PerspectiveRemovedWithOwner>(
+                    pubsub,
+                    topic.to_string(),
+                    filter,
+                )
+                .await
             }
         }
     }
@@ -399,7 +457,10 @@ impl Subscription {
                 // Get the perspective and verify access
                 if let Some(perspective) = crate::perspectives::get_perspective(&uuid) {
                     let handle = perspective.persisted.lock().await.clone();
-                    if !crate::graphql::query_resolvers::can_access_perspective(&user_email, &handle) {
+                    if !crate::graphql::query_resolvers::can_access_perspective(
+                        &user_email,
+                        &handle,
+                    ) {
                         return Box::pin(stream::once(async move {
                             Err(coasys_juniper::FieldError::new(
                                 "Access denied: You don't have permission to subscribe to this perspective",
@@ -440,29 +501,45 @@ impl Subscription {
 
                 // Get user email and DID for filtering
                 let user_email = user_email_from_token(context.auth_token.clone());
-                log::info!("📬 PERSPECTIVE_UPDATED subscription: user_email={:?}", user_email);
+                log::info!(
+                    "📬 PERSPECTIVE_UPDATED subscription: user_email={:?}",
+                    user_email
+                );
 
                 // Determine the filter (user DID or None for main agent)
                 let filter = if let Some(email) = user_email {
                     // Get user DID to filter by owner
-                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email) {
-                        log::debug!("📬 PERSPECTIVE_UPDATED subscription: Filtering by user_did={}", user_did);
+                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email)
+                    {
+                        log::debug!(
+                            "📬 PERSPECTIVE_UPDATED subscription: Filtering by user_did={}",
+                            user_did
+                        );
                         Some(user_did)
                     } else {
-                        log::warn!("📬 PERSPECTIVE_UPDATED subscription: Could not get DID for user {}", email);
+                        log::warn!(
+                            "📬 PERSPECTIVE_UPDATED subscription: Could not get DID for user {}",
+                            email
+                        );
                         None
                     }
                 } else {
                     // Main agent context - get main agent DID
-                    let main_did = crate::agent::AgentService::with_global_instance(|service| service.did.clone());
+                    let main_did = crate::agent::AgentService::with_global_instance(|service| {
+                        service.did.clone()
+                    });
                     if let Some(ref did) = main_did {
-                        log::debug!("📬 PERSPECTIVE_UPDATED subscription: Filtering by main agent DID={}", did);
+                        log::debug!(
+                            "📬 PERSPECTIVE_UPDATED subscription: Filtering by main agent DID={}",
+                            did
+                        );
                     }
                     main_did
                 };
 
                 // Subscribe with filter to only receive perspectives owned by this user/agent
-                subscribe_and_process::<PerspectiveWithOwner>(pubsub, topic.to_string(), filter).await
+                subscribe_and_process::<PerspectiveWithOwner>(pubsub, topic.to_string(), filter)
+                    .await
             }
         }
     }

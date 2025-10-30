@@ -2,8 +2,8 @@ pub mod perspective_instance;
 pub mod sdna;
 pub mod utils;
 use crate::graphql::graphql_types::{
-    LinkQuery, LinkStatus, PerspectiveExpression, PerspectiveHandle, PerspectiveState,
-    PerspectiveRemovedWithOwner, PerspectiveWithOwner,
+    LinkQuery, LinkStatus, PerspectiveExpression, PerspectiveHandle, PerspectiveRemovedWithOwner,
+    PerspectiveState, PerspectiveWithOwner,
 };
 use lazy_static::lazy_static;
 use perspective_instance::PerspectiveInstance;
@@ -178,7 +178,7 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
 
     if let Some(ref instance) = removed_instance {
         instance.teardown_background_tasks().await;
-        
+
         // Publish one removal event per owner so each user gets their own notification
         let handle = instance.persisted.lock().await.clone();
         let pubsub = get_global_pubsub().await;
