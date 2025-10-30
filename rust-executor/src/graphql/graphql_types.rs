@@ -654,18 +654,23 @@ pub struct NeighbourhoodSignalFilter {
     pub recipient: Option<String>, // DID of the recipient agent for this signal
 }
 
-#[derive(Default, Debug, Deserialize, Serialize)]
-pub struct PerspectiveLinkFilter {
-    pub perspective: PerspectiveHandle,
-    pub link: DecoratedLinkExpression,
-}
-
+// Wrapper for link events with owner filtering (for multi-user isolation)
 #[derive(Default, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveLinkUpdatedFilter {
+pub struct PerspectiveLinkWithOwner {
+    pub perspective_uuid: String,
+    pub link: DecoratedLinkExpression,
+    pub owner: String, // DID of the owner
+}
+
+// Wrapper for link updated events with owner filtering (for multi-user isolation)
+#[derive(Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerspectiveLinkUpdatedWithOwner {
+    pub perspective_uuid: String,
     pub new_link: DecoratedLinkExpression,
     pub old_link: DecoratedLinkExpression,
-    pub perspective: PerspectiveHandle,
+    pub owner: String, // DID of the owner
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -869,8 +874,8 @@ impl GetFilter for NeighbourhoodSignalFilter {
     }
 }
 
-// Implement the trait for the `PerspectiveLinkFilter` struct
-impl GetValue for PerspectiveLinkFilter {
+// Implement GetValue and GetFilter for PerspectiveLinkWithOwner
+impl GetValue for PerspectiveLinkWithOwner {
     type Value = DecoratedLinkExpression;
 
     fn get_value(&self) -> Self::Value {
@@ -878,15 +883,14 @@ impl GetValue for PerspectiveLinkFilter {
     }
 }
 
-// Implement the trait for the `PerspectiveLinkFilter` struct
-impl GetFilter for PerspectiveLinkFilter {
+impl GetFilter for PerspectiveLinkWithOwner {
     fn get_filter(&self) -> Option<String> {
-        Some(self.perspective.uuid.clone())
+        Some(self.owner.clone())
     }
 }
 
-// Implement the trait for the `PerspectiveLinkUpdatedFilter` struct
-impl GetValue for PerspectiveLinkUpdatedFilter {
+// Implement GetValue and GetFilter for PerspectiveLinkUpdatedWithOwner
+impl GetValue for PerspectiveLinkUpdatedWithOwner {
     type Value = LinkUpdated;
 
     fn get_value(&self) -> Self::Value {
@@ -897,10 +901,9 @@ impl GetValue for PerspectiveLinkUpdatedFilter {
     }
 }
 
-// Implement the trait for the `PerspectiveLinkUpdatedFilter` struct
-impl GetFilter for PerspectiveLinkUpdatedFilter {
+impl GetFilter for PerspectiveLinkUpdatedWithOwner {
     fn get_filter(&self) -> Option<String> {
-        Some(self.perspective.uuid.clone())
+        Some(self.owner.clone())
     }
 }
 
@@ -981,6 +984,50 @@ impl GetValue for PerspectiveHandle {
 impl GetFilter for PerspectiveHandle {
     fn get_filter(&self) -> Option<String> {
         None
+    }
+}
+
+// Wrapper type for perspective subscriptions that includes owner for filtering
+#[derive(Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerspectiveWithOwner {
+    pub perspective: PerspectiveHandle,
+    pub owner: String,
+}
+
+impl GetValue for PerspectiveWithOwner {
+    type Value = PerspectiveHandle;
+
+    fn get_value(&self) -> Self::Value {
+        self.perspective.clone()
+    }
+}
+
+impl GetFilter for PerspectiveWithOwner {
+    fn get_filter(&self) -> Option<String> {
+        Some(self.owner.clone())
+    }
+}
+
+// Wrapper type for perspective removed subscriptions that includes owner for filtering
+#[derive(Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerspectiveRemovedWithOwner {
+    pub uuid: String,
+    pub owner: String,
+}
+
+impl GetValue for PerspectiveRemovedWithOwner {
+    type Value = String;
+
+    fn get_value(&self) -> Self::Value {
+        self.uuid.clone()
+    }
+}
+
+impl GetFilter for PerspectiveRemovedWithOwner {
+    fn get_filter(&self) -> Option<String> {
+        Some(self.owner.clone())
     }
 }
 

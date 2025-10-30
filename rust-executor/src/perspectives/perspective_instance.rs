@@ -8,7 +8,7 @@ use crate::agent::AgentContext;
 use crate::graphql::graphql_types::{
     DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery,
     LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle,
-    PerspectiveLinkFilter, PerspectiveLinkUpdatedFilter, PerspectiveQuerySubscriptionFilter,
+    PerspectiveLinkUpdatedWithOwner, PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter,
     PerspectiveState, PerspectiveStateFilter,
 };
 use crate::languages::language::Language;
@@ -815,32 +815,41 @@ impl PerspectiveInstance {
             persisted_guard.clone()
         };
 
-        for link in &decorated_diff.additions {
-            get_global_pubsub()
-                .await
-                .publish(
-                    &PERSPECTIVE_LINK_ADDED_TOPIC,
-                    &serde_json::to_string(&PerspectiveLinkFilter {
-                        perspective: handle.clone(),
-                        link: link.clone(),
-                    })
-                    .unwrap(),
-                )
-                .await;
-        }
+        // Publish link added events - one per owner for proper multi-user isolation
+        let pubsub = get_global_pubsub().await;
+        if let Some(owners) = &handle.owners {
+            for link in &decorated_diff.additions {
+                for owner in owners {
+                    pubsub
+                        .publish(
+                            &PERSPECTIVE_LINK_ADDED_TOPIC,
+                            &serde_json::to_string(&PerspectiveLinkWithOwner {
+                                perspective_uuid: handle.uuid.clone(),
+                                link: link.clone(),
+                                owner: owner.clone(),
+                            })
+                            .unwrap(),
+                        )
+                        .await;
+                }
+            }
 
-        for link in &decorated_diff.removals {
-            get_global_pubsub()
-                .await
-                .publish(
-                    &PERSPECTIVE_LINK_REMOVED_TOPIC,
-                    &serde_json::to_string(&PerspectiveLinkFilter {
-                        perspective: handle.clone(),
-                        link: link.clone(),
-                    })
-                    .unwrap(),
-                )
-                .await;
+            // Publish link removed events - one per owner for proper multi-user isolation
+            for link in &decorated_diff.removals {
+                for owner in owners {
+                    pubsub
+                        .publish(
+                            &PERSPECTIVE_LINK_REMOVED_TOPIC,
+                            &serde_json::to_string(&PerspectiveLinkWithOwner {
+                                perspective_uuid: handle.uuid.clone(),
+                                link: link.clone(),
+                                owner: owner.clone(),
+                            })
+                            .unwrap(),
+                        )
+                        .await;
+                }
+            }
         }
     }
 
@@ -1050,18 +1059,24 @@ impl PerspectiveInstance {
 
             self.spawn_prolog_facts_update(decorated_diff.clone(), None);
 
-            get_global_pubsub()
-                .await
-                .publish(
-                    &PERSPECTIVE_LINK_UPDATED_TOPIC,
-                    &serde_json::to_string(&PerspectiveLinkUpdatedFilter {
-                        perspective: handle.clone(),
-                        old_link: decorated_old_link,
-                        new_link: decorated_new_link_expression.clone(),
-                    })
-                    .unwrap(),
-                )
-                .await;
+            // Publish link updated events - one per owner for proper multi-user isolation
+            let pubsub = get_global_pubsub().await;
+            if let Some(owners) = &handle.owners {
+                for owner in owners {
+                    pubsub
+                        .publish(
+                            &PERSPECTIVE_LINK_UPDATED_TOPIC,
+                            &serde_json::to_string(&PerspectiveLinkUpdatedWithOwner {
+                                perspective_uuid: handle.uuid.clone(),
+                                old_link: decorated_old_link.clone(),
+                                new_link: decorated_new_link_expression.clone(),
+                                owner: owner.clone(),
+                            })
+                            .unwrap(),
+                        )
+                        .await;
+                }
+            }
 
             if link_status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&diff);

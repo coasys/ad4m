@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-use coasys_juniper::FieldResult;
+use coasys_juniper::{FieldResult, graphql_value};
 use futures::stream;
 use futures::stream::Stream;
 use std::pin::Pin;
@@ -128,7 +128,32 @@ impl Subscription {
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_ADDED_TOPIC;
-                subscribe_and_process::<PerspectiveHandle>(pubsub, topic.to_string(), None).await
+
+                // Get user email and DID for filtering
+                let user_email = user_email_from_token(context.auth_token.clone());
+                log::info!("📬 PERSPECTIVE_ADDED subscription: user_email={:?}", user_email);
+
+                // Determine the filter (user DID or None for main agent)
+                let filter = if let Some(email) = user_email {
+                    // Get user DID to filter by owner
+                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email) {
+                        log::debug!("📬 PERSPECTIVE_ADDED subscription: Filtering by user_did={}", user_did);
+                        Some(user_did)
+                    } else {
+                        log::warn!("📬 PERSPECTIVE_ADDED subscription: Could not get DID for user {}", email);
+                        None
+                    }
+                } else {
+                    // Main agent context - get main agent DID
+                    let main_did = crate::agent::AgentService::with_global_instance(|service| service.did.clone());
+                    if let Some(ref did) = main_did {
+                        log::debug!("📬 PERSPECTIVE_ADDED subscription: Filtering by main agent DID={}", did);
+                    }
+                    main_did
+                };
+
+                // Subscribe with filter to only receive perspectives owned by this user/agent
+                subscribe_and_process::<PerspectiveWithOwner>(pubsub, topic.to_string(), filter).await
             }
         }
     }
@@ -141,12 +166,56 @@ impl Subscription {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
             Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
+                // Check if user has access to this perspective before subscribing
+                let user_email = user_email_from_token(context.auth_token.clone());
+
+                // Get the perspective and verify access
+                if let Some(perspective) = crate::perspectives::get_perspective(&uuid) {
+                    let handle = perspective.persisted.lock().await.clone();
+                    if !crate::graphql::query_resolvers::can_access_perspective(&user_email, &handle) {
+                        // User doesn't have access to this perspective
+                        return Box::pin(stream::once(async move {
+                            Err(coasys_juniper::FieldError::new(
+                                "Access denied: You don't have permission to subscribe to this perspective",
+                                graphql_value!(null),
+                            ))
+                        }));
+                    }
+                } else {
+                    // Perspective doesn't exist
+                    return Box::pin(stream::once(async move {
+                        Err(coasys_juniper::FieldError::new(
+                            "Perspective not found",
+                            graphql_value!(null),
+                        ))
+                    }));
+                }
+
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_LINK_ADDED_TOPIC;
-                subscribe_and_process::<PerspectiveLinkFilter>(
+
+                // Get user DID for filtering (or main agent DID if no user context)
+                let filter = if let Some(email) = user_email {
+                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email) {
+                        log::debug!("📬 PERSPECTIVE_LINK_ADDED subscription: Filtering by user_did={}", user_did);
+                        Some(user_did)
+                    } else {
+                        log::warn!("📬 PERSPECTIVE_LINK_ADDED subscription: Could not get DID for user {}", email);
+                        None
+                    }
+                } else {
+                    // Main agent context - get main agent DID
+                    let main_did = crate::agent::AgentService::with_global_instance(|service| service.did.clone());
+                    if let Some(ref did) = main_did {
+                        log::debug!("📬 PERSPECTIVE_LINK_ADDED subscription: Filtering by main agent DID={}", did);
+                    }
+                    main_did
+                };
+
+                subscribe_and_process::<PerspectiveLinkWithOwner>(
                     pubsub,
                     topic.to_string(),
-                    Some(uuid),
+                    filter,
                 )
                 .await
             }
@@ -161,12 +230,54 @@ impl Subscription {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
             Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
+                // Check if user has access to this perspective before subscribing
+                let user_email = user_email_from_token(context.auth_token.clone());
+
+                // Get the perspective and verify access
+                if let Some(perspective) = crate::perspectives::get_perspective(&uuid) {
+                    let handle = perspective.persisted.lock().await.clone();
+                    if !crate::graphql::query_resolvers::can_access_perspective(&user_email, &handle) {
+                        return Box::pin(stream::once(async move {
+                            Err(coasys_juniper::FieldError::new(
+                                "Access denied: You don't have permission to subscribe to this perspective",
+                                graphql_value!(null),
+                            ))
+                        }));
+                    }
+                } else {
+                    return Box::pin(stream::once(async move {
+                        Err(coasys_juniper::FieldError::new(
+                            "Perspective not found",
+                            graphql_value!(null),
+                        ))
+                    }));
+                }
+
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_LINK_REMOVED_TOPIC;
-                subscribe_and_process::<PerspectiveLinkFilter>(
+
+                // Get user DID for filtering (or main agent DID if no user context)
+                let filter = if let Some(email) = user_email {
+                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email) {
+                        log::debug!("📬 PERSPECTIVE_LINK_REMOVED subscription: Filtering by user_did={}", user_did);
+                        Some(user_did)
+                    } else {
+                        log::warn!("📬 PERSPECTIVE_LINK_REMOVED subscription: Could not get DID for user {}", email);
+                        None
+                    }
+                } else {
+                    // Main agent context - get main agent DID
+                    let main_did = crate::agent::AgentService::with_global_instance(|service| service.did.clone());
+                    if let Some(ref did) = main_did {
+                        log::debug!("📬 PERSPECTIVE_LINK_REMOVED subscription: Filtering by main agent DID={}", did);
+                    }
+                    main_did
+                };
+
+                subscribe_and_process::<PerspectiveLinkWithOwner>(
                     pubsub,
                     topic.to_string(),
-                    Some(uuid),
+                    filter,
                 )
                 .await
             }
@@ -181,12 +292,54 @@ impl Subscription {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
             Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
+                // Check if user has access to this perspective before subscribing
+                let user_email = user_email_from_token(context.auth_token.clone());
+
+                // Get the perspective and verify access
+                if let Some(perspective) = crate::perspectives::get_perspective(&uuid) {
+                    let handle = perspective.persisted.lock().await.clone();
+                    if !crate::graphql::query_resolvers::can_access_perspective(&user_email, &handle) {
+                        return Box::pin(stream::once(async move {
+                            Err(coasys_juniper::FieldError::new(
+                                "Access denied: You don't have permission to subscribe to this perspective",
+                                graphql_value!(null),
+                            ))
+                        }));
+                    }
+                } else {
+                    return Box::pin(stream::once(async move {
+                        Err(coasys_juniper::FieldError::new(
+                            "Perspective not found",
+                            graphql_value!(null),
+                        ))
+                    }));
+                }
+
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_LINK_UPDATED_TOPIC;
-                subscribe_and_process::<PerspectiveLinkUpdatedFilter>(
+
+                // Get user DID for filtering (or main agent DID if no user context)
+                let filter = if let Some(email) = user_email {
+                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email) {
+                        log::debug!("📬 PERSPECTIVE_LINK_UPDATED subscription: Filtering by user_did={}", user_did);
+                        Some(user_did)
+                    } else {
+                        log::warn!("📬 PERSPECTIVE_LINK_UPDATED subscription: Could not get DID for user {}", email);
+                        None
+                    }
+                } else {
+                    // Main agent context - get main agent DID
+                    let main_did = crate::agent::AgentService::with_global_instance(|service| service.did.clone());
+                    if let Some(ref did) = main_did {
+                        log::debug!("📬 PERSPECTIVE_LINK_UPDATED subscription: Filtering by main agent DID={}", did);
+                    }
+                    main_did
+                };
+
+                subscribe_and_process::<PerspectiveLinkUpdatedWithOwner>(
                     pubsub,
                     topic.to_string(),
-                    Some(uuid),
+                    filter,
                 )
                 .await
             }
@@ -202,7 +355,32 @@ impl Subscription {
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_REMOVED_TOPIC;
-                subscribe_and_process::<String>(pubsub, topic.to_string(), None).await
+
+                // Get user email and DID for filtering
+                let user_email = user_email_from_token(context.auth_token.clone());
+                log::info!("📬 PERSPECTIVE_REMOVED subscription: user_email={:?}", user_email);
+
+                // Determine the filter (user DID or None for main agent)
+                let filter = if let Some(email) = user_email {
+                    // Get user DID to filter by owner
+                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email) {
+                        log::debug!("📬 PERSPECTIVE_REMOVED subscription: Filtering by user_did={}", user_did);
+                        Some(user_did)
+                    } else {
+                        log::warn!("📬 PERSPECTIVE_REMOVED subscription: Could not get DID for user {}", email);
+                        None
+                    }
+                } else {
+                    // Main agent context - get main agent DID
+                    let main_did = crate::agent::AgentService::with_global_instance(|service| service.did.clone());
+                    if let Some(ref did) = main_did {
+                        log::debug!("📬 PERSPECTIVE_REMOVED subscription: Filtering by main agent DID={}", did);
+                    }
+                    main_did
+                };
+
+                // Subscribe with filter to only receive removal events for perspectives owned by this user/agent
+                subscribe_and_process::<PerspectiveRemovedWithOwner>(pubsub, topic.to_string(), filter).await
             }
         }
     }
@@ -215,6 +393,29 @@ impl Subscription {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
             Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
+                // Check if user has access to this perspective before subscribing
+                let user_email = user_email_from_token(context.auth_token.clone());
+
+                // Get the perspective and verify access
+                if let Some(perspective) = crate::perspectives::get_perspective(&uuid) {
+                    let handle = perspective.persisted.lock().await.clone();
+                    if !crate::graphql::query_resolvers::can_access_perspective(&user_email, &handle) {
+                        return Box::pin(stream::once(async move {
+                            Err(coasys_juniper::FieldError::new(
+                                "Access denied: You don't have permission to subscribe to this perspective",
+                                graphql_value!(null),
+                            ))
+                        }));
+                    }
+                } else {
+                    return Box::pin(stream::once(async move {
+                        Err(coasys_juniper::FieldError::new(
+                            "Perspective not found",
+                            graphql_value!(null),
+                        ))
+                    }));
+                }
+
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC;
                 subscribe_and_process::<PerspectiveStateFilter>(
@@ -236,7 +437,32 @@ impl Subscription {
             Ok(_) => {
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_UPDATED_TOPIC;
-                subscribe_and_process::<PerspectiveHandle>(pubsub, topic.to_string(), None).await
+
+                // Get user email and DID for filtering
+                let user_email = user_email_from_token(context.auth_token.clone());
+                log::info!("📬 PERSPECTIVE_UPDATED subscription: user_email={:?}", user_email);
+
+                // Determine the filter (user DID or None for main agent)
+                let filter = if let Some(email) = user_email {
+                    // Get user DID to filter by owner
+                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email) {
+                        log::debug!("📬 PERSPECTIVE_UPDATED subscription: Filtering by user_did={}", user_did);
+                        Some(user_did)
+                    } else {
+                        log::warn!("📬 PERSPECTIVE_UPDATED subscription: Could not get DID for user {}", email);
+                        None
+                    }
+                } else {
+                    // Main agent context - get main agent DID
+                    let main_did = crate::agent::AgentService::with_global_instance(|service| service.did.clone());
+                    if let Some(ref did) = main_did {
+                        log::debug!("📬 PERSPECTIVE_UPDATED subscription: Filtering by main agent DID={}", did);
+                    }
+                    main_did
+                };
+
+                // Subscribe with filter to only receive perspectives owned by this user/agent
+                subscribe_and_process::<PerspectiveWithOwner>(pubsub, topic.to_string(), filter).await
             }
         }
     }

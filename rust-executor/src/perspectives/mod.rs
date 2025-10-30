@@ -3,6 +3,7 @@ pub mod sdna;
 pub mod utils;
 use crate::graphql::graphql_types::{
     LinkQuery, LinkStatus, PerspectiveExpression, PerspectiveHandle, PerspectiveState,
+    PerspectiveRemovedWithOwner, PerspectiveWithOwner,
 };
 use lazy_static::lazy_static;
 use perspective_instance::PerspectiveInstance;
@@ -72,13 +73,22 @@ pub async fn add_perspective(
         perspectives.insert(handle.uuid.clone(), RwLock::new(p));
     }
 
-    get_global_pubsub()
-        .await
-        .publish(
-            &PERSPECTIVE_ADDED_TOPIC,
-            &serde_json::to_string(&handle).unwrap(),
-        )
-        .await;
+    // Publish one event per owner so each user gets their own notification
+    let pubsub = get_global_pubsub().await;
+    if let Some(owners) = &handle.owners {
+        for owner in owners {
+            let perspective_with_owner = PerspectiveWithOwner {
+                perspective: handle.clone(),
+                owner: owner.clone(),
+            };
+            pubsub
+                .publish(
+                    &PERSPECTIVE_ADDED_TOPIC,
+                    &serde_json::to_string(&perspective_with_owner).unwrap(),
+                )
+                .await;
+        }
+    }
     Ok(())
 }
 
@@ -129,13 +139,22 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
         })?;
     }
 
-    get_global_pubsub()
-        .await
-        .publish(
-            &PERSPECTIVE_UPDATED_TOPIC,
-            &serde_json::to_string(&handle).unwrap(),
-        )
-        .await;
+    // Publish one event per owner so each user gets their own notification
+    let pubsub = get_global_pubsub().await;
+    if let Some(owners) = &handle.owners {
+        for owner in owners {
+            let perspective_with_owner = PerspectiveWithOwner {
+                perspective: handle.clone(),
+                owner: owner.clone(),
+            };
+            pubsub
+                .publish(
+                    &PERSPECTIVE_UPDATED_TOPIC,
+                    &serde_json::to_string(&perspective_with_owner).unwrap(),
+                )
+                .await;
+        }
+    }
     Ok(())
 }
 
@@ -159,12 +178,26 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
 
     if let Some(ref instance) = removed_instance {
         instance.teardown_background_tasks().await;
+        
+        // Publish one removal event per owner so each user gets their own notification
+        let handle = instance.persisted.lock().await.clone();
+        let pubsub = get_global_pubsub().await;
+        if let Some(owners) = &handle.owners {
+            for owner in owners {
+                let removed_with_owner = PerspectiveRemovedWithOwner {
+                    uuid: uuid.to_string(),
+                    owner: owner.clone(),
+                };
+                pubsub
+                    .publish(
+                        &PERSPECTIVE_REMOVED_TOPIC,
+                        &serde_json::to_string(&removed_with_owner).unwrap(),
+                    )
+                    .await;
+            }
+        }
     }
 
-    get_global_pubsub()
-        .await
-        .publish(&PERSPECTIVE_REMOVED_TOPIC, &String::from(uuid))
-        .await;
     removed_instance
 }
 
