@@ -103,7 +103,7 @@ impl HolochainService {
                     let spawned_sig = tokio::spawn(async move {
 
                         let mut streams: tokio_stream::StreamMap<String, tokio_stream::wrappers::BroadcastStream<Signal>> = tokio_stream::StreamMap::new();
-                        conductor_clone.list_apps(Some(AppStatusFilter::Running)).await.unwrap().into_iter().for_each(|app| {
+                        conductor_clone.list_apps(Some(AppStatusFilter::Enabled)).await.unwrap().into_iter().for_each(|app| {
                             let sig_broadcasters = conductor_clone.subscribe_to_app_signals(app.installed_app_id.clone());
                             streams.insert(app.installed_app_id.clone(), tokio_stream::wrappers::BroadcastStream::new(sig_broadcasters));
                         });
@@ -471,6 +471,7 @@ impl HolochainService {
             .clone()
             .add_app_interface(
                 Either::Left(local_config.app_port),
+                None,
                 AllowedOrigins::Any,
                 None,
             )
@@ -715,14 +716,14 @@ impl HolochainService {
         let path = PathBuf::from(path);
         let name = holochain_cli_bundle::get_app_name(&path).await?;
         info!("Got hApp name: {:?}", name);
-        let pack = holochain_cli_bundle::pack::<AppManifest>(&path, None, name, false).await?;
-        info!("Packed hApp at path: {:#?}", pack.0);
-        Ok(pack.0.to_str().unwrap().to_string())
+        let pack = holochain_cli_bundle::pack::<AppManifest>(&path, None, name).await?;
+        info!("Packed hApp at path: {:#?}", pack);
+        Ok(pack.to_str().unwrap().to_string())
     }
 
     pub async fn unpack_happ(path: String) -> Result<String, AnyError> {
         let path = PathBuf::from(path);
-        let pack = holochain_cli_bundle::unpack::<AppManifest>("happ", &path, None, true).await?;
+        let pack = holochain_cli_bundle::expand_bundle::<AppManifest>(&path, None, true).await?;
         info!("UnPacked hApp at path: {:#?}", pack);
         Ok(pack.to_str().unwrap().to_string())
     }
@@ -732,15 +733,15 @@ impl HolochainService {
         let name = holochain_cli_bundle::get_dna_name(&path).await?;
         info!("Got dna name: {:?}", name);
         let pack =
-            holochain_cli_bundle::pack::<ValidatedDnaManifest>(&path, None, name, false).await?;
-        info!("Packed dna at path: {:#?}", pack.0);
-        Ok(pack.0.to_str().unwrap().to_string())
+            holochain_cli_bundle::pack::<ValidatedDnaManifest>(&path, None, name).await?;
+        info!("Packed dna at path: {:#?}", pack);
+        Ok(pack.to_str().unwrap().to_string())
     }
 
     pub async fn unpack_dna(path: String) -> Result<String, AnyError> {
         let path = PathBuf::from(path);
         let pack =
-            holochain_cli_bundle::unpack::<ValidatedDnaManifest>("dna", &path, None, true).await?;
+            holochain_cli_bundle::expand_bundle::<ValidatedDnaManifest>(&path, None, true).await?;
         info!("UnPacked dna at path: {:#?}", pack);
         Ok(pack.to_str().unwrap().to_string())
     }
