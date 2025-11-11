@@ -101,7 +101,7 @@ holochain_types = { version = "0.6.0-rc.0", git = "https://github.com/coasys/hol
 lair_keystore_api = { version = "0.6.3", git = "https://github.com/coasys/lair.git", branch = "0.6.3-coasys" }
 sodoken = "=0.1.0"
 
-scryer-prolog = { version = "0.9.4", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m-hc-0.5" }
+scryer-prolog = { version = "0.10", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
 ad4m-client = { path = "../rust-client", version="0.10.1-dev" }
