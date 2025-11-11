@@ -32,7 +32,6 @@ use log::error;
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
-static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
 static TRANSCRIPTION_TIMEOUT_SECS: u64 = 120; // 2 minutes
 static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 10;
 
@@ -538,7 +537,7 @@ impl AIService {
 
         // Build the local Llama model
         let llama = llama
-            .with_device(Self::new_candle_device())
+            //.with_device(Self::new_candle_device())
             .build_with_loading_handler({
                 let model_id = model_id.clone();
                 move |progress| {
@@ -979,7 +978,7 @@ impl AIService {
                         publish_model_status(model_id.clone(), 0.0, "Loading", false, false).await;
 
                         let bert = Bert::builder()
-                            .with_device(Self::new_candle_device())
+                            //.with_device(Self::new_candle_device())
                             .build_with_loading_handler({
                                 let model_id = model_id.clone();
                                 move |progress| {
@@ -1007,7 +1006,7 @@ impl AIService {
                         Ok(Some(request)) => {
                             let result: Result<Vec<f32>> = rt
                                 .block_on(async { model.embed(request.prompt).await })
-                                .map(|tensor| tensor.to_vec())
+                                .map(|tensor| tensor.vector().to_vec())
                                 .map_err(|bert_error| anyhow!(bert_error));
                             let _ = request.result_sender.send(result);
                         }
@@ -1047,24 +1046,18 @@ impl AIService {
 
     fn whisper_string_to_model(whisper_string: String) -> Result<WhisperSource> {
         match whisper_string.as_str() {
-            "whisper_tiny" => Ok(WhisperSource::Tiny),
-            "whisper_tiny_quantized" => Ok(WhisperSource::QuantizedTiny),
-            "whisper_tiny_en" => Ok(WhisperSource::TinyEn),
-            "whisper_tiny_en_quantized" => Ok(WhisperSource::QuantizedTinyEn),
-            "whisper_base" => Ok(WhisperSource::Base),
-            "whisper_base_en" => Ok(WhisperSource::BaseEn),
-            "whisper_small" => Ok(WhisperSource::Small),
-            "whisper_small_en" => Ok(WhisperSource::SmallEn),
-            "whisper_medium" => Ok(WhisperSource::Medium),
-            "whisper_medium_en" => Ok(WhisperSource::MediumEn),
-            "whisper_medium_en_quantized_distil" => Ok(WhisperSource::QuantizedDistilMediumEn),
-            "whisper_large" => Ok(WhisperSource::Large),
-            "whisper_large_v2" => Ok(WhisperSource::LargeV2),
-            "whisper_distil_medium_en" => Ok(WhisperSource::DistilMediumEn),
-            "whisper_distil_large_v2" => Ok(WhisperSource::DistilLargeV2),
-            "whisper_distil_large_v3" => Ok(WhisperSource::DistilLargeV3),
-            "whisper_distil_large_v3_quantized" => Ok(WhisperSource::QuantizedDistilLargeV3),
-            "whisper_large_v3_turbo_quantized" => Ok(WhisperSource::QuantizedLargeV3Turbo),
+            "whisper_tiny" => Ok(WhisperSource::tiny()),
+            "whisper_tiny_en" => Ok(WhisperSource::tiny_en()),
+            "whisper_base" => Ok(WhisperSource::base()),
+            "whisper_base_en" => Ok(WhisperSource::base_en()),
+
+            "whisper_medium" => Ok(WhisperSource::medium()),
+            "whisper_medium_en" => Ok(WhisperSource::medium_en()),
+            "whisper_large_v3" => Ok(WhisperSource::large_v3()),
+            "whisper_distil_medium_en" => Ok(WhisperSource::distil_medium_en()),
+            "whisper_distil_large_v3" => Ok(WhisperSource::distil_large_v3()),
+            "whisper_distil_large_v3_5" => Ok(WhisperSource::distil_large_v3_5()),
+            "whisper_large_v3_turbo" => Ok(WhisperSource::large_v3_turbo()),
             _ => Err(anyhow!("Unknown whisper model: {}", whisper_string)),
         }
     }
@@ -1100,7 +1093,7 @@ impl AIService {
         }
 
         // Default to tiny if nothing found
-        Ok(WhisperSource::Tiny)
+        Ok(WhisperSource::tiny())
     }
 
     pub async fn open_transcription_stream(
@@ -1122,7 +1115,7 @@ impl AIService {
             rt.block_on(async {
                 let maybe_model = WhisperBuilder::default()
                     .with_source(model_size)
-                    .with_device(Self::new_candle_device())
+                    //.with_device(Self::new_candle_device())
                     .build()
                     .await;
 
@@ -1249,11 +1242,11 @@ impl AIService {
 
         let model_size = Self::get_whisper_model_size(model_id.clone())
             .ok()
-            .unwrap_or(WHISPER_MODEL);
+            .unwrap_or(WhisperSource::tiny());
 
         let _ = WhisperBuilder::default()
             .with_source(model_size)
-            .with_device(Self::new_candle_device())
+            //.with_device(Self::new_candle_device())
             .build_with_loading_handler({
                 let name = model_id.clone();
                 move |progress| {

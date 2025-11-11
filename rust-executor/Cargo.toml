@@ -70,7 +70,7 @@ fs_extra = "1.3.0"
 os_info = "3.7.0"
 semver = "1.0.17"
 did-key = "0.2.1"
-zip = "0.6.4"
+zip = "6"
 multibase = "0.9.1"
 multihash = { version = "0.18.0", features = ["sha2"] }
 cid = "0.10.1"
@@ -120,7 +120,7 @@ rustls = "0.23"
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
 
-kalosm = { version = "0.3.2", git = "https://github.com/coasys/floneum.git", branch = "coasys-2", features = ["language", "sound"] }
+kalosm = { version = "0.4", git = "https://github.com/coasys/floneum.git", branch = "0.4-coasys", features = ["language", "sound"] }
 candle-core = "0.8.2"
 deflate = "1.0.0"
 futures-core = "0.3.30"
