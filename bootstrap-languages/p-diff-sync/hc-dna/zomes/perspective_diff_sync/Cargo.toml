@@ -22,7 +22,7 @@ itertools = "0.10.3"
 perspective_diff_sync_integrity = { path = "../perspective_diff_sync_integrity" }
 sha2 = "0.10.5"
 #getrandom = { version = "0.2", features = ["js"] }
-getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom = { version = "0.3" }
 js-sys = "0.3.82"
 
 hdi = { version = "0.7.0-rc.0", git = "https://github.com/coasys/holochain.git", branch = "0.6.0-rc.0-coasys" }
@@ -33,4 +33,4 @@ holochain_serialized_bytes = "=0.0.56"
 test = []
 
 [target.wasm32-unknown-unknown]
-rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+rustflags = ['--cfg', 'getrandom_backend="custom"']

@@ -13,7 +13,7 @@ derive_more = "0"
 serde = "1"
 chrono = { version = "0.4.38", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
 thiserror = "1"
-getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom = { version = "0.3" }
 
 hdk = { version = "0.6.0-rc.0", git = "https://github.com/coasys/holochain.git", branch = "0.6.0-rc.0-coasys" }
 holo_hash =  { version = "0.6.0-rc.0", git = "https://github.com/coasys/holochain.git", branch = "0.6.0-rc.0-coasys" }
@@ -21,4 +21,4 @@ holochain_serialized_bytes = "=0.0.56"
 agent_store_integrity = { path = "../agent_store_integrity" }
 
 [target.wasm32-unknown-unknown]
-rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+rustflags = ['--cfg', 'getrandom_backend="custom"']
