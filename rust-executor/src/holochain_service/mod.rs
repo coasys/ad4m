@@ -732,8 +732,7 @@ impl HolochainService {
         let path = PathBuf::from(path);
         let name = holochain_cli_bundle::get_dna_name(&path).await?;
         info!("Got dna name: {:?}", name);
-        let pack =
-            holochain_cli_bundle::pack::<ValidatedDnaManifest>(&path, None, name).await?;
+        let pack = holochain_cli_bundle::pack::<ValidatedDnaManifest>(&path, None, name).await?;
         info!("Packed dna at path: {:#?}", pack);
         Ok(pack.to_str().unwrap().to_string())
     }
