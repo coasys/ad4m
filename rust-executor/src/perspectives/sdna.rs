@@ -409,18 +409,22 @@ hex_digit_value('f', 15).
 
     let json_parser = r#"
     % Main predicate to parse JSON and extract a property
+    % Use list-based dict instead of assoc to support nested JSON objects
     json_property(JsonString, Property, Value) :-
         phrase(json_dict(Dict), JsonString),
-        get_assoc(Property, Dict, Value).
-    
+        member(Property-Value, Dict).
+
     % DCG rules to parse JSON
     json_dict(Dict) -->
         ws, "{", ws, key_value_pairs(Pairs), ws, "}", ws,
-        { list_to_assoc(Pairs, Dict) }.
-    
+        { Dict = Pairs }.
+
     key_value_pairs([Key-Value|Pairs]) -->
-        ws, json_string(Key), ws, ":", ws, json_value(Value), ws, ("," -> key_value_pairs(Pairs) ; {Pairs=[]}).
-    
+        ws, json_string(Key), ws, ":", ws, json_value(Value), ws, ",", !,
+        key_value_pairs(Pairs).
+    key_value_pairs([Key-Value]) -->
+        ws, json_string(Key), ws, ":", ws, json_value(Value), ws.
+
     json_value(Value) --> json_dict(Value).
     json_value(Value) --> json_array(Value).
     json_value(Value) --> json_string(Value).
@@ -428,10 +432,18 @@ hex_digit_value('f', 15).
     json_value(true) --> "true".
     json_value(false) --> "false".
     json_value(null) --> "null".
-    
+
     json_array([Value|Values]) -->
-        "[", ws, json_value(Value), ws, ("," -> json_value_list(Values) ; {Values=[]}), ws, "]".
-    json_value_list([Value|Values]) --> json_value(Value), ws, ("," -> json_value_list(Values) ; {Values=[]}).
+        "[", ws, json_value(Value), ws, ",", !, ws,
+        json_value_list(Values), ws, "]".
+    json_array([Value]) -->
+        "[", ws, json_value(Value), ws, "]".
+
+    json_value_list([Value|Values]) -->
+        json_value(Value), ws, ",", !, ws,
+        json_value_list(Values).
+    json_value_list([Value]) -->
+        json_value(Value), ws.
     
     json_string(String) -->
     "\"", json_string_chars(String), "\"".
@@ -480,35 +492,39 @@ hex_digit_value('f', 15).
     % If it is false, then the property value is a literal and we did resolve it here
     % If it is true, then the property value is a URI and it still needs to be resolved
     resolve_property(SubjectClass, Base, PropertyName, PropertyValue, Resolve) :-
-        % Get the property name and resolve boolean
         property(SubjectClass, PropertyName),
         property_getter(SubjectClass, Base, PropertyName, PropertyUri),
-        ( property_resolve(SubjectClass, PropertyName)
-            % If the property is resolvable, try to resolve it
-            -> (
-            append("literal://", _, PropertyUri)
-            % If the property is a literal, we can resolve it here
-            -> (
-                % so tell JS to not resolve it
-                Resolve = false,
-                literal_from_url(PropertyUri, LiteralValue, Scheme),
-                (
-                json_property(LiteralValue, "data", Data)
-                % If it is a JSON literal, and it has a 'data' field, use that
-                -> PropertyValue = Data
-                % Otherwise, just use the literal value
-                ; PropertyValue = LiteralValue 
-                )
-            )
-            ;
-            % else (it should be resolved but is not a literal),
-            % pass through URI to JS and tell JS to resolve it
-            (Resolve = true, PropertyValue = PropertyUri)
-            )
-            ;
-            % else (no property resolve), just return the URI as the value
-            (Resolve = false, PropertyValue = PropertyUri)
-        )."#;
+        resolve_property_value(SubjectClass, PropertyName, PropertyUri, PropertyValue, Resolve).
+
+    % Helper to convert PropertyUri to character list whether it's an atom or already a list
+    resolve_property_ensure_chars(Input, Chars) :-
+        atom(Input),
+        !,
+        atom_chars(Input, Chars).
+    resolve_property_ensure_chars(Input, Input).
+
+    % Case 1: Property is resolvable AND it's a literal URL - resolve it here
+    resolve_property_value(SubjectClass, PropertyName, PropertyUri, PropertyValue, false) :-
+        property_resolve(SubjectClass, PropertyName),
+        resolve_property_ensure_chars(PropertyUri, PropertyUriChars),
+        append("literal://", _, PropertyUriChars),
+        !,
+        literal_from_url(PropertyUriChars, LiteralValue, _Scheme),
+        resolve_property_extract_json_or_value(LiteralValue, PropertyValue).
+
+    % Case 2: Property is resolvable but NOT a literal URL - pass through for JS resolution
+    resolve_property_value(SubjectClass, PropertyName, PropertyUri, PropertyUri, true) :-
+        property_resolve(SubjectClass, PropertyName),
+        !.
+
+    % Case 3: Property is NOT resolvable - return the URI as-is
+    resolve_property_value(_SubjectClass, _PropertyName, PropertyUri, PropertyUri, false).
+
+    % Helper to extract JSON data field or return value as-is
+    resolve_property_extract_json_or_value(Value, Data) :-
+        json_property(Value, "data", Data),
+        !.
+    resolve_property_extract_json_or_value(Value, Value)."#;
 
     lines.extend(resolve_property.split('\n').map(|s| s.to_string()));
 
