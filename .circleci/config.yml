@@ -84,6 +84,12 @@ jobs:
       - checkout
       - attach_workspace:
           at: .
+      - run:
+          name: Hot-upgrade Rust to 1.88
+          command: ~/.cargo/bin/rustup default 1.88 && ~/.cargo/bin/rustup target add wasm32-unknown-unknown
+      - run:
+          name: Hot-upgrade Holochain CLI to 0.6.0-rc.1
+          command: ~/.cargo/bin/cargo install holochain_cli@0.6.0-rc.1
       - restore_cache:
           keys:
             - agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
