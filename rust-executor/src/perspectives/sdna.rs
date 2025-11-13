@@ -110,6 +110,90 @@ pub fn is_sdna_link(link: &Link) -> bool {
         .contains(&link.predicate.as_deref().unwrap_or(""))
 }
 
+/// Returns the JSON parser Prolog code as a string
+/// This is used both in production (get_static_infrastructure_facts) and in tests
+pub fn get_json_parser_code() -> &'static str {
+    r#"
+    % Main predicate to parse JSON and extract a property
+    % Use list-based dict instead of assoc to support nested JSON objects
+    json_property(JsonString, Property, Value) :-
+        phrase(json_dict(Dict), JsonString),
+        member(Property-Value, Dict).
+
+    % DCG rules to parse JSON
+    % Empty dict clause - must come before non-empty variant
+    json_dict([]) -->
+        ws, "{", ws, "}", ws.
+    json_dict(Dict) -->
+        ws, "{", ws, key_value_pairs(Pairs), ws, "}", ws,
+        { Dict = Pairs }.
+
+    key_value_pairs([Key-Value|Pairs]) -->
+        ws, json_string(Key), ws, ":", ws, json_value(Value), ws, ",", !,
+        key_value_pairs(Pairs).
+    key_value_pairs([Key-Value]) -->
+        ws, json_string(Key), ws, ":", ws, json_value(Value), ws.
+
+    json_value(Value) --> json_dict(Value).
+    json_value(Value) --> json_array(Value).
+    json_value(Value) --> json_string(Value).
+    json_value(Value) --> json_number(Value).
+    json_value(true) --> "true".
+    json_value(false) --> "false".
+    json_value(null) --> "null".
+
+    % Empty array clause - must come before non-empty variant
+    json_array([]) -->
+        "[", ws, "]".
+    json_array([Value|Values]) -->
+        "[", ws, json_value(Value), ws, ",", !, ws,
+        json_value_list(Values), ws, "]".
+    json_array([Value]) -->
+        "[", ws, json_value(Value), ws, "]".
+
+    json_value_list([Value|Values]) -->
+        json_value(Value), ws, ",", !, ws,
+        json_value_list(Values).
+    json_value_list([Value]) -->
+        json_value(Value), ws.
+    
+    json_string(String) -->
+    "\"", json_string_chars(String), "\"".
+
+    json_string_chars([]) --> [].
+    json_string_chars([C|Cs]) --> json_string_char(C), json_string_chars(Cs).
+
+    json_string_char(C) --> [C], { dif(C, '"'), dif(C, '\\') }.
+    json_string_char('"') --> ['\\', '"'].
+    json_string_char('\\') --> ['\\', '\\'].
+    json_string_char('/') --> ['\\', '/'].
+    json_string_char('\b') --> ['\\', 'b'].
+    json_string_char('\f') --> ['\\', 'f'].
+    json_string_char('\n') --> ['\\', 'n'].
+    json_string_char('\r') --> ['\\', 'r'].
+    json_string_char('\t') --> ['\\', 't'].
+    
+    json_number(Number) -->
+        number_sequence(Chars),
+        { number_chars(Number, Chars) }.
+    
+    string_chars([]) --> [].
+    string_chars([C|Cs]) --> [C], { dif(C, '"') }, string_chars(Cs).
+    
+    % Simplified number_sequence to handle both integer and fractional parts
+    number_sequence([D|Ds]) --> digit(D), number_sequence_rest(Ds).
+    number_sequence_rest([D|Ds]) --> digit(D), number_sequence_rest(Ds).
+    number_sequence_rest([]) --> [].
+    
+    digit(D) --> [D], { member(D, "0123456789.") }.
+    
+    ws --> ws_char, ws.
+    ws --> [].
+    
+    ws_char --> [C], { C = ' ' ; C = '\t' ; C = '\n' ; C = '\r' }.
+    "#
+}
+
 /// Get static infrastructure facts that are the same for all engines
 /// This includes setup directives, library imports, and built-in predicates
 pub fn get_static_infrastructure_facts() -> Vec<String> {
@@ -407,81 +491,7 @@ hex_digit_value('f', 15).
             .map(|s| s.to_string()),
     );
 
-    let json_parser = r#"
-    % Main predicate to parse JSON and extract a property
-    % Use list-based dict instead of assoc to support nested JSON objects
-    json_property(JsonString, Property, Value) :-
-        phrase(json_dict(Dict), JsonString),
-        member(Property-Value, Dict).
-
-    % DCG rules to parse JSON
-    json_dict(Dict) -->
-        ws, "{", ws, key_value_pairs(Pairs), ws, "}", ws,
-        { Dict = Pairs }.
-
-    key_value_pairs([Key-Value|Pairs]) -->
-        ws, json_string(Key), ws, ":", ws, json_value(Value), ws, ",", !,
-        key_value_pairs(Pairs).
-    key_value_pairs([Key-Value]) -->
-        ws, json_string(Key), ws, ":", ws, json_value(Value), ws.
-
-    json_value(Value) --> json_dict(Value).
-    json_value(Value) --> json_array(Value).
-    json_value(Value) --> json_string(Value).
-    json_value(Value) --> json_number(Value).
-    json_value(true) --> "true".
-    json_value(false) --> "false".
-    json_value(null) --> "null".
-
-    json_array([Value|Values]) -->
-        "[", ws, json_value(Value), ws, ",", !, ws,
-        json_value_list(Values), ws, "]".
-    json_array([Value]) -->
-        "[", ws, json_value(Value), ws, "]".
-
-    json_value_list([Value|Values]) -->
-        json_value(Value), ws, ",", !, ws,
-        json_value_list(Values).
-    json_value_list([Value]) -->
-        json_value(Value), ws.
-    
-    json_string(String) -->
-    "\"", json_string_chars(String), "\"".
-
-    json_string_chars([]) --> [].
-    json_string_chars([C|Cs]) --> json_string_char(C), json_string_chars(Cs).
-
-    json_string_char(C) --> [C], { dif(C, '"'), dif(C, '\\') }.
-    json_string_char('"') --> ['\\', '"'].
-    json_string_char('\\') --> ['\\', '\\'].
-    json_string_char('/') --> ['\\', '/'].
-    json_string_char('\b') --> ['\\', 'b'].
-    json_string_char('\f') --> ['\\', 'f'].
-    json_string_char('\n') --> ['\\', 'n'].
-    json_string_char('\r') --> ['\\', 'r'].
-    json_string_char('\t') --> ['\\', 't'].
-    
-    json_number(Number) -->
-        number_sequence(Chars),
-        { number_chars(Number, Chars) }.
-    
-    string_chars([]) --> [].
-    string_chars([C|Cs]) --> [C], { dif(C, '"') }, string_chars(Cs).
-    
-    % Simplified number_sequence to handle both integer and fractional parts
-    number_sequence([D|Ds]) --> digit(D), number_sequence_rest(Ds).
-    number_sequence_rest([D|Ds]) --> digit(D), number_sequence_rest(Ds).
-    number_sequence_rest([]) --> [].
-    
-    digit(D) --> [D], { member(D, "0123456789.") }.
-    
-    ws --> ws_char, ws.
-    ws --> [].
-    
-    ws_char --> [C], { C = ' ' ; C = '\t' ; C = '\n' ; C = '\r' }.
-    "#;
-
-    lines.extend(json_parser.split('\n').map(|s| s.to_string()));
+    lines.extend(get_json_parser_code().split('\n').map(|s| s.to_string()));
 
     let resolve_property = r#"
     % Retrieve a property from a subject class
@@ -656,4 +666,189 @@ pub async fn init_engine_facts(
     lines.extend(get_sdna_facts(&all_links, neighbourhood_author)?);
 
     Ok(lines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prolog_service::engine::PrologEngine;
+    use crate::prolog_service::types::QueryResolution;
+
+    // Helper function for tests to get JSON parser code with required libraries
+    // Returns a Vec<String> just like production code does
+    fn get_json_parser_for_test() -> Vec<String> {
+        let mut lines = vec![];
+        lines.push(":- use_module(library(lists)).".to_string());
+        lines.push(":- use_module(library(dcgs)).".to_string());
+        lines.push(":- use_module(library(dif)).".to_string());
+        lines.extend(get_json_parser_code().split('\n').map(|s| s.to_string()));
+        lines
+    }
+
+    #[tokio::test]
+    async fn test_simple_dcg() {
+        let mut engine = PrologEngine::new();
+        assert!(engine.spawn().await.is_ok());
+
+        // Load a simple DCG rule to test if DCGs work at all
+        let simple_dcg = r#"
+    :- use_module(library(dcgs)).
+    
+    simple --> "hello".
+        "#.to_string();
+        
+        let load_result = engine.load_module_string("user", &[simple_dcg]).await;
+        assert!(load_result.is_ok(), "Failed to load simple DCG: {:?}", load_result);
+
+        // Test the simple DCG
+        let query = r#"phrase(simple, "hello")."#.to_string();
+        println!("Testing simple DCG: {}", query);
+        let result = engine.run_query(query).await;
+        println!("Simple DCG result: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_simple_empty_dict_dcg() {
+        let mut engine = PrologEngine::new();
+        assert!(engine.spawn().await.is_ok());
+
+        // Load the production JSON parser code
+        let json_parser = get_json_parser_for_test();
+        let load_result = engine.load_module_string("user", &json_parser).await;
+        if let Err(e) = &load_result {
+            println!("Load error: {:?}", e);
+        }
+        assert!(load_result.is_ok(), "Failed to load JSON parser: {:?}", load_result);
+
+        // Test the empty dict DCG
+        let query = r#"phrase(json_dict(Dict), "{}")."#.to_string();
+        println!("Testing empty dict DCG: {}", query);
+        let result = engine.run_query(query).await;
+        println!("Empty dict DCG result: {:?}", result);
+        match result {
+            Ok(Ok(QueryResolution::True)) | Ok(Ok(QueryResolution::Matches(_))) => {
+                println!("✅ Empty dict DCG succeeded!");
+            }
+            _ => {
+                panic!("Empty dict DCG failed: {:?}", result);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_empty_json_object_parsing() {
+        let mut engine = PrologEngine::new();
+        assert!(engine.spawn().await.is_ok());
+
+        // Load the production JSON parser code with required libraries
+        let json_parser = get_json_parser_for_test();
+        let load_result = engine.load_module_string("user", &json_parser).await;
+        assert!(load_result.is_ok(), "Failed to load JSON parser: {:?}", load_result);
+
+        // Test empty JSON object "{}"
+        let query = r#"phrase(json_dict(Dict), "{}")."#.to_string();
+        println!("Testing empty JSON object: {}", query);
+        let result = engine.run_query(query).await;
+        println!("Empty object result: {:?}", result);
+        match result {
+            Ok(Ok(QueryResolution::True)) | Ok(Ok(QueryResolution::Matches(_))) => {
+                println!("✅ Empty JSON object parsing succeeded");
+            }
+            _ => {
+                panic!("Empty JSON object parsing failed: {:?}", result);
+            }
+        }
+
+        // Test empty JSON object with whitespace "{ }"
+        let query = r#"phrase(json_dict(Dict), "{ }")."#.to_string();
+        println!("Testing empty JSON object with whitespace: {}", query);
+        let result = engine.run_query(query).await;
+        println!("Empty object with whitespace result: {:?}", result);
+        match result {
+            Ok(Ok(QueryResolution::True)) | Ok(Ok(QueryResolution::Matches(_))) => {
+                println!("✅ Empty JSON object with whitespace parsing succeeded");
+            }
+            _ => {
+                panic!("Empty JSON object with whitespace parsing failed: {:?}", result);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_empty_json_array_parsing() {
+        let mut engine = PrologEngine::new();
+        assert!(engine.spawn().await.is_ok());
+
+        // Load the production JSON parser code with required libraries
+        let json_parser = get_json_parser_for_test();
+        let load_result = engine.load_module_string("user", &json_parser).await;
+        assert!(load_result.is_ok(), "Failed to load JSON parser: {:?}", load_result);
+
+        // Test empty JSON array "[]"
+        let query = r#"phrase(json_array(Array), "[]")."#.to_string();
+        println!("Testing empty JSON array: {}", query);
+        let result = engine.run_query(query).await;
+        println!("Empty array result: {:?}", result);
+        match result {
+            Ok(Ok(QueryResolution::True)) | Ok(Ok(QueryResolution::Matches(_))) => {
+                println!("✅ Empty JSON array parsing succeeded");
+            }
+            _ => {
+                panic!("Empty JSON array parsing failed: {:?}", result);
+            }
+        }
+
+        // Test empty JSON array with whitespace "[ ]"
+        let query = r#"phrase(json_array(Array), "[ ]")."#.to_string();
+        println!("Testing empty JSON array with whitespace: {}", query);
+        let result = engine.run_query(query).await;
+        println!("Empty array with whitespace result: {:?}", result);
+        match result {
+            Ok(Ok(QueryResolution::True)) | Ok(Ok(QueryResolution::Matches(_))) => {
+                println!("✅ Empty JSON array with whitespace parsing succeeded");
+            }
+            _ => {
+                panic!("Empty JSON array with whitespace parsing failed: {:?}", result);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_non_empty_json_parsing() {
+        let mut engine = PrologEngine::new();
+        assert!(engine.spawn().await.is_ok());
+
+        // Load the production JSON parser code with required libraries
+        let json_parser = get_json_parser_for_test();
+        let load_result = engine.load_module_string("user", &json_parser).await;
+        assert!(load_result.is_ok(), "Failed to load JSON parser: {:?}", load_result);
+
+        // Test non-empty JSON object
+        let query = r#"phrase(json_dict(Dict), "{\"key\": \"value\"}")."#.to_string();
+        println!("Testing non-empty JSON object: {}", query);
+        let result = engine.run_query(query).await;
+        println!("Non-empty object result: {:?}", result);
+        match result {
+            Ok(Ok(QueryResolution::True)) | Ok(Ok(QueryResolution::Matches(_))) => {
+                println!("✅ Non-empty JSON object parsing succeeded");
+            }
+            _ => {
+                panic!("Non-empty JSON object parsing failed: {:?}", result);
+            }
+        }
+
+        // Test non-empty JSON array
+        let query = r#"phrase(json_array(Array), "[1, 2, 3]")."#.to_string();
+        println!("Testing non-empty JSON array: {}", query);
+        let result = engine.run_query(query).await;
+        println!("Non-empty array result: {:?}", result);
+        match result {
+            Ok(Ok(QueryResolution::True)) | Ok(Ok(QueryResolution::Matches(_))) => {
+                println!("✅ Non-empty JSON array parsing succeeded");
+            }
+            _ => {
+                panic!("Non-empty JSON array parsing failed: {:?}", result);
+            }
+        }
+    }
 }
