@@ -6,11 +6,14 @@ pub(crate) fn err(reason: &str) -> WasmError {
 }
 
 pub(crate) fn get_latest_link(base: EntryHash, tag: Option<LinkTag>) -> ExternResult<Option<Link>> {
-    let query = LinkQuery::try_new(
+    let mut query = LinkQuery::try_new(
         base,
         LinkTypes::ProfileLink,
-    )?
-    .tag_prefix(tag.unwrap());
+    )?;
+    
+    if let Some(t) = tag {
+        query = query.tag_prefix(t);
+    }
 
     let profile_info = get_links(query, GetStrategy::Network)?;
 
