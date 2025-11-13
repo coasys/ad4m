@@ -94,10 +94,6 @@ jobs:
           keys:
             - p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
             - p-diff-sync-rust-cache-
-      - restore_cache:
-          keys:
-            - p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
-            - p-diff-sync-socket-signaling-rust-cache-
       - run:
           name: Install specific pnpm version
           command: npm install -g pnpm@9.15.0
@@ -126,10 +122,6 @@ jobs:
           key: p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
           paths:
             - ./bootstrap-languages/p-diff-sync/hc-dna/target
-      - save_cache:
-          key: p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
-          paths:
-            - ./bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/target\
       - run:
           name: Install ffmpeg for transcription test
           command: sudo apt-get update && sudo apt-get install ffmpeg --fix-missing
