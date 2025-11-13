@@ -16,7 +16,7 @@ jobs:
       - run:
           name: Hot-upgrade Rust to 1.88
           command: 
-            ~/.cargo/bin/rustup default set 1.88
+            ~/.cargo/bin/rustup default 1.88
             ~/.cargo/bin/rustup target add wasm32-unknown-unknown
       - run:
           name: Hot-upgrade Holochain CLI to 0.6.0-rc.1
