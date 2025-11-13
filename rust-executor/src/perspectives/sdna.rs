@@ -532,6 +532,7 @@ hex_digit_value('f', 15).
 
     % Helper to extract JSON data field or return value as-is
     resolve_property_extract_json_or_value(Value, Data) :-
+        is_list(Value),
         json_property(Value, "data", Data),
         !.
     resolve_property_extract_json_or_value(Value, Value)."#;
