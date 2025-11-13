@@ -1572,7 +1572,7 @@ impl PerspectiveInstance {
                 let rebuild_start = std::time::Instant::now();
                 match self_clone.update_prolog_engine_facts().await {
                     Ok(()) => {
-                        log::info!(
+                        log::trace!(
                             "🔧 PROLOG UPDATE: Full rebuild completed successfully in {:?}",
                             rebuild_start.elapsed()
                         );
