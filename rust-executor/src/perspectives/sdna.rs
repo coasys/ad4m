@@ -696,10 +696,15 @@ mod tests {
     :- use_module(library(dcgs)).
     
     simple --> "hello".
-        "#.to_string();
-        
+        "#
+        .to_string();
+
         let load_result = engine.load_module_string("user", &[simple_dcg]).await;
-        assert!(load_result.is_ok(), "Failed to load simple DCG: {:?}", load_result);
+        assert!(
+            load_result.is_ok(),
+            "Failed to load simple DCG: {:?}",
+            load_result
+        );
 
         // Test the simple DCG
         let query = r#"phrase(simple, "hello")."#.to_string();
@@ -719,7 +724,11 @@ mod tests {
         if let Err(e) = &load_result {
             println!("Load error: {:?}", e);
         }
-        assert!(load_result.is_ok(), "Failed to load JSON parser: {:?}", load_result);
+        assert!(
+            load_result.is_ok(),
+            "Failed to load JSON parser: {:?}",
+            load_result
+        );
 
         // Test the empty dict DCG
         let query = r#"phrase(json_dict(Dict), "{}")."#.to_string();
@@ -744,7 +753,11 @@ mod tests {
         // Load the production JSON parser code with required libraries
         let json_parser = get_json_parser_for_test();
         let load_result = engine.load_module_string("user", &json_parser).await;
-        assert!(load_result.is_ok(), "Failed to load JSON parser: {:?}", load_result);
+        assert!(
+            load_result.is_ok(),
+            "Failed to load JSON parser: {:?}",
+            load_result
+        );
 
         // Test empty JSON object "{}"
         let query = r#"phrase(json_dict(Dict), "{}")."#.to_string();
@@ -770,7 +783,10 @@ mod tests {
                 println!("✅ Empty JSON object with whitespace parsing succeeded");
             }
             _ => {
-                panic!("Empty JSON object with whitespace parsing failed: {:?}", result);
+                panic!(
+                    "Empty JSON object with whitespace parsing failed: {:?}",
+                    result
+                );
             }
         }
     }
@@ -783,7 +799,11 @@ mod tests {
         // Load the production JSON parser code with required libraries
         let json_parser = get_json_parser_for_test();
         let load_result = engine.load_module_string("user", &json_parser).await;
-        assert!(load_result.is_ok(), "Failed to load JSON parser: {:?}", load_result);
+        assert!(
+            load_result.is_ok(),
+            "Failed to load JSON parser: {:?}",
+            load_result
+        );
 
         // Test empty JSON array "[]"
         let query = r#"phrase(json_array(Array), "[]")."#.to_string();
@@ -809,7 +829,10 @@ mod tests {
                 println!("✅ Empty JSON array with whitespace parsing succeeded");
             }
             _ => {
-                panic!("Empty JSON array with whitespace parsing failed: {:?}", result);
+                panic!(
+                    "Empty JSON array with whitespace parsing failed: {:?}",
+                    result
+                );
             }
         }
     }
@@ -822,7 +845,11 @@ mod tests {
         // Load the production JSON parser code with required libraries
         let json_parser = get_json_parser_for_test();
         let load_result = engine.load_module_string("user", &json_parser).await;
-        assert!(load_result.is_ok(), "Failed to load JSON parser: {:?}", load_result);
+        assert!(
+            load_result.is_ok(),
+            "Failed to load JSON parser: {:?}",
+            load_result
+        );
 
         // Test non-empty JSON object
         let query = r#"phrase(json_dict(Dict), "{\"key\": \"value\"}")."#.to_string();
