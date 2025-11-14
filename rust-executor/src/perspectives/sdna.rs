@@ -189,8 +189,87 @@ pub fn get_json_parser_code() -> &'static str {
     
     ws --> ws_char, ws.
     ws --> [].
-    
+
     ws_char --> [C], { C = ' ' ; C = '\t' ; C = '\n' ; C = '\r' }.
+
+    % Convert Prolog values back to JSON strings
+    % This is needed to convert nested dict structures back to proper JSON for JavaScript
+
+    % Helper to check if something is a list (empty or non-empty)
+    check_is_list([]).
+    check_is_list([_|_]).
+
+    % Check if a value is a dict (list of Key-Value pairs)
+    is_dict([]).
+    is_dict([K-_V|Rest]) :- check_is_list(K), is_dict(Rest).
+
+    % Check if a value looks like a regular list (not a dict)
+    is_regular_list([]).
+    is_regular_list([H|T]) :- \+ is_pair(H), is_regular_list(T).
+
+    is_pair(_-_).
+
+    % Main conversion predicate
+    prolog_value_to_json(Value, JsonChars) :-
+        is_dict(Value),
+        !,
+        dict_to_json(Value, JsonChars).
+    prolog_value_to_json(Value, JsonChars) :-
+        is_regular_list(Value),
+        !,
+        list_to_json(Value, JsonChars).
+    prolog_value_to_json(Value, JsonChars) :-
+        check_is_list(Value),
+        !,
+        % It's a character list (string)
+        append("\"", Value, Temp),
+        append(Temp, "\"", JsonChars).
+    prolog_value_to_json(true, "true") :- !.
+    prolog_value_to_json(false, "false") :- !.
+    prolog_value_to_json(null, "null") :- !.
+    prolog_value_to_json(Value, JsonChars) :-
+        number(Value),
+        !,
+        number_chars(Value, JsonChars).
+    prolog_value_to_json(Value, Value).
+
+    % Convert dict (list of pairs) to JSON object
+    dict_to_json([], "{}") :- !.
+    dict_to_json(Pairs, JsonChars) :-
+        dict_pairs_to_json(Pairs, PairsJson),
+        append("{", PairsJson, Temp),
+        append(Temp, "}", JsonChars).
+
+    dict_pairs_to_json([Key-Value], JsonChars) :-
+        !,
+        prolog_value_to_json(Value, ValueJson),
+        append("\"", Key, Temp1),
+        append(Temp1, "\":", Temp2),
+        append(Temp2, ValueJson, JsonChars).
+    dict_pairs_to_json([Key-Value|Rest], JsonChars) :-
+        prolog_value_to_json(Value, ValueJson),
+        dict_pairs_to_json(Rest, RestJson),
+        append("\"", Key, Temp1),
+        append(Temp1, "\":", Temp2),
+        append(Temp2, ValueJson, Temp3),
+        append(Temp3, ",", Temp4),
+        append(Temp4, RestJson, JsonChars).
+
+    % Convert list to JSON array
+    list_to_json([], "[]") :- !.
+    list_to_json(Items, JsonChars) :-
+        list_items_to_json(Items, ItemsJson),
+        append("[", ItemsJson, Temp),
+        append(Temp, "]", JsonChars).
+
+    list_items_to_json([Item], JsonChars) :-
+        !,
+        prolog_value_to_json(Item, JsonChars).
+    list_items_to_json([Item|Rest], JsonChars) :-
+        prolog_value_to_json(Item, ItemJson),
+        list_items_to_json(Rest, RestJson),
+        append(ItemJson, ",", Temp),
+        append(Temp, RestJson, JsonChars).
     "#
 }
 
@@ -531,10 +610,19 @@ hex_digit_value('f', 15).
     resolve_property_value(_SubjectClass, _PropertyName, PropertyUri, PropertyUri, false).
 
     % Helper to extract JSON data field or return value as-is
-    resolve_property_extract_json_or_value(Value, Data) :-
+    % If the extracted data is a complex object (dict or array), convert it back to JSON
+    resolve_property_extract_json_or_value(Value, JsonData) :-
         catch(json_property(Value, "data", Data), _, fail),
+        !,
+        resolve_property_convert_if_complex(Data, JsonData).
+    resolve_property_extract_json_or_value(Value, Value).
+
+    % Convert complex objects (dicts) to a format Rust understands as objects
+    % Wrap dict in dict/1 compound so Rust knows to convert it to JSON object
+    resolve_property_convert_if_complex(Data, dict(Data)) :-
+        is_dict(Data),
         !.
-    resolve_property_extract_json_or_value(Value, Value)."#;
+    resolve_property_convert_if_complex(Data, Data)."#;
 
     lines.extend(resolve_property.split('\n').map(|s| s.to_string()));
 

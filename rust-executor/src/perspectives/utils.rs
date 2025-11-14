@@ -33,6 +33,33 @@ fn sanitize_into_json(s: String) -> String {
     }
 }
 
+fn convert_dict_to_json(args: &[Term]) -> String {
+    // args should be [PairsList] where PairsList is a list of Key-Value pairs
+    if args.len() != 1 {
+        return "{}".to_string();
+    }
+
+    let mut map = JsonMap::new();
+
+    if let Term::List(pairs) = &args[0] {
+        for pair in pairs {
+            if let Term::Compound(functor, pair_args) = pair {
+                if functor == "-" && pair_args.len() == 2 {
+                    // Extract key and value from Key-Value pair
+                    if let Some(key) = get_string(&pair_args[0]) {
+                        let v_json = prolog_value_to_json_string(pair_args[1].clone());
+                        let v_value: JsonValue =
+                            serde_json::from_str(&v_json).unwrap_or(JsonValue::Null);
+                        map.insert(key, v_value);
+                    }
+                }
+            }
+        }
+    }
+
+    JsonValue::Object(map).to_string()
+}
+
 fn convert_assoc_to_json(_functor: &str, args: &[Term]) -> String {
     let mut pairs = Vec::new();
     collect_assoc_pairs(args, &mut pairs);
@@ -152,6 +179,11 @@ pub fn prolog_value_to_json_string(value: Term) -> String {
             // where separators are "<", "-", or "t" atoms
             if s.as_str() == "t" {
                 return parse_t_compound_to_json(&l);
+            } else if s.as_str() == "dict" {
+                // Handle dict(Pairs) where Pairs is a list of Key-Value pairs
+                // Pattern: dict([Key1-Value1, Key2-Value2, ...])
+                // Convert to JSON object: {Key1: Value1, Key2: Value2, ...}
+                return convert_dict_to_json(&l);
             } else if s.as_str() == "-" {
                 // Handle Prolog assoc dictionary structures
                 // Pattern: -(Key, Value, Left, Right) where Left and Right are subtrees
