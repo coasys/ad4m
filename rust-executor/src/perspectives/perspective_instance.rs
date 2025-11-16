@@ -25,6 +25,7 @@ use crate::pubsub::{
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
     RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
+use crate::surreal_service::get_surreal_service;
 use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
 use chrono::DateTime;
@@ -1472,6 +1473,23 @@ impl PerspectiveInstance {
         .await
     }
 
+    /// Executes a SurrealQL query against the perspective's SurrealDB cache
+    /// Returns results as JSON values for easy handling
+    pub async fn surreal_query(&self, query: String) -> Result<Vec<serde_json::Value>, AnyError> {
+        let uuid = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
+
+        match get_surreal_service().await.query_links(&uuid, &query).await {
+            Ok(results) => Ok(results),
+            Err(e) => {
+                log::warn!("Failed to execute SurrealDB query for perspective {}: {:?}", uuid, e);
+                Ok(vec![])  // Graceful degradation: return empty results
+            }
+        }
+    }
+
     fn spawn_prolog_facts_update(
         &self,
         diff: DecoratedPerspectiveDiff,
@@ -1526,9 +1544,19 @@ impl PerspectiveInstance {
                 let service = get_prolog_service().await;
                 //log::info!("🔧 PROLOG UPDATE: Got prolog service in {:?}", service_start.elapsed());
 
+                // Get SurrealDB service for fast path updates
+                let surreal_service = get_surreal_service().await;
+
                 // Acquire write lock only for the prolog operation
                 let _write_guard = self_clone.prolog_update_mutex.write().await;
                 //log::info!("🔧 PROLOG UPDATE: Acquired prolog_update_mutex after {:?}", mutex_wait_start.elapsed());
+
+                // Add links to SurrealDB in fast path
+                for addition in &diff.additions {
+                    if let Err(e) = surreal_service.add_link(&uuid, addition).await {
+                        log::warn!("Failed to add link to SurrealDB for perspective {}: {:?}", uuid, e);
+                    }
+                }
 
                 let query_start = std::time::Instant::now();
                 let query = format!("{}.", assertions.join(","));
@@ -1568,6 +1596,21 @@ impl PerspectiveInstance {
                 // For fact rebuild, acquire write lock for the entire operation
                 let _write_guard = self_clone.prolog_update_mutex.write().await;
                 //log::info!("🔧 PROLOG UPDATE: Acquired prolog_update_mutex after {:?}", mutex_wait_start.elapsed());
+
+                // Get SurrealDB service for full rebuild path
+                let surreal_service = get_surreal_service().await;
+                
+                // Process SurrealDB updates based on diff (add additions, remove removals)
+                for addition in &diff.additions {
+                    if let Err(e) = surreal_service.add_link(&uuid, addition).await {
+                        log::warn!("Failed to add link to SurrealDB for perspective {}: {:?}", uuid, e);
+                    }
+                }
+                for removal in &diff.removals {
+                    if let Err(e) = surreal_service.remove_link(&uuid, removal).await {
+                        log::warn!("Failed to remove link from SurrealDB for perspective {}: {:?}", uuid, e);
+                    }
+                }
 
                 let rebuild_start = std::time::Instant::now();
                 match self_clone.update_prolog_engine_facts().await {
@@ -2896,18 +2939,26 @@ pub fn prolog_result(result: String) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentService;
     use crate::db::Ad4mDb;
     use crate::graphql::graphql_types::PerspectiveState;
     use crate::perspectives::perspective_instance::PerspectiveHandle;
+    use crate::prolog_service::init_prolog_service;
+    use crate::surreal_service::init_surreal_service;
     use crate::test_utils::setup_wallet;
     use fake::{Fake, Faker};
     use uuid::Uuid;
 
-    fn setup() -> PerspectiveInstance {
+    async fn setup() -> PerspectiveInstance {
         setup_wallet();
         Ad4mDb::init_global_instance(":memory:").unwrap();
+        
+        // Initialize agent, prolog and surreal services for tests
+        AgentService::init_global_test_instance();
+        init_prolog_service().await;
+        init_surreal_service().await.expect("Failed to init surreal service");
 
-        PerspectiveInstance::new(
+        let instance = PerspectiveInstance::new(
             PerspectiveHandle {
                 uuid: Uuid::new_v4().to_string(),
                 name: Some("Test Perspective".to_string()),
@@ -2916,7 +2967,30 @@ mod tests {
                 state: PerspectiveState::Private,
             },
             None,
-        )
+        );
+        
+        // Ensure prolog engine pool is initialized
+        instance.ensure_prolog_engine_pool().await.expect("Failed to initialize prolog engine pool");
+        
+        instance
+    }
+
+    async fn create_perspective() -> PerspectiveInstance {
+        let instance = PerspectiveInstance::new(
+            PerspectiveHandle {
+                uuid: Uuid::new_v4().to_string(),
+                name: Some("Test Perspective".to_string()),
+                shared_url: None,
+                neighbourhood: None,
+                state: PerspectiveState::Private,
+            },
+            None,
+        );
+        
+        // Ensure prolog engine pool is initialized
+        instance.ensure_prolog_engine_pool().await.expect("Failed to initialize prolog engine pool");
+        
+        instance
     }
 
     pub fn create_link() -> Link {
@@ -2929,7 +3003,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_all_links_after_adding_five() {
-        let mut perspective = setup();
+        let mut perspective = setup().await;
         let mut all_links = Vec::new();
 
         for _ in 0..5 {
@@ -2961,7 +3035,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_links_by_source() {
-        let mut perspective = setup();
+        let mut perspective = setup().await;
         let mut all_links = Vec::new();
         let source = "ad4m://self";
 
@@ -3003,7 +3077,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_link() {
-        let mut perspective = setup();
+        let mut perspective = setup().await;
         let link = create_link();
         let status = LinkStatus::Local;
 
@@ -3031,7 +3105,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_link_query_date_filtering() {
-        let mut perspective = setup();
+        let mut perspective = setup().await;
         let mut all_links = Vec::new();
         let now = chrono::Utc::now();
 
@@ -3147,7 +3221,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_operations() {
-        let mut perspective = setup();
+        let mut perspective = setup().await;
         let link = create_link();
         let batch_id = perspective.create_batch().await;
 
@@ -3171,7 +3245,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_update_and_remove() {
-        let mut perspective = setup();
+        let mut perspective = setup().await;
         let link = create_link();
         let batch_id = perspective.create_batch().await;
 
@@ -3209,7 +3283,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_multiple_operations() {
-        let mut perspective = setup();
+        let mut perspective = setup().await;
 
         // one link outside the batch, for removal
         let link0 = create_link();
@@ -3255,7 +3329,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_error_handling() {
-        let mut perspective = setup();
+        let mut perspective = setup().await;
 
         // Try to commit non-existent batch
         let result = perspective.commit_batch("non-existent".to_string()).await;
@@ -3294,7 +3368,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_with_execute_commands() {
-        let mut perspective = setup();
+        let mut perspective = setup().await;
         let batch_id = perspective.create_batch().await;
 
         // Create commands to add links
@@ -3347,9 +3421,207 @@ mod tests {
         assert_eq!(links_after.len(), 2);
     }
 
+    #[tokio::test]
+    async fn test_add_link_surreal_query() {
+        let mut perspective = setup().await;
+        
+        // Add a link
+        let link = create_link();
+        let source = link.source.clone();
+        let predicate = link.predicate.clone().unwrap_or_default();
+        let target = link.target.clone();
+        
+        perspective
+            .add_link(link.clone(), LinkStatus::Shared, None)
+            .await
+            .unwrap();
+        
+        // Wait for async updates to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+        
+        // Query SurrealDB
+        let results = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
+        
+        // Verify link was added to SurrealDB
+        assert!(results.len() > 0, "Expected at least one link in SurrealDB");
+        
+        // Find the added link in results
+        let found = results.iter().any(|result| {
+            result.get("source").and_then(|v| v.as_str()) == Some(&source) &&
+            result.get("predicate").and_then(|v| v.as_str()) == Some(&predicate) &&
+            result.get("target").and_then(|v| v.as_str()) == Some(&target)
+        });
+        
+        assert!(found, "Added link not found in SurrealDB query results");
+    }
+
+    #[tokio::test]
+    async fn test_remove_link_surreal_query() {
+        let mut perspective = setup().await;
+        
+        // Add a link
+        let link = create_link();
+        let added_link = perspective
+            .add_link(link.clone(), LinkStatus::Shared, None)
+            .await
+            .unwrap();
+        
+        // Wait for async updates to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+        
+        // Verify link exists in SurrealDB
+        let results_before = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
+        assert_eq!(results_before.len(), 1, "Expected one link before removal");
+        
+        // Remove the link
+        perspective.remove_link(added_link.into(), None).await.unwrap();
+        
+        // Wait for async updates to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+        
+        // Query SurrealDB again
+        let results_after = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
+        
+        // Verify link was removed
+        assert_eq!(results_after.len(), 0, "Expected no links after removal");
+    }
+
+    #[tokio::test]
+    async fn test_batch_add_remove_surreal_query() {
+        let mut perspective = setup().await;
+        
+        // Add multiple links
+        let mut added_links = Vec::new();
+        for _ in 0..5 {
+            let link = create_link();
+            let added = perspective
+                .add_link(link.clone(), LinkStatus::Shared, None)
+                .await
+                .unwrap();
+            added_links.push(added);
+        }
+        
+        // Wait for async updates to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+        
+        // Query SurrealDB
+        let results = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
+        assert_eq!(results.len(), 5, "Expected 5 links in SurrealDB");
+        
+        // Remove 3 links
+        for i in 0..3 {
+            perspective.remove_link(added_links[i].clone().into(), None).await.unwrap();
+        }
+        
+        // Wait for async updates to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+        
+        // Query SurrealDB again
+        let results_after = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
+        assert_eq!(results_after.len(), 2, "Expected 2 links after removing 3");
+    }
+
+    #[tokio::test]
+    async fn test_full_reload_surreal_query() {
+        let mut perspective = setup().await;
+        
+        // Add some normal links first
+        for _ in 0..3 {
+            let link = create_link();
+            perspective
+                .add_link(link.clone(), LinkStatus::Shared, None)
+                .await
+                .unwrap();
+        }
+        
+        // Wait for async updates to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+        
+        // Query before triggering rebuild
+        let results_before = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
+        assert_eq!(results_before.len(), 3, "Expected 3 links before rebuild");
+        
+        // Add an SDNA link (which triggers full rebuild)
+        let sdna_link = Link {
+            source: "test://source".to_string(),
+            target: "ad4m://sdna".to_string(),
+            predicate: Some("has_sdna".to_string()),
+        };
+        perspective
+            .add_link(sdna_link.clone(), LinkStatus::Shared, None)
+            .await
+            .unwrap();
+        
+        // Wait for full rebuild to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+        
+        // Query after rebuild
+        let results_after = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
+        assert_eq!(results_after.len(), 4, "Expected 4 links after rebuild (3 normal + 1 SDNA)");
+        
+        // Verify all links are present
+        let all_links = perspective.get_links(&LinkQuery::default()).await.unwrap();
+        assert_eq!(all_links.len(), results_after.len(), "SurrealDB and Prolog link counts should match");
+    }
+
+    #[tokio::test]
+    async fn test_surreal_query_error_handling() {
+        let perspective = setup().await;
+        
+        // Test with invalid query syntax - should return empty vec, not crash
+        let results = perspective.surreal_query("INVALID QUERY SYNTAX".to_string()).await.unwrap();
+        
+        // Should return empty vec on error
+        assert_eq!(results.len(), 0, "Expected empty results on query error");
+    }
+
+    #[tokio::test]
+    async fn test_perspective_isolation_surreal_query() {
+        // Initialize services once
+        setup_wallet();
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AgentService::init_global_test_instance();
+        init_prolog_service().await;
+        init_surreal_service().await.expect("Failed to init surreal service");
+        
+        // Create two separate perspectives without re-initializing globals
+        let mut perspective1 = create_perspective().await;
+        let mut perspective2 = create_perspective().await;
+        
+        // Add links to perspective 1
+        let link1 = create_link();
+        perspective1
+            .add_link(link1.clone(), LinkStatus::Shared, None)
+            .await
+            .unwrap();
+        
+        // Add different links to perspective 2
+        let link2 = create_link();
+        perspective2
+            .add_link(link2.clone(), LinkStatus::Shared, None)
+            .await
+            .unwrap();
+        
+        // Wait for async updates to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+        
+        // Query both perspectives
+        let results1 = perspective1.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
+        let results2 = perspective2.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
+        
+        // Each perspective should only see its own link
+        assert_eq!(results1.len(), 1, "Perspective 1 should have 1 link");
+        assert_eq!(results2.len(), 1, "Perspective 2 should have 1 link");
+        
+        // Verify the links are different (by checking source)
+        let source1 = results1[0].get("source").and_then(|v| v.as_str()).unwrap();
+        let source2 = results2[0].get("source").and_then(|v| v.as_str()).unwrap();
+        assert_ne!(source1, source2, "Links from different perspectives should be isolated");
+    }
+
     // #[tokio::test]
     // async fn test_batch_with_create_subject() {
-    //     let mut perspective = setup();
+    //     let mut perspective = setup().await;
     //     let batch_id = perspective.create_batch().await;
 
     //     // Create a subject class option
