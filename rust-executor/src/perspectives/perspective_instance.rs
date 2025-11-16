@@ -683,6 +683,7 @@ impl PerspectiveInstance {
         };
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+        self.update_surreal_cache(&decorated_diff).await;
         self.pubsub_publish_diff(decorated_diff).await;
     }
 
@@ -742,6 +743,7 @@ impl PerspectiveInstance {
                     DecoratedPerspectiveDiff::from_removals(vec![decorated_link.clone()]);
 
                 self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+                self.update_surreal_cache(&decorated_diff).await;
                 self.pubsub_publish_diff(decorated_diff.clone()).await;
 
                 if status == LinkStatus::Shared {
@@ -822,6 +824,7 @@ impl PerspectiveInstance {
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
         self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
+        self.update_surreal_cache(&decorated_perspective_diff).await;
 
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
@@ -875,6 +878,7 @@ impl PerspectiveInstance {
             })?;
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
+            self.update_surreal_cache(&decorated_perspective_diff).await;
             self.pubsub_publish_diff(decorated_perspective_diff).await;
 
             if status == LinkStatus::Shared {
@@ -926,6 +930,7 @@ impl PerspectiveInstance {
         };
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+        self.update_surreal_cache(&decorated_diff).await;
         self.pubsub_publish_diff(decorated_diff.clone()).await;
 
         if status == LinkStatus::Shared {
@@ -992,6 +997,7 @@ impl PerspectiveInstance {
             );
 
             self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+            self.update_surreal_cache(&decorated_diff).await;
 
             get_global_pubsub()
                 .await
@@ -1072,6 +1078,7 @@ impl PerspectiveInstance {
             }
 
             self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+            self.update_surreal_cache(&decorated_diff).await;
             self.pubsub_publish_diff(decorated_diff).await;
 
             // Only commit shared links by filtering decorated_links
@@ -1490,6 +1497,29 @@ impl PerspectiveInstance {
         }
     }
 
+    async fn update_surreal_cache(&self, diff: &DecoratedPerspectiveDiff) {
+        // Get UUID
+        let uuid = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
+
+        // Update SurrealDB synchronously
+        let surreal_service = get_surreal_service().await;
+        
+        // Process SurrealDB updates based on diff (add additions, remove removals)
+        for addition in &diff.additions {
+            if let Err(e) = surreal_service.add_link(&uuid, addition).await {
+                log::warn!("Failed to add link to SurrealDB for perspective {}: {:?}", uuid, e);
+            }
+        }
+        for removal in &diff.removals {
+            if let Err(e) = surreal_service.remove_link(&uuid, removal).await {
+                log::warn!("Failed to remove link from SurrealDB for perspective {}: {:?}", uuid, e);
+            }
+        }
+    }
+
     fn spawn_prolog_facts_update(
         &self,
         diff: DecoratedPerspectiveDiff,
@@ -1544,19 +1574,9 @@ impl PerspectiveInstance {
                 let service = get_prolog_service().await;
                 //log::info!("🔧 PROLOG UPDATE: Got prolog service in {:?}", service_start.elapsed());
 
-                // Get SurrealDB service for fast path updates
-                let surreal_service = get_surreal_service().await;
-
                 // Acquire write lock only for the prolog operation
                 let _write_guard = self_clone.prolog_update_mutex.write().await;
                 //log::info!("🔧 PROLOG UPDATE: Acquired prolog_update_mutex after {:?}", mutex_wait_start.elapsed());
-
-                // Add links to SurrealDB in fast path
-                for addition in &diff.additions {
-                    if let Err(e) = surreal_service.add_link(&uuid, addition).await {
-                        log::warn!("Failed to add link to SurrealDB for perspective {}: {:?}", uuid, e);
-                    }
-                }
 
                 let query_start = std::time::Instant::now();
                 let query = format!("{}.", assertions.join(","));
@@ -1596,21 +1616,6 @@ impl PerspectiveInstance {
                 // For fact rebuild, acquire write lock for the entire operation
                 let _write_guard = self_clone.prolog_update_mutex.write().await;
                 //log::info!("🔧 PROLOG UPDATE: Acquired prolog_update_mutex after {:?}", mutex_wait_start.elapsed());
-
-                // Get SurrealDB service for full rebuild path
-                let surreal_service = get_surreal_service().await;
-                
-                // Process SurrealDB updates based on diff (add additions, remove removals)
-                for addition in &diff.additions {
-                    if let Err(e) = surreal_service.add_link(&uuid, addition).await {
-                        log::warn!("Failed to add link to SurrealDB for perspective {}: {:?}", uuid, e);
-                    }
-                }
-                for removal in &diff.removals {
-                    if let Err(e) = surreal_service.remove_link(&uuid, removal).await {
-                        log::warn!("Failed to remove link from SurrealDB for perspective {}: {:?}", uuid, e);
-                    }
-                }
 
                 let rebuild_start = std::time::Instant::now();
                 match self_clone.update_prolog_engine_facts().await {
@@ -2908,6 +2913,7 @@ impl PerspectiveInstance {
 
             // Update prolog facts once for all changes and wait for completion
             self.spawn_prolog_facts_update(combined_diff.clone(), Some(completion_sender));
+            self.update_surreal_cache(&combined_diff).await;
             let _ = completion_receiver.await;
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
@@ -3436,9 +3442,6 @@ mod tests {
             .await
             .unwrap();
         
-        // Wait for async updates to complete
-        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-        
         // Query SurrealDB
         let results = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
         
@@ -3466,18 +3469,12 @@ mod tests {
             .await
             .unwrap();
         
-        // Wait for async updates to complete
-        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-        
         // Verify link exists in SurrealDB
         let results_before = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
         assert_eq!(results_before.len(), 1, "Expected one link before removal");
         
         // Remove the link
         perspective.remove_link(added_link.into(), None).await.unwrap();
-        
-        // Wait for async updates to complete
-        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
         
         // Query SurrealDB again
         let results_after = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
@@ -3501,9 +3498,6 @@ mod tests {
             added_links.push(added);
         }
         
-        // Wait for async updates to complete
-        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-        
         // Query SurrealDB
         let results = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
         assert_eq!(results.len(), 5, "Expected 5 links in SurrealDB");
@@ -3512,9 +3506,6 @@ mod tests {
         for i in 0..3 {
             perspective.remove_link(added_links[i].clone().into(), None).await.unwrap();
         }
-        
-        // Wait for async updates to complete
-        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
         
         // Query SurrealDB again
         let results_after = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
@@ -3534,9 +3525,6 @@ mod tests {
                 .unwrap();
         }
         
-        // Wait for async updates to complete
-        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-        
         // Query before triggering rebuild
         let results_before = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
         assert_eq!(results_before.len(), 3, "Expected 3 links before rebuild");
@@ -3551,9 +3539,6 @@ mod tests {
             .add_link(sdna_link.clone(), LinkStatus::Shared, None)
             .await
             .unwrap();
-        
-        // Wait for full rebuild to complete
-        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
         
         // Query after rebuild
         let results_after = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
@@ -3601,9 +3586,6 @@ mod tests {
             .add_link(link2.clone(), LinkStatus::Shared, None)
             .await
             .unwrap();
-        
-        // Wait for async updates to complete
-        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
         
         // Query both perspectives
         let results1 = perspective1.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
