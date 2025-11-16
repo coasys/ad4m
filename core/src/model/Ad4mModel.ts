@@ -711,6 +711,296 @@ export class Ad4mModel {
     return fullQuery;
   }
 
+  /**
+   * Generates a SurrealQL query from a Query object.
+   * 
+   * @description
+   * This method translates high-level query parameters into a SurrealQL query string
+   * that can be executed against the SurrealDB backend. Unlike Prolog queries which
+   * operate on SDNA-aware predicates, SurrealQL queries operate directly on raw links
+   * stored in SurrealDB.
+   * 
+   * The generated query uses a CTE (Common Table Expression) pattern:
+   * 1. First, identify candidate base expressions by filtering links based on where conditions
+   * 2. Then, for each candidate base, resolve properties and collections via subqueries
+   * 3. Finally, apply ordering, pagination (LIMIT/START) at the SQL level
+   * 
+   * Key architectural notes:
+   * - SurrealDB stores only raw links (source, predicate, target, author, timestamp)
+   * - No SDNA knowledge at the database level
+   * - Properties are resolved via subqueries that look for links with specific predicates
+   * - Collections are similar but return multiple values instead of one
+   * - Special fields (base, author, timestamp) are accessed directly, not via subqueries
+   * 
+   * @param perspective - The perspective to query (used for metadata extraction)
+   * @param query - Query parameters (where, order, limit, offset, properties, collections)
+   * @returns Complete SurrealQL query string ready for execution
+   * 
+   * @example
+   * ```typescript
+   * const query = Recipe.queryToSurrealQL(perspective, {
+   *   where: { name: "Pasta", rating: { gt: 4 } },
+   *   order: { timestamp: "DESC" },
+   *   limit: 10
+   * });
+   * // Returns: WITH candidate_bases AS (SELECT DISTINCT source AS base FROM link WHERE ...)
+   * //          SELECT cb.base, (SELECT target FROM link WHERE ...) AS name, ... FROM candidate_bases cb ...
+   * ```
+   */
+  public static queryToSurrealQL(perspective: PerspectiveProxy, query: Query): string {
+    const metadata = this.getModelMetadata();
+    const { where, order, offset, limit, properties, collections } = query;
+    
+    // Build WHERE clause for candidate bases
+    const whereClause = this.buildSurrealWhereClause(metadata, where);
+    
+    // Build SELECT fields for properties and collections
+    const selectFields = this.buildSurrealSelectFields(metadata, properties, collections);
+    
+    // Build ORDER BY clause
+    const orderClause = order ? `ORDER BY ${Object.keys(order)[0]} ${Object.values(order)[0]}` : '';
+    
+    // Build LIMIT clause
+    const limitClause = limit ? `LIMIT ${limit}` : '';
+    
+    // Build OFFSET clause (SurrealQL uses START)
+    const offsetClause = offset ? `START ${offset}` : '';
+    
+    // Assemble full query
+    const fullQuery = `
+WITH candidate_bases AS (
+  SELECT DISTINCT source AS base
+  FROM link
+  ${whereClause ? 'WHERE ' + whereClause : ''}
+)
+SELECT 
+  cb.base,
+  ${selectFields}
+FROM candidate_bases cb
+${orderClause}
+${limitClause}
+${offsetClause}
+    `.trim();
+    
+    return fullQuery;
+  }
+
+  /**
+   * Builds the WHERE clause for SurrealQL queries.
+   * 
+   * @description
+   * Translates the where conditions from the Query object into SurrealQL WHERE clause fragments.
+   * For each property filter, generates a subquery that checks for links with the appropriate
+   * predicate and target value.
+   * 
+   * Handles several condition types:
+   * - Simple equality: `{ name: "Pasta" }` → subquery checking for predicate and target match
+   * - Arrays (IN clause): `{ name: ["Pasta", "Pizza"] }` → target IN [...]
+   * - Operators: `{ rating: { gt: 4 } }` → target > '4'
+   *   - gt, gte, lt, lte: comparison operators
+   *   - not: negation (single value or array)
+   *   - between: range check
+   * - Special fields: base, author, timestamp are accessed directly, not via subqueries
+   * 
+   * All conditions are joined with AND.
+   * 
+   * @param metadata - Model metadata containing property predicates
+   * @param where - Where conditions from the query
+   * @returns WHERE clause string (without the "WHERE" keyword), or empty string if no conditions
+   * 
+   * @private
+   */
+  private static buildSurrealWhereClause(metadata: ModelMetadata, where?: Where): string {
+    if (!where) return '';
+    
+    const conditions: string[] = [];
+    
+    for (const [propertyName, condition] of Object.entries(where)) {
+      // Check if this is a special field (base, author, timestamp)
+      const isSpecial = ['base', 'author', 'timestamp'].includes(propertyName);
+      
+      if (isSpecial) {
+        // Handle special fields directly
+        if (Array.isArray(condition)) {
+          // Array values (IN clause)
+          const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
+          conditions.push(`${propertyName} IN [${formattedValues}]`);
+        } else if (typeof condition === 'object' && condition !== null) {
+          // Operator object
+          const ops = condition as any;
+          if (ops.not !== undefined) {
+            if (Array.isArray(ops.not)) {
+              const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
+              conditions.push(`${propertyName} NOT IN [${formattedValues}]`);
+            } else {
+              conditions.push(`${propertyName} != ${this.formatSurrealValue(ops.not)}`);
+            }
+          }
+          if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
+            conditions.push(`${propertyName} >= ${this.formatSurrealValue(ops.between[0])} AND ${propertyName} <= ${this.formatSurrealValue(ops.between[1])}`);
+          }
+          if (ops.gt !== undefined) {
+            conditions.push(`${propertyName} > ${this.formatSurrealValue(ops.gt)}`);
+          }
+          if (ops.gte !== undefined) {
+            conditions.push(`${propertyName} >= ${this.formatSurrealValue(ops.gte)}`);
+          }
+          if (ops.lt !== undefined) {
+            conditions.push(`${propertyName} < ${this.formatSurrealValue(ops.lt)}`);
+          }
+          if (ops.lte !== undefined) {
+            conditions.push(`${propertyName} <= ${this.formatSurrealValue(ops.lte)}`);
+          }
+        } else {
+          // Simple equality
+          conditions.push(`${propertyName} = ${this.formatSurrealValue(condition)}`);
+        }
+      } else {
+        // Handle regular properties via subqueries
+        const propMeta = metadata.properties[propertyName];
+        if (!propMeta) continue; // Skip if property not found in metadata
+        
+        const predicate = propMeta.predicate;
+        
+        if (Array.isArray(condition)) {
+          // Array values (IN clause)
+          const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
+          conditions.push(`source IN (SELECT source FROM link WHERE predicate = '${predicate}' AND target IN [${formattedValues}])`);
+        } else if (typeof condition === 'object' && condition !== null) {
+          // Operator object
+          const ops = condition as any;
+          if (ops.not !== undefined) {
+            if (Array.isArray(ops.not)) {
+              const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
+              conditions.push(`source IN (SELECT source FROM link WHERE predicate = '${predicate}' AND target NOT IN [${formattedValues}])`);
+            } else {
+              conditions.push(`source IN (SELECT source FROM link WHERE predicate = '${predicate}' AND target != ${this.formatSurrealValue(ops.not)})`);
+            }
+          }
+          if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
+            conditions.push(`source IN (SELECT source FROM link WHERE predicate = '${predicate}' AND target >= ${this.formatSurrealValue(ops.between[0])} AND target <= ${this.formatSurrealValue(ops.between[1])})`);
+          }
+          if (ops.gt !== undefined) {
+            conditions.push(`source IN (SELECT source FROM link WHERE predicate = '${predicate}' AND target > ${this.formatSurrealValue(ops.gt)})`);
+          }
+          if (ops.gte !== undefined) {
+            conditions.push(`source IN (SELECT source FROM link WHERE predicate = '${predicate}' AND target >= ${this.formatSurrealValue(ops.gte)})`);
+          }
+          if (ops.lt !== undefined) {
+            conditions.push(`source IN (SELECT source FROM link WHERE predicate = '${predicate}' AND target < ${this.formatSurrealValue(ops.lt)})`);
+          }
+          if (ops.lte !== undefined) {
+            conditions.push(`source IN (SELECT source FROM link WHERE predicate = '${predicate}' AND target <= ${this.formatSurrealValue(ops.lte)})`);
+          }
+        } else {
+          // Simple equality
+          conditions.push(`source IN (SELECT source FROM link WHERE predicate = '${predicate}' AND target = ${this.formatSurrealValue(condition)})`);
+        }
+      }
+    }
+    
+    return conditions.join(' AND ');
+  }
+
+  /**
+   * Builds the SELECT fields for SurrealQL queries.
+   * 
+   * @description
+   * Generates the field list for the SELECT clause, resolving properties and collections
+   * via subqueries. Each property is fetched with a subquery that finds the link with the
+   * appropriate predicate and returns its target. Collections are similar but don't use LIMIT 1.
+   * 
+   * Field types:
+   * - Properties: `(SELECT target FROM link WHERE source = cb.base AND predicate = 'X' LIMIT 1) AS propName`
+   * - Collections: `(SELECT target FROM link WHERE source = cb.base AND predicate = 'X') AS collName`
+   * - Author/Timestamp: Always included to provide metadata about each instance
+   * 
+   * If properties or collections arrays are provided, only those fields are included.
+   * Otherwise, all properties/collections from metadata are included.
+   * 
+   * @param metadata - Model metadata containing property and collection predicates
+   * @param properties - Optional array of property names to include (default: all)
+   * @param collections - Optional array of collection names to include (default: all)
+   * @returns Comma-separated SELECT field list
+   * 
+   * @private
+   */
+  private static buildSurrealSelectFields(metadata: ModelMetadata, properties?: string[], collections?: string[]): string {
+    const fields: string[] = [];
+    
+    // Determine properties to fetch
+    const propsToFetch = properties || Object.keys(metadata.properties);
+    for (const propName of propsToFetch) {
+      const propMeta = metadata.properties[propName];
+      if (!propMeta) continue; // Skip if not found
+      
+      fields.push(`(SELECT target FROM link WHERE source = cb.base AND predicate = '${propMeta.predicate}' LIMIT 1) AS ${propName}`);
+    }
+    
+    // Determine collections to fetch
+    const collsToFetch = collections || Object.keys(metadata.collections);
+    for (const collName of collsToFetch) {
+      const collMeta = metadata.collections[collName];
+      if (!collMeta) continue; // Skip if not found
+      
+      fields.push(`(SELECT target FROM link WHERE source = cb.base AND predicate = '${collMeta.predicate}') AS ${collName}`);
+    }
+    
+    // Always add author and timestamp fields
+    fields.push(`(SELECT author FROM link WHERE source = cb.base LIMIT 1) AS author`);
+    fields.push(`(SELECT timestamp FROM link WHERE source = cb.base LIMIT 1) AS timestamp`);
+    
+    return fields.join(',\n  ');
+  }
+
+  /**
+   * Maps operator names to SQL operators.
+   * 
+   * @param op - Operator name (gt, gte, lt, lte, not, etc.)
+   * @returns SQL operator symbol
+   * 
+   * @private
+   */
+  private static operatorToSQL(op: string): string {
+    const mapping: Record<string, string> = {
+      'gt': '>',
+      'gte': '>=',
+      'lt': '<',
+      'lte': '<=',
+      'ne': '!=',
+      'not': '!=',
+      'contains': 'CONTAINS'
+    };
+    return mapping[op] || '=';
+  }
+
+  /**
+   * Formats a value for use in SurrealQL queries.
+   * 
+   * @description
+   * Handles different value types:
+   * - Strings: Wrapped in single quotes with escaped quotes
+   * - Numbers/booleans: Converted to string
+   * - Arrays: Recursively formatted and wrapped in brackets
+   * 
+   * @param value - The value to format
+   * @returns Formatted value string ready for SQL
+   * 
+   * @private
+   */
+  private static formatSurrealValue(value: any): string {
+    if (typeof value === 'string') {
+      // Escape single quotes by doubling them
+      return `'${value.replace(/'/g, "''")}'`;
+    } else if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    } else if (Array.isArray(value)) {
+      return `[${value.map(v => this.formatSurrealValue(v)).join(', ')}]`;
+    } else {
+      return String(value);
+    }
+  }
+
   public static async instancesFromPrologResult<T extends Ad4mModel>(
     this: typeof Ad4mModel & (new (...args: any[]) => T), 
     perspective: PerspectiveProxy,

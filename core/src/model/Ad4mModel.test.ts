@@ -437,3 +437,333 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
   });
 });
 
+describe("Ad4mModel.queryToSurrealQL()", () => {
+  // Mock perspective proxy (minimal since queryToSurrealQL doesn't actually call it)
+  const mockPerspective = {} as any;
+
+  // Helper function to normalize whitespace in queries for easier comparison
+  function normalizeQuery(query: string): string {
+    return query.replace(/\s+/g, ' ').trim();
+  }
+
+  // Test Recipe model
+  @ModelOptions({ name: "Recipe" })
+  class Recipe extends Ad4mModel {
+    @Property({ through: "recipe://name" })
+    name: string = "";
+    
+    @Property({ through: "recipe://rating" })
+    rating: number = 0;
+    
+    @Collection({ through: "recipe://ingredient" })
+    ingredients: string[] = [];
+  }
+
+  it("should generate basic query with no filters", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, {});
+    
+    expect(query).toContain("WITH candidate_bases AS");
+    expect(query).toContain("SELECT DISTINCT source AS base");
+    expect(query).toContain("FROM link");
+    expect(query).toContain("(SELECT target FROM link WHERE source = cb.base AND predicate = 'recipe://name' LIMIT 1) AS name");
+    expect(query).toContain("(SELECT target FROM link WHERE source = cb.base AND predicate = 'recipe://ingredient') AS ingredients");
+    expect(query).toContain("(SELECT author FROM link WHERE source = cb.base LIMIT 1) AS author");
+    expect(query).toContain("(SELECT timestamp FROM link WHERE source = cb.base LIMIT 1) AS timestamp");
+    // Check that there's no WHERE clause in the CTE (candidate_bases should not filter)
+    const normalized = normalizeQuery(query);
+    expect(normalized).toContain("FROM link )");
+  });
+
+  it("should generate query with simple property filter", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { name: "Pasta" } });
+    
+    expect(query).toContain("WHERE source IN (SELECT source FROM link WHERE predicate = 'recipe://name' AND target = 'Pasta')");
+  });
+
+  it("should generate query with multiple property filters", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { name: "Pasta", rating: 5 } });
+    
+    expect(query).toContain("WHERE");
+    expect(query).toContain("source IN (SELECT source FROM link WHERE predicate = 'recipe://name' AND target = 'Pasta')");
+    expect(query).toContain("source IN (SELECT source FROM link WHERE predicate = 'recipe://rating' AND target = 5)");
+    expect(query).toContain("AND");
+  });
+
+  it("should handle gt operator", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { rating: { gt: 4 } } });
+    
+    expect(query).toContain("target > 4");
+  });
+
+  it("should handle lt operator", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { rating: { lt: 3 } } });
+    
+    expect(query).toContain("target < 3");
+  });
+
+  it("should handle gte and lte operators", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { rating: { gte: 3, lte: 5 } } });
+    
+    expect(query).toContain("target >= 3");
+    expect(query).toContain("target <= 5");
+  });
+
+  it("should handle not operator with single value", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { name: { not: "Salad" } } });
+    
+    expect(query).toContain("target != 'Salad'");
+  });
+
+  it("should handle not operator with array (NOT IN)", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { name: { not: ["Salad", "Soup"] } } });
+    
+    expect(query).toContain("target NOT IN ['Salad', 'Soup']");
+  });
+
+  it("should handle between operator", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { rating: { between: [3, 5] } } });
+    
+    const normalized = normalizeQuery(query);
+    expect(normalized).toContain("target >= 3 AND");
+    expect(normalized).toContain("target <= 5");
+  });
+
+  it("should handle array values (IN clause)", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { name: ["Pasta", "Pizza"] } });
+    
+    expect(query).toContain("target IN ['Pasta', 'Pizza']");
+  });
+
+  it("should handle special fields (author, timestamp) without subqueries", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { author: "did:key:alice" } });
+    
+    expect(query).toContain("WHERE author = 'did:key:alice'");
+    // Ensure it's NOT using a subquery pattern for author in WHERE clause
+    expect(normalizeQuery(query)).not.toMatch(/WHERE.*source IN.*SELECT source FROM link.*author/);
+  });
+
+  it("should generate ORDER BY clause", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { order: { timestamp: "DESC" } });
+    
+    expect(query).toContain("ORDER BY timestamp DESC");
+  });
+
+  it("should generate LIMIT clause", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { limit: 10 });
+    
+    expect(query).toContain("LIMIT 10");
+  });
+
+  it("should generate START clause for offset", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { offset: 20 });
+    
+    expect(query).toContain("START 20");
+  });
+
+  it("should generate complete query with all options", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, {
+      where: { name: "Pasta", rating: { gt: 4 } },
+      order: { timestamp: "DESC" },
+      limit: 10,
+      offset: 20
+    });
+    
+    expect(query).toContain("WHERE");
+    expect(query).toContain("source IN (SELECT source FROM link WHERE predicate = 'recipe://name' AND target = 'Pasta')");
+    expect(query).toContain("source IN (SELECT source FROM link WHERE predicate = 'recipe://rating' AND target > 4)");
+    expect(query).toContain("ORDER BY timestamp DESC");
+    expect(query).toContain("LIMIT 10");
+    expect(query).toContain("START 20");
+  });
+
+  it("should only select requested properties", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { properties: ["name"] });
+    
+    expect(query).toContain("(SELECT target FROM link WHERE source = cb.base AND predicate = 'recipe://name' LIMIT 1) AS name");
+    // Should NOT contain rating property
+    expect(query).not.toContain("(SELECT target FROM link WHERE source = cb.base AND predicate = 'recipe://rating' LIMIT 1) AS rating");
+    // Should still contain author/timestamp
+    expect(query).toContain("AS author");
+    expect(query).toContain("AS timestamp");
+  });
+
+  it("should only select requested collections", () => {
+    @ModelOptions({ name: "MultiCollectionModel" })
+    class MultiCollectionModel extends Ad4mModel {
+      @Collection({ through: "test://coll1" })
+      coll1: string[] = [];
+      
+      @Collection({ through: "test://coll2" })
+      coll2: string[] = [];
+    }
+
+    const query = MultiCollectionModel.queryToSurrealQL(mockPerspective, { collections: ["coll1"] });
+    
+    expect(query).toContain("(SELECT target FROM link WHERE source = cb.base AND predicate = 'test://coll1') AS coll1");
+    // Should NOT contain coll2
+    expect(query).not.toContain("(SELECT target FROM link WHERE source = cb.base AND predicate = 'test://coll2') AS coll2");
+  });
+
+  it("should escape single quotes in string values", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { name: "O'Brien's Recipe" } });
+    
+    expect(query).toContain("'O''Brien''s Recipe'");
+  });
+
+  it("should handle numeric values without quotes", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { rating: 5 } });
+    
+    // Numeric values should not have quotes around them
+    expect(query).toContain("target = 5");
+    expect(query).not.toContain("target = '5'");
+  });
+
+  it("should handle complex nested query", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, {
+      where: {
+        name: "Pasta",
+        rating: { gte: 4, lte: 5 },
+        author: "did:key:alice"
+      },
+      order: { rating: "DESC" },
+      limit: 5
+    });
+    
+    const normalized = normalizeQuery(query);
+    
+    // Verify all WHERE conditions are present
+    expect(normalized).toContain("source IN (SELECT source FROM link WHERE predicate = 'recipe://name' AND target = 'Pasta')");
+    expect(normalized).toContain("target >= 4");
+    expect(normalized).toContain("target <= 5");
+    expect(normalized).toContain("author = 'did:key:alice'");
+    
+    // Verify ORDER BY and LIMIT
+    expect(normalized).toContain("ORDER BY rating DESC");
+    expect(normalized).toContain("LIMIT 5");
+    
+    // Verify query structure
+    expect(normalized).toContain("WITH candidate_bases AS");
+    expect(normalized).toContain("FROM candidate_bases cb");
+  });
+
+  it("should handle empty query object", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, {});
+    
+    // Should generate valid query without WHERE clause in CTE, ORDER BY, LIMIT, or START
+    expect(query).toContain("WITH candidate_bases AS");
+    expect(query).toContain("SELECT DISTINCT source AS base");
+    expect(query).toContain("FROM link");
+    // Check that there's no WHERE clause in the CTE
+    const normalized = normalizeQuery(query);
+    expect(normalized).toContain("FROM link )");
+    expect(query).not.toContain("ORDER BY");
+    expect(query).not.toContain("START");
+    // Check that query ends with "FROM candidate_bases cb" (no LIMIT/ORDER BY/START at end)
+    expect(normalized).toMatch(/FROM candidate_bases cb$/);
+  });
+
+  it("should handle base special field", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { base: "literal://test" } });
+    
+    expect(query).toContain("WHERE base = 'literal://test'");
+  });
+
+  it("should handle timestamp special field with gt operator", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { timestamp: { gt: 1234567890 } } });
+    
+    expect(query).toContain("WHERE timestamp > 1234567890");
+  });
+
+  it("should handle multiple special fields", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, {
+      where: {
+        author: "did:key:alice",
+        timestamp: { gt: 1000 }
+      }
+    });
+    
+    const normalized = normalizeQuery(query);
+    expect(normalized).toContain("author = 'did:key:alice'");
+    expect(normalized).toContain("timestamp > 1000");
+    expect(normalized).toContain("AND");
+  });
+
+  it("should handle mixed special and regular properties", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, {
+      where: {
+        name: "Pasta",
+        author: "did:key:alice",
+        rating: { gt: 4 }
+      }
+    });
+    
+    const normalized = normalizeQuery(query);
+    // Regular properties use subqueries
+    expect(normalized).toContain("source IN (SELECT source FROM link WHERE predicate = 'recipe://name' AND target = 'Pasta')");
+    expect(normalized).toContain("source IN (SELECT source FROM link WHERE predicate = 'recipe://rating' AND target > 4)");
+    // Special fields use direct access
+    expect(normalized).toContain("author = 'did:key:alice'");
+  });
+
+  it("should handle boolean values", () => {
+    @ModelOptions({ name: "Task" })
+    class Task extends Ad4mModel {
+      @Property({ through: "task://completed" })
+      completed: boolean = false;
+    }
+
+    const query = Task.queryToSurrealQL(mockPerspective, { where: { completed: true } });
+    
+    expect(query).toContain("target = true");
+  });
+
+  it("should handle array of numbers", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { rating: [4, 5] } });
+    
+    expect(query).toContain("target IN [4, 5]");
+  });
+
+  it("should skip unknown properties in where clause", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { unknownProp: "value" } as any });
+    
+    // Should not throw error, just skip the unknown property
+    expect(query).toContain("WITH candidate_bases AS");
+    // Should not contain any condition for unknownProp
+    expect(query).not.toContain("unknownProp");
+  });
+
+  it("should skip unknown properties in select clause", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { properties: ["name", "unknownProp"] as any });
+    
+    // Should include name
+    expect(query).toContain("(SELECT target FROM link WHERE source = cb.base AND predicate = 'recipe://name' LIMIT 1) AS name");
+    // Should not error on unknownProp, just skip it
+    expect(query).not.toContain("unknownProp");
+  });
+
+  it("should handle order by regular property", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { order: { name: "ASC" } });
+    
+    expect(query).toContain("ORDER BY name ASC");
+  });
+
+  it("should generate query with only properties, no collections", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { properties: ["name", "rating"], collections: [] });
+    
+    expect(query).toContain("AS name");
+    expect(query).toContain("AS rating");
+    expect(query).not.toContain("AS ingredients");
+  });
+
+  it("should generate query with only collections, no properties", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { properties: [], collections: ["ingredients"] });
+    
+    expect(query).toContain("AS ingredients");
+    expect(query).not.toContain("AS name");
+    expect(query).not.toContain("AS rating");
+    // But should still include author and timestamp
+    expect(query).toContain("AS author");
+    expect(query).toContain("AS timestamp");
+  });
+});
+
