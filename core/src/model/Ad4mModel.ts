@@ -71,6 +71,60 @@ export type AllInstancesResult = { AllInstances: Ad4mModel[]; TotalCount?: numbe
 export type ResultsWithTotalCount<T> = { results: T[]; totalCount?: number };
 export type PaginationResult<T> = { results: T[]; totalCount?: number; pageSize: number; pageNumber: number };
 
+/**
+ * Metadata for a single property extracted from decorators.
+ */
+export interface PropertyMetadata {
+  /** The property name */
+  name: string;
+  /** The predicate URI (through value) */
+  predicate: string;
+  /** Whether the property is required */
+  required: boolean;
+  /** Whether the property is writable */
+  writable: boolean;
+  /** Initial value if specified */
+  initial?: string;
+  /** Language for resolution (e.g., "literal") */
+  resolveLanguage?: string;
+  /** Custom Prolog getter code */
+  getter?: string;
+  /** Custom Prolog setter code */
+  setter?: string;
+  /** Whether stored locally only */
+  local?: boolean;
+  /** Transform function */
+  transform?: (value: any) => any;
+  /** Whether this is a flag property */
+  flag?: boolean;
+}
+
+/**
+ * Metadata for a single collection extracted from decorators.
+ */
+export interface CollectionMetadata {
+  /** The collection name */
+  name: string;
+  /** The predicate URI (through value) */
+  predicate: string;
+  /** Filter conditions */
+  where?: { isInstance?: any; condition?: string };
+  /** Whether stored locally only */
+  local?: boolean;
+}
+
+/**
+ * Complete model metadata extracted from decorators.
+ */
+export interface ModelMetadata {
+  /** The model class name from @ModelOptions */
+  className: string;
+  /** Map of property name to metadata */
+  properties: Record<string, PropertyMetadata>;
+  /** Map of collection name to metadata */
+  collections: Record<string, CollectionMetadata>;
+}
+
 function capitalize(word: string): string {
   return word.charAt(0).toUpperCase() + word.slice(1);
 }
@@ -380,6 +434,94 @@ export class Ad4mModel {
     }
 
     return classCache[perspectiveID];
+  }
+
+  /**
+   * Extracts metadata from decorators for query building.
+   * 
+   * @description
+   * This method reads the metadata stored by decorators (@Property, @Collection, etc.)
+   * and returns it in a structured format that's easier to work with for query builders
+   * and other systems that need to introspect model structure.
+   * 
+   * The metadata includes:
+   * - Class name from @ModelOptions
+   * - Property metadata (predicates, types, constraints, etc.)
+   * - Collection metadata (predicates, filters, etc.)
+   * 
+   * @returns Structured metadata object containing className, properties, and collections
+   * @throws Error if the class doesn't have @ModelOptions decorator
+   * 
+   * @example
+   * ```typescript
+   * @ModelOptions({ name: "Recipe" })
+   * class Recipe extends Ad4mModel {
+   *   @Property({ through: "recipe://name", resolveLanguage: "literal" })
+   *   name: string = "";
+   *   
+   *   @Collection({ through: "recipe://ingredient" })
+   *   ingredients: string[] = [];
+   * }
+   * 
+   * const metadata = Recipe.getModelMetadata();
+   * console.log(metadata.className); // "Recipe"
+   * console.log(metadata.properties.name.predicate); // "recipe://name"
+   * console.log(metadata.collections.ingredients.predicate); // "recipe://ingredient"
+   * ```
+   */
+  protected static getModelMetadata(): ModelMetadata {
+    // Access the prototype with any type to access decorator-added properties
+    const prototype = this.prototype as any;
+    
+    // Validate that the class has @ModelOptions decorator
+    // The decorator sets prototype.className, so we check for its existence
+    if (!prototype.className || prototype.className === 'Ad4mModel') {
+      throw new Error("Model class must be decorated with @ModelOptions");
+    }
+    
+    // Extract className
+    const className = prototype.className;
+    
+    // Extract properties from prototype.__properties
+    const propertiesMetadata: Record<string, PropertyMetadata> = {};
+    const prototypeProperties = prototype.__properties || {};
+    
+    for (const [propertyName, opts] of Object.entries(prototypeProperties)) {
+      const options = opts as any;
+      propertiesMetadata[propertyName] = {
+        name: propertyName,
+        predicate: options.through || "",
+        required: options.required || false,
+        writable: options.writable || false,
+        ...(options.initial !== undefined && { initial: options.initial }),
+        ...(options.resolveLanguage !== undefined && { resolveLanguage: options.resolveLanguage }),
+        ...(options.getter !== undefined && { getter: options.getter }),
+        ...(options.setter !== undefined && { setter: options.setter }),
+        ...(options.local !== undefined && { local: options.local }),
+        ...(options.transform !== undefined && { transform: options.transform }),
+        ...(options.flag !== undefined && { flag: options.flag })
+      };
+    }
+    
+    // Extract collections from prototype.__collections
+    const collectionsMetadata: Record<string, CollectionMetadata> = {};
+    const prototypeCollections = prototype.__collections || {};
+    
+    for (const [collectionName, opts] of Object.entries(prototypeCollections)) {
+      const options = opts as any;
+      collectionsMetadata[collectionName] = {
+        name: collectionName,
+        predicate: options.through || "",
+        ...(options.where !== undefined && { where: options.where }),
+        ...(options.local !== undefined && { local: options.local })
+      };
+    }
+    
+    return {
+      className,
+      properties: propertiesMetadata,
+      collections: collectionsMetadata
+    };
   }
 
   /**
