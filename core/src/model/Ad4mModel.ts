@@ -469,7 +469,7 @@ export class Ad4mModel {
    * console.log(metadata.collections.ingredients.predicate); // "recipe://ingredient"
    * ```
    */
-  protected static getModelMetadata(): ModelMetadata {
+  public static getModelMetadata(): ModelMetadata {
     // Access the prototype with any type to access decorator-added properties
     const prototype = this.prototype as any;
     

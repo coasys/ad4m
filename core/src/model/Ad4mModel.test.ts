@@ -6,7 +6,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
     @ModelOptions({ name: "SimpleModel" })
     class SimpleModel extends Ad4mModel {}
 
-    const metadata = (SimpleModel as any).getModelMetadata();
+    const metadata = SimpleModel.getModelMetadata();
     
     expect(metadata.className).toBe("SimpleModel");
     expect(metadata.properties).toEqual({});
@@ -29,7 +29,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
       type: string = "";
     }
 
-    const metadata = (PropertyModel as any).getModelMetadata();
+    const metadata = PropertyModel.getModelMetadata();
     
     // Should have 4 properties
     expect(Object.keys(metadata.properties)).toHaveLength(4);
@@ -71,7 +71,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
       local: string[] = [];
     }
 
-    const metadata = (CollectionModel as any).getModelMetadata();
+    const metadata = CollectionModel.getModelMetadata();
     
     // Should have 3 collections
     expect(Object.keys(metadata.collections)).toHaveLength(3);
@@ -99,7 +99,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
       data: string = "";
     }
 
-    const metadata = (TransformModel as any).getModelMetadata();
+    const metadata = TransformModel.getModelMetadata();
     
     // Assert transform is a function
     expect(typeof metadata.properties.data.transform).toBe("function");
@@ -120,7 +120,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
       computed: number = 0;
     }
 
-    const metadata = (CustomModel as any).getModelMetadata();
+    const metadata = CustomModel.getModelMetadata();
     
     // Assert getter and setter contain the custom code
     expect(metadata.properties.computed.getter).toContain("triple(Base, 'test://value', V), Value is V * 2");
@@ -141,7 +141,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
       comments: string[] = [];
     }
 
-    const metadata = (Post as any).getModelMetadata();
+    const metadata = Post.getModelMetadata();
     
     // Assert isInstance is defined
     expect(metadata.collections.comments.where?.isInstance).toBeDefined();
@@ -151,7 +151,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
     class NoDecoratorModel extends Ad4mModel {}
 
     // Assert that calling getModelMetadata throws an error
-    expect(() => (NoDecoratorModel as any).getModelMetadata()).toThrow("Model class must be decorated with @ModelOptions");
+    expect(() => NoDecoratorModel.getModelMetadata()).toThrow("Model class must be decorated with @ModelOptions");
   });
 
   it("should handle complex model with mixed property and collection types", () => {
@@ -173,7 +173,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
       steps: string[] = [];
     }
 
-    const metadata = (Recipe as any).getModelMetadata();
+    const metadata = Recipe.getModelMetadata();
     
     // Assert className
     expect(metadata.className).toBe("Recipe");
