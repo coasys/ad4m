@@ -99,10 +99,16 @@ impl SurrealDBService {
         // Set namespace and database
         db.use_ns("ad4m").use_db("perspectives").await?;
 
-        // Define schema with indexes for fast queries
+        // Define schema with explicit fields and indexes for fast queries
         db.query(
             "
-            DEFINE TABLE IF NOT EXISTS link SCHEMALESS;
+            DEFINE TABLE IF NOT EXISTS link SCHEMAFULL;
+            DEFINE FIELD IF NOT EXISTS perspective ON link TYPE string;
+            DEFINE FIELD IF NOT EXISTS source ON link TYPE string;
+            DEFINE FIELD IF NOT EXISTS predicate ON link TYPE string;
+            DEFINE FIELD IF NOT EXISTS target ON link TYPE string;
+            DEFINE FIELD IF NOT EXISTS author ON link TYPE string;
+            DEFINE FIELD IF NOT EXISTS timestamp ON link TYPE string;
             DEFINE INDEX IF NOT EXISTS perspective_idx ON link FIELDS perspective;
             DEFINE INDEX IF NOT EXISTS source_idx ON link FIELDS source;
             DEFINE INDEX IF NOT EXISTS target_idx ON link FIELDS target;
