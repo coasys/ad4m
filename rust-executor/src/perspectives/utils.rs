@@ -771,4 +771,325 @@ mod tests {
             .unwrap()
             .contains("did:key:"));
     }
+
+    // Tests for dict(...) conversion functionality
+
+    #[test]
+    fn test_dict_simple() {
+        // Simple dict: dict([key1-value1, key2-value2])
+        let pair1 = Term::Compound(
+            "-".to_string(),
+            vec![
+                Term::String("name".to_string()),
+                Term::String("Alice".to_string()),
+            ],
+        );
+        let pair2 = Term::Compound(
+            "-".to_string(),
+            vec![Term::String("age".to_string()), Term::Integer(30.into())],
+        );
+
+        let dict_term = Term::Compound("dict".to_string(), vec![Term::List(vec![pair1, pair2])]);
+
+        let result = prolog_value_to_json_string(dict_term);
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("Valid JSON");
+
+        assert_eq!(parsed["name"], "Alice");
+        assert_eq!(parsed["age"], 30);
+        assert_eq!(parsed.as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_dict_nested_values() {
+        // Nested dict: dict([outer-dict([inner-value])])
+        let inner_pair = Term::Compound(
+            "-".to_string(),
+            vec![
+                Term::String("inner_key".to_string()),
+                Term::String("inner_value".to_string()),
+            ],
+        );
+
+        let inner_dict = Term::Compound("dict".to_string(), vec![Term::List(vec![inner_pair])]);
+
+        let outer_pair = Term::Compound(
+            "-".to_string(),
+            vec![Term::String("outer".to_string()), inner_dict],
+        );
+
+        let outer_dict = Term::Compound("dict".to_string(), vec![Term::List(vec![outer_pair])]);
+
+        let result = prolog_value_to_json_string(outer_dict);
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("Valid JSON");
+
+        assert_eq!(parsed["outer"]["inner_key"], "inner_value");
+    }
+
+    #[test]
+    fn test_dict_nested_multiple_levels() {
+        // More complex nesting: dict([level1-dict([level2-dict([level3-"deep"])])])
+        let level3_pair = Term::Compound(
+            "-".to_string(),
+            vec![
+                Term::String("level3".to_string()),
+                Term::String("deep".to_string()),
+            ],
+        );
+
+        let level2_dict = Term::Compound("dict".to_string(), vec![Term::List(vec![level3_pair])]);
+
+        let level2_pair = Term::Compound(
+            "-".to_string(),
+            vec![Term::String("level2".to_string()), level2_dict],
+        );
+
+        let level1_dict = Term::Compound("dict".to_string(), vec![Term::List(vec![level2_pair])]);
+
+        let level1_pair = Term::Compound(
+            "-".to_string(),
+            vec![Term::String("level1".to_string()), level1_dict],
+        );
+
+        let root_dict = Term::Compound("dict".to_string(), vec![Term::List(vec![level1_pair])]);
+
+        let result = prolog_value_to_json_string(root_dict);
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("Valid JSON");
+
+        assert_eq!(parsed["level1"]["level2"]["level3"], "deep");
+    }
+
+    #[test]
+    fn test_dict_empty() {
+        // Empty dict: dict([])
+        let dict_term = Term::Compound("dict".to_string(), vec![Term::List(vec![])]);
+
+        let result = prolog_value_to_json_string(dict_term);
+        assert_eq!(result, "{}");
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("Valid JSON");
+        assert!(parsed.is_object());
+        assert_eq!(parsed.as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_dict_invalid_structure_no_list() {
+        // Invalid: dict(invalid_structure) - not a list
+        let dict_term = Term::Compound(
+            "dict".to_string(),
+            vec![Term::String("not_a_list".to_string())],
+        );
+
+        let result = prolog_value_to_json_string(dict_term);
+        // Should fallback to empty object
+        assert_eq!(result, "{}");
+    }
+
+    #[test]
+    fn test_dict_invalid_structure_too_many_args() {
+        // Invalid: dict(arg1, arg2) - too many arguments
+        let dict_term = Term::Compound(
+            "dict".to_string(),
+            vec![Term::List(vec![]), Term::String("extra_arg".to_string())],
+        );
+
+        let result = prolog_value_to_json_string(dict_term);
+        // Should fallback to empty object
+        assert_eq!(result, "{}");
+    }
+
+    #[test]
+    fn test_dict_invalid_structure_no_args() {
+        // Invalid: dict() - no arguments
+        let dict_term = Term::Compound("dict".to_string(), vec![]);
+
+        let result = prolog_value_to_json_string(dict_term);
+        // Should fallback to empty object
+        assert_eq!(result, "{}");
+    }
+
+    #[test]
+    fn test_dict_invalid_pair_not_compound() {
+        // Invalid pair: dict([not_a_pair]) - element is not a compound
+        let dict_term = Term::Compound(
+            "dict".to_string(),
+            vec![Term::List(vec![Term::String("not_a_pair".to_string())])],
+        );
+
+        let result = prolog_value_to_json_string(dict_term);
+        // Should return empty object since no valid pairs
+        assert_eq!(result, "{}");
+    }
+
+    #[test]
+    fn test_dict_invalid_pair_wrong_functor() {
+        // Invalid pair: dict([wrong_functor(a, b)]) - functor is not "-"
+        let invalid_pair = Term::Compound(
+            "wrong".to_string(),
+            vec![
+                Term::String("key".to_string()),
+                Term::String("value".to_string()),
+            ],
+        );
+
+        let dict_term = Term::Compound("dict".to_string(), vec![Term::List(vec![invalid_pair])]);
+
+        let result = prolog_value_to_json_string(dict_term);
+        // Should return empty object since no valid pairs
+        assert_eq!(result, "{}");
+    }
+
+    #[test]
+    fn test_dict_invalid_pair_wrong_arity() {
+        // Invalid pair: dict([-(key)]) - pair doesn't have 2 args
+        let invalid_pair = Term::Compound("-".to_string(), vec![Term::String("key".to_string())]);
+
+        let dict_term = Term::Compound("dict".to_string(), vec![Term::List(vec![invalid_pair])]);
+
+        let result = prolog_value_to_json_string(dict_term);
+        // Should return empty object since no valid pairs
+        assert_eq!(result, "{}");
+    }
+
+    #[test]
+    fn test_dict_invalid_key_type() {
+        // Invalid key: dict([123-value]) - key is not a string/atom
+        let invalid_pair = Term::Compound(
+            "-".to_string(),
+            vec![Term::Integer(123.into()), Term::String("value".to_string())],
+        );
+
+        let dict_term = Term::Compound("dict".to_string(), vec![Term::List(vec![invalid_pair])]);
+
+        let result = prolog_value_to_json_string(dict_term);
+        // Should return empty object since key extraction fails
+        assert_eq!(result, "{}");
+    }
+
+    #[test]
+    fn test_dict_duplicate_keys_last_wins() {
+        // Duplicate keys: dict([key-"first", key-"second"]) - last value should win
+        let pair1 = Term::Compound(
+            "-".to_string(),
+            vec![
+                Term::String("key".to_string()),
+                Term::String("first".to_string()),
+            ],
+        );
+        let pair2 = Term::Compound(
+            "-".to_string(),
+            vec![
+                Term::String("key".to_string()),
+                Term::String("second".to_string()),
+            ],
+        );
+
+        let dict_term = Term::Compound("dict".to_string(), vec![Term::List(vec![pair1, pair2])]);
+
+        let result = prolog_value_to_json_string(dict_term);
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("Valid JSON");
+
+        // Last value should win
+        assert_eq!(parsed["key"], "second");
+        assert_eq!(parsed.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_dict_mixed_value_types() {
+        // Dict with various value types
+        let pair1 = Term::Compound(
+            "-".to_string(),
+            vec![
+                Term::String("string".to_string()),
+                Term::String("value".to_string()),
+            ],
+        );
+        let pair2 = Term::Compound(
+            "-".to_string(),
+            vec![
+                Term::String("integer".to_string()),
+                Term::Integer(42.into()),
+            ],
+        );
+        let pair3 = Term::Compound(
+            "-".to_string(),
+            vec![Term::String("float".to_string()), Term::Float(3.14)],
+        );
+        let pair4 = Term::Compound(
+            "-".to_string(),
+            vec![
+                Term::String("boolean".to_string()),
+                Term::Atom("true".to_string()),
+            ],
+        );
+        let pair5 = Term::Compound(
+            "-".to_string(),
+            vec![
+                Term::String("array".to_string()),
+                Term::List(vec![
+                    Term::Integer(1.into()),
+                    Term::Integer(2.into()),
+                    Term::Integer(3.into()),
+                ]),
+            ],
+        );
+
+        let dict_term = Term::Compound(
+            "dict".to_string(),
+            vec![Term::List(vec![pair1, pair2, pair3, pair4, pair5])],
+        );
+
+        let result = prolog_value_to_json_string(dict_term);
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("Valid JSON");
+
+        assert_eq!(parsed["string"], "value");
+        assert_eq!(parsed["integer"], 42);
+        assert_eq!(parsed["float"], 3.14);
+        assert_eq!(parsed["boolean"], true);
+        assert_eq!(parsed["array"], serde_json::json!([1, 2, 3]));
+        assert_eq!(parsed.as_object().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn test_dict_mixed_valid_and_invalid_pairs() {
+        // Dict with mix of valid and invalid pairs - valid ones should be included
+        let valid_pair = Term::Compound(
+            "-".to_string(),
+            vec![
+                Term::String("valid".to_string()),
+                Term::String("value".to_string()),
+            ],
+        );
+        let invalid_pair = Term::String("not_a_pair".to_string());
+
+        let dict_term = Term::Compound(
+            "dict".to_string(),
+            vec![Term::List(vec![valid_pair, invalid_pair])],
+        );
+
+        let result = prolog_value_to_json_string(dict_term);
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("Valid JSON");
+
+        // Should only contain the valid pair
+        assert_eq!(parsed["valid"], "value");
+        assert_eq!(parsed.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_dict_with_atom_keys() {
+        // Test dict with atom keys (not string keys)
+        let pair = Term::Compound(
+            "-".to_string(),
+            vec![
+                Term::Atom("atom_key".to_string()),
+                Term::String("value".to_string()),
+            ],
+        );
+
+        let dict_term = Term::Compound("dict".to_string(), vec![Term::List(vec![pair])]);
+
+        let result = prolog_value_to_json_string(dict_term);
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("Valid JSON");
+
+        assert_eq!(parsed["atom_key"], "value");
+    }
 }
