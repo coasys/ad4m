@@ -665,7 +665,46 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   it("should handle base special field", () => {
     const query = Recipe.queryToSurrealQL(mockPerspective, { where: { base: "literal://test" } });
     
-    expect(query).toContain("WHERE base = 'literal://test'");
+    expect(query).toContain("WHERE source = 'literal://test'");
+  });
+
+  it("should handle base special field with array (IN clause)", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { base: ["literal://test1", "literal://test2"] } });
+    
+    expect(query).toContain("WHERE source IN ['literal://test1', 'literal://test2']");
+  });
+
+  it("should handle base special field with not operator", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { base: { not: "literal://test" } } });
+    
+    expect(query).toContain("WHERE source != 'literal://test'");
+  });
+
+  it("should handle base special field with not operator and array (NOT IN)", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { base: { not: ["literal://test1", "literal://test2"] } } });
+    
+    expect(query).toContain("WHERE source NOT IN ['literal://test1', 'literal://test2']");
+  });
+
+  it("should handle base special field with between operator", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { base: { between: ["literal://a", "literal://z"] } } } as any);
+    
+    const normalized = normalizeQuery(query);
+    expect(normalized).toContain("WHERE source >= 'literal://a' AND source <= 'literal://z'");
+  });
+
+  it("should handle base special field with gt operator", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { base: { gt: "literal://m" } } } as any);
+    
+    expect(query).toContain("WHERE source > 'literal://m'");
+  });
+
+  it("should handle base special field with gte and lte operators", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { base: { gte: "literal://a", lte: "literal://z" } } } as any);
+    
+    const normalized = normalizeQuery(query);
+    expect(normalized).toContain("source >= 'literal://a'");
+    expect(normalized).toContain("source <= 'literal://z'");
   });
 
   it("should handle timestamp special field with gt operator", () => {

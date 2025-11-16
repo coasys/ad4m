@@ -815,45 +815,54 @@ ${offsetClause}
     
     const conditions: string[] = [];
     
+    // Helper to map property name to actual column name for special fields
+    const getColumnName = (propertyName: string): string => {
+      if (propertyName === 'base') return 'source'; // base is an alias, use underlying column
+      return propertyName; // author and timestamp are actual column names
+    };
+    
     for (const [propertyName, condition] of Object.entries(where)) {
       // Check if this is a special field (base, author, timestamp)
       const isSpecial = ['base', 'author', 'timestamp'].includes(propertyName);
       
       if (isSpecial) {
+        // Get the actual column name (maps base -> source, leaves others unchanged)
+        const columnName = getColumnName(propertyName);
+        
         // Handle special fields directly
         if (Array.isArray(condition)) {
           // Array values (IN clause)
           const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
-          conditions.push(`${propertyName} IN [${formattedValues}]`);
+          conditions.push(`${columnName} IN [${formattedValues}]`);
         } else if (typeof condition === 'object' && condition !== null) {
           // Operator object
           const ops = condition as any;
           if (ops.not !== undefined) {
             if (Array.isArray(ops.not)) {
               const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
-              conditions.push(`${propertyName} NOT IN [${formattedValues}]`);
+              conditions.push(`${columnName} NOT IN [${formattedValues}]`);
             } else {
-              conditions.push(`${propertyName} != ${this.formatSurrealValue(ops.not)}`);
+              conditions.push(`${columnName} != ${this.formatSurrealValue(ops.not)}`);
             }
           }
           if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
-            conditions.push(`${propertyName} >= ${this.formatSurrealValue(ops.between[0])} AND ${propertyName} <= ${this.formatSurrealValue(ops.between[1])}`);
+            conditions.push(`${columnName} >= ${this.formatSurrealValue(ops.between[0])} AND ${columnName} <= ${this.formatSurrealValue(ops.between[1])}`);
           }
           if (ops.gt !== undefined) {
-            conditions.push(`${propertyName} > ${this.formatSurrealValue(ops.gt)}`);
+            conditions.push(`${columnName} > ${this.formatSurrealValue(ops.gt)}`);
           }
           if (ops.gte !== undefined) {
-            conditions.push(`${propertyName} >= ${this.formatSurrealValue(ops.gte)}`);
+            conditions.push(`${columnName} >= ${this.formatSurrealValue(ops.gte)}`);
           }
           if (ops.lt !== undefined) {
-            conditions.push(`${propertyName} < ${this.formatSurrealValue(ops.lt)}`);
+            conditions.push(`${columnName} < ${this.formatSurrealValue(ops.lt)}`);
           }
           if (ops.lte !== undefined) {
-            conditions.push(`${propertyName} <= ${this.formatSurrealValue(ops.lte)}`);
+            conditions.push(`${columnName} <= ${this.formatSurrealValue(ops.lte)}`);
           }
         } else {
           // Simple equality
-          conditions.push(`${propertyName} = ${this.formatSurrealValue(condition)}`);
+          conditions.push(`${columnName} = ${this.formatSurrealValue(condition)}`);
         }
       } else {
         // Handle regular properties via subqueries
