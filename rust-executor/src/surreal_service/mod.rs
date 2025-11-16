@@ -237,8 +237,37 @@ impl SurrealDBService {
 
         // Batch insert all links in a transaction
         if !links.is_empty() {
-            for link in links {
-                self.add_link(perspective_uuid, &link).await?;
+            // Build a batch query with all CREATE statements
+            // SurrealDB executes all statements in a single query atomically
+            let mut query_builder = self.db.query("");
+            
+            // Add each link as a CREATE statement in the batch
+            for (idx, link) in links.iter().enumerate() {
+                let record = LinkRecord {
+                    perspective: perspective_uuid.to_string(),
+                    source: link.data.source.clone(),
+                    predicate: link.data.predicate.clone().unwrap_or_default(),
+                    target: link.data.target.clone(),
+                    author: link.author.clone(),
+                    timestamp: link.timestamp.clone(),
+                };
+                
+                // Add CREATE statement with bound parameters for this link
+                // Use unique parameter name for each record to avoid conflicts
+                let param_name = format!("record{}", idx);
+                query_builder = query_builder
+                    .query(format!("CREATE link CONTENT ${};", param_name))
+                    .bind((param_name, record));
+            }
+            
+            // Execute the batch query
+            let mut response = query_builder.await?;
+            
+            // Check results - verify each CREATE operation succeeded
+            for idx in 0..links.len() {
+                let _: Option<LinkRecord> = response.take(idx).map_err(|e| {
+                    Error::msg(format!("Failed to insert link {}: {}", idx, e))
+                })?;
             }
         }
 
