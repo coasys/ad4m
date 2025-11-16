@@ -6,9 +6,75 @@ use serde_json::Value;
 use std::sync::Arc;
 use surrealdb::{
     engine::local::{Db, Mem},
+    Value as SurrealValue,
     Surreal,
 };
 use tokio::sync::RwLock;
+
+/// Helper function to unwrap SurrealDB's enum-wrapped JSON structure
+/// SurrealDB values serialize with variant names as keys (e.g., {"Strand": "value"})
+/// This function recursively unwraps these to get clean JSON
+fn unwrap_surreal_json(value: Value) -> Value {
+    match value {
+        Value::Object(mut obj) => {
+            // Check if this is a single-key enum wrapper
+            if obj.len() == 1 {
+                // Get the single key to check if it's a known enum variant
+                let key = obj.keys().next().unwrap().clone();
+                
+                match key.as_str() {
+                    // Array wrapper - recursively unwrap contents
+                    "Array" => {
+                        if let Some(Value::Array(arr)) = obj.remove(&key) {
+                            return Value::Array(arr.into_iter().map(unwrap_surreal_json).collect());
+                        }
+                    }
+                    // Object wrapper - recursively unwrap all fields
+                    "Object" => {
+                        if let Some(Value::Object(inner)) = obj.remove(&key) {
+                            let unwrapped: serde_json::Map<_, _> = inner
+                                .into_iter()
+                                .map(|(k, v)| (k, unwrap_surreal_json(v)))
+                                .collect();
+                            return Value::Object(unwrapped);
+                        }
+                    }
+                    // Simple value wrappers - extract the inner value
+                    "Strand" | "String" | "Number" | "Bool" => {
+                        if let Some(val) = obj.remove(&key) {
+                            return val;
+                        }
+                    }
+                    // Thing (record ID) - convert to string representation
+                    "Thing" => {
+                        if let Some(Value::Object(thing_obj)) = obj.remove(&key) {
+                            // Format as "table:id"
+                            let tb = thing_obj.get("tb").and_then(|v| v.as_str()).unwrap_or("");
+                            let id = thing_obj.get("id")
+                                .and_then(|v| unwrap_surreal_json(v.clone()).as_str().map(String::from))
+                                .unwrap_or_default();
+                            return Value::String(format!("{}:{}", tb, id));
+                        }
+                    }
+                    // Unknown single-key object - recursively unwrap the value
+                    _ => {
+                        if let Some(val) = obj.remove(&key) {
+                            return Value::Object([(key, unwrap_surreal_json(val))].into_iter().collect());
+                        }
+                    }
+                }
+            }
+            
+            // Multi-key object - recursively unwrap all values
+            Value::Object(obj.into_iter().map(|(k, v)| (k, unwrap_surreal_json(v))).collect())
+        }
+        Value::Array(arr) => {
+            Value::Array(arr.into_iter().map(unwrap_surreal_json).collect())
+        }
+        // Primitive values - return as is
+        other => other,
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct LinkRecord {
@@ -121,16 +187,27 @@ impl SurrealDBService {
 
         let mut response = query_obj.await?;
 
-        // Try to take the results - SurrealDB returns results in the first position
-        let results: Vec<LinkRecord> = response.take(0).unwrap_or_default();
-
-        // Convert to JSON values
-        let json_results: Vec<Value> = results
-            .into_iter()
-            .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
-            .collect();
-
-        Ok(json_results)
+        // Take the results as a single SurrealDB Value
+        // This will contain the query results in SurrealDB's native format
+        let result: SurrealValue = response.take(0)?;
+        
+        // Convert the SurrealDB value to JSON using round-trip serialization
+        // This serializes with enum variant names as keys (e.g., {"Array": [...]})
+        let json_string = serde_json::to_string(&result)?;
+        let json_value: Value = serde_json::from_str(&json_string)?;
+        
+        // Unwrap the SurrealDB enum structure to get clean JSON
+        let unwrapped = unwrap_surreal_json(json_value);
+        
+        // Extract array from the unwrapped result, propagating error if not an array
+        match unwrapped {
+            Value::Array(arr) => Ok(arr),
+            Value::Null => Ok(vec![]),
+            other => Err(Error::msg(format!(
+                "Query result is not an array after unwrapping: {:?}",
+                other
+            ))),
+        }
     }
 
     pub async fn clear_perspective(&self, perspective_uuid: &str) -> Result<(), Error> {
