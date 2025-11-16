@@ -51,6 +51,7 @@ type WhereOps = {
   lte: number; // less than or equal to
   gt: number; // greater than
   gte: number; // greater than or equal to
+  contains: string | number; // substring/element check
 };
 type WhereCondition = string | number | boolean | string[] | number[] | { [K in keyof WhereOps]?: WhereOps[K] };
 type Where = { [propertyName: string]: WhereCondition };
@@ -800,6 +801,7 @@ ${offsetClause}
    *   - gt, gte, lt, lte: comparison operators
    *   - not: negation (single value or array)
    *   - between: range check
+   *   - contains: substring/element check (uses SurrealQL CONTAINS)
    * - Special fields: base, author, timestamp are accessed directly, not via subqueries
    * 
    * All conditions are joined with AND.
@@ -860,6 +862,9 @@ ${offsetClause}
           if (ops.lte !== undefined) {
             conditions.push(`${columnName} <= ${this.formatSurrealValue(ops.lte)}`);
           }
+          if (ops.contains !== undefined) {
+            conditions.push(`${columnName} CONTAINS ${this.formatSurrealValue(ops.contains)}`);
+          }
         } else {
           // Simple equality
           conditions.push(`${columnName} = ${this.formatSurrealValue(condition)}`);
@@ -900,6 +905,9 @@ ${offsetClause}
           }
           if (ops.lte !== undefined) {
             conditions.push(`source IN (SELECT source FROM link WHERE predicate = '${predicate}' AND target <= ${this.formatSurrealValue(ops.lte)})`);
+          }
+          if (ops.contains !== undefined) {
+            conditions.push(`source IN (SELECT source FROM link WHERE predicate = '${predicate}' AND target CONTAINS ${this.formatSurrealValue(ops.contains)})`);
           }
         } else {
           // Simple equality

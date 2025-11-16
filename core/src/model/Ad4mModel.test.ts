@@ -528,6 +528,32 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     expect(normalized).toContain("target <= 5");
   });
 
+  it("should handle contains operator on string property", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { name: { contains: "Past" } } });
+    
+    expect(query).toContain("target CONTAINS 'Past'");
+  });
+
+  it("should handle contains operator on regular property with substring", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { name: { contains: "Salad" } } });
+    
+    expect(query).toContain("source IN (SELECT source FROM link WHERE predicate = 'recipe://name' AND target CONTAINS 'Salad')");
+  });
+
+  it("should handle contains operator on special field (author)", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { author: { contains: "alice" } } });
+    
+    expect(query).toContain("WHERE author CONTAINS 'alice'");
+    // Should not use a subquery pattern
+    expect(query).not.toContain("SELECT source FROM link");
+  });
+
+  it("should handle contains operator on special field (base)", () => {
+    const query = Recipe.queryToSurrealQL(mockPerspective, { where: { base: { contains: "test" } } });
+    
+    expect(query).toContain("WHERE source CONTAINS 'test'");
+  });
+
   it("should handle array values (IN clause)", () => {
     const query = Recipe.queryToSurrealQL(mockPerspective, { where: { name: ["Pasta", "Pizza"] } });
     
