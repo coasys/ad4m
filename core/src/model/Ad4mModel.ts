@@ -492,7 +492,7 @@ export class Ad4mModel {
     const prototypeProperties = prototype.__properties || {};
     
     for (const [propertyName, opts] of Object.entries(prototypeProperties)) {
-      const options = opts as any;
+      const options = opts as PropertyOptions & { required?: boolean; flag?: boolean };
       propertiesMetadata[propertyName] = {
         name: propertyName,
         predicate: options.through || "",
@@ -513,7 +513,7 @@ export class Ad4mModel {
     const prototypeCollections = prototype.__collections || {};
     
     for (const [collectionName, opts] of Object.entries(prototypeCollections)) {
-      const options = opts as any;
+      const options = opts as CollectionOptions;
       collectionsMetadata[collectionName] = {
         name: collectionName,
         predicate: options.through || "",
