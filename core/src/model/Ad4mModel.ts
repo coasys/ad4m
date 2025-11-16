@@ -970,26 +970,6 @@ ${offsetClause}
     return fields.join(',\n  ');
   }
 
-  /**
-   * Maps operator names to SQL operators.
-   * 
-   * @param op - Operator name (gt, gte, lt, lte, not, etc.)
-   * @returns SQL operator symbol
-   * 
-   * @private
-   */
-  private static operatorToSQL(op: string): string {
-    const mapping: Record<string, string> = {
-      'gt': '>',
-      'gte': '>=',
-      'lt': '<',
-      'lte': '<=',
-      'ne': '!=',
-      'not': '!=',
-      'contains': 'CONTAINS'
-    };
-    return mapping[op] || '=';
-  }
 
   /**
    * Formats a value for use in SurrealQL queries.
