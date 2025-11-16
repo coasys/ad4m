@@ -201,3 +201,239 @@ describe("Ad4mModel.getModelMetadata()", () => {
   });
 });
 
+describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
+  it("should extract metadata from a model created via fromJSONSchema with basic properties", () => {
+    const schema = {
+      title: "Product",
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        price: { type: "number" },
+        description: { type: "string" }
+      },
+      required: ["name", "price"]
+    };
+
+    const ProductClass = Ad4mModel.fromJSONSchema(schema, {
+      name: "Product",
+      namespace: "product://",
+      resolveLanguage: "literal"
+    });
+
+    const metadata = ProductClass.getModelMetadata();
+
+    // Verify className
+    expect(metadata.className).toBe("Product");
+
+    // Verify properties are extracted
+    expect(Object.keys(metadata.properties).length).toBeGreaterThan(0);
+    expect(metadata.properties.name).toBeDefined();
+    expect(metadata.properties.name.predicate).toBe("product://name");
+    expect(metadata.properties.name.required).toBe(true);
+    expect(metadata.properties.name.writable).toBe(true);
+    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+
+    expect(metadata.properties.price).toBeDefined();
+    expect(metadata.properties.price.predicate).toBe("product://price");
+    expect(metadata.properties.price.required).toBe(true);
+    expect(metadata.properties.price.resolveLanguage).toBe("literal");
+
+    expect(metadata.properties.description).toBeDefined();
+    expect(metadata.properties.description.predicate).toBe("product://description");
+    expect(metadata.properties.description.required).toBe(false);
+  });
+
+  it("should extract collections from a model created via fromJSONSchema with arrays", () => {
+    const schema = {
+      title: "Post",
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        tags: {
+          type: "array",
+          items: { type: "string" }
+        },
+        comments: {
+          type: "array",
+          items: { type: "string" }
+        }
+      },
+      required: ["title"]
+    };
+
+    const PostClass = Ad4mModel.fromJSONSchema(schema, {
+      name: "Post",
+      namespace: "post://"
+    });
+
+    const metadata = PostClass.getModelMetadata();
+
+    // Verify className
+    expect(metadata.className).toBe("Post");
+
+    // Verify collections are extracted
+    expect(Object.keys(metadata.collections).length).toBeGreaterThan(0);
+    expect(metadata.collections.tags).toBeDefined();
+    expect(metadata.collections.tags.predicate).toBe("post://tags");
+
+    expect(metadata.collections.comments).toBeDefined();
+    expect(metadata.collections.comments.predicate).toBe("post://comments");
+
+    // Verify properties (should include at least title)
+    expect(metadata.properties.title).toBeDefined();
+    expect(metadata.properties.title.predicate).toBe("post://title");
+    expect(metadata.properties.title.required).toBe(true);
+  });
+
+  it("should handle x-ad4m metadata in JSON schema for property options", () => {
+    const schema = {
+      title: "Contact",
+      "x-ad4m": {
+        namespace: "contact://"
+      },
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          "x-ad4m": {
+            through: "foaf://name",
+            resolveLanguage: "literal",
+            writable: true
+          }
+        },
+        email: {
+          type: "string",
+          "x-ad4m": {
+            through: "foaf://mbox",
+            local: true
+          }
+        }
+      },
+      required: ["name"]
+    };
+
+    const ContactClass = Ad4mModel.fromJSONSchema(schema, {
+      name: "Contact"
+    });
+
+    const metadata = ContactClass.getModelMetadata();
+
+    // Verify x-ad4m metadata is respected
+    expect(metadata.properties.name.predicate).toBe("foaf://name");
+    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    expect(metadata.properties.name.writable).toBe(true);
+    expect(metadata.properties.name.required).toBe(true);
+
+    expect(metadata.properties.email.predicate).toBe("foaf://mbox");
+    expect(metadata.properties.email.local).toBe(true);
+  });
+
+  it("should handle property mapping override in options", () => {
+    const schema = {
+      title: "User",
+      type: "object",
+      properties: {
+        username: { type: "string" },
+        fullName: { type: "string" }
+      },
+      required: ["username"]
+    };
+
+    const UserClass = Ad4mModel.fromJSONSchema(schema, {
+      name: "User",
+      namespace: "user://",
+      propertyMapping: {
+        username: "custom://identifier",
+        fullName: "custom://name"
+      }
+    });
+
+    const metadata = UserClass.getModelMetadata();
+
+    // Verify property mappings are applied
+    expect(metadata.properties.username.predicate).toBe("custom://identifier");
+    expect(metadata.properties.fullName.predicate).toBe("custom://name");
+  });
+
+  it("should extract metadata from dynamically generated models with mixed types", () => {
+    const schema = {
+      title: "Article",
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        views: { type: "number" },
+        published: { type: "boolean" },
+        authors: {
+          type: "array",
+          items: { type: "string" }
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          "x-ad4m": {
+            local: true
+          }
+        }
+      },
+      required: ["title", "published"]
+    };
+
+    const ArticleClass = Ad4mModel.fromJSONSchema(schema, {
+      name: "Article",
+      namespace: "article://",
+      resolveLanguage: "literal"
+    });
+
+    const metadata = ArticleClass.getModelMetadata();
+
+    // Verify className
+    expect(metadata.className).toBe("Article");
+
+    // Verify properties
+    expect(metadata.properties.title).toBeDefined();
+    expect(metadata.properties.title.predicate).toBe("article://title");
+    expect(metadata.properties.title.required).toBe(true);
+    expect(metadata.properties.title.resolveLanguage).toBe("literal");
+
+    expect(metadata.properties.views).toBeDefined();
+    expect(metadata.properties.views.predicate).toBe("article://views");
+    expect(metadata.properties.views.resolveLanguage).toBe("literal");
+
+    expect(metadata.properties.published).toBeDefined();
+    expect(metadata.properties.published.predicate).toBe("article://published");
+    expect(metadata.properties.published.required).toBe(true);
+
+    // Verify collections
+    expect(metadata.collections.authors).toBeDefined();
+    expect(metadata.collections.authors.predicate).toBe("article://authors");
+
+    expect(metadata.collections.tags).toBeDefined();
+    expect(metadata.collections.tags.predicate).toBe("article://tags");
+    expect(metadata.collections.tags.local).toBe(true);
+  });
+
+  it("should handle models with only an auto-generated type flag", () => {
+    const schema = {
+      title: "EmptyModel",
+      type: "object",
+      properties: {}
+    };
+
+    const EmptyModelClass = Ad4mModel.fromJSONSchema(schema, {
+      name: "EmptyModel",
+      namespace: "empty://"
+    });
+
+    const metadata = EmptyModelClass.getModelMetadata();
+
+    // Should have className
+    expect(metadata.className).toBe("EmptyModel");
+
+    // Should have the auto-generated __ad4m_type property
+    expect(metadata.properties.__ad4m_type).toBeDefined();
+    expect(metadata.properties.__ad4m_type.predicate).toBe("ad4m://type");
+    expect(metadata.properties.__ad4m_type.initial).toBe("empty://instance");
+    expect(metadata.properties.__ad4m_type.flag).toBe(true);
+  });
+});
+

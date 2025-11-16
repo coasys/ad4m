@@ -449,6 +449,11 @@ export class Ad4mModel {
    * - Property metadata (predicates, types, constraints, etc.)
    * - Collection metadata (predicates, filters, etc.)
    * 
+   * For models created via `fromJSONSchema()`, this method will derive metadata from
+   * the stored `__properties` and `__collections` structures that were populated during
+   * the dynamic class creation. If these structures are empty but a JSON schema was
+   * attached to the class, it can fall back to deriving metadata from that schema.
+   * 
    * @returns Structured metadata object containing className, properties, and collections
    * @throws Error if the class doesn't have @ModelOptions decorator
    * 
@@ -515,6 +520,50 @@ export class Ad4mModel {
         ...(options.where !== undefined && { where: options.where }),
         ...(options.local !== undefined && { local: options.local })
       };
+    }
+    
+    // Fallback: If both structures are empty but a JSON schema is attached, derive from it
+    // This handles edge cases where fromJSONSchema() was called but metadata wasn't properly populated
+    const hasProperties = Object.keys(propertiesMetadata).length > 0;
+    const hasCollections = Object.keys(collectionsMetadata).length > 0;
+    const hasMetadata = hasProperties || hasCollections;
+    
+    if (!hasMetadata && prototype.__jsonSchema) {
+      // Derive metadata from the attached JSON schema
+      const schema = prototype.__jsonSchema;
+      const options = prototype.__jsonSchemaOptions || {};
+      
+      if (schema.properties) {
+        for (const [propertyName, propertySchema] of Object.entries(schema.properties)) {
+          const isArray = isArrayType(propertySchema as JSONSchemaProperty);
+          const predicate = this.determinePredicate(
+            schema, 
+            propertyName, 
+            propertySchema as JSONSchemaProperty, 
+            this.determineNamespace(schema, options),
+            options
+          );
+          
+          if (isArray) {
+            collectionsMetadata[propertyName] = {
+              name: propertyName,
+              predicate: predicate,
+              ...(propertySchema["x-ad4m"]?.local !== undefined && { local: propertySchema["x-ad4m"].local })
+            };
+          } else {
+            const isRequired = schema.required?.includes(propertyName) || false;
+            propertiesMetadata[propertyName] = {
+              name: propertyName,
+              predicate: predicate,
+              required: isRequired,
+              writable: propertySchema["x-ad4m"]?.writable !== false,
+              ...(propertySchema["x-ad4m"]?.resolveLanguage && { resolveLanguage: propertySchema["x-ad4m"].resolveLanguage }),
+              ...(propertySchema["x-ad4m"]?.initial && { initial: propertySchema["x-ad4m"].initial }),
+              ...(propertySchema["x-ad4m"]?.local !== undefined && { local: propertySchema["x-ad4m"].local })
+            };
+          }
+        }
+      }
     }
     
     return {
@@ -1333,6 +1382,10 @@ export class Ad4mModel {
     // Attach metadata to prototype
     (DynamicModelClass.prototype as any).__properties = properties;
     (DynamicModelClass.prototype as any).__collections = collections;
+    
+    // Store the JSON schema and options on the prototype for potential fallback use by getModelMetadata()
+    (DynamicModelClass.prototype as any).__jsonSchema = schema;
+    (DynamicModelClass.prototype as any).__jsonSchemaOptions = options;
     
     // Apply the ModelOptions decorator to set up the generateSDNA method
     const ModelOptionsDecorator = ModelOptions({ name: options.name });
