@@ -452,6 +452,28 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Executes a SurrealQL query against the perspective's link cache.
+     * This allows powerful SQL-like queries on the link data stored in SurrealDB.
+     * 
+     * @param query - SurrealQL query string
+     * @returns Query results as parsed JSON
+     * 
+     * @example
+     * ```typescript
+     * // Get all links
+     * const links = await perspective.querySurrealDB('SELECT * FROM links');
+     * 
+     * // Filter links by predicate
+     * const follows = await perspective.querySurrealDB(
+     *   "SELECT * FROM links WHERE predicate = 'follows'"
+     * );
+     * ```
+     */
+    async querySurrealDB(query: string): Promise<any> {
+        return await this.#client.querySurrealDB(this.#handle.uuid, query)
+    }
+
+    /**
      * Adds a new link to the perspective.
      * 
      * @param link - The link to add
