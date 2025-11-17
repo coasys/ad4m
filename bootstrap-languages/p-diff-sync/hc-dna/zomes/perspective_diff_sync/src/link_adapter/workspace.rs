@@ -663,15 +663,12 @@ impl Workspace {
         debug!("===Workspace.get_snapshot(): Function start");
         let fn_start = get_now()?.time();
 
-        let input = GetLinksInputBuilder::try_new(
+        let query = LinkQuery::try_new(
             hash_entry(address)?,
             LinkTypes::Snapshot
-        )
-        .unwrap()
-        .tag_prefix(LinkTag::new("snapshot"))
-        .get_options(GetStrategy::Network)
-        .build();
-        let mut snapshot_links = get_links(input)?;
+        )?
+        .tag_prefix(LinkTag::new("snapshot"));
+        let mut snapshot_links = get_links(query, GetStrategy::Network)?;
 
         if snapshot_links.len() > 0 {
             let snapshot = get(

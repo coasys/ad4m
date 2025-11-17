@@ -13,8 +13,12 @@ name = "integrity"
 derive_more = "0"
 serde = "1"
 chrono = { version = "0.4.38", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
+getrandom = { version = "0.3" }
 
-hdi = { version = "0.6.2", git = "https://github.com/coasys/holochain.git", branch = "0.5.2-coasys" }
-hdk = { version = "0.5.2", git = "https://github.com/coasys/holochain.git", branch = "0.5.2-coasys" }
-holochain_serialized_bytes = { version = "=0.0.56", git = "https://github.com/holochain/holochain-serialization"}
-holo_hash =  { version = "0.5.2", git = "https://github.com/coasys/holochain.git", branch = "0.5.2-coasys" }
+hdi = { version = "0.7.0-rc.0", git = "https://github.com/coasys/holochain.git", branch = "0.6.0-rc.0-coasys" }
+hdk = { version = "0.6.0-rc.0", git = "https://github.com/coasys/holochain.git", branch = "0.6.0-rc.0-coasys" }
+holochain_serialized_bytes = "=0.0.56"
+holo_hash =  { version = "0.6.0-rc.0", git = "https://github.com/coasys/holochain.git", branch = "0.6.0-rc.0-coasys" }
+
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="custom"']

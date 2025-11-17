@@ -10,7 +10,7 @@ use test_inspect::get_test_recipient;
 
 #[hdk_extern]
 fn init(_: ()) -> ExternResult<InitCallbackResult> {
-    let mut functions = BTreeSet::new();
+    let mut functions = HashSet::new();
     functions.insert((
         ZomeName::from("direct-message"),
         "recv_remote_signal".into(),
@@ -209,16 +209,13 @@ pub fn fetch_inbox(_: ()) -> ExternResult<()> {
     if Recipient(agent_info()?.agent_initial_pubkey) == recipient()? {
         //debug!("fetch_inbox agent");
         //debug!("agent_address: {}", agent_address);
-        let input = GetLinksInputBuilder::try_new(
+        let query = LinkQuery::try_new(
             agent_address,
             LinkTypes::Message
-        )
-        .unwrap()
-        .tag_prefix(LinkTag::new("message"))
-        .get_options(GetStrategy::Network)
-        .build();
+        )?
+        .tag_prefix(LinkTag::new("message"));
 
-        for link in get_links(input)? {
+        for link in get_links(query, GetStrategy::Network)? {
             //debug!("fetch_inbox link");
             if let Some(message_entry) = get(
                 link.target
@@ -231,7 +228,7 @@ pub fn fetch_inbox(_: ()) -> ExternResult<()> {
                 let public_message = PublicMessage::try_from(message_entry)?;
                 let message: PerspectiveExpression = public_message.into();
                 create_entry(EntryTypes::StoredMessage(StoredMessage(message)))?;
-                delete_link(link.create_link_hash)?;
+                delete_link(link.create_link_hash, GetOptions::network())?;
                 delete_entry(header_address)?;
             } else {
                 error!("Message linked in inbox not retrievable")
