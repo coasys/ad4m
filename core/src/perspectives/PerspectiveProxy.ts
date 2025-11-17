@@ -461,11 +461,11 @@ export class PerspectiveProxy {
      * @example
      * ```typescript
      * // Get all links
-     * const links = await perspective.querySurrealDB('SELECT * FROM links');
+     * const links = await perspective.querySurrealDB('SELECT * FROM link');
      * 
      * // Filter links by predicate
      * const follows = await perspective.querySurrealDB(
-     *   "SELECT * FROM links WHERE predicate = 'follows'"
+     *   "SELECT * FROM link WHERE predicate = 'follows'"
      * );
      * ```
      */

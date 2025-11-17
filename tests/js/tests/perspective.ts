@@ -914,8 +914,8 @@ export default function perspectiveTests(testContext: TestContext) {
                 await sleep(500)
                 
                 // Execute SurrealQL query
-                const result = await perspective.querySurrealDB('SELECT * FROM links')
-
+                const result = await perspective.querySurrealDB('SELECT * FROM link')
+                
                 // Verify results
                 expect(result).to.be.an('array')
                 expect(result.length).to.be.greaterThanOrEqual(2)
@@ -952,7 +952,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 
                 // Query with WHERE clause
                 const result = await perspective.querySurrealDB(
-                    "SELECT * FROM links WHERE predicate = 'test://follows'"
+                    "SELECT * FROM link WHERE predicate = 'test://follows'"
                 )
                 
                 // Verify filtered results
@@ -986,7 +986,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 
                 // Query for something that doesn't exist
                 const result = await perspective.querySurrealDB(
-                    "SELECT * FROM links WHERE predicate = 'test://nonexistent'"
+                    "SELECT * FROM link WHERE predicate = 'test://nonexistent'"
                 )
                 
                 // Should return empty array
@@ -1015,7 +1015,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 
                 // Query to verify it's there
                 let result = await perspective.querySurrealDB(
-                    "SELECT * FROM links WHERE source = 'test://mutation-source'"
+                    "SELECT * FROM link WHERE source = 'test://mutation-source'"
                 )
                 
                 expect(result).to.be.an('array')
@@ -1029,7 +1029,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 
                 // Query again and verify it's gone
                 result = await perspective.querySurrealDB(
-                    "SELECT * FROM links WHERE source = 'test://mutation-source'"
+                    "SELECT * FROM link WHERE source = 'test://mutation-source'"
                 )
                 
                 expect(result).to.be.an('array')
