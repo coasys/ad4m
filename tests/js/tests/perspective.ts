@@ -910,9 +910,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 
                 await perspective.addLinks([link1, link2])
                 
-                // Wait a bit for SurrealDB to index
-                await sleep(500)
-                
                 // Execute SurrealQL query
                 const result = await perspective.querySurrealDB('SELECT * FROM link')
                 
@@ -947,9 +944,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 
                 await perspective.addLinks([followsLink, likesLink])
                 
-                // Wait for indexing
-                await sleep(500)
-                
                 // Query with WHERE clause
                 const result = await perspective.querySurrealDB(
                     "SELECT * FROM link WHERE predicate = 'test://follows'"
@@ -981,9 +975,6 @@ export default function perspectiveTests(testContext: TestContext) {
                     target: "test://target"
                 }))
                 
-                // Wait for indexing
-                await sleep(500)
-                
                 // Query for something that doesn't exist
                 const result = await perspective.querySurrealDB(
                     "SELECT * FROM link WHERE predicate = 'test://nonexistent'"
@@ -1010,9 +1001,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 
                 const addedLink = await perspective.add(link)
                 
-                // Wait for indexing
-                await sleep(500)
-                
                 // Query to verify it's there
                 let result = await perspective.querySurrealDB(
                     "SELECT * FROM link WHERE source = 'test://mutation-source'"
@@ -1023,9 +1011,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 
                 // Remove the link
                 await perspective.removeLinks([addedLink])
-                
-                // Wait for indexing
-                await sleep(500)
                 
                 // Query again and verify it's gone
                 result = await perspective.querySurrealDB(
