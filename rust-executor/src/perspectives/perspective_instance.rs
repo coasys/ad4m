@@ -3640,4 +3640,233 @@ mod tests {
     //     let links_after = perspective.get_links(&query).await.unwrap();
     //     assert!(links_after.len() > 0);
     // }
+
+    #[tokio::test]
+    async fn test_surreal_query_for_recipe_instances() {
+        let mut perspective = setup().await;
+        
+        println!("\n=== Step 1: Adding Recipe SDNA ===");
+        
+        // Step 1: Add Recipe SDNA with two required properties (matching subject.pl format exactly)
+        let recipe_sdna = r#"
+subject_class("Recipe", c).
+constructor(c, '[{action: "addLink", source: "this", predicate: "recipe://name", target: ""}, {action: "addLink", source: "this", predicate: "recipe://rating", target: "0"}]').
+instance(c, Base) :- 
+    triple(Base, "recipe://name", _),
+    triple(Base, "recipe://rating", _).
+property(c, "name").
+property_getter(c, Base, "name", Value) :- 
+    triple(Base, "recipe://name", Value).
+property_setter(c, "name", '[{action: "setSingleTarget", source: "this", predicate: "recipe://name", target: "value"}]').
+property(c, "rating").
+property_getter(c, Base, "rating", Value) :- 
+    triple(Base, "recipe://rating", Value).
+property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predicate: "recipe://rating", target: "value"}]').
+"#;
+        
+        perspective.ensure_prolog_engine_pool().await.unwrap();
+        perspective.add_sdna("Recipe".to_string(), recipe_sdna.to_string(), SdnaType::SubjectClass).await.unwrap();
+        
+
+        perspective.get_links(&LinkQuery::default()).await.unwrap();
+        let links = perspective.get_links(&LinkQuery::default()).await.unwrap();
+        assert_eq!(links.len(), 2, "Expected 2 links");
+
+        let check = perspective.prolog_query("subject_class(Name, _)".to_string()).await.unwrap();
+        println!("Check: {:?}", check);
+
+        println!("✓ Recipe SDNA added, Prolog engine updated");
+        
+        perspective.create_subject(
+            SubjectClassOption {
+                class_name: Some("Recipe".to_string()),
+                query: None,
+            },
+            "literal://recipe1".to_string(),
+            Some(serde_json::json!({
+                "name": "Pasta Carbonara",
+                "rating": "5"
+            })),
+            None
+        ).await.unwrap();
+        
+        perspective.create_subject(
+            SubjectClassOption {
+                class_name: Some("Recipe".to_string()),
+                query: None,
+            },
+            "literal://recipe2".to_string(),
+            Some(serde_json::json!({
+                "name": "Pizza Margherita",
+                "rating": "4"
+            })),
+            None
+        ).await.unwrap();
+        
+        println!("✓ Created 2 Recipe instances using create_subject");
+        
+        // Debug: Check all links after creating subjects
+        let all_links_after_subjects = perspective.get_links(&LinkQuery::default()).await.unwrap();
+        println!("\n=== Debug: All links after creating subjects ({} total) ===", all_links_after_subjects.len());
+        for link in &all_links_after_subjects {
+            println!("  {} --[{}]--> {}", link.data.source, link.data.predicate.as_ref().unwrap_or(&"None".to_string()), link.data.target);
+        }
+        
+        println!("\n=== Step 3: Adding noise links ===");
+        
+        // Step 3: Add some noise links (non-recipe data) to ensure filtering works
+        perspective.add_link(
+            Link {
+                source: "literal://user1".to_string(),
+                target: "Alice".to_string(),
+                predicate: Some("user://name".to_string()),
+            },
+            LinkStatus::Shared,
+            None,
+        ).await.unwrap();
+        
+        perspective.add_link(
+            Link {
+                source: "literal://incomplete_recipe".to_string(),
+                target: "Half Recipe".to_string(),
+                predicate: Some("recipe://name".to_string()),
+                // Missing rating - should NOT be found as a Recipe instance
+            },
+            LinkStatus::Shared,
+            None,
+        ).await.unwrap();
+        
+        println!("✓ Added noise links");
+        
+        // Give SurrealDB time to process all the links
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        
+        println!("\n=== Step 4: Running structural SurrealQL query ===");
+        
+        // Get perspective UUID for manual filtering
+        let uuid = {
+            let persisted_guard = perspective.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
+        
+        // Debug: First, check raw data in SurrealDB including IDs
+        let raw_query = format!("SELECT id, source, predicate, target FROM link WHERE perspective = '{}'", uuid);
+        let raw_results = perspective.surreal_query(raw_query).await.unwrap();
+        println!("Debug - Raw links in SurrealDB: {}", raw_results.len());
+        for (i, link) in raw_results.iter().enumerate() {
+            let id = link.get("id").map(|v| format!("{:?}", v)).unwrap_or("NO ID".to_string());
+            let source = link.get("source").and_then(|v| v.as_str()).unwrap_or("?");
+            let pred = link.get("predicate").and_then(|v| v.as_str()).unwrap_or("?");
+            let target = link.get("target").and_then(|v| v.as_str()).unwrap_or("?");
+            println!("  {}: [{}] {} --[{}]--> {}", i+1, id, source, pred, target);
+        }
+        
+        // Debug: Test GROUP BY with count() WITHOUT alias (like the docs example)
+        let count_query = "SELECT source, count() AS total FROM link GROUP BY source";
+        println!("\nDebug - GROUP BY without alias: {}", count_query);
+        let count_results = perspective.surreal_query(count_query.to_string()).await.unwrap();
+        println!("Result: Found {} grouped sources", count_results.len());
+        for row in &count_results {
+            let source = row.get("source").and_then(|v| v.as_str()).unwrap_or("?");
+            let total = row.get("total").map(|v| format!("{:?}", v)).unwrap_or("?".to_string());
+            println!("  {} has {} links", source, total);
+        }
+        
+        // Debug: Test the SIMPLEST possible GROUP BY with array::group
+        let simplest_query = "SELECT source AS base, array::group(predicate) AS predicates FROM link GROUP BY source";
+        println!("\nDebug - GROUP BY with array::group(): {}", simplest_query);
+        let simplest_results = perspective.surreal_query(simplest_query.to_string()).await.unwrap();
+        println!("Result: Found {} grouped sources", simplest_results.len());
+        for row in &simplest_results {
+            if let (Some(base), Some(preds)) = (row.get("base").and_then(|v| v.as_str()), row.get("predicates").and_then(|v| v.as_array())) {
+                println!("  {} has {} predicates", base, preds.len());
+            }
+        }
+        
+        // Debug: Test GROUP BY with manual perspective filter
+        let simple_group_query = format!(
+            "SELECT source AS base, array::group(predicate) AS predicates FROM link WHERE perspective = '{}' GROUP BY source",
+            uuid
+        );
+        println!("\nDebug - GROUP BY with WHERE: {}", simple_group_query);
+        let simple_group_results = perspective.surreal_query(simple_group_query).await.unwrap();
+        println!("Result: Found {} grouped sources", simple_group_results.len());
+        for row in &simple_group_results {
+            if let (Some(base), Some(preds)) = (row.get("base").and_then(|v| v.as_str()), row.get("predicates").and_then(|v| v.as_array())) {
+                println!("  {} has {} predicates: {:?}", base, preds.len(), preds);
+            }
+        }
+        
+        // Step 4: Query for Recipe instances based on structure (both required properties must exist)
+        // This emulates Prolog's instance(C, Base) check
+        // Using manual perspective filter since auto-injection is temporarily disabled
+        // NOTE: Cannot alias 'source' in SELECT when using GROUP BY source - it breaks SurrealDB grouping!
+        let query = format!(r#"
+SELECT 
+  source,
+  array::group(predicate) AS predicates,
+  array::group(target) AS targets
+FROM link
+WHERE 
+  perspective = '{}'
+  AND source IN (SELECT VALUE source FROM link WHERE perspective = '{}' AND predicate = 'recipe://name')
+  AND source IN (SELECT VALUE source FROM link WHERE perspective = '{}' AND predicate = 'recipe://rating')
+GROUP BY source
+"#, uuid, uuid, uuid);
+        
+        println!("\n=== Running structural query for Recipe instances ===");
+        println!("Query:\n{}", query);
+        
+        let results = perspective.surreal_query(query.clone()).await.unwrap();
+        
+        println!("\n=== Results ===");
+        println!("Found {} recipe instances", results.len());
+        for (i, row) in results.iter().enumerate() {
+            let source = row.get("source").and_then(|v| v.as_str()).unwrap_or("?");
+            let predicates = row.get("predicates").and_then(|v| v.as_array()).unwrap();
+            let targets = row.get("targets").and_then(|v| v.as_array()).unwrap();
+            
+            println!("\nRecipe {}: source = {}", i+1, source);
+            println!("  Properties:");
+            for j in 0..predicates.len() {
+                let pred = predicates[j].as_str().unwrap_or("?");
+                let target = targets[j].as_str().unwrap_or("?");
+                println!("    {} = {}", pred, target);
+            }
+        }
+        
+        // Assertions
+        assert_eq!(results.len(), 2, "Should find exactly 2 recipe instances (not the incomplete one, not the user)");
+        
+        // Verify both recipes are present with correct data
+        let recipe1 = results.iter().find(|r| 
+            r.get("source").and_then(|v| v.as_str()) == Some("literal://recipe1")
+        );
+        let recipe2 = results.iter().find(|r| 
+            r.get("source").and_then(|v| v.as_str()) == Some("literal://recipe2")
+        );
+        
+        assert!(recipe1.is_some(), "Should find recipe1");
+        assert!(recipe2.is_some(), "Should find recipe2");
+        
+        // Verify recipe1 has correct properties
+        let r1_targets = recipe1.unwrap().get("targets").and_then(|v| v.as_array()).unwrap();
+        let has_pasta = r1_targets.iter().any(|v| v.as_str() == Some("Pasta Carbonara"));
+        let has_rating_5 = r1_targets.iter().any(|v| v.as_str() == Some("5"));
+        assert!(has_pasta, "Recipe1 should have name 'Pasta Carbonara'");
+        assert!(has_rating_5, "Recipe1 should have rating '5'");
+        
+        // Verify recipe2 has correct properties
+        let r2_targets = recipe2.unwrap().get("targets").and_then(|v| v.as_array()).unwrap();
+        let has_pizza = r2_targets.iter().any(|v| v.as_str() == Some("Pizza Margherita"));
+        let has_rating_4 = r2_targets.iter().any(|v| v.as_str() == Some("4"));
+        assert!(has_pizza, "Recipe2 should have name 'Pizza Margherita'");
+        assert!(has_rating_4, "Recipe2 should have rating '4'");
+        
+        println!("\n=== ✓ SUCCESS ===");
+        println!("✓ Found exactly 2 recipe instances");
+        println!("✓ Filtered out incomplete recipe (missing rating)");
+        println!("✓ Filtered out user data (different structure)");
+        println!("✓ Both recipes have correct property values");
+    }
 }
