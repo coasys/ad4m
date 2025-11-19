@@ -176,15 +176,74 @@ impl SurrealDBService {
         let query = query.trim().to_string();
 
         // Automatically inject perspective filter into the query
-        // This ensures perspective isolation is enforced at the service level
-        let filtered_query = if query.to_uppercase().contains("WHERE") {
-            // Query already has WHERE clause - append perspective filter with AND
-            format!("{} AND perspective = $perspective", query)
-        } else if query.to_uppercase().contains("FROM") {
-            // Query has no WHERE clause - add one with perspective filter
-            format!("{} WHERE perspective = $perspective", query)
+        // NOTE: Cannot alias grouped fields in SELECT when using GROUP BY - it breaks SurrealDB grouping!
+        let query_upper = query.to_uppercase();
+        
+        let filtered_query = if query_upper.contains("FROM LINK") {
+            // Find all occurrences of "FROM link" (case insensitive)
+            let mut result = query.clone();
+            let mut search_start = 0;
+            
+            loop {
+                let remaining = &result[search_start..];
+                let remaining_upper = remaining.to_uppercase();
+                
+                if let Some(pos) = remaining_upper.find("FROM LINK") {
+                    let absolute_pos = search_start + pos;
+                    
+                    // Check if this FROM LINK is already in a subquery
+                    // Count opening and closing parentheses before this position
+                    let before = &result[..absolute_pos];
+                    let open_parens = before.matches('(').count();
+                    let close_parens = before.matches(')').count();
+                    
+                    // If we're not inside a subquery (or we are but this is the innermost link table)
+                    // we should wrap it
+                    let end_pos = absolute_pos + 9; // "FROM link".len() = 9
+                    
+                    // Check what comes after "link" - if there's already AS or a subquery, skip it
+                    let after = &result[end_pos..].trim_start();
+                    if after.starts_with("AS") || after.starts_with("as") {
+                        // Already aliased, skip this one
+                        search_start = end_pos;
+                        continue;
+                    }
+                    
+                    // Replace "FROM link" with "FROM link WHERE perspective = $perspective"
+                    // But need to check if there's already a WHERE clause after this FROM
+                    let after_from = &result[end_pos..];
+                    let after_from_upper = after_from.trim_start().to_uppercase();
+                    
+                    if after_from_upper.starts_with("WHERE") {
+                        // Already has WHERE, inject AND condition
+                        let where_start = end_pos + after_from.len() - after_from.trim_start().len();
+                        let where_end = where_start + 5; // "WHERE".len()
+                        result = format!(
+                            "{} perspective = $perspective AND{}",
+                            &result[..where_end],
+                            &result[where_end..]
+                        );
+                        search_start = where_end + 35;
+                    } else {
+                        // No WHERE yet, add one
+                        // Trim the after part to avoid double spaces
+                        let after_trimmed = &result[end_pos..].trim_start();
+                        result = format!(
+                            "{}FROM link WHERE perspective = $perspective {}",
+                            &result[..absolute_pos],
+                            after_trimmed
+                        );
+                        search_start = absolute_pos + "FROM link WHERE perspective = $perspective".len();
+                    }
+                } else {
+                    break;
+                }
+            }
+            
+            result
         } else {
-            // Fallback: just bind the perspective if query structure is unclear
+            // No "FROM link" found, return query as-is
+            // This might be a complex query or error, but we'll let SurrealDB handle it
             query.clone()
         };
 
