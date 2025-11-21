@@ -901,43 +901,45 @@ ${offsetClause}
         if (!propMeta) continue; // Skip if property not found in metadata
         
         const predicate = propMeta.predicate;
+        // Use fn::parse_literal() for properties with resolveLanguage
+        const targetField = propMeta.resolveLanguage === 'literal' ? 'fn::parse_literal(target)' : 'target';
         
         if (Array.isArray(condition)) {
           // Array values (IN clause)
           const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
-          conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND target IN [${formattedValues}])`);
+          conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} IN [${formattedValues}])`);
         } else if (typeof condition === 'object' && condition !== null) {
           // Operator object
           const ops = condition as any;
           if (ops.not !== undefined) {
             if (Array.isArray(ops.not)) {
               const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
-              conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND target NOT IN [${formattedValues}])`);
+              conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} NOT IN [${formattedValues}])`);
             } else {
-              conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND target != ${this.formatSurrealValue(ops.not)})`);
+              conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} != ${this.formatSurrealValue(ops.not)})`);
             }
           }
           if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
-            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND target >= ${this.formatSurrealValue(ops.between[0])} AND target <= ${this.formatSurrealValue(ops.between[1])})`);
+            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} >= ${this.formatSurrealValue(ops.between[0])} AND ${targetField} <= ${this.formatSurrealValue(ops.between[1])})`);
           }
           if (ops.gt !== undefined) {
-            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND target > ${this.formatSurrealValue(ops.gt)})`);
+            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} > ${this.formatSurrealValue(ops.gt)})`);
           }
           if (ops.gte !== undefined) {
-            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND target >= ${this.formatSurrealValue(ops.gte)})`);
+            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} >= ${this.formatSurrealValue(ops.gte)})`);
           }
           if (ops.lt !== undefined) {
-            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND target < ${this.formatSurrealValue(ops.lt)})`);
+            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} < ${this.formatSurrealValue(ops.lt)})`);
           }
           if (ops.lte !== undefined) {
-            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND target <= ${this.formatSurrealValue(ops.lte)})`);
+            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} <= ${this.formatSurrealValue(ops.lte)})`);
           }
           if (ops.contains !== undefined) {
-            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND target CONTAINS ${this.formatSurrealValue(ops.contains)})`);
+            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} CONTAINS ${this.formatSurrealValue(ops.contains)})`);
           }
         } else {
           // Simple equality
-          conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND target = ${this.formatSurrealValue(condition)})`);
+          conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(condition)})`);
         }
       }
     }
@@ -1156,13 +1158,27 @@ ${offsetClause}
             if (propMeta.predicate === predicate) {
               // For properties, take the first value (or we could use timestamp to get latest)
               if (!instance[propName] || instance[propName] === "" || instance[propName] === 0) {
-                // Type conversion: check the instance property's current type
                 let convertedValue = target;
-                const expectedType = typeof instance[propName];
-                if (expectedType === 'number' && typeof target === 'string') {
-                  convertedValue = Number(target);
-                } else if (expectedType === 'boolean' && typeof target === 'string') {
-                  convertedValue = target === 'true' || target === '1';
+                
+                // Parse literal URLs if property has resolveLanguage
+                if (propMeta.resolveLanguage === 'literal' && typeof target === 'string' && target.startsWith('literal://')) {
+                  try {
+                    convertedValue = Literal.fromUrl(target).get();
+                    if(convertedValue.data !== undefined) {
+                      convertedValue = convertedValue.data;
+                    }
+                  } catch (e) {
+                    console.warn(`Failed to parse literal URL for ${propName}:`, e);
+                    convertedValue = target; // Fall back to raw value
+                  }
+                } else {
+                  // Type conversion: check the instance property's current type
+                  const expectedType = typeof instance[propName];
+                  if (expectedType === 'number' && typeof target === 'string') {
+                    convertedValue = Number(target);
+                  } else if (expectedType === 'boolean' && typeof target === 'string') {
+                    convertedValue = target === 'true' || target === '1';
+                  }
                 }
                 instance[propName] = convertedValue;
               }

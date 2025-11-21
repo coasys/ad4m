@@ -5,9 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 use surrealdb::{
-    engine::local::{Db, Mem},
-    Value as SurrealValue,
-    Surreal,
+    Surreal, Value as SurrealValue, engine::local::{Db, Mem}, opt::{Config, capabilities::Capabilities}
 };
 use tokio::sync::RwLock;
 
@@ -93,8 +91,12 @@ pub struct SurrealDBService {
 
 impl SurrealDBService {
     pub async fn new() -> Result<Self, Error> {
+        // Enable scripting (and any other capabilities you want)
+        let config = Config::default()
+            .capabilities(Capabilities::default().with_scripting(true));
+
         // Initialize in-memory SurrealDB instance
-        let db = Surreal::new::<Mem>(()).await?;
+        let db = Surreal::new::<Mem>(config).await?;
 
         // Set namespace and database
         db.use_ns("ad4m").use_db("perspectives").await?;
@@ -114,6 +116,49 @@ impl SurrealDBService {
             DEFINE INDEX IF NOT EXISTS target_idx ON link FIELDS target;
             DEFINE INDEX IF NOT EXISTS predicate_idx ON link FIELDS predicate;
             DEFINE INDEX IF NOT EXISTS source_predicate_idx ON link FIELDS source, predicate;
+            
+            DEFINE FUNCTION IF NOT EXISTS fn::parse_literal($url: option<string>) {
+                RETURN function($url) {
+                    const [url] = arguments;
+                    
+                    if (!url || typeof url !== 'string') {
+                        return url;
+                    }
+                    
+                    if (!url.startsWith('literal://')) {
+                        return url;
+                    }
+                    
+                    const body = url.substring(10);
+                    
+                    if (body.startsWith('string:')) {
+                        return decodeURIComponent(body.substring(7));
+                    }
+                    
+                    if (body.startsWith('number:')) {
+                        return parseFloat(body.substring(7));
+                    }
+                    
+                    if (body.startsWith('boolean:')) {
+                        return body.substring(8) === 'true';
+                    }
+                    
+                    if (body.startsWith('json:')) {
+                        try {
+                            const json = decodeURIComponent(body.substring(5));
+                            const parsed = JSON.parse(json);
+                            if (parsed.data !== undefined) {
+                                return parsed.data;
+                            }
+                            return parsed;
+                        } catch (e) {
+                            return url;
+                        }
+                    }
+                    
+                    return url;
+                };
+            };
             ",
         )
         .await?;
@@ -268,10 +313,8 @@ impl SurrealDBService {
         match unwrapped {
             Value::Array(arr) => Ok(arr),
             Value::Null => Ok(vec![]),
-            other => Err(Error::msg(format!(
-                "Query result is not an array after unwrapping: {:?}",
-                other
-            ))),
+            // For non-array results (e.g., RETURN function() or single values), wrap in array
+            other => Ok(vec![other]),
         }
     }
 
