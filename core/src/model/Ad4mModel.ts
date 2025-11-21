@@ -854,21 +854,22 @@ ${offsetClause}
     
     const conditions: string[] = [];
     
-    // Helper to map property name to actual column name for special fields
-    const getColumnName = (propertyName: string): string => {
-      if (propertyName === 'base') return 'source'; // base is an alias, use underlying column
-      return propertyName; // author and timestamp are actual column names
-    };
-    
     for (const [propertyName, condition] of Object.entries(where)) {
       // Check if this is a special field (base, author, timestamp)
+      // Note: author and timestamp filtering is done in JavaScript after GROUP BY
+      // because they need to be computed from the grouped links first
       const isSpecial = ['base', 'author', 'timestamp'].includes(propertyName);
       
       if (isSpecial) {
-        // Get the actual column name (maps base -> source, leaves others unchanged)
-        const columnName = getColumnName(propertyName);
+        // Skip author and timestamp - they'll be filtered in JavaScript
+        // Only handle 'base' (which maps to 'source') here
+        if (propertyName === 'author' || propertyName === 'timestamp') {
+          continue; // Skip - will be filtered post-query
+        }
         
-        // Handle special fields directly
+        const columnName = 'source'; // base maps to source
+        
+        // Handle base/source field directly
         if (Array.isArray(condition)) {
           // Array values (IN clause)
           const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
@@ -924,10 +925,12 @@ ${offsetClause}
           const ops = condition as any;
           if (ops.not !== undefined) {
             if (Array.isArray(ops.not)) {
+              // For NOT IN with array: exclude sources that HAVE a value in the array
               const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
-              conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} NOT IN [${formattedValues}])`);
+              conditions.push(`source NOT IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} IN [${formattedValues}])`);
             } else {
-              conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} != ${this.formatSurrealValue(ops.not)})`);
+              // For NOT with single value: exclude sources that HAVE this value
+              conditions.push(`source NOT IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(ops.not)})`);
             }
           }
           if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
@@ -1273,14 +1276,92 @@ ${offsetClause}
       }
     }
     
+    // Filter by author and timestamp if specified (these couldn't be filtered in SQL)
+    let filteredInstances = instances;
+    if (query.where) {
+      filteredInstances = instances.filter(instance => {
+        // Check author filter
+        if (query.where.author !== undefined) {
+          if (!this.matchesCondition(instance.author, query.where.author)) {
+            return false;
+          }
+        }
+        
+        // Check timestamp filter
+        if (query.where.timestamp !== undefined) {
+          if (!this.matchesCondition(instance.timestamp, query.where.timestamp)) {
+            return false;
+          }
+        }
+        
+        return true;
+      });
+    }
+    
     // totalCount: Since LIMIT/OFFSET are applied in the query, we need to count separately
-    // For now, we'll use instances.length as totalCount (this will be fixed with a proper count query)
-    const totalCount = instances.length;
+    // For now, we'll use filteredInstances.length as totalCount (this will be fixed with a proper count query)
+    const totalCount = filteredInstances.length;
     
     return { 
-      results: instances, 
+      results: filteredInstances, 
       totalCount 
     };
+  }
+  
+  /**
+   * Checks if a value matches a condition (for post-query filtering).
+   * @private
+   */
+  private static matchesCondition(value: any, condition: WhereCondition): boolean {
+    // Handle array values (IN clause)
+    if (Array.isArray(condition)) {
+      return (condition as any[]).includes(value);
+    }
+    
+    // Handle operator object
+    if (typeof condition === 'object' && condition !== null) {
+      const ops = condition as any;
+      
+      if (ops.not !== undefined) {
+        if (Array.isArray(ops.not)) {
+          return !(ops.not as any[]).includes(value);
+        } else {
+          return value !== ops.not;
+        }
+      }
+      
+      if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
+        return value >= ops.between[0] && value <= ops.between[1];
+      }
+      
+      if (ops.gt !== undefined) {
+        return value > ops.gt;
+      }
+      
+      if (ops.gte !== undefined) {
+        return value >= ops.gte;
+      }
+      
+      if (ops.lt !== undefined) {
+        return value < ops.lt;
+      }
+      
+      if (ops.lte !== undefined) {
+        return value <= ops.lte;
+      }
+      
+      if (ops.contains !== undefined) {
+        if (typeof value === 'string') {
+          return value.includes(String(ops.contains));
+        } else if (Array.isArray(value)) {
+          return value.includes(ops.contains);
+        }
+        return false;
+      }
+    }
+    
+    // Simple equality
+    return value === condition;
   }
 
   /**
