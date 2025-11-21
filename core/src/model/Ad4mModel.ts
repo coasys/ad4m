@@ -750,10 +750,17 @@ export class Ad4mModel {
    */
   public static async queryToSurrealQL(perspective: PerspectiveProxy, query: Query): Promise<string> {
     const metadata = this.getModelMetadata();
-    const { where, order, offset, limit } = query;
+    const { source, where, order, offset, limit } = query;
     
     // Build instance filter: sources must have ALL required properties
     const requiredFilters: string[] = [];
+    
+    // Add source filter if specified (filter to instances linked from this source)
+    if (source) {
+      requiredFilters.push(
+        `source IN (SELECT VALUE target FROM link WHERE source = '${source}' AND predicate = 'ad4m://has_child')`
+      );
+    }
     
     // Add filters for required properties
     for (const [propName, propMeta] of Object.entries(metadata.properties)) {
@@ -1228,9 +1235,6 @@ ${offsetClause}
         for (const [collName, collMeta] of Object.entries(metadata.collections)) {
           const timestampsKey = `__${collName}_timestamps`;
           if (instance[collName] && instance[timestampsKey]) {
-            console.log("sorting collection", collName);
-            console.log(instance[collName]);
-            console.log(instance[timestampsKey]);
             // Create array of [value, timestamp] pairs
             const pairs = instance[collName].map((value: any, index: number) => ({
               value,
@@ -1307,9 +1311,7 @@ ${offsetClause}
   ): Promise<T[]> {
     if (useSurrealDB) {
       const surrealQuery = await this.queryToSurrealQL(perspective, query);
-      console.log(surrealQuery)
       const result = await perspective.querySurrealDB(surrealQuery);
-      console.log(result)
       const { results } = await this.instancesFromSurrealResult(perspective, query, result);
       return results;
     } else {
