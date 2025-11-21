@@ -758,7 +758,7 @@ export class Ad4mModel {
     // Add source filter if specified (filter to instances linked from this source)
     if (source) {
       requiredFilters.push(
-        `source IN (SELECT VALUE target FROM link WHERE source = '${source}' AND predicate = 'ad4m://has_child')`
+        `source IN (SELECT VALUE target FROM link WHERE source = ${this.formatSurrealValue(source)} AND predicate = 'ad4m://has_child')`
       );
     }
     
@@ -1053,19 +1053,26 @@ ${offsetClause}
    * 
    * @description
    * Handles different value types:
-   * - Strings: Wrapped in single quotes with escaped quotes
+   * - Strings: Wrapped in single quotes with backslash-escaped special characters
    * - Numbers/booleans: Converted to string
    * - Arrays: Recursively formatted and wrapped in brackets
    * 
    * @param value - The value to format
-   * @returns Formatted value string ready for SQL
+   * @returns Formatted value string ready for SurrealQL
    * 
    * @private
    */
   private static formatSurrealValue(value: any): string {
     if (typeof value === 'string') {
-      // Escape single quotes by doubling them
-      return `'${value.replace(/'/g, "''")}'`;
+      // Escape backslashes first, then single quotes and other special characters
+      const escaped = value
+        .replace(/\\/g, '\\\\')  // Backslash -> \\
+        .replace(/'/g, "\\'")     // Single quote -> \'
+        .replace(/"/g, '\\"')     // Double quote -> \"
+        .replace(/\n/g, '\\n')    // Newline -> \n
+        .replace(/\r/g, '\\r')    // Carriage return -> \r
+        .replace(/\t/g, '\\t');   // Tab -> \t
+      return `'${escaped}'`;
     } else if (typeof value === 'number' || typeof value === 'boolean') {
       return String(value);
     } else if (Array.isArray(value)) {
