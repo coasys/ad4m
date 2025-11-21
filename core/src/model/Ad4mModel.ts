@@ -791,8 +791,35 @@ export class Ad4mModel {
       ? `${instanceFilter} AND ${userWhereClause}`
       : instanceFilter || userWhereClause;
     
-    // Build ORDER BY clause
-    const orderClause = order ? `ORDER BY ${Object.keys(order)[0]} ${Object.values(order)[0]}` : '';
+    // Build ORDER BY field - need to include it in SELECT for GROUP BY queries
+    let orderField = '';
+    let orderClause = '';
+    if (order) {
+      const orderPropName = Object.keys(order)[0];
+      const orderDirection = Object.values(order)[0];
+      
+      // Check if ordering by a special field (timestamp, author, base/source)
+      if (orderPropName === 'timestamp' || orderPropName === 'author') {
+        // For timestamp/author, we'll order by the first value in the grouped array
+        orderField = `array::first(${orderPropName}) AS order_by_${orderPropName}`;
+        orderClause = `ORDER BY order_by_${orderPropName} ${orderDirection}`;
+      } else if (orderPropName === 'base') {
+        // base maps to source, which is already in SELECT
+        orderClause = `ORDER BY source ${orderDirection}`;
+      } else {
+        // For regular properties, extract from links array
+        const propMeta = metadata.properties[orderPropName];
+        if (propMeta) {
+          // Use fn::parse_literal() if property has resolveLanguage
+          if (propMeta.resolveLanguage === 'literal') {
+            orderField = `fn::parse_literal(array::first(target[WHERE predicate = '${propMeta.predicate}'])) AS order_by_${orderPropName}`;
+          } else {
+            orderField = `array::first(target[WHERE predicate = '${propMeta.predicate}']) AS order_by_${orderPropName}`;
+          }
+          orderClause = `ORDER BY order_by_${orderPropName} ${orderDirection}`;
+        }
+      }
+    }
     
     // Build LIMIT and OFFSET clauses
     const limitClause = limit ? `LIMIT ${limit}` : '';
@@ -811,7 +838,7 @@ SELECT
     target: target,
     author: author,
     timestamp: timestamp
-  }) AS links
+  }) AS links${orderField ? ',\n  ' + orderField : ''}
 FROM link
 ${whereClause ? 'WHERE ' + whereClause : ''}
 GROUP BY source
