@@ -794,13 +794,17 @@ export class Ad4mModel {
     // Query structure: Use GROUP BY with array::group() to aggregate all predicates and targets
     // IMPORTANT: Cannot alias 'source' in SELECT when using GROUP BY - it breaks SurrealDB grouping!
     // See: https://github.com/surrealdb/surrealdb/issues (aliasing grouped fields breaks GROUP BY in v2.1)
+    // Note: We need to collect entire link records, not individual fields,
+    // to maintain the pairing between predicate, target, author, and timestamp
     const fullQuery = `
 SELECT 
   source,
-  array::group(predicate) AS predicates,
-  array::group(target) AS targets,
-  array::group(author) AS authors,
-  array::group(timestamp) AS timestamps
+  array::group({
+    predicate: predicate,
+    target: target,
+    author: author,
+    timestamp: timestamp
+  }) AS links
 FROM link
 ${whereClause ? 'WHERE ' + whereClause : ''}
 GROUP BY source
@@ -1122,10 +1126,7 @@ ${offsetClause}
     
     // The query used GROUP BY, so each row has:
     // - source: the base expression (not aliased due to SurrealDB GROUP BY limitation)
-    // - predicates: array of predicates
-    // - targets: array of targets (same indices as predicates)
-    // - authors: array of authors
-    // - timestamps: array of timestamps
+    // - links: array of link objects with {predicate, target, author, timestamp}
     
     const instances: T[] = [];
     for (const row of result) {
@@ -1137,20 +1138,27 @@ ${offsetClause}
           continue;
         }
         
-        const predicates = row.predicates || [];
-        const targets = row.targets || [];
-        const authors = row.authors || [];
-        const timestamps = row.timestamps || [];
+        const links = row.links || [];
         
         const instance = new this(perspective, base) as any;
         
-        // Process each (predicate, target) pair
-        for (let i = 0; i < predicates.length; i++) {
-          const predicate = predicates[i];
-          const target = targets[i];
+        // Track the most recent timestamp and corresponding author
+        let maxTimestamp = null;
+        let latestAuthor = null;
+        
+        // Process each link
+        for (const link of links) {
+          const predicate = link.predicate;
+          const target = link.target;
           
           // Skip 'None' values
           if (target === 'None') continue;
+          
+          // Track the most recent timestamp and its author
+          if (link.timestamp && (!maxTimestamp || link.timestamp > maxTimestamp)) {
+            maxTimestamp = link.timestamp;
+            latestAuthor = link.author;
+          }
           
           // Find matching property
           let foundProperty = false;
@@ -1191,12 +1199,18 @@ ${offsetClause}
           if (!foundProperty) {
             for (const [collName, collMeta] of Object.entries(metadata.collections)) {
               if (collMeta.predicate === predicate) {
-                // For collections, accumulate all values
+                // For collections, accumulate all values with their timestamps for sorting
                 if (!instance[collName]) {
                   instance[collName] = [];
                 }
+                // Initialize timestamp tracking array if not already done
+                const timestampsKey = `__${collName}_timestamps`;
+                if (!instance[timestampsKey]) {
+                  instance[timestampsKey] = [];
+                }
                 if (!instance[collName].includes(target)) {
                   instance[collName].push(target);
+                  instance[timestampsKey].push(link.timestamp || '');
                 }
                 break;
               }
@@ -1204,19 +1218,31 @@ ${offsetClause}
           }
         }
         
-        // Handle author and timestamp - take the most recent (last in array, or max timestamp)
-        if (authors.length > 0) {
-          // Find the index of the most recent timestamp
-          let maxIndex = 0;
-          let maxTimestamp = timestamps[0];
-          for (let i = 1; i < timestamps.length; i++) {
-            if (timestamps[i] > maxTimestamp) {
-              maxTimestamp = timestamps[i];
-              maxIndex = i;
-            }
+        // Set author and timestamp from the most recent link
+        if (latestAuthor && maxTimestamp) {
+          instance.author = latestAuthor;
+          instance.timestamp = maxTimestamp;
+        }
+        
+        // Sort collections by timestamp to maintain insertion order
+        for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+          const timestampsKey = `__${collName}_timestamps`;
+          if (instance[collName] && instance[timestampsKey]) {
+            console.log("sorting collection", collName);
+            console.log(instance[collName]);
+            console.log(instance[timestampsKey]);
+            // Create array of [value, timestamp] pairs
+            const pairs = instance[collName].map((value: any, index: number) => ({
+              value,
+              timestamp: instance[timestampsKey][index]
+            }));
+            // Sort by timestamp
+            pairs.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+            // Replace collection with sorted values
+            instance[collName] = pairs.map(p => p.value);
+            // Clean up temporary timestamp array
+            delete instance[timestampsKey];
           }
-          instance.author = authors[maxIndex];
-          instance.timestamp = timestamps[maxIndex];
         }
         
         // Filter by requested attributes if specified

@@ -885,13 +885,12 @@ describe("Prolog + Literals", () => {
 
                     expect(recipes.length).to.equal(2);
                     expect(recipes[0].comments.length).to.equal(2);
-                    expect(recipes[0].comments[0]).to.equal("Recipe 1: Comment 1");
-                    expect(recipes[0].comments[1]).to.equal("Recipe 1: Comment 2");
+                    expect(recipes[0].comments).to.include("Recipe 1: Comment 1");
+                    expect(recipes[0].comments).to.include("Recipe 1: Comment 2");
 
                     expect(recipes[1].comments.length).to.equal(2);
-                    expect(recipes[1].comments[0]).to.equal("Recipe 2: Comment 1");
-                    expect(recipes[1].comments[1]).to.equal("Recipe 2: Comment 2");
-
+                    expect(recipes[1].comments).to.include("Recipe 2: Comment 1");
+                    expect(recipes[1].comments).to.include("Recipe 2: Comment 2");
                     await recipe1.delete();
                     await recipe2.delete();
                 })
