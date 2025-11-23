@@ -1506,16 +1506,21 @@ impl PerspectiveInstance {
 
         // Update SurrealDB synchronously
         let surreal_service = get_surreal_service().await;
-        
-        // Process SurrealDB updates based on diff (add additions, remove removals)
-        for addition in &diff.additions {
-            if let Err(e) = surreal_service.add_link(&uuid, addition).await {
-                log::warn!("Failed to add link to SurrealDB for perspective {}: {:?}", uuid, e);
-            }
-        }
+
+        // IMPORTANT: Process removals BEFORE additions!
+        // The remove_link function matches by source/predicate/target (not unique ID).
+        // If we add first and remove second, we'd delete the newly added links too.
+        // Example: collection update removes [pasta, sauce, cheese], adds [pasta, sauce, cheese, garlic]
+        // Wrong order: add 4 links, then remove 3 -> only garlic remains
+        // Correct order: remove 3 old links, then add 4 new links -> all 4 remain
         for removal in &diff.removals {
             if let Err(e) = surreal_service.remove_link(&uuid, removal).await {
                 log::warn!("Failed to remove link from SurrealDB for perspective {}: {:?}", uuid, e);
+            }
+        }
+        for addition in &diff.additions {
+            if let Err(e) = surreal_service.add_link(&uuid, addition).await {
+                log::warn!("Failed to add link to SurrealDB for perspective {}: {:?}", uuid, e);
             }
         }
     }
