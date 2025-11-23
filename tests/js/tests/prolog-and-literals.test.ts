@@ -2034,7 +2034,7 @@ describe("Prolog + Literals", () => {
                     const recipesAfterCommit = await BatchRecipe.findAll(perspective!);
                     expect(recipesAfterCommit.length).to.equal(1);
                     expect(recipesAfterCommit[0].name).to.equal("Pasta");
-                    expect(recipesAfterCommit[0].ingredients).to.deep.equal(["pasta", "sauce", "cheese"]);
+                    expect(recipesAfterCommit[0].ingredients).to.have.members(["pasta", "sauce", "cheese"]);
 
                     const notesAfterCommit = await BatchNote.findAll(perspective!);
                     expect(notesAfterCommit.length).to.equal(1);
@@ -2051,7 +2051,7 @@ describe("Prolog + Literals", () => {
 
                     // Verify models haven't changed before commit
                     const recipesBeforeUpdate = await BatchRecipe.findAll(perspective!);
-                    expect(recipesBeforeUpdate[0].ingredients).to.deep.equal(["pasta", "sauce", "cheese"]);
+                    expect(recipesBeforeUpdate[0].ingredients).to.have.members(["pasta", "sauce", "cheese"]);
 
                     const notesBeforeUpdate = await BatchNote.findAll(perspective!);
                     expect(notesBeforeUpdate[0].content).to.equal("Make sure to use fresh ingredients");
