@@ -791,39 +791,10 @@ export class Ad4mModel {
       ? `${instanceFilter} AND ${userWhereClause}`
       : instanceFilter || userWhereClause;
     
-    // Build ORDER BY field - need to include it in SELECT for GROUP BY queries
-    let orderField = '';
-    let orderClause = '';
-    if (order) {
-      const orderPropName = Object.keys(order)[0];
-      const orderDirection = Object.values(order)[0];
-      
-      // Check if ordering by a special field (timestamp, author, base/source)
-      if (orderPropName === 'timestamp' || orderPropName === 'author') {
-        // For timestamp/author, we'll order by the first value in the grouped array
-        orderField = `array::first(${orderPropName}) AS order_by_${orderPropName}`;
-        orderClause = `ORDER BY order_by_${orderPropName} ${orderDirection}`;
-      } else if (orderPropName === 'base') {
-        // base maps to source, which is already in SELECT
-        orderClause = `ORDER BY source ${orderDirection}`;
-      } else {
-        // For regular properties, extract from links array
-        const propMeta = metadata.properties[orderPropName];
-        if (propMeta) {
-          // Use fn::parse_literal() if property has resolveLanguage
-          if (propMeta.resolveLanguage === 'literal') {
-            orderField = `fn::parse_literal(array::first(target[WHERE predicate = '${propMeta.predicate}'])) AS order_by_${orderPropName}`;
-          } else {
-            orderField = `array::first(target[WHERE predicate = '${propMeta.predicate}']) AS order_by_${orderPropName}`;
-          }
-          orderClause = `ORDER BY order_by_${orderPropName} ${orderDirection}`;
-        }
-      }
-    }
-    
-    // Build LIMIT and OFFSET clauses
-    const limitClause = limit ? `LIMIT ${limit}` : '';
-    const offsetClause = offset ? `START ${offset}` : '';
+    // Note: ORDER BY, LIMIT, and OFFSET are applied in JavaScript after fetching results
+    // because SurrealDB GROUP BY doesn't support complex ordering expressions on aggregated data.
+    // This approach is still much faster than Prolog because we're only fetching and processing
+    // the relevant links rather than running Prolog inference.
     
     // Query structure: Use GROUP BY with array::group() to aggregate all predicates and targets
     // IMPORTANT: Cannot alias 'source' in SELECT when using GROUP BY - it breaks SurrealDB grouping!
@@ -831,20 +802,17 @@ export class Ad4mModel {
     // Note: We need to collect entire link records, not individual fields,
     // to maintain the pairing between predicate, target, author, and timestamp
     const fullQuery = `
-SELECT 
+SELECT
   source,
   array::group({
     predicate: predicate,
     target: target,
     author: author,
     timestamp: timestamp
-  }) AS links${orderField ? ',\n  ' + orderField : ''}
+  }) AS links
 FROM link
 ${whereClause ? 'WHERE ' + whereClause : ''}
 GROUP BY source
-${orderClause}
-${limitClause}
-${offsetClause}
     `.trim();
     
     return fullQuery;
@@ -960,24 +928,10 @@ ${offsetClause}
               conditions.push(`source NOT IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(ops.not)})`);
             }
           }
-          if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
-            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} >= ${this.formatSurrealValue(ops.between[0])} AND ${targetField} <= ${this.formatSurrealValue(ops.between[1])})`);
-          }
-          if (ops.gt !== undefined) {
-            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} > ${this.formatSurrealValue(ops.gt)})`);
-          }
-          if (ops.gte !== undefined) {
-            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} >= ${this.formatSurrealValue(ops.gte)})`);
-          }
-          if (ops.lt !== undefined) {
-            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} < ${this.formatSurrealValue(ops.lt)})`);
-          }
-          if (ops.lte !== undefined) {
-            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} <= ${this.formatSurrealValue(ops.lte)})`);
-          }
-          if (ops.contains !== undefined) {
-            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} CONTAINS ${this.formatSurrealValue(ops.contains)})`);
-          }
+          // Note: gt, gte, lt, lte, between, contains operators are filtered in JavaScript
+          // post-query because fn::parse_literal() comparisons in SurrealDB subqueries
+          // don't work reliably with numeric comparisons.
+          // These are handled in instancesFromSurrealResult along with author/timestamp filtering.
         } else {
           // Simple equality
           conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(condition)})`);
@@ -1190,8 +1144,9 @@ ${offsetClause}
         let maxTimestamp = null;
         let latestAuthor = null;
         
-        // Process each link
-        for (const link of links) {
+        // Process each link (track index for collection ordering)
+        for (let linkIndex = 0; linkIndex < links.length; linkIndex++) {
+          const link = links[linkIndex];
           const predicate = link.predicate;
           const target = link.target;
           
@@ -1232,6 +1187,12 @@ ${offsetClause}
                     convertedValue = target === 'true' || target === '1';
                   }
                 }
+
+                // Apply transform function if it exists
+                if (propMeta.transform && typeof propMeta.transform === 'function') {
+                  convertedValue = propMeta.transform(convertedValue);
+                }
+
                 instance[propName] = convertedValue;
               }
               foundProperty = true;
@@ -1243,18 +1204,24 @@ ${offsetClause}
           if (!foundProperty) {
             for (const [collName, collMeta] of Object.entries(metadata.collections)) {
               if (collMeta.predicate === predicate) {
-                // For collections, accumulate all values with their timestamps for sorting
+                // For collections, accumulate all values with their timestamps and indices for sorting
                 if (!instance[collName]) {
                   instance[collName] = [];
                 }
                 // Initialize timestamp tracking array if not already done
                 const timestampsKey = `__${collName}_timestamps`;
+                const indicesKey = `__${collName}_indices`;
                 if (!instance[timestampsKey]) {
                   instance[timestampsKey] = [];
+                }
+                if (!instance[indicesKey]) {
+                  instance[indicesKey] = [];
                 }
                 if (!instance[collName].includes(target)) {
                   instance[collName].push(target);
                   instance[timestampsKey].push(link.timestamp || '');
+                  // Track original position in the links array for stable sorting
+                  instance[indicesKey].push(linkIndex);
                 }
                 break;
               }
@@ -1265,24 +1232,42 @@ ${offsetClause}
         // Set author and timestamp from the most recent link
         if (latestAuthor && maxTimestamp) {
           instance.author = latestAuthor;
-          instance.timestamp = maxTimestamp;
+          // Convert timestamp to number (milliseconds) if it's an ISO string
+          if (typeof maxTimestamp === 'string' && maxTimestamp.includes('T')) {
+            instance.timestamp = new Date(maxTimestamp).getTime();
+          } else if (typeof maxTimestamp === 'string') {
+            // Try to parse as number string
+            instance.timestamp = parseInt(maxTimestamp, 10) || maxTimestamp;
+          } else {
+            instance.timestamp = maxTimestamp;
+          }
         }
         
         // Sort collections by timestamp to maintain insertion order
         for (const [collName, collMeta] of Object.entries(metadata.collections)) {
           const timestampsKey = `__${collName}_timestamps`;
+          const indicesKey = `__${collName}_indices`;
           if (instance[collName] && instance[timestampsKey]) {
-            // Create array of [value, timestamp] pairs
+            // Create array of [value, timestamp, index] tuples
             const pairs = instance[collName].map((value: any, index: number) => ({
               value,
-              timestamp: instance[timestampsKey][index]
+              timestamp: instance[timestampsKey][index] || '',
+              originalIndex: instance[indicesKey]?.[index] ?? index
             }));
-            // Sort by timestamp
-            pairs.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+            // Sort by timestamp first, then by original index for stable sorting
+            pairs.sort((a, b) => {
+              const tsA = a.timestamp || '';
+              const tsB = b.timestamp || '';
+              const tsCompare = tsA.localeCompare(tsB);
+              if (tsCompare !== 0) return tsCompare;
+              // Use original index as tiebreaker for stable sorting
+              return a.originalIndex - b.originalIndex;
+            });
             // Replace collection with sorted values
             instance[collName] = pairs.map(p => p.value);
-            // Clean up temporary timestamp array
+            // Clean up temporary arrays
             delete instance[timestampsKey];
+            delete instance[indicesKey];
           }
         }
         
@@ -1303,35 +1288,93 @@ ${offsetClause}
       }
     }
     
-    // Filter by author and timestamp if specified (these couldn't be filtered in SQL)
+    // Filter by where conditions that couldn't be filtered in SQL
+    // This includes:
+    // - author/timestamp (computed from grouped links)
+    // - Properties with comparison operators (gt, gte, lt, lte, between, contains)
+    //   because fn::parse_literal() comparisons in SurrealDB subqueries don't work reliably
     let filteredInstances = instances;
     if (query.where) {
       filteredInstances = instances.filter(instance => {
-        // Check author filter
-        if (query.where.author !== undefined) {
-          if (!this.matchesCondition(instance.author, query.where.author)) {
-            return false;
+        for (const [propertyName, condition] of Object.entries(query.where!)) {
+          // Skip 'base' as it's filtered in SQL
+          if (propertyName === 'base') continue;
+
+          // For author and timestamp, always filter in JS
+          if (propertyName === 'author' || propertyName === 'timestamp') {
+            if (!this.matchesCondition(instance[propertyName], condition)) {
+              return false;
+            }
+            continue;
+          }
+
+          // For regular properties, only filter comparison operators in JS
+          // Simple equality and NOT are handled in SQL, but gt/gte/lt/lte/between/contains need JS
+          if (typeof condition === 'object' && condition !== null && !Array.isArray(condition)) {
+            const ops = condition as any;
+            // Check if any comparison operators are present
+            const hasComparisonOps = ops.gt !== undefined || ops.gte !== undefined ||
+                                     ops.lt !== undefined || ops.lte !== undefined ||
+                                     ops.between !== undefined || ops.contains !== undefined;
+            if (hasComparisonOps) {
+              if (!this.matchesCondition(instance[propertyName], condition)) {
+                return false;
+              }
+            }
           }
         }
-        
-        // Check timestamp filter
-        if (query.where.timestamp !== undefined) {
-          if (!this.matchesCondition(instance.timestamp, query.where.timestamp)) {
-            return false;
-          }
-        }
-        
         return true;
       });
     }
-    
-    // totalCount: Since LIMIT/OFFSET are applied in the query, we need to count separately
-    // For now, we'll use filteredInstances.length as totalCount (this will be fixed with a proper count query)
+
+    // Apply ordering in JavaScript
+    // If limit/offset is used but no explicit order, default to ordering by timestamp (ASC)
+    // This ensures consistent pagination behavior
+    const effectiveOrder = query.order ||
+      (query.limit !== undefined || query.offset !== undefined ? { timestamp: 'ASC' as 'ASC' } : null);
+
+    if (effectiveOrder) {
+      const orderPropName = Object.keys(effectiveOrder)[0];
+      const orderDirection = Object.values(effectiveOrder)[0];
+
+      filteredInstances.sort((a: any, b: any) => {
+        let aVal = a[orderPropName];
+        let bVal = b[orderPropName];
+
+        // Handle undefined values - push them to the end
+        if (aVal === undefined && bVal === undefined) return 0;
+        if (aVal === undefined) return orderDirection === 'ASC' ? 1 : -1;
+        if (bVal === undefined) return orderDirection === 'ASC' ? -1 : 1;
+
+        // Compare values
+        let comparison = 0;
+        if (typeof aVal === 'number' && typeof bVal === 'number') {
+          comparison = aVal - bVal;
+        } else if (typeof aVal === 'string' && typeof bVal === 'string') {
+          comparison = aVal.localeCompare(bVal);
+        } else {
+          // Convert to strings for comparison
+          comparison = String(aVal).localeCompare(String(bVal));
+        }
+
+        return orderDirection === 'DESC' ? -comparison : comparison;
+      });
+    }
+
+    // Calculate totalCount BEFORE applying limit/offset
     const totalCount = filteredInstances.length;
-    
-    return { 
-      results: filteredInstances, 
-      totalCount 
+
+    // Apply offset and limit in JavaScript
+    let paginatedInstances = filteredInstances;
+    if (query.offset !== undefined || query.limit !== undefined) {
+      const start = query.offset || 0;
+      const end = query.limit ? start + query.limit : undefined;
+      paginatedInstances = filteredInstances.slice(start, end);
+    }
+
+    return {
+      results: paginatedInstances,
+      totalCount
     };
   }
   
@@ -2540,7 +2583,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     if (this.useSurrealDBFlag) {
       const surrealQuery = await this.ctor.countQueryToSurrealQL(this.perspective, this.queryParams);
       const result = await this.perspective.querySurrealDB(surrealQuery);
-      return result?.[0] || 0;
+      // Since GROUP BY returns one row per source, just count the rows
+      return result?.length || 0;
     } else {
       const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
       const result = await this.perspective.infer(query);
