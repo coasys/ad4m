@@ -1164,7 +1164,10 @@ GROUP BY source
           for (const [propName, propMeta] of Object.entries(metadata.properties)) {
             if (propMeta.predicate === predicate) {
               // For properties, take the first value (or we could use timestamp to get latest)
-              if (!instance[propName] || instance[propName] === "" || instance[propName] === 0) {
+              // Note: Empty objects {} are truthy, so we need to check for them explicitly
+              const currentValue = instance[propName];
+              const isEmptyObject = typeof currentValue === 'object' && currentValue !== null && !Array.isArray(currentValue) && Object.keys(currentValue).length === 0;
+              if (!currentValue || currentValue === "" || currentValue === 0 || isEmptyObject) {
                 let convertedValue = target;
                 
                 // Parse literal URLs if property has resolveLanguage
