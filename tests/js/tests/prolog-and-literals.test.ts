@@ -2199,6 +2199,115 @@ describe("Prolog + Literals", () => {
                     expect(notesAfterDelete.length).to.equal(0);
                 });
 
+                describe("SurrealDB vs Prolog Subscriptions", () => {
+                    let perspective: PerspectiveProxy;
+
+                    @ModelOptions({ name: "SubscriptionTestModel" })
+                    class TestModel extends Ad4mModel {
+                        @Property({
+                            through: "test://name",
+                            resolveLanguage: "literal"
+                        })
+                        name: string = "";
+
+                        @Property({
+                            through: "test://status",
+                            resolveLanguage: "literal"
+                        })
+                        status: string = "";
+                    }
+
+                    beforeEach(async () => {
+                        perspective = await ad4m!.perspective.add("subscription-parity-test");
+                        await perspective!.ensureSDNASubjectClass(TestModel);
+                    });
+
+                    afterEach(async () => {
+                        if (perspective) {
+                            await ad4m!.perspective.remove(perspective.uuid);
+                        }
+                    });
+
+                    it("should produce identical results with SurrealDB and Prolog subscriptions", async () => {
+                        // 1. Setup subscriptions
+                        const surrealCallback = sinon.fake();
+                        const prologCallback = sinon.fake();
+
+                        // SurrealDB subscription (default)
+                        const surrealBuilder = TestModel.query(perspective).where({ status: "active" });
+                        await surrealBuilder.subscribe(surrealCallback);
+
+                        // Prolog subscription (explicit)
+                        const prologBuilder = TestModel.query(perspective).where({ status: "active" }).useSurrealDB(false);
+                        await prologBuilder.subscribe(prologCallback);
+
+                        // 2. Add data
+                        const startTime = Date.now();
+                        const count = 5;
+                        
+                        for (let i = 0; i < count; i++) {
+                            const model = new TestModel(perspective);
+                            model.name = `Item ${i}`;
+                            model.status = "active";
+                            await model.save();
+                        }
+
+                        // 3. Wait for updates
+                        // Give enough time for both to catch up
+                        await sleep(2000);
+
+                        // 4. Verify results match
+                        expect(surrealCallback.called).to.be.true;
+                        expect(prologCallback.called).to.be.true;
+
+                        const surrealLastResult = surrealCallback.lastCall.args[0];
+                        const prologLastResult = prologCallback.lastCall.args[0];
+
+                        expect(surrealLastResult.length).to.equal(count);
+                        expect(prologLastResult.length).to.equal(count);
+
+                        // Sort by name to ensure order doesn't affect comparison
+                        const sortByName = (a: TestModel, b: TestModel) => a.name.localeCompare(b.name);
+                        surrealLastResult.sort(sortByName);
+                        prologLastResult.sort(sortByName);
+
+                        for (let i = 0; i < count; i++) {
+                            expect(surrealLastResult[i].name).to.equal(prologLastResult[i].name);
+                            expect(surrealLastResult[i].status).to.equal(prologLastResult[i].status);
+                        }
+
+                        console.log(`SurrealDB vs Prolog subscription parity check passed with ${count} items.`);
+                        
+                        // Cleanup
+                        surrealBuilder.dispose();
+                        prologBuilder.dispose();
+                    });
+
+                    it("should demonstrate SurrealDB subscription performance", async () => {
+                        // Measure latency of update
+                        const surrealCallback = sinon.fake();
+                        const surrealBuilder = TestModel.query(perspective).where({ status: "perf-test" });
+                        await surrealBuilder.subscribe(surrealCallback);
+
+                        const start = Date.now();
+                        const model = new TestModel(perspective);
+                        model.name = "Perf Item";
+                        model.status = "perf-test";
+                        await model.save();
+
+                        // Poll until callback called
+                        while (!surrealCallback.called) {
+                            await sleep(10);
+                            if (Date.now() - start > 5000) throw new Error("Timeout waiting for subscription update");
+                        }
+
+                        const latency = Date.now() - start;
+                        console.log(`SurrealDB subscription update latency: ${latency}ms`);
+                        
+                        surrealBuilder.dispose();
+                    });
+                });
+
                 describe('ModelQueryBuilder', () => {
                     let perspective: PerspectiveProxy;
 

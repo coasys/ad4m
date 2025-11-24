@@ -1,11 +1,12 @@
 use crate::types::DecoratedLinkExpression;
 use deno_core::anyhow::Error;
+use futures::stream::Stream;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 use surrealdb::{
-    Surreal, Value as SurrealValue, engine::local::{Db, Mem}, opt::{Config, capabilities::Capabilities}
+    Surreal, Value as SurrealValue, engine::local::{Db, Mem}, opt::{Config, capabilities::Capabilities}, Notification
 };
 use tokio::sync::RwLock;
 
@@ -75,13 +76,16 @@ fn unwrap_surreal_json(value: Value) -> Value {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct LinkRecord {
-    perspective: String,
-    source: String,
-    predicate: String,
-    target: String,
-    author: String,
-    timestamp: String,
+pub struct LinkRecord {
+    #[serde(skip)]
+    #[allow(dead_code)]
+    pub id: Option<serde_json::Value>, // SurrealDB Thing ID - skip to avoid deserialization issues with Thing type
+    pub perspective: String,
+    pub source: String,
+    pub predicate: String,
+    pub target: String,
+    pub author: String,
+    pub timestamp: String,
 }
 
 #[derive(Clone)]
@@ -172,6 +176,7 @@ impl SurrealDBService {
         link: &DecoratedLinkExpression,
     ) -> Result<(), Error> {
         let record = LinkRecord {
+            id: None, // Will be assigned by SurrealDB
             perspective: perspective_uuid.to_string(),
             source: link.data.source.clone(),
             predicate: link.data.predicate.clone().unwrap_or_default(),
@@ -238,9 +243,9 @@ impl SurrealDBService {
                     
                     // Check if this FROM LINK is already in a subquery
                     // Count opening and closing parentheses before this position
-                    let before = &result[..absolute_pos];
-                    let open_parens = before.matches('(').count();
-                    let close_parens = before.matches(')').count();
+                    let _before = &result[..absolute_pos];
+                    let _open_parens = _before.matches('(').count();
+                    let _close_parens = _before.matches(')').count();
                     
                     // If we're not inside a subquery (or we are but this is the innermost link table)
                     // we should wrap it
@@ -318,6 +323,18 @@ impl SurrealDBService {
         }
     }
 
+    pub async fn subscribe_query(
+        &self,
+        _perspective_uuid: &str,
+        _query: &str,
+    ) -> Result<impl Stream<Item = Result<Notification<LinkRecord>, surrealdb::Error>> + Send + Unpin + '_, Error> {
+        // We listen to the whole "link" table.
+        // Filtering happens in the consumer because we can't easily filter a live stream by property in current rust client
+        // without using raw "LIVE SELECT" queries which don't return a stream in the same way.
+        Ok(self.db.select("link").live().await?)
+    }
+
+    #[allow(dead_code)]
     pub async fn clear_perspective(&self, perspective_uuid: &str) -> Result<(), Error> {
         let perspective_uuid = perspective_uuid.to_string();
 
@@ -329,6 +346,7 @@ impl SurrealDBService {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn reload_perspective(
         &self,
         perspective_uuid: &str,
@@ -346,6 +364,7 @@ impl SurrealDBService {
             // Add each link as a CREATE statement in the batch
             for (idx, link) in links.iter().enumerate() {
                 let record = LinkRecord {
+                    id: None, // Will be assigned by SurrealDB
                     perspective: perspective_uuid.to_string(),
                     source: link.data.source.clone(),
                     predicate: link.data.predicate.clone().unwrap_or_default(),

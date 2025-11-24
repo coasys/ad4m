@@ -31,7 +31,7 @@ use ad4m_client::literal::Literal;
 use chrono::DateTime;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
-use futures::future;
+use futures::{future, StreamExt};
 use json5;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -159,6 +159,15 @@ struct SubscribedQuery {
     last_keepalive: Instant,
 }
 
+struct SurrealSubscribedQuery {
+    #[allow(dead_code)]
+    query: String,
+    #[allow(dead_code)]
+    last_result: String,
+    last_keepalive: Instant,
+    listener_handle: tokio::task::JoinHandle<()>,
+}
+
 #[derive(Clone)]
 pub struct PerspectiveInstance {
     pub persisted: Arc<Mutex<PerspectiveHandle>>,
@@ -176,6 +185,7 @@ pub struct PerspectiveInstance {
     commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
+    surreal_subscribed_queries: Arc<Mutex<HashMap<String, SurrealSubscribedQuery>>>,
     batch_store: Arc<RwLock<HashMap<String, PerspectiveDiff>>>,
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
@@ -199,6 +209,7 @@ impl PerspectiveInstance {
             commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
+            surreal_subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
             // Initialize fallback sync tracking
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
@@ -213,6 +224,7 @@ impl PerspectiveInstance {
             self.nh_sync_loop(),
             self.pending_diffs_loop(),
             self.subscribed_queries_loop(),
+            self.surreal_subscription_cleanup_loop(),
             self.fallback_sync_loop()
         );
     }
@@ -2584,6 +2596,141 @@ impl PerspectiveInstance {
             Ok(true)
         } else {
             Ok(false)
+        }
+    }
+
+    pub async fn subscribe_and_query_surreal(&self, query: String) -> Result<(String, String), AnyError> {
+        let subscription_id = Uuid::new_v4().to_string();
+        // Get initial result
+        let initial_result_vec = self.surreal_query(query.clone()).await?;
+        let initial_result_string = serde_json::to_string(&initial_result_vec)?;
+        
+        // Clone stuff for the listener task
+        let self_clone = self.clone();
+        let uuid = self.persisted.lock().await.uuid.clone();
+        let sub_id_clone = subscription_id.clone();
+        let mut last_result = initial_result_string.clone();
+        let query_clone = query.clone();
+
+        // Spawn listener task
+        let handle = tokio::spawn(async move {
+            // Get the service - we need to keep it alive for the lifetime of the stream
+            let _surreal_service = get_surreal_service().await;
+            
+            // Get the live stream - this borrows from _surreal_service
+            let stream_result = _surreal_service.subscribe_query(&uuid, &query_clone).await;
+            
+            // Now we process the stream while keeping _surreal_service alive
+            match stream_result {
+                Ok(mut stream) => {
+                    while let Some(notification_res) = stream.next().await {
+                        match notification_res {
+                            Ok(notification) => {
+                                // notification.data is now a LinkRecord - check if it matches our perspective
+                                if notification.data.perspective == uuid {
+                                    // Re-query to get the full current state
+                                    let service = get_surreal_service().await;
+                                    match service.query_links(&uuid, &query_clone).await {
+                                        Ok(new_result_vec) => {
+                                            match serde_json::to_string(&new_result_vec) {
+                                                Ok(new_result_string) => {
+                                                    if new_result_string != last_result {
+                                                        last_result = new_result_string.clone();
+                                                        self_clone.send_subscription_update(
+                                                            sub_id_clone.clone(),
+                                                            last_result.clone(),
+                                                            None
+                                                        ).await;
+                                                    }
+                                                },
+                                                Err(e) => log::error!("Failed to serialize surreal result: {}", e),
+                                            }
+                                        },
+                                        Err(e) => log::error!("Failed to re-query surreal: {}", e),
+                                    }
+                                }
+                            },
+                            Err(e) => log::error!("SurrealDB live stream error: {}", e),
+                        }
+                    }
+                    // _surreal_service will be dropped here automatically, keeping the stream alive
+                },
+                Err(e) => {
+                    log::error!("Failed to subscribe to surreal query: {}", e);
+                    // _surreal_service will be dropped here automatically
+                },
+            }
+        });
+
+        let subscribed_query = SurrealSubscribedQuery {
+            query,
+            last_result: initial_result_string.clone(),
+            last_keepalive: Instant::now(),
+            listener_handle: handle,
+        };
+
+        self.surreal_subscribed_queries
+            .lock()
+            .await
+            .insert(subscription_id.clone(), subscribed_query);
+            
+        // Send initial result with #init# prefix for compatibility
+        let init_msg = format!("#init#{}", initial_result_string);
+        // Send multiple updates to ensure client gets it (same as Prolog implementation)
+        for delay in [100, 500, 1000, 2000] {
+             self.send_subscription_update(
+                subscription_id.clone(), 
+                init_msg.clone(), 
+                Some(Duration::from_millis(delay))
+            ).await;
+        }
+
+        Ok((subscription_id, initial_result_string))
+    }
+
+    pub async fn keepalive_surreal_query(&self, subscription_id: String) -> Result<(), AnyError> {
+        let mut queries = self.surreal_subscribed_queries.lock().await;
+        if let Some(query) = queries.get_mut(&subscription_id) {
+            query.last_keepalive = Instant::now();
+            Ok(())
+        } else {
+            Err(anyhow!("Surreal subscription not found"))
+        }
+    }
+
+    pub async fn dispose_surreal_query_subscription(&self, subscription_id: String) -> Result<bool, AnyError> {
+        let removed = {
+            let mut queries = self.surreal_subscribed_queries.lock().await;
+            queries.remove(&subscription_id)
+        };
+
+        if let Some(query) = removed {
+            query.listener_handle.abort();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn surreal_subscription_cleanup_loop(&self) {
+        let mut interval = time::interval(Duration::from_millis(QUERY_SUBSCRIPTION_CHECK_INTERVAL));
+        while !*self.is_teardown.lock().await {
+            let mut to_remove = Vec::new();
+            
+            {
+                let queries = self.surreal_subscribed_queries.lock().await;
+                for (id, query) in queries.iter() {
+                    if query.last_keepalive.elapsed() > Duration::from_secs(QUERY_SUBSCRIPTION_TIMEOUT) {
+                        to_remove.push(id.clone());
+                    }
+                }
+            }
+            
+            for id in to_remove {
+                let _ = self.dispose_surreal_query_subscription(id).await;
+            }
+            
+            interval.tick().await;
         }
     }
 

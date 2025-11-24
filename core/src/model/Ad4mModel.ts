@@ -2504,8 +2504,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    * 
    * @remarks
-   * Note: Subscriptions (subscribe(), countSubscribe(), paginateSubscribe()) currently only work with Prolog.
-   * SurrealDB subscriptions will be added in a future phase.
+   * Note: Subscriptions (subscribe(), countSubscribe(), paginateSubscribe()) default to SurrealDB live queries
+   * if useSurrealDB(true) is set (default).
    */
   useSurrealDB(enabled: boolean = true): ModelQueryBuilder<T> {
     this.useSurrealDBFlag = enabled;
@@ -2573,22 +2573,45 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     // Clean up any existing subscription
     this.dispose();
 
-    // Note: Subscriptions currently only work with Prolog
-    const query = await this.ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
-    this.currentSubscription = await this.perspective.subscribeInfer(query);
+    if (this.useSurrealDBFlag) {
+        const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
+        this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
 
-    const processResults = async (result: AllInstancesResult) => {
-      const { results } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
-      callback(results as T[]);
-    };
+        const processResults = async (result: any) => {
+            // The result from live query subscription update (handled in PerspectiveInstance listener)
+            // is the new full set of results (because we re-query in Rust).
+            // So we just need to map it to instances.
+            const { results } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
+            callback(results as T[]);
+        };
 
-    this.currentSubscription.onResult(processResults);
-    const { results } = await this.ctor.instancesFromPrologResult(
-      this.perspective,
-      this.queryParams,
-      this.currentSubscription.result
-    );
-    return results as T[];
+        this.currentSubscription.onResult(processResults);
+        
+        // Process initial result
+        const { results } = await this.ctor.instancesFromSurrealResult(
+            this.perspective, 
+            this.queryParams, 
+            this.currentSubscription.result
+        );
+        return results as T[];
+    } else {
+        // Note: Subscriptions currently only work with Prolog
+        const query = await this.ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
+        this.currentSubscription = await this.perspective.subscribeInfer(query);
+
+        const processResults = async (result: AllInstancesResult) => {
+            const { results } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
+            callback(results as T[]);
+        };
+
+        this.currentSubscription.onResult(processResults);
+        const { results } = await this.ctor.instancesFromPrologResult(
+            this.perspective,
+            this.queryParams,
+            this.currentSubscription.result
+        );
+        return results as T[];
+    }
   }
 
   /**
@@ -2650,16 +2673,34 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     // Clean up any existing subscription
     this.dispose();
 
-    const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
-    this.currentSubscription = await this.perspective.subscribeInfer(query);
+    if (this.useSurrealDBFlag) {
+      const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
+      this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
 
-    const processResults = async (result: any) => {
-      const newCount = result?.[0]?.TotalCount || 0;
-      callback(newCount);
-    };
+      const processResults = async (result: any) => {
+        const { totalCount } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
+        callback(totalCount);
+      };
 
-    this.currentSubscription.onResult(processResults);
-    return this.currentSubscription.result?.[0]?.TotalCount || 0;
+      this.currentSubscription.onResult(processResults);
+      const { totalCount } = await this.ctor.instancesFromSurrealResult(
+        this.perspective, 
+        this.queryParams, 
+        this.currentSubscription.result
+      );
+      return totalCount;
+    } else {
+      const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
+      this.currentSubscription = await this.perspective.subscribeInfer(query);
+
+      const processResults = async (result: any) => {
+        const newCount = result?.[0]?.TotalCount || 0;
+        callback(newCount);
+      };
+
+      this.currentSubscription.onResult(processResults);
+      return this.currentSubscription.result?.[0]?.TotalCount || 0;
+    }
   }
 
   /**
@@ -2730,16 +2771,31 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     this.dispose();
 
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
-    this.currentSubscription = await this.perspective.subscribeInfer(prologQuery);
 
-    const processResults = async (r: AllInstancesResult) => {
-      const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, r)) as ResultsWithTotalCount<T>;
-      callback({ results, totalCount, pageSize, pageNumber });
-    };
+    if (this.useSurrealDBFlag) {
+      const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, paginationQuery);
+      this.currentSubscription = await this.perspective.subscribeSurrealDB(surrealQuery);
 
-    this.currentSubscription.onResult(processResults);
-    const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, this.currentSubscription.result)) as ResultsWithTotalCount<T>;
-    return { results, totalCount, pageSize, pageNumber };
+      const processResults = async (result: any) => {
+        const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, result)) as ResultsWithTotalCount<T>;
+        callback({ results, totalCount, pageSize, pageNumber });
+      };
+
+      this.currentSubscription.onResult(processResults);
+      const { results, totalCount } = (await this.ctor.instancesFromSurrealResult(this.perspective, paginationQuery, this.currentSubscription.result)) as ResultsWithTotalCount<T>;
+      return { results, totalCount, pageSize, pageNumber };
+    } else {
+      const prologQuery = await this.ctor.queryToProlog(this.perspective, paginationQuery, this.modelClassName);
+      this.currentSubscription = await this.perspective.subscribeInfer(prologQuery);
+
+      const processResults = async (r: AllInstancesResult) => {
+        const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, r)) as ResultsWithTotalCount<T>;
+        callback({ results, totalCount, pageSize, pageNumber });
+      };
+
+      this.currentSubscription.onResult(processResults);
+      const { results, totalCount } = (await this.ctor.instancesFromPrologResult(this.perspective, paginationQuery, this.currentSubscription.result)) as ResultsWithTotalCount<T>;
+      return { results, totalCount, pageSize, pageNumber };
+    }
   }
 }

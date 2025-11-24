@@ -193,6 +193,53 @@ export class PerspectiveClient {
         return { subscriptionId, result: finalResult, isInit }
     }
 
+    async perspectiveSubscribeSurrealQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult, isInit?: boolean }> {
+        const { perspectiveSubscribeSurrealQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveSubscribeSurrealQuery($uuid: String!, $query: String!) {
+                perspectiveSubscribeSurrealQuery(uuid: $uuid, query: $query) {
+                    subscriptionId
+                    result
+                }
+            }`,
+            variables: { uuid, query }
+        }))
+        const { subscriptionId, result } = perspectiveSubscribeSurrealQuery
+        let finalResult = result;
+        let isInit = false;
+        if(finalResult.startsWith("#init#")) {
+            finalResult = finalResult.substring(6)
+            isInit = true;
+        }
+        try {
+            finalResult = JSON.parse(finalResult)
+        } catch (e) {
+            console.error('Error parsing perspectiveSubscribeSurrealQuery result:', e)
+        }
+        return { subscriptionId, result: finalResult, isInit }
+    }
+
+    async perspectiveKeepAliveSurrealQuery(uuid: string, subscriptionId: string): Promise<boolean> {
+        const { perspectiveKeepAliveSurrealQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveKeepAliveSurrealQuery($uuid: String!, $subscriptionId: String!) {
+                perspectiveKeepAliveSurrealQuery(uuid: $uuid, subscriptionId: $subscriptionId)
+            }`,
+            variables: { uuid, subscriptionId }
+        }))
+
+        return perspectiveKeepAliveSurrealQuery
+    }
+
+    async perspectiveDisposeSurrealQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
+        const { perspectiveDisposeSurrealQuerySubscription } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveDisposeSurrealQuerySubscription($uuid: String!, $subscriptionId: String!) {
+                perspectiveDisposeSurrealQuerySubscription(uuid: $uuid, subscriptionId: $subscriptionId)
+            }`,
+            variables: { uuid, subscriptionId }
+        }))
+
+        return perspectiveDisposeSurrealQuerySubscription
+    }
+
     subscribeToQueryUpdates(subscriptionId: string, onData: (result: AllInstancesResult) => void): () => void {
         const subscription = this.#apolloClient.subscribe({
             query: gql`
