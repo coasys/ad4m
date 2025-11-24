@@ -2623,12 +2623,38 @@ impl PerspectiveInstance {
             // Now we process the stream while keeping _surreal_service alive
             match stream_result {
                 Ok(mut stream) => {
-                    while let Some(notification_res) = stream.next().await {
-                        match notification_res {
-                            Ok(notification) => {
-                                // notification.data is now a LinkRecord - check if it matches our perspective
-                                if notification.data.perspective == uuid {
-                                    // Re-query to get the full current state
+                    // Debounce notifications to batch rapid changes (e.g., multiple links for one entity)
+                    // Use a longer debounce for GROUP BY queries which take longer to execute
+                    let debounce_duration = Duration::from_millis(300);
+                    let mut pending_update = false;
+                    let mut last_notification_time = tokio::time::Instant::now();
+                    
+                    loop {
+                        // Use timeout to periodically check if we should send a pending update
+                        let timeout_result = tokio::time::timeout(
+                            debounce_duration,
+                            stream.next()
+                        ).await;
+                        
+                        match timeout_result {
+                            Ok(Some(notification_res)) => {
+                                match notification_res {
+                                    Ok(_notification) => {
+                                        // Mark that we have a pending update
+                                        pending_update = true;
+                                        last_notification_time = tokio::time::Instant::now();
+                                    },
+                                    Err(e) => log::error!("SurrealDB live stream error: {}", e),
+                                }
+                            },
+                            Ok(None) => {
+                                // Stream ended
+                                break;
+                            },
+                            Err(_) => {
+                                // Timeout - check if we should send the pending update
+                                if pending_update && last_notification_time.elapsed() >= debounce_duration {
+                                    // Re-query to get the full current state matching the query
                                     let service = get_surreal_service().await;
                                     match service.query_links(&uuid, &query_clone).await {
                                         Ok(new_result_vec) => {
@@ -2648,9 +2674,9 @@ impl PerspectiveInstance {
                                         },
                                         Err(e) => log::error!("Failed to re-query surreal: {}", e),
                                     }
+                                    pending_update = false;
                                 }
-                            },
-                            Err(e) => log::error!("SurrealDB live stream error: {}", e),
+                            }
                         }
                     }
                     // _surreal_service will be dropped here automatically, keeping the stream alive

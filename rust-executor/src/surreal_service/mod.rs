@@ -325,13 +325,200 @@ impl SurrealDBService {
 
     pub async fn subscribe_query(
         &self,
-        _perspective_uuid: &str,
-        _query: &str,
-    ) -> Result<impl Stream<Item = Result<Notification<LinkRecord>, surrealdb::Error>> + Send + Unpin + '_, Error> {
-        // We listen to the whole "link" table.
-        // Filtering happens in the consumer because we can't easily filter a live stream by property in current rust client
-        // without using raw "LIVE SELECT" queries which don't return a stream in the same way.
-        Ok(self.db.select("link").live().await?)
+        perspective_uuid: &str,
+        query: &str,
+    ) -> Result<std::pin::Pin<Box<dyn Stream<Item = Result<Notification<LinkRecord>, surrealdb::Error>> + Send + '_>>, Error> {
+        use futures::stream::StreamExt;
+        
+        // Check if the query has features not supported by LIVE SELECT
+        // LIVE SELECT doesn't support: GROUP BY, ORDER BY, LIMIT, OFFSET, aggregations
+        let query_upper = query.to_uppercase();
+        let has_unsupported_features = query_upper.contains("GROUP BY") 
+            || query_upper.contains("ORDER BY")
+            || query_upper.contains("LIMIT")
+            || query_upper.contains("OFFSET")
+            || query_upper.contains("COUNT(")
+            || query_upper.contains("SUM(")
+            || query_upper.contains("AVG(")
+            || query_upper.contains("MIN(")
+            || query_upper.contains("MAX(");
+        
+        if has_unsupported_features {
+            // Fall back to manual filtering for complex queries
+            return self.subscribe_query_with_filter(perspective_uuid, query).await;
+        }
+        
+        // Convert the SELECT query to a LIVE SELECT query with perspective filter
+        let live_query = self.convert_to_live_query(query, perspective_uuid);
+        
+        // Execute the LIVE SELECT query using the query builder
+        let mut response = self.db.query(&live_query).await?;
+        
+        // Get the stream from the response - this returns a QueryStream of Notifications
+        let stream = response.stream::<Notification<LinkRecord>>(0)?;
+        
+        Ok(Box::pin(stream))
+    }
+    
+    /// Subscribe with manual filtering - used for queries with GROUP BY, ORDER BY, etc.
+    async fn subscribe_query_with_filter(
+        &self,
+        perspective_uuid: &str,
+        query: &str,
+    ) -> Result<std::pin::Pin<Box<dyn Stream<Item = Result<Notification<LinkRecord>, surrealdb::Error>> + Send + '_>>, Error> {
+        use futures::stream::StreamExt;
+        
+        // Parse the query to extract filter conditions
+        let query_filters = Self::parse_query_filters(query);
+        let perspective_filter = perspective_uuid.to_string();
+        
+        // Listen to the whole "link" table and filter the stream manually
+        let stream = self.db.select("link").live().await?;
+        
+        // Filter the stream based on the query conditions using filter_map
+        let filtered_stream = stream.filter_map(move |notification_result| {
+            let query_filters = query_filters.clone();
+            let perspective_filter = perspective_filter.clone();
+            
+            async move {
+                match notification_result {
+                    Ok(notification) => {
+                        let record: &LinkRecord = &notification.data;
+                        
+                        // Always filter by perspective
+                        if record.perspective != perspective_filter {
+                            return None;
+                        }
+                        
+                        // Apply query-specific filters
+                        if Self::matches_filters(record, &query_filters) {
+                            Some(Ok(notification))
+                        } else {
+                            None
+                        }
+                    }
+                    Err(e) => Some(Err(e)), // Pass through errors
+                }
+            }
+        });
+        
+        Ok(Box::pin(filtered_stream))
+    }
+    
+    /// Parse a SurrealQL query to extract WHERE clause filters
+    /// Returns a HashMap of field -> value pairs to filter on
+    fn parse_query_filters(query: &str) -> std::collections::HashMap<String, String> {
+        use std::collections::HashMap;
+        
+        let mut filters = HashMap::new();
+        let query_upper = query.to_uppercase();
+        
+        // Find WHERE clause
+        if let Some(where_pos) = query_upper.find("WHERE") {
+            let where_clause = &query[where_pos + 5..].trim();
+            
+            // Find the end of the WHERE clause (before GROUP BY, ORDER BY, etc.)
+            let end_markers = ["GROUP BY", "ORDER BY", "LIMIT", "OFFSET"];
+            let mut where_end = where_clause.len();
+            for marker in &end_markers {
+                if let Some(pos) = where_clause.to_uppercase().find(marker) {
+                    where_end = where_end.min(pos);
+                }
+            }
+            let where_clause = &where_clause[..where_end].trim();
+            
+            // Extract simple equality conditions like "source = 'value'"
+            let parts: Vec<&str> = where_clause.split("AND").collect();
+            
+            for part in parts {
+                let part = part.trim();
+                if part.contains('=') && !part.contains("!=") {
+                    let eq_parts: Vec<&str> = part.splitn(2, '=').collect();
+                    if eq_parts.len() == 2 {
+                        let field = eq_parts[0].trim().to_lowercase();
+                        let mut value = eq_parts[1].trim().to_string();
+                        
+                        // Remove quotes if present
+                        if (value.starts_with('\'') && value.ends_with('\'')) 
+                            || (value.starts_with('"') && value.ends_with('"')) {
+                            value = value[1..value.len()-1].to_string();
+                        }
+                        
+                        // Skip perspective filter as it's handled separately
+                        if field != "perspective" {
+                            filters.insert(field, value);
+                        }
+                    }
+                }
+            }
+        }
+        
+        filters
+    }
+    
+    /// Check if a LinkRecord matches the given filters
+    fn matches_filters(record: &LinkRecord, filters: &std::collections::HashMap<String, String>) -> bool {
+        for (field, expected_value) in filters {
+            let actual_value = match field.as_str() {
+                "source" => &record.source,
+                "predicate" => &record.predicate,
+                "target" => &record.target,
+                "author" => &record.author,
+                "timestamp" => &record.timestamp,
+                _ => continue, // Skip unknown fields
+            };
+            
+            if actual_value != expected_value {
+                return false;
+            }
+        }
+        
+        true
+    }
+    
+    /// Convert a regular SELECT query to a LIVE SELECT query
+    fn convert_to_live_query(&self, query: &str, perspective_uuid: &str) -> String {
+        let query = query.trim();
+        let query_upper = query.to_uppercase();
+        
+        // Check if it already starts with LIVE SELECT
+        if query_upper.starts_with("LIVE SELECT") {
+            return query.to_string();
+        }
+        
+        // Convert SELECT to LIVE SELECT
+        if query_upper.starts_with("SELECT") {
+            // Inject perspective filter into WHERE clause if not already present
+            let filtered_query = if query_upper.contains("FROM LINK") {
+                self.inject_perspective_filter(query, perspective_uuid)
+            } else {
+                query.to_string()
+            };
+            
+            format!("LIVE {}", filtered_query)
+        } else {
+            // If it's not a SELECT query, wrap it as LIVE SELECT * FROM link WHERE ...
+            format!("LIVE SELECT * FROM link WHERE perspective = '{}'", perspective_uuid)
+        }
+    }
+    
+    /// Inject perspective filter into a query's WHERE clause
+    fn inject_perspective_filter(&self, query: &str, perspective_uuid: &str) -> String {
+        let query_upper = query.to_uppercase();
+        
+        if let Some(where_pos) = query_upper.find("WHERE") {
+            // Already has WHERE, add AND condition
+            let before_where = &query[..where_pos + 5];
+            let after_where = &query[where_pos + 5..];
+            format!("{} perspective = '{}' AND{}", before_where, perspective_uuid, after_where)
+        } else if let Some(from_link_pos) = query_upper.find("FROM LINK") {
+            // No WHERE clause, add one after FROM link
+            let before_from_link = &query[..from_link_pos + 9]; // "FROM LINK".len() = 9
+            let after_from_link = &query[from_link_pos + 9..];
+            format!("{} WHERE perspective = '{}' {}", before_from_link, perspective_uuid, after_from_link.trim())
+        } else {
+            query.to_string()
+        }
     }
 
     #[allow(dead_code)]
