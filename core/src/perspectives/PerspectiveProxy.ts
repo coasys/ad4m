@@ -81,14 +81,14 @@ export class QuerySubscriptionProxy {
     }
 
     async subscribe() {
-        // initialize the query subscription
+        // Initialize the query subscription
         const result = await this.#client.subscribeQuery(this.#uuid, this.#query);
         this.#subscriptionId = result.subscriptionId;
         // Subscribe to query updates
         this.#initialized = new Promise<boolean>((resolve, reject) => {
             // Add timeout to prevent hanging promises
             this.#initTimeoutId = setTimeout(() => {
-                reject(new Error('Subscription initialization timed out after 30 seconds. Resubscribing...'));
+                console.error('Subscription initialization timed out after 30 seconds. Resubscribing...');
                 this.subscribe();
             }, 30000); // 30 seconds timeout
             
@@ -106,7 +106,7 @@ export class QuerySubscriptionProxy {
                     // and we got a result before, we don't notify the callbacks
                     // so they don't get confused (we could have gotten another 
                     // more recent result in between)
-                    if(result.isInit && this.#latestResult) {
+                    if (result.isInit && this.#latestResult) {
                         return
                     }
 
