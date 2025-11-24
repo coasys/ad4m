@@ -1217,3 +1217,240 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
   });
 });
 
+describe("Ad4mModel.count() with advanced where conditions", () => {
+  // Test Recipe model
+  @ModelOptions({ name: "Recipe" })
+  class Recipe extends Ad4mModel {
+    @Property({ through: "recipe://name" })
+    name: string = "";
+    
+    @Property({ through: "recipe://rating" })
+    rating: number = 0;
+    
+    @Collection({ through: "recipe://ingredient" })
+    ingredients: string[] = [];
+  }
+
+  // Mock perspective
+  const mockPerspective = {
+    querySurrealDB: jest.fn(),
+    infer: jest.fn(),
+    uuid: 'test-perspective-uuid',
+    stringOrTemplateObjectToSubjectClassName: jest.fn().mockResolvedValue('Recipe')
+  } as any;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("should apply JS-level filtering for gt operator on properties in SurrealDB count()", async () => {
+    // Mock SurrealDB results: 5 recipes with ratings 1, 2, 3, 4, 5
+    const surrealResults = Array.from({ length: 5 }, (_, i) => ({
+      source: `literal://recipe${i+1}`,
+      links: [
+        { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
+        { predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
+      ]
+    }));
+    
+    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+
+    // Count recipes with rating > 3 (should match 2 recipes: rating 4 and 5)
+    const count = await Recipe.count(mockPerspective, { where: { rating: { gt: 3 } } });
+    
+    // Verify count matches the number of instances that would be returned by findAll
+    const findAllResults = await Recipe.findAll(mockPerspective, { where: { rating: { gt: 3 } } });
+    
+    expect(count).toBe(2);
+    expect(count).toBe(findAllResults.length);
+  });
+
+  it("should apply JS-level filtering for between operator on properties in SurrealDB count()", async () => {
+    // Mock SurrealDB results: 5 recipes with ratings 1, 2, 3, 4, 5
+    const surrealResults = Array.from({ length: 5 }, (_, i) => ({
+      source: `literal://recipe${i+1}`,
+      links: [
+        { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
+        { predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
+      ]
+    }));
+    
+    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+
+    // Count recipes with rating between 2 and 4 (should match 3 recipes: rating 2, 3, 4)
+    const count = await Recipe.count(mockPerspective, { where: { rating: { between: [2, 4] } } });
+    
+    // Verify count matches the number of instances that would be returned by findAll
+    const findAllResults = await Recipe.findAll(mockPerspective, { where: { rating: { between: [2, 4] } } });
+    
+    expect(count).toBe(3);
+    expect(count).toBe(findAllResults.length);
+  });
+
+  it("should apply JS-level filtering for timestamp gt operator in SurrealDB count()", async () => {
+    // Mock SurrealDB results: 5 recipes with different timestamps
+    const surrealResults = Array.from({ length: 5 }, (_, i) => ({
+      source: `literal://recipe${i+1}`,
+      links: [
+        { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
+        { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
+      ]
+    }));
+    
+    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+
+    // Count recipes with timestamp > 2023-01-03 (should match 2 recipes: 2023-01-04 and 2023-01-05)
+    const targetTimestamp = new Date("2023-01-03T00:00:00Z").getTime();
+    const count = await Recipe.count(mockPerspective, { where: { timestamp: { gt: targetTimestamp } } });
+    
+    // Verify count matches the number of instances that would be returned by findAll
+    const findAllResults = await Recipe.findAll(mockPerspective, { where: { timestamp: { gt: targetTimestamp } } });
+    
+    expect(count).toBe(2);
+    expect(count).toBe(findAllResults.length);
+  });
+
+  it("should apply JS-level filtering for timestamp between operator in SurrealDB count()", async () => {
+    // Mock SurrealDB results: 5 recipes with different timestamps
+    const surrealResults = Array.from({ length: 5 }, (_, i) => ({
+      source: `literal://recipe${i+1}`,
+      links: [
+        { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
+        { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
+      ]
+    }));
+    
+    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+
+    // Count recipes with timestamp between 2023-01-02 and 2023-01-04
+    const startTimestamp = new Date("2023-01-02T00:00:00Z").getTime();
+    const endTimestamp = new Date("2023-01-04T00:00:00Z").getTime();
+    const count = await Recipe.count(mockPerspective, { 
+      where: { timestamp: { between: [startTimestamp, endTimestamp] } } 
+    });
+    
+    // Verify count matches the number of instances that would be returned by findAll
+    const findAllResults = await Recipe.findAll(mockPerspective, { 
+      where: { timestamp: { between: [startTimestamp, endTimestamp] } } 
+    });
+    
+    expect(count).toBe(3);
+    expect(count).toBe(findAllResults.length);
+  });
+
+  it("should apply JS-level filtering for author filtering in SurrealDB count()", async () => {
+    // Mock SurrealDB results: 3 recipes by Alice and 2 by Bob
+    const surrealResults = [
+      ...Array.from({ length: 3 }, (_, i) => ({
+        source: `literal://recipe${i+1}`,
+        links: [
+          { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
+          { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
+        ]
+      })),
+      ...Array.from({ length: 2 }, (_, i) => ({
+        source: `literal://recipe${i+4}`,
+        links: [
+          { predicate: "recipe://name", target: `Recipe ${i+4}`, author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
+          { predicate: "recipe://rating", target: "5", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" }
+        ]
+      }))
+    ];
+    
+    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+
+    // Count recipes by Alice (should match 3 recipes)
+    const count = await Recipe.count(mockPerspective, { where: { author: "did:key:alice" } });
+    
+    // Verify count matches the number of instances that would be returned by findAll
+    const findAllResults = await Recipe.findAll(mockPerspective, { where: { author: "did:key:alice" } });
+    
+    expect(count).toBe(3);
+    expect(count).toBe(findAllResults.length);
+  });
+
+  it("should apply JS-level filtering in ModelQueryBuilder.count() with gt operator", async () => {
+    // Mock SurrealDB results: 5 recipes with ratings 1, 2, 3, 4, 5
+    const surrealResults = Array.from({ length: 5 }, (_, i) => ({
+      source: `literal://recipe${i+1}`,
+      links: [
+        { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
+        { predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
+      ]
+    }));
+    
+    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+
+    // Count recipes with rating > 3 using ModelQueryBuilder
+    const count = await Recipe.query(mockPerspective)
+      .where({ rating: { gt: 3 } })
+      .count();
+    
+    // Verify count matches the number of instances that would be returned by get()
+    const getResults = await Recipe.query(mockPerspective)
+      .where({ rating: { gt: 3 } })
+      .get();
+    
+    expect(count).toBe(2);
+    expect(count).toBe(getResults.length);
+  });
+
+  it("should apply JS-level filtering in ModelQueryBuilder.count() with timestamp between", async () => {
+    // Mock SurrealDB results: 5 recipes with different timestamps
+    const surrealResults = Array.from({ length: 5 }, (_, i) => ({
+      source: `literal://recipe${i+1}`,
+      links: [
+        { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
+        { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
+      ]
+    }));
+    
+    mockPerspective.querySurrealDB.mockResolvedValue(surrealResults);
+
+    const startTimestamp = new Date("2023-01-02T00:00:00Z").getTime();
+    const endTimestamp = new Date("2023-01-04T00:00:00Z").getTime();
+    
+    // Count using ModelQueryBuilder
+    const count = await Recipe.query(mockPerspective)
+      .where({ timestamp: { between: [startTimestamp, endTimestamp] } })
+      .count();
+    
+    // Verify count matches the number of instances that would be returned by get()
+    const getResults = await Recipe.query(mockPerspective)
+      .where({ timestamp: { between: [startTimestamp, endTimestamp] } })
+      .get();
+    
+    expect(count).toBe(3);
+    expect(count).toBe(getResults.length);
+  });
+
+  it("should handle count() with Prolog for gt operator (legacy)", async () => {
+    const prologResults = [{ TotalCount: 2 }];
+    mockPerspective.infer.mockResolvedValue(prologResults);
+
+    const count = await Recipe.count(mockPerspective, { where: { rating: { gt: 3 } } }, false);
+    
+    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.querySurrealDB).not.toHaveBeenCalled();
+    expect(count).toBe(2);
+  });
+
+  it("should handle count() with Prolog for timestamp between (legacy)", async () => {
+    const prologResults = [{ TotalCount: 3 }];
+    mockPerspective.infer.mockResolvedValue(prologResults);
+
+    const startTimestamp = new Date("2023-01-02T00:00:00Z").getTime();
+    const endTimestamp = new Date("2023-01-04T00:00:00Z").getTime();
+    
+    const count = await Recipe.count(
+      mockPerspective, 
+      { where: { timestamp: { between: [startTimestamp, endTimestamp] } } }, 
+      false
+    );
+    
+    expect(mockPerspective.infer).toHaveBeenCalledTimes(1);
+    expect(mockPerspective.querySurrealDB).not.toHaveBeenCalled();
+    expect(count).toBe(3);
+  });
+});
+

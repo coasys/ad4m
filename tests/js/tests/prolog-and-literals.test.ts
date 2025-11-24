@@ -1168,7 +1168,15 @@ describe("Prolog + Literals", () => {
                     expect(recipes4.length).to.equal(3);
 
                     // 2. Timestamps
-                    const recipe2timestamp = parseInt(allRecipes[1].timestamp);
+                    // Sort recipes by timestamp to ensure consistent ordering
+                    const sortedRecipes = [...allRecipes].sort((a, b) => {
+                        const aTime = typeof a.timestamp === 'number' ? a.timestamp : parseInt(a.timestamp);
+                        const bTime = typeof b.timestamp === 'number' ? b.timestamp : parseInt(b.timestamp);
+                        return aTime - bTime;
+                    });
+                    const recipe2timestamp = typeof sortedRecipes[1].timestamp === 'number' 
+                        ? sortedRecipes[1].timestamp 
+                        : parseInt(sortedRecipes[1].timestamp); // Second recipe by timestamp
                     
                     // Test less than (lt) operation on timestamp
                     const recipes5 = await Recipe.findAll(perspective!, { where: { timestamp: { lt: recipe2timestamp } } });
@@ -1604,6 +1612,101 @@ describe("Prolog + Literals", () => {
 
                     // Dispose the subscription to prevent cross-test interference
                     builder.dispose();
+                })
+
+                it("count() works with advanced where conditions (gt, between, timestamp)", async () => {
+                    // Create recipes with different numbers
+                    const recipe1 = new Recipe(perspective!);
+                    recipe1.name = "Recipe 1";
+                    recipe1.number = 1;
+                    await recipe1.save();
+                    
+                    const recipe2 = new Recipe(perspective!);
+                    recipe2.name = "Recipe 2"; 
+                    recipe2.number = 2;
+                    await recipe2.save();
+                    
+                    const recipe3 = new Recipe(perspective!);
+                    recipe3.name = "Recipe 3";
+                    recipe3.number = 3;
+                    await recipe3.save();
+
+                    const recipe4 = new Recipe(perspective!);
+                    recipe4.name = "Recipe 4";
+                    recipe4.number = 4;
+                    await recipe4.save();
+
+                    const recipe5 = new Recipe(perspective!);
+                    recipe5.name = "Recipe 5";
+                    recipe5.number = 5;
+                    await recipe5.save();
+
+                    // Test count() with gt operator
+                    const countGt3 = await Recipe.count(perspective!, { where: { number: { gt: 3 } } });
+                    const findAllGt3 = await Recipe.findAll(perspective!, { where: { number: { gt: 3 } } });
+                    expect(countGt3).to.equal(findAllGt3.length);
+                    expect(countGt3).to.equal(2); // recipes 4 and 5
+
+                    // Test count() with between operator
+                    const countBetween2And4 = await Recipe.count(perspective!, { where: { number: { between: [2, 4] } } });
+                    const findAllBetween2And4 = await Recipe.findAll(perspective!, { where: { number: { between: [2, 4] } } });
+                    expect(countBetween2And4).to.equal(findAllBetween2And4.length);
+                    expect(countBetween2And4).to.equal(3); // recipes 2, 3, and 4
+
+                    // Test count() with gte and lte operators
+                    const countGte2Lte4 = await Recipe.count(perspective!, { where: { number: { gte: 2, lte: 4 } } });
+                    const findAllGte2Lte4 = await Recipe.findAll(perspective!, { where: { number: { gte: 2, lte: 4 } } });
+                    expect(countGte2Lte4).to.equal(findAllGte2Lte4.length);
+                    expect(countGte2Lte4).to.equal(3); // recipes 2, 3, and 4
+
+                    // Test count() with lt operator
+                    const countLt3 = await Recipe.count(perspective!, { where: { number: { lt: 3 } } });
+                    const findAllLt3 = await Recipe.findAll(perspective!, { where: { number: { lt: 3 } } });
+                    expect(countLt3).to.equal(findAllLt3.length);
+                    expect(countLt3).to.equal(2); // recipes 1 and 2
+
+                    // Test query builder count() with gt operator
+                    const queryCountGt3 = await Recipe.query(perspective!)
+                        .where({ number: { gt: 3 } })
+                        .count();
+                    const queryGetGt3 = await Recipe.query(perspective!)
+                        .where({ number: { gt: 3 } })
+                        .get();
+                    expect(queryCountGt3).to.equal(queryGetGt3.length);
+                    expect(queryCountGt3).to.equal(2);
+
+                    // Test query builder count() with between operator
+                    const queryCountBetween = await Recipe.query(perspective!)
+                        .where({ number: { between: [2, 4] } })
+                        .count();
+                    const queryGetBetween = await Recipe.query(perspective!)
+                        .where({ number: { between: [2, 4] } })
+                        .get();
+                    expect(queryCountBetween).to.equal(queryGetBetween.length);
+                    expect(queryCountBetween).to.equal(3);
+
+                    // Test count() with timestamp filtering
+                    // Get the timestamp of recipe3
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    const recipe3Instance = allRecipes.find((r: any) => r.name === "Recipe 3");
+                    expect(recipe3Instance).to.not.be.undefined;
+                    
+                    if (recipe3Instance && recipe3Instance.timestamp) {
+                        // Convert timestamp to number if it's a string
+                        const recipe3Timestamp = typeof recipe3Instance.timestamp === 'string' 
+                            ? new Date(recipe3Instance.timestamp).getTime() 
+                            : recipe3Instance.timestamp;
+                        
+                        // Count recipes with timestamp greater than recipe3's timestamp
+                        const countAfterRecipe3 = await Recipe.count(perspective!, { 
+                            where: { timestamp: { gt: recipe3Timestamp } } 
+                        });
+                        const findAllAfterRecipe3 = await Recipe.findAll(perspective!, { 
+                            where: { timestamp: { gt: recipe3Timestamp } } 
+                        });
+                        expect(countAfterRecipe3).to.equal(findAllAfterRecipe3.length);
+                        expect(countAfterRecipe3).to.be.at.least(2); // At least recipes 4 and 5
+                    }
                 })
 
                 it("paginate() and paginateSubscribe() work on the query builder", async () => {
@@ -2299,20 +2402,20 @@ describe("Prolog + Literals", () => {
                         body: string = ""
                     }
 
-                    /*
-                    before(async () => {
-                        // Add a small delay to ensure Prolog engine is stable
-                        await sleep(2000);
+                    
+                    // before(async () => {
+                    //     // Add a small delay to ensure Prolog engine is stable
+                    //     await sleep(2000);
                         
-                        // Register the EmojiMessage class using ensureSDNASubjectClass
-                        await perspective!.ensureSDNASubjectClass(EmojiMessage);
+                    //     // Register the EmojiMessage class using ensureSDNASubjectClass
+                    //     await perspective!.ensureSDNASubjectClass(EmojiMessage);
                         
-                        // Clear any existing EmojiMessage instances to start fresh
-                        const existingMessages = await EmojiMessage.findAll(perspective!);
-                        for (const msg of existingMessages) {
-                            await msg.delete();
-                        }
-                    });*/
+                    //     // Clear any existing EmojiMessage instances to start fresh
+                    //     const existingMessages = await EmojiMessage.findAll(perspective!);
+                    //     for (const msg of existingMessages) {
+                    //         await msg.delete();
+                    //     }
+                    // });
 
                     beforeEach(async () => {
                         // Register the EmojiMessage class using ensureSDNASubjectClass

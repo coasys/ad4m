@@ -932,6 +932,14 @@ GROUP BY source
           // post-query because fn::parse_literal() comparisons in SurrealDB subqueries
           // don't work reliably with numeric comparisons.
           // These are handled in instancesFromSurrealResult along with author/timestamp filtering.
+          // However, we still need to ensure the property exists by filtering on the predicate
+          const hasComparisonOps = ops.gt !== undefined || ops.gte !== undefined ||
+                                   ops.lt !== undefined || ops.lte !== undefined ||
+                                   ops.between !== undefined || ops.contains !== undefined;
+          if (hasComparisonOps) {
+            // Ensure we only get instances that have this property
+            conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}')`);
+          }
         } else {
           // Simple equality
           conditions.push(`source IN (SELECT VALUE source FROM link WHERE predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(condition)})`);
@@ -1240,7 +1248,8 @@ GROUP BY source
             instance.timestamp = new Date(maxTimestamp).getTime();
           } else if (typeof maxTimestamp === 'string') {
             // Try to parse as number string
-            instance.timestamp = parseInt(maxTimestamp, 10) || maxTimestamp;
+            const parsed = parseInt(maxTimestamp, 10);
+            instance.timestamp = isNaN(parsed) ? maxTimestamp : parsed;
           } else {
             instance.timestamp = maxTimestamp;
           }
@@ -1395,6 +1404,7 @@ GROUP BY source
     if (typeof condition === 'object' && condition !== null) {
       const ops = condition as any;
       
+      // Special case: 'not' operator (exclusive with other operators)
       if (ops.not !== undefined) {
         if (Array.isArray(ops.not)) {
           return !(ops.not as any[]).includes(value);
@@ -1403,34 +1413,42 @@ GROUP BY source
         }
       }
       
+      // Special case: 'between' operator (inclusive range, exclusive with gt/gte/lt/lte)
       if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
         return value >= ops.between[0] && value <= ops.between[1];
       }
       
+      // For all other operators (gt, gte, lt, lte, contains), we need to check ALL of them
+      // and return true only if ALL conditions are satisfied
+      let allConditionsMet = true;
+      
       if (ops.gt !== undefined) {
-        return value > ops.gt;
+        allConditionsMet = allConditionsMet && (value > ops.gt);
       }
       
       if (ops.gte !== undefined) {
-        return value >= ops.gte;
+        allConditionsMet = allConditionsMet && (value >= ops.gte);
       }
       
       if (ops.lt !== undefined) {
-        return value < ops.lt;
+        allConditionsMet = allConditionsMet && (value < ops.lt);
       }
       
       if (ops.lte !== undefined) {
-        return value <= ops.lte;
+        allConditionsMet = allConditionsMet && (value <= ops.lte);
       }
       
       if (ops.contains !== undefined) {
         if (typeof value === 'string') {
-          return value.includes(String(ops.contains));
+          allConditionsMet = allConditionsMet && value.includes(String(ops.contains));
         } else if (Array.isArray(value)) {
-          return value.includes(ops.contains);
+          allConditionsMet = allConditionsMet && value.includes(ops.contains);
+        } else {
+          allConditionsMet = false;
         }
-        return false;
       }
+      
+      return allConditionsMet;
     }
     
     // Simple equality
@@ -1620,10 +1638,13 @@ GROUP BY source
    */
   static async count(perspective: PerspectiveProxy, query: Query = {}, useSurrealDB: boolean = true) {
     if (useSurrealDB) {
-      const surrealQuery = await this.countQueryToSurrealQL(perspective, query);
+      const surrealQuery = await this.queryToSurrealQL(perspective, query);
       const result = await perspective.querySurrealDB(surrealQuery);
-      // Since GROUP BY returns one row per source, just count the rows
-      return result.length;
+      // Use instancesFromSurrealResult to apply JS-level filtering for advanced where conditions
+      // (e.g., gt, gte, lt, lte, between, contains on properties and author/timestamp)
+      // This ensures count() returns the same number as findAll().length
+      const { totalCount } = await this.instancesFromSurrealResult(perspective, query, result);
+      return totalCount;
     } else {
       const result = await perspective.infer(await this.countQueryToProlog(perspective, query));
       return result?.[0]?.TotalCount || 0;
@@ -2584,10 +2605,13 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async count(): Promise<number> {
     if (this.useSurrealDBFlag) {
-      const surrealQuery = await this.ctor.countQueryToSurrealQL(this.perspective, this.queryParams);
+      const surrealQuery = await this.ctor.queryToSurrealQL(this.perspective, this.queryParams);
       const result = await this.perspective.querySurrealDB(surrealQuery);
-      // Since GROUP BY returns one row per source, just count the rows
-      return result?.length || 0;
+      // Use instancesFromSurrealResult to apply JS-level filtering for advanced where conditions
+      // (e.g., gt, gte, lt, lte, between, contains on properties and author/timestamp)
+      // This ensures count() returns the same number as get().length
+      const { totalCount } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
+      return totalCount;
     } else {
       const query = await this.ctor.countQueryToProlog(this.perspective, this.queryParams, this.modelClassName);
       const result = await this.perspective.infer(query);
