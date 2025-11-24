@@ -640,23 +640,16 @@ export default class LanguageController {
             let happYaml = yaml.load(fs.readFileSync(happYamlPath, 'utf8'));
             //console.log("happ.yaml", happYaml)
             //@ts-ignore
-            let dnaBundlePath = path.join(unpackHappPath, happYaml.roles[0].dna.bundled)
+            let dnaBundlePath = path.join(unpackHappPath, happYaml.roles[0].dna.path)
 
             console.log("LanguageController.readAndTemplateHolochainDNA: unpacking DNA");
             let unpackDnaPath = (await this.#holochainService?.unPackDna(dnaBundlePath)).replace(/(\r\n|\n|\r)/gm, "");
             //console.log("unpackDnaPath:", unpackDnaPath)
 
             const dnaYamlPath = path.join(unpackDnaPath, "dna.yaml");
-            const wasmPath = path.join(unpackHappPath, "target/wasm32-unknown-unknown/release/")
 
             if (!fs.existsSync(dnaYamlPath)) {
                 throw new Error("Expected to find DNA of source language at path: " + dnaYamlPath + " after unpacking but could not find at given path");
-            }
-
-            //Read for files inside wasm path after unpack since we should now have .wasm file there but we do not know which name it may have
-            const wasmName = fs.readdirSync(wasmPath);
-            if (wasmName.length == 0) {
-                throw new Error("Got incorrect number of files inside wasm path when unpacking DNA");
             }
 
             //Read the yaml file

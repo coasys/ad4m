@@ -13,9 +13,15 @@ jobs:
     resource_class: xlarge
     steps:
       - checkout
+      - run:
+          name: Hot-upgrade Rust to 1.88
+          command: ~/.cargo/bin/rustup default 1.88 && ~/.cargo/bin/rustup target add wasm32-unknown-unknown
+      - run:
+          name: Hot-upgrade Holochain CLI to 0.6.0-rc.1
+          command: ~/.cargo/bin/cargo install holochain_cli@0.6.0-rc.1
       - restore_cache:
           keys:
-            - rust-cache-{{ checksum "Cargo.lock" }}-v2
+            - rust-cache-{{ checksum "Cargo.lock" }}-1.88
             - rust-cache-
       - run:
           name: cargo fmt --check
@@ -45,7 +51,7 @@ jobs:
           no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
       - save_cache:
-          key: rust-cache-{{ checksum "Cargo.lock" }}-v2
+          key: rust-cache-{{ checksum "Cargo.lock" }}-1.88
           paths:
             - ./target
             - ~/.cargo/registry
@@ -78,6 +84,12 @@ jobs:
       - checkout
       - attach_workspace:
           at: .
+      - run:
+          name: Hot-upgrade Rust to 1.88
+          command: ~/.cargo/bin/rustup default 1.88 && ~/.cargo/bin/rustup target add wasm32-unknown-unknown
+      - run:
+          name: Hot-upgrade Holochain CLI to 0.6.0-rc.1
+          command: ~/.cargo/bin/cargo install holochain_cli@0.6.0-rc.1
       - restore_cache:
           keys:
             - agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
@@ -94,10 +106,6 @@ jobs:
           keys:
             - p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
             - p-diff-sync-rust-cache-
-      - restore_cache:
-          keys:
-            - p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
-            - p-diff-sync-socket-signaling-rust-cache-
       - run:
           name: Install specific pnpm version
           command: npm install -g pnpm@9.15.0
@@ -126,10 +134,6 @@ jobs:
           key: p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
           paths:
             - ./bootstrap-languages/p-diff-sync/hc-dna/target
-      - save_cache:
-          key: p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
-          paths:
-            - ./bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/target\
       - run:
           name: Install ffmpeg for transcription test
           command: sudo apt-get update && sudo apt-get install ffmpeg --fix-missing
