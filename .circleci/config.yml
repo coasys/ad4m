@@ -1,6 +1,6 @@
 version: 2.1
 references:
-  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:654fee9ee2a36fec192a4a08c611ef99d9ad57c6d1a4e5bd51d899871b908b03
+  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
 
 orbs:
   node: circleci/node@5.2.0
@@ -13,12 +13,6 @@ jobs:
     resource_class: xlarge
     steps:
       - checkout
-      - run:
-          name: Hot-upgrade Rust to 1.88
-          command: ~/.cargo/bin/rustup default 1.88 && ~/.cargo/bin/rustup target add wasm32-unknown-unknown
-      - run:
-          name: Hot-upgrade Holochain CLI to 0.6.0-rc.1
-          command: ~/.cargo/bin/cargo install holochain_cli@0.6.0-rc.1
       - restore_cache:
           keys:
             - rust-cache-{{ checksum "Cargo.lock" }}-1.88
@@ -84,12 +78,6 @@ jobs:
       - checkout
       - attach_workspace:
           at: .
-      - run:
-          name: Hot-upgrade Rust to 1.88
-          command: ~/.cargo/bin/rustup default 1.88 && ~/.cargo/bin/rustup target add wasm32-unknown-unknown
-      - run:
-          name: Hot-upgrade Holochain CLI to 0.6.0-rc.1
-          command: ~/.cargo/bin/cargo install holochain_cli@0.6.0-rc.1
       - restore_cache:
           keys:
             - agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
