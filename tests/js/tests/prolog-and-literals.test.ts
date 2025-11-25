@@ -2307,7 +2307,7 @@ describe("Prolog + Literals", () => {
 
                         const saveLatency = saveTime - start;
                         const subscriptionLatency = Date.now() - saveTime;
-                        console.log("TestModel.sav() latency: ", saveLatency);
+                        console.log(`TestModel.save() latency: ${saveLatency}ms`);
                         console.log(`SurrealDB subscription update latency: ${subscriptionLatency}ms`);
                         
                         surrealBuilder.dispose();
