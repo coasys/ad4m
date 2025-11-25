@@ -40,6 +40,17 @@ pub fn initialize_from_db() {
     let mut perspectives = PERSPECTIVES.write().unwrap();
     for handle in handles {
         let p = PerspectiveInstance::new(handle.clone(), None);
+        // Sync existing links to SurrealDB before starting background tasks
+        let p_clone = p.clone();
+        tokio::spawn(async move {
+            if let Err(e) = p_clone.sync_existing_links_to_surreal().await {
+                log::warn!(
+                    "Failed to sync existing links to SurrealDB for perspective {}: {:?}",
+                    p_clone.persisted.lock().await.uuid,
+                    e
+                );
+            }
+        });
         tokio::spawn(p.clone().start_background_tasks());
         perspectives.insert(handle.uuid.clone(), RwLock::new(p));
     }

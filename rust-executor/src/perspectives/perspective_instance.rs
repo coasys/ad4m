@@ -233,6 +233,34 @@ impl PerspectiveInstance {
         *self.is_teardown.lock().await = true;
     }
 
+    /// Sync existing links from Prolog to SurrealDB
+    /// This should be called once when a perspective is loaded from storage
+    pub async fn sync_existing_links_to_surreal(&self) -> Result<(), AnyError> {
+        let uuid = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
+
+        log::info!("💾 SURREAL SYNC: Starting initial sync for perspective {}", uuid);
+        let sync_start = std::time::Instant::now();
+
+        // Get all links from storage (Prolog)
+        let all_links = self.get_links(&LinkQuery::default()).await?;
+        log::info!("💾 SURREAL SYNC: Found {} links to sync", all_links.len());
+
+        if all_links.is_empty() {
+            log::info!("💾 SURREAL SYNC: No links to sync");
+            return Ok(());
+        }
+
+        // Reload perspective in SurrealDB
+        let surreal_service = get_surreal_service().await;
+        surreal_service.reload_perspective(&uuid, all_links).await?;
+
+        log::info!("💾 SURREAL SYNC: Completed in {:?}", sync_start.elapsed());
+        Ok(())
+    }
+
     async fn ensure_link_language(&self) {
         let mut interval = time::interval(Duration::from_secs(5));
         while !*self.is_teardown.lock().await {
