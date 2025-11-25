@@ -82,36 +82,45 @@ export class QuerySubscriptionProxy {
 
     async subscribe() {
         // Initialize the query subscription
-        const result = await this.#client.subscribeQuery(this.#uuid, this.#query);
-        this.#subscriptionId = result.subscriptionId;
+        const initialResult = await this.#client.subscribeQuery(this.#uuid, this.#query);
+        this.#subscriptionId = initialResult.subscriptionId;
+
+        let subscriptionEstablished = false;
+
+        // Process the initial result immediately for fast UX
+        if (initialResult.result) {
+            this.#latestResult = initialResult.result;
+            this.#notifyCallbacks(initialResult.result);
+        } else {
+            console.warn('⚠️ No initial result returned from subscribeQuery!');
+        }
+
         // Subscribe to query updates
         this.#initialized = new Promise<boolean>((resolve, reject) => {
-            // Add timeout to prevent hanging promises
+            // Timeout and resubscribe if subscription doesn't confirm within 30 seconds
             this.#initTimeoutId = setTimeout(() => {
                 console.error('Subscription initialization timed out after 30 seconds. Resubscribing...');
                 this.subscribe();
-            }, 30000); // 30 seconds timeout
+            }, 30000);
             
             // Subscribe to query updates
             this.#unsubscribe = this.#client.subscribeToQueryUpdates(
                 this.#subscriptionId,
-                (result) => {
+                (updateResult) => {
                     if (this.#initTimeoutId) {
                         clearTimeout(this.#initTimeoutId);
                         this.#initTimeoutId = undefined;
                     }
                     resolve(true);
 
-                    // if the result is one of those repeated initialization results
+                    // If the update result is one of those repeated initialization results
                     // and we got a result before, we don't notify the callbacks
                     // so they don't get confused (we could have gotten another 
                     // more recent result in between)
-                    if (result.isInit && this.#latestResult) {
-                        return
-                    }
+                    if (updateResult.isInit && this.#latestResult) return;
 
-                    this.#latestResult = result;
-                    this.#notifyCallbacks(result);
+                    this.#latestResult = updateResult;
+                    this.#notifyCallbacks(updateResult);
                 }
             );
         });
