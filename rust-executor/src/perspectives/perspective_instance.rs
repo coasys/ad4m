@@ -1503,8 +1503,12 @@ impl PerspectiveInstance {
         match get_surreal_service().await.query_links(&uuid, &query).await {
             Ok(results) => Ok(results),
             Err(e) => {
-                log::warn!("Failed to execute SurrealDB query for perspective {}: {:?}", uuid, e);
-                Ok(vec![])  // Graceful degradation: return empty results
+                log::warn!(
+                    "Failed to execute SurrealDB query for perspective {}: {:?}",
+                    uuid,
+                    e
+                );
+                Ok(vec![]) // Graceful degradation: return empty results
             }
         }
     }
@@ -1527,12 +1531,20 @@ impl PerspectiveInstance {
         // Correct order: remove 3 old links, then add 4 new links -> all 4 remain
         for removal in &diff.removals {
             if let Err(e) = surreal_service.remove_link(&uuid, removal).await {
-                log::warn!("Failed to remove link from SurrealDB for perspective {}: {:?}", uuid, e);
+                log::warn!(
+                    "Failed to remove link from SurrealDB for perspective {}: {:?}",
+                    uuid,
+                    e
+                );
             }
         }
         for addition in &diff.additions {
             if let Err(e) = surreal_service.add_link(&uuid, addition).await {
-                log::warn!("Failed to add link to SurrealDB for perspective {}: {:?}", uuid, e);
+                log::warn!(
+                    "Failed to add link to SurrealDB for perspective {}: {:?}",
+                    uuid,
+                    e
+                );
             }
         }
     }
@@ -2600,7 +2612,10 @@ impl PerspectiveInstance {
         }
     }
 
-    pub async fn subscribe_and_query_surreal(&self, query: String) -> Result<(String, String), AnyError> {
+    pub async fn subscribe_and_query_surreal(
+        &self,
+        query: String,
+    ) -> Result<(String, String), AnyError> {
         let subscription_id = Uuid::new_v4().to_string();
 
         // Execute surreal query without holding any locks
@@ -2644,7 +2659,10 @@ impl PerspectiveInstance {
         }
     }
 
-    pub async fn dispose_surreal_query_subscription(&self, subscription_id: String) -> Result<bool, AnyError> {
+    pub async fn dispose_surreal_query_subscription(
+        &self,
+        subscription_id: String,
+    ) -> Result<bool, AnyError> {
         let mut queries = self.surreal_subscribed_queries.lock().await;
         Ok(queries.remove(&subscription_id).is_some())
     }
@@ -2687,18 +2705,20 @@ impl PerspectiveInstance {
             // Spawn query check future
             let self_clone = self.clone();
             let query_future = async move {
-                if let Ok(result_vec) = self_clone
-                    .surreal_query(query.query.clone())
-                    .await
-                {
+                if let Ok(result_vec) = self_clone.surreal_query(query.query.clone()).await {
                     if let Ok(result_string) = serde_json::to_string(&result_vec) {
                         if result_string != query.last_result {
                             // Update the query result and send notification immediately
                             {
                                 self_clone
-                                    .send_subscription_update(id.clone(), result_string.clone(), None)
+                                    .send_subscription_update(
+                                        id.clone(),
+                                        result_string.clone(),
+                                        None,
+                                    )
                                     .await;
-                                let mut queries = self_clone.surreal_subscribed_queries.lock().await;
+                                let mut queries =
+                                    self_clone.surreal_subscribed_queries.lock().await;
                                 if let Some(stored_query) = queries.get_mut(&id) {
                                     stored_query.last_result = result_string.clone();
                                 }
@@ -3098,11 +3118,13 @@ mod tests {
     async fn setup() -> PerspectiveInstance {
         setup_wallet();
         Ad4mDb::init_global_instance(":memory:").unwrap();
-        
+
         // Initialize agent, prolog and surreal services for tests
         AgentService::init_global_test_instance();
         init_prolog_service().await;
-        init_surreal_service().await.expect("Failed to init surreal service");
+        init_surreal_service()
+            .await
+            .expect("Failed to init surreal service");
 
         let instance = PerspectiveInstance::new(
             PerspectiveHandle {
@@ -3114,10 +3136,13 @@ mod tests {
             },
             None,
         );
-        
+
         // Ensure prolog engine pool is initialized
-        instance.ensure_prolog_engine_pool().await.expect("Failed to initialize prolog engine pool");
-        
+        instance
+            .ensure_prolog_engine_pool()
+            .await
+            .expect("Failed to initialize prolog engine pool");
+
         instance
     }
 
@@ -3132,10 +3157,13 @@ mod tests {
             },
             None,
         );
-        
+
         // Ensure prolog engine pool is initialized
-        instance.ensure_prolog_engine_pool().await.expect("Failed to initialize prolog engine pool");
-        
+        instance
+            .ensure_prolog_engine_pool()
+            .await
+            .expect("Failed to initialize prolog engine pool");
+
         instance
     }
 
@@ -3570,55 +3598,67 @@ mod tests {
     #[tokio::test]
     async fn test_add_link_surreal_query() {
         let mut perspective = setup().await;
-        
+
         // Add a link
         let link = create_link();
         let source = link.source.clone();
         let predicate = link.predicate.clone().unwrap_or_default();
         let target = link.target.clone();
-        
+
         perspective
             .add_link(link.clone(), LinkStatus::Shared, None)
             .await
             .unwrap();
-        
+
         // Query SurrealDB
-        let results = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
-        
+        let results = perspective
+            .surreal_query("SELECT * FROM link".to_string())
+            .await
+            .unwrap();
+
         // Verify link was added to SurrealDB
         assert!(results.len() > 0, "Expected at least one link in SurrealDB");
-        
+
         // Find the added link in results
         let found = results.iter().any(|result| {
-            result.get("source").and_then(|v| v.as_str()) == Some(&source) &&
-            result.get("predicate").and_then(|v| v.as_str()) == Some(&predicate) &&
-            result.get("target").and_then(|v| v.as_str()) == Some(&target)
+            result.get("source").and_then(|v| v.as_str()) == Some(&source)
+                && result.get("predicate").and_then(|v| v.as_str()) == Some(&predicate)
+                && result.get("target").and_then(|v| v.as_str()) == Some(&target)
         });
-        
+
         assert!(found, "Added link not found in SurrealDB query results");
     }
 
     #[tokio::test]
     async fn test_remove_link_surreal_query() {
         let mut perspective = setup().await;
-        
+
         // Add a link
         let link = create_link();
         let added_link = perspective
             .add_link(link.clone(), LinkStatus::Shared, None)
             .await
             .unwrap();
-        
+
         // Verify link exists in SurrealDB
-        let results_before = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
+        let results_before = perspective
+            .surreal_query("SELECT * FROM link".to_string())
+            .await
+            .unwrap();
         assert_eq!(results_before.len(), 1, "Expected one link before removal");
-        
+
         // Remove the link
-        perspective.remove_link(added_link.into(), None).await.unwrap();
-        
+        perspective
+            .remove_link(added_link.into(), None)
+            .await
+            .unwrap();
+
         // Query SurrealDB again
-        let results_after = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
-        
+        let results_after = perspective
+            .surreal_query("SELECT * FROM link".to_string())
+            .await
+            .unwrap();
+
         // Verify link was removed
         assert_eq!(results_after.len(), 0, "Expected no links after removal");
     }
@@ -3626,7 +3666,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_add_remove_surreal_query() {
         let mut perspective = setup().await;
-        
+
         // Add multiple links
         let mut added_links = Vec::new();
         for _ in 0..5 {
@@ -3637,25 +3677,34 @@ mod tests {
                 .unwrap();
             added_links.push(added);
         }
-        
+
         // Query SurrealDB
-        let results = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
+        let results = perspective
+            .surreal_query("SELECT * FROM link".to_string())
+            .await
+            .unwrap();
         assert_eq!(results.len(), 5, "Expected 5 links in SurrealDB");
-        
+
         // Remove 3 links
         for i in 0..3 {
-            perspective.remove_link(added_links[i].clone().into(), None).await.unwrap();
+            perspective
+                .remove_link(added_links[i].clone().into(), None)
+                .await
+                .unwrap();
         }
-        
+
         // Query SurrealDB again
-        let results_after = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
+        let results_after = perspective
+            .surreal_query("SELECT * FROM link".to_string())
+            .await
+            .unwrap();
         assert_eq!(results_after.len(), 2, "Expected 2 links after removing 3");
     }
 
     #[tokio::test]
     async fn test_full_reload_surreal_query() {
         let mut perspective = setup().await;
-        
+
         // Add some normal links first
         for _ in 0..3 {
             let link = create_link();
@@ -3664,11 +3713,14 @@ mod tests {
                 .await
                 .unwrap();
         }
-        
+
         // Query before triggering rebuild
-        let results_before = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
+        let results_before = perspective
+            .surreal_query("SELECT * FROM link".to_string())
+            .await
+            .unwrap();
         assert_eq!(results_before.len(), 3, "Expected 3 links before rebuild");
-        
+
         // Add an SDNA link (which triggers full rebuild)
         let sdna_link = Link {
             source: "test://source".to_string(),
@@ -3679,23 +3731,37 @@ mod tests {
             .add_link(sdna_link.clone(), LinkStatus::Shared, None)
             .await
             .unwrap();
-        
+
         // Query after rebuild
-        let results_after = perspective.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
-        assert_eq!(results_after.len(), 4, "Expected 4 links after rebuild (3 normal + 1 SDNA)");
-        
+        let results_after = perspective
+            .surreal_query("SELECT * FROM link".to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            results_after.len(),
+            4,
+            "Expected 4 links after rebuild (3 normal + 1 SDNA)"
+        );
+
         // Verify all links are present
         let all_links = perspective.get_links(&LinkQuery::default()).await.unwrap();
-        assert_eq!(all_links.len(), results_after.len(), "SurrealDB and Prolog link counts should match");
+        assert_eq!(
+            all_links.len(),
+            results_after.len(),
+            "SurrealDB and Prolog link counts should match"
+        );
     }
 
     #[tokio::test]
     async fn test_surreal_query_error_handling() {
         let perspective = setup().await;
-        
+
         // Test with invalid query syntax - should return empty vec, not crash
-        let results = perspective.surreal_query("INVALID QUERY SYNTAX".to_string()).await.unwrap();
-        
+        let results = perspective
+            .surreal_query("INVALID QUERY SYNTAX".to_string())
+            .await
+            .unwrap();
+
         // Should return empty vec on error
         assert_eq!(results.len(), 0, "Expected empty results on query error");
     }
@@ -3707,38 +3773,49 @@ mod tests {
         Ad4mDb::init_global_instance(":memory:").unwrap();
         AgentService::init_global_test_instance();
         init_prolog_service().await;
-        init_surreal_service().await.expect("Failed to init surreal service");
-        
+        init_surreal_service()
+            .await
+            .expect("Failed to init surreal service");
+
         // Create two separate perspectives without re-initializing globals
         let mut perspective1 = create_perspective().await;
         let mut perspective2 = create_perspective().await;
-        
+
         // Add links to perspective 1
         let link1 = create_link();
         perspective1
             .add_link(link1.clone(), LinkStatus::Shared, None)
             .await
             .unwrap();
-        
+
         // Add different links to perspective 2
         let link2 = create_link();
         perspective2
             .add_link(link2.clone(), LinkStatus::Shared, None)
             .await
             .unwrap();
-        
+
         // Query both perspectives
-        let results1 = perspective1.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
-        let results2 = perspective2.surreal_query("SELECT * FROM link".to_string()).await.unwrap();
-        
+        let results1 = perspective1
+            .surreal_query("SELECT * FROM link".to_string())
+            .await
+            .unwrap();
+        let results2 = perspective2
+            .surreal_query("SELECT * FROM link".to_string())
+            .await
+            .unwrap();
+
         // Each perspective should only see its own link
         assert_eq!(results1.len(), 1, "Perspective 1 should have 1 link");
         assert_eq!(results2.len(), 1, "Perspective 2 should have 1 link");
-        
+
         // Verify the links are different (by checking source)
         let source1 = results1[0].get("source").and_then(|v| v.as_str()).unwrap();
         let source2 = results2[0].get("source").and_then(|v| v.as_str()).unwrap();
-        assert_ne!(source1, source2, "Links from different perspectives should be isolated");
+        assert_ne!(
+            source1, source2,
+            "Links from different perspectives should be isolated"
+        );
     }
 
     // #[tokio::test]
@@ -3784,9 +3861,9 @@ mod tests {
     #[tokio::test]
     async fn test_surreal_query_for_recipe_instances() {
         let mut perspective = setup().await;
-        
+
         println!("\n=== Step 1: Adding Recipe SDNA ===");
-        
+
         // Step 1: Add Recipe SDNA with two required properties (matching subject.pl format exactly)
         let recipe_sdna = r#"
 subject_class("Recipe", c).
@@ -3803,126 +3880,183 @@ property_getter(c, Base, "rating", Value) :-
     triple(Base, "recipe://rating", Value).
 property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predicate: "recipe://rating", target: "value"}]').
 "#;
-        
+
         perspective.ensure_prolog_engine_pool().await.unwrap();
-        perspective.add_sdna("Recipe".to_string(), recipe_sdna.to_string(), SdnaType::SubjectClass).await.unwrap();
-        
+        perspective
+            .add_sdna(
+                "Recipe".to_string(),
+                recipe_sdna.to_string(),
+                SdnaType::SubjectClass,
+            )
+            .await
+            .unwrap();
 
         perspective.get_links(&LinkQuery::default()).await.unwrap();
         let links = perspective.get_links(&LinkQuery::default()).await.unwrap();
         assert_eq!(links.len(), 2, "Expected 2 links");
 
-        let check = perspective.prolog_query("subject_class(Name, _)".to_string()).await.unwrap();
+        let check = perspective
+            .prolog_query("subject_class(Name, _)".to_string())
+            .await
+            .unwrap();
         println!("Check: {:?}", check);
 
         println!("✓ Recipe SDNA added, Prolog engine updated");
-        
-        perspective.create_subject(
-            SubjectClassOption {
-                class_name: Some("Recipe".to_string()),
-                query: None,
-            },
-            "literal://recipe1".to_string(),
-            Some(serde_json::json!({
-                "name": "Pasta Carbonara",
-                "rating": "5"
-            })),
-            None
-        ).await.unwrap();
-        
-        perspective.create_subject(
-            SubjectClassOption {
-                class_name: Some("Recipe".to_string()),
-                query: None,
-            },
-            "literal://recipe2".to_string(),
-            Some(serde_json::json!({
-                "name": "Pizza Margherita",
-                "rating": "4"
-            })),
-            None
-        ).await.unwrap();
-        
+
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Recipe".to_string()),
+                    query: None,
+                },
+                "literal://recipe1".to_string(),
+                Some(serde_json::json!({
+                    "name": "Pasta Carbonara",
+                    "rating": "5"
+                })),
+                None,
+            )
+            .await
+            .unwrap();
+
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Recipe".to_string()),
+                    query: None,
+                },
+                "literal://recipe2".to_string(),
+                Some(serde_json::json!({
+                    "name": "Pizza Margherita",
+                    "rating": "4"
+                })),
+                None,
+            )
+            .await
+            .unwrap();
+
         println!("✓ Created 2 Recipe instances using create_subject");
-        
+
         // Debug: Check all links after creating subjects
         let all_links_after_subjects = perspective.get_links(&LinkQuery::default()).await.unwrap();
-        println!("\n=== Debug: All links after creating subjects ({} total) ===", all_links_after_subjects.len());
+        println!(
+            "\n=== Debug: All links after creating subjects ({} total) ===",
+            all_links_after_subjects.len()
+        );
         for link in &all_links_after_subjects {
-            println!("  {} --[{}]--> {}", link.data.source, link.data.predicate.as_ref().unwrap_or(&"None".to_string()), link.data.target);
+            println!(
+                "  {} --[{}]--> {}",
+                link.data.source,
+                link.data.predicate.as_ref().unwrap_or(&"None".to_string()),
+                link.data.target
+            );
         }
-        
+
         println!("\n=== Step 3: Adding noise links ===");
-        
+
         // Step 3: Add some noise links (non-recipe data) to ensure filtering works
-        perspective.add_link(
-            Link {
-                source: "literal://user1".to_string(),
-                target: "Alice".to_string(),
-                predicate: Some("user://name".to_string()),
-            },
-            LinkStatus::Shared,
-            None,
-        ).await.unwrap();
-        
-        perspective.add_link(
-            Link {
-                source: "literal://incomplete_recipe".to_string(),
-                target: "Half Recipe".to_string(),
-                predicate: Some("recipe://name".to_string()),
-                // Missing rating - should NOT be found as a Recipe instance
-            },
-            LinkStatus::Shared,
-            None,
-        ).await.unwrap();
-        
+        perspective
+            .add_link(
+                Link {
+                    source: "literal://user1".to_string(),
+                    target: "Alice".to_string(),
+                    predicate: Some("user://name".to_string()),
+                },
+                LinkStatus::Shared,
+                None,
+            )
+            .await
+            .unwrap();
+
+        perspective
+            .add_link(
+                Link {
+                    source: "literal://incomplete_recipe".to_string(),
+                    target: "Half Recipe".to_string(),
+                    predicate: Some("recipe://name".to_string()),
+                    // Missing rating - should NOT be found as a Recipe instance
+                },
+                LinkStatus::Shared,
+                None,
+            )
+            .await
+            .unwrap();
+
         println!("✓ Added noise links");
-        
+
         // Give SurrealDB time to process all the links
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        
+
         println!("\n=== Step 4: Running structural SurrealQL query ===");
-        
+
         // Get perspective UUID for manual filtering
         let uuid = {
             let persisted_guard = perspective.persisted.lock().await;
             persisted_guard.uuid.clone()
         };
-        
+
         // Debug: First, check raw data in SurrealDB including IDs
-        let raw_query = format!("SELECT id, source, predicate, target FROM link WHERE perspective = '{}'", uuid);
+        let raw_query = format!(
+            "SELECT id, source, predicate, target FROM link WHERE perspective = '{}'",
+            uuid
+        );
         let raw_results = perspective.surreal_query(raw_query).await.unwrap();
         println!("Debug - Raw links in SurrealDB: {}", raw_results.len());
         for (i, link) in raw_results.iter().enumerate() {
-            let id = link.get("id").map(|v| format!("{:?}", v)).unwrap_or("NO ID".to_string());
+            let id = link
+                .get("id")
+                .map(|v| format!("{:?}", v))
+                .unwrap_or("NO ID".to_string());
             let source = link.get("source").and_then(|v| v.as_str()).unwrap_or("?");
-            let pred = link.get("predicate").and_then(|v| v.as_str()).unwrap_or("?");
+            let pred = link
+                .get("predicate")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
             let target = link.get("target").and_then(|v| v.as_str()).unwrap_or("?");
-            println!("  {}: [{}] {} --[{}]--> {}", i+1, id, source, pred, target);
+            println!(
+                "  {}: [{}] {} --[{}]--> {}",
+                i + 1,
+                id,
+                source,
+                pred,
+                target
+            );
         }
-        
+
         // Debug: Test GROUP BY with count() WITHOUT alias (like the docs example)
         let count_query = "SELECT source, count() AS total FROM link GROUP BY source";
         println!("\nDebug - GROUP BY without alias: {}", count_query);
-        let count_results = perspective.surreal_query(count_query.to_string()).await.unwrap();
+        let count_results = perspective
+            .surreal_query(count_query.to_string())
+            .await
+            .unwrap();
         println!("Result: Found {} grouped sources", count_results.len());
         for row in &count_results {
             let source = row.get("source").and_then(|v| v.as_str()).unwrap_or("?");
-            let total = row.get("total").map(|v| format!("{:?}", v)).unwrap_or("?".to_string());
+            let total = row
+                .get("total")
+                .map(|v| format!("{:?}", v))
+                .unwrap_or("?".to_string());
             println!("  {} has {} links", source, total);
         }
-        
+
         // Debug: Test the SIMPLEST possible GROUP BY with array::group
         let simplest_query = "SELECT source AS base, array::group(predicate) AS predicates FROM link GROUP BY source";
         println!("\nDebug - GROUP BY with array::group(): {}", simplest_query);
-        let simplest_results = perspective.surreal_query(simplest_query.to_string()).await.unwrap();
+        let simplest_results = perspective
+            .surreal_query(simplest_query.to_string())
+            .await
+            .unwrap();
         println!("Result: Found {} grouped sources", simplest_results.len());
         for row in &simplest_results {
-            if let (Some(base), Some(preds)) = (row.get("base").and_then(|v| v.as_str()), row.get("predicates").and_then(|v| v.as_array())) {
+            if let (Some(base), Some(preds)) = (
+                row.get("base").and_then(|v| v.as_str()),
+                row.get("predicates").and_then(|v| v.as_array()),
+            ) {
                 println!("  {} has {} predicates", base, preds.len());
             }
         }
-        
+
         // Debug: Test GROUP BY with manual perspective filter
         let simple_group_query = format!(
             "SELECT source AS base, array::group(predicate) AS predicates FROM link WHERE perspective = '{}' GROUP BY source",
@@ -3930,18 +4064,25 @@ property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predi
         );
         println!("\nDebug - GROUP BY with WHERE: {}", simple_group_query);
         let simple_group_results = perspective.surreal_query(simple_group_query).await.unwrap();
-        println!("Result: Found {} grouped sources", simple_group_results.len());
+        println!(
+            "Result: Found {} grouped sources",
+            simple_group_results.len()
+        );
         for row in &simple_group_results {
-            if let (Some(base), Some(preds)) = (row.get("base").and_then(|v| v.as_str()), row.get("predicates").and_then(|v| v.as_array())) {
+            if let (Some(base), Some(preds)) = (
+                row.get("base").and_then(|v| v.as_str()),
+                row.get("predicates").and_then(|v| v.as_array()),
+            ) {
                 println!("  {} has {} predicates: {:?}", base, preds.len(), preds);
             }
         }
-        
+
         // Step 4: Query for Recipe instances based on structure (both required properties must exist)
         // This emulates Prolog's instance(C, Base) check
         // Using manual perspective filter since auto-injection is temporarily disabled
         // NOTE: Cannot alias 'source' in SELECT when using GROUP BY source - it breaks SurrealDB grouping!
-        let query = format!(r#"
+        let query = format!(
+            r#"
 SELECT 
   source,
   array::group(predicate) AS predicates,
@@ -3952,21 +4093,23 @@ WHERE
   AND source IN (SELECT VALUE source FROM link WHERE perspective = '{}' AND predicate = 'recipe://name')
   AND source IN (SELECT VALUE source FROM link WHERE perspective = '{}' AND predicate = 'recipe://rating')
 GROUP BY source
-"#, uuid, uuid, uuid);
-        
+"#,
+            uuid, uuid, uuid
+        );
+
         println!("\n=== Running structural query for Recipe instances ===");
         println!("Query:\n{}", query);
-        
+
         let results = perspective.surreal_query(query.clone()).await.unwrap();
-        
+
         println!("\n=== Results ===");
         println!("Found {} recipe instances", results.len());
         for (i, row) in results.iter().enumerate() {
             let source = row.get("source").and_then(|v| v.as_str()).unwrap_or("?");
             let predicates = row.get("predicates").and_then(|v| v.as_array()).unwrap();
             let targets = row.get("targets").and_then(|v| v.as_array()).unwrap();
-            
-            println!("\nRecipe {}: source = {}", i+1, source);
+
+            println!("\nRecipe {}: source = {}", i + 1, source);
             println!("  Properties:");
             for j in 0..predicates.len() {
                 let pred = predicates[j].as_str().unwrap_or("?");
@@ -3974,35 +4117,51 @@ GROUP BY source
                 println!("    {} = {}", pred, target);
             }
         }
-        
+
         // Assertions
-        assert_eq!(results.len(), 2, "Should find exactly 2 recipe instances (not the incomplete one, not the user)");
-        
+        assert_eq!(
+            results.len(),
+            2,
+            "Should find exactly 2 recipe instances (not the incomplete one, not the user)"
+        );
+
         // Verify both recipes are present with correct data
-        let recipe1 = results.iter().find(|r| 
-            r.get("source").and_then(|v| v.as_str()) == Some("literal://recipe1")
-        );
-        let recipe2 = results.iter().find(|r| 
-            r.get("source").and_then(|v| v.as_str()) == Some("literal://recipe2")
-        );
-        
+        let recipe1 = results
+            .iter()
+            .find(|r| r.get("source").and_then(|v| v.as_str()) == Some("literal://recipe1"));
+        let recipe2 = results
+            .iter()
+            .find(|r| r.get("source").and_then(|v| v.as_str()) == Some("literal://recipe2"));
+
         assert!(recipe1.is_some(), "Should find recipe1");
         assert!(recipe2.is_some(), "Should find recipe2");
-        
+
         // Verify recipe1 has correct properties
-        let r1_targets = recipe1.unwrap().get("targets").and_then(|v| v.as_array()).unwrap();
-        let has_pasta = r1_targets.iter().any(|v| v.as_str() == Some("Pasta Carbonara"));
+        let r1_targets = recipe1
+            .unwrap()
+            .get("targets")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        let has_pasta = r1_targets
+            .iter()
+            .any(|v| v.as_str() == Some("Pasta Carbonara"));
         let has_rating_5 = r1_targets.iter().any(|v| v.as_str() == Some("5"));
         assert!(has_pasta, "Recipe1 should have name 'Pasta Carbonara'");
         assert!(has_rating_5, "Recipe1 should have rating '5'");
-        
+
         // Verify recipe2 has correct properties
-        let r2_targets = recipe2.unwrap().get("targets").and_then(|v| v.as_array()).unwrap();
-        let has_pizza = r2_targets.iter().any(|v| v.as_str() == Some("Pizza Margherita"));
+        let r2_targets = recipe2
+            .unwrap()
+            .get("targets")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        let has_pizza = r2_targets
+            .iter()
+            .any(|v| v.as_str() == Some("Pizza Margherita"));
         let has_rating_4 = r2_targets.iter().any(|v| v.as_str() == Some("4"));
         assert!(has_pizza, "Recipe2 should have name 'Pizza Margherita'");
         assert!(has_rating_4, "Recipe2 should have rating '4'");
-        
+
         println!("\n=== ✓ SUCCESS ===");
         println!("✓ Found exactly 2 recipe instances");
         println!("✓ Filtered out incomplete recipe (missing rating)");
@@ -4013,15 +4172,15 @@ GROUP BY source
     #[tokio::test]
     async fn test_literal_parsing_in_surreal_queries() {
         let mut perspective = setup().await;
-        
+
         println!("\n=== Testing fn::parse_literal() in SurrealDB ===");
-        
+
         // Get perspective UUID
         let uuid = {
             let persisted_guard = perspective.persisted.lock().await;
             persisted_guard.uuid.clone()
         };
-        
+
         // Helper function to URL encode for literal URLs
         fn url_encode(s: &str) -> String {
             s.chars()
@@ -4031,58 +4190,67 @@ GROUP BY source
                 })
                 .collect()
         }
-        
+
         // Create literal://json: URLs with Expression objects (as created by the literal language)
         let recipe1_json = r#"{"author":"did:key:test","timestamp":"2025-11-19T10:00:00Z","data":"Pasta Carbonara","proof":{"signature":"abc123"}}"#;
         let recipe1_name_literal = format!("literal://json:{}", url_encode(recipe1_json));
-        
+
         let recipe2_json = r#"{"author":"did:key:test","timestamp":"2025-11-19T10:00:00Z","data":"Pizza Margherita","proof":{"signature":"def456"}}"#;
         let recipe2_name_literal = format!("literal://json:{}", url_encode(recipe2_json));
-        
+
         let recipe3_json = r#"{"author":"did:key:test","timestamp":"2025-11-19T10:00:00Z","data":"Salad","proof":{"signature":"ghi789"}}"#;
         let recipe3_name_literal = format!("literal://json:{}", url_encode(recipe3_json));
-        
+
         println!("Created literal URLs:");
         println!("  Recipe1: {}", recipe1_name_literal);
         println!("  Recipe2: {}", recipe2_name_literal);
         println!("  Recipe3: {}", recipe3_name_literal);
-        
+
         // Add links with literal URLs as targets
-        perspective.add_link(
-            Link {
-                source: "literal://recipe1".to_string(),
-                target: recipe1_name_literal.clone(),
-                predicate: Some("recipe://name".to_string()),
-            },
-            LinkStatus::Shared,
-            None,
-        ).await.unwrap();
-        
-        perspective.add_link(
-            Link {
-                source: "literal://recipe2".to_string(),
-                target: recipe2_name_literal.clone(),
-                predicate: Some("recipe://name".to_string()),
-            },
-            LinkStatus::Shared,
-            None,
-        ).await.unwrap();
-        
-        perspective.add_link(
-            Link {
-                source: "literal://recipe3".to_string(),
-                target: recipe3_name_literal.clone(),
-                predicate: Some("recipe://name".to_string()),
-            },
-            LinkStatus::Shared,
-            None,
-        ).await.unwrap();
-        
+        perspective
+            .add_link(
+                Link {
+                    source: "literal://recipe1".to_string(),
+                    target: recipe1_name_literal.clone(),
+                    predicate: Some("recipe://name".to_string()),
+                },
+                LinkStatus::Shared,
+                None,
+            )
+            .await
+            .unwrap();
+
+        perspective
+            .add_link(
+                Link {
+                    source: "literal://recipe2".to_string(),
+                    target: recipe2_name_literal.clone(),
+                    predicate: Some("recipe://name".to_string()),
+                },
+                LinkStatus::Shared,
+                None,
+            )
+            .await
+            .unwrap();
+
+        perspective
+            .add_link(
+                Link {
+                    source: "literal://recipe3".to_string(),
+                    target: recipe3_name_literal.clone(),
+                    predicate: Some("recipe://name".to_string()),
+                },
+                LinkStatus::Shared,
+                None,
+            )
+            .await
+            .unwrap();
+
         println!("✓ Added 3 recipe links with literal URLs");
-        
+
         // Give SurrealDB time to process
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        
+
         // Test 1: Query without fn::parse_literal() - should match the full literal URL
         println!("\n=== Test 1: Query without fn::parse_literal() ===");
         let query_raw = format!(
@@ -4092,33 +4260,40 @@ GROUP BY source
         println!("Query: {}", query_raw);
         let results_raw = perspective.surreal_query(query_raw).await.unwrap();
         println!("Results: {} matches", results_raw.len());
-        assert_eq!(results_raw.len(), 1, "Should find exactly 1 match with full literal URL");
-        
+        assert_eq!(
+            results_raw.len(),
+            1,
+            "Should find exactly 1 match with full literal URL"
+        );
+
         // Test 2A: Test if JavaScript functions work at all
         println!("\n=== Test 2A: Test if JavaScript works with simple function ===");
         let query_simple_js = "RETURN function() { return 42; }";
         println!("Query: {}", query_simple_js);
-        let result_simple_js = perspective.surreal_query(query_simple_js.to_string()).await.unwrap();
+        let result_simple_js = perspective
+            .surreal_query(query_simple_js.to_string())
+            .await
+            .unwrap();
         println!("Result: {:?}", result_simple_js);
-        
+
         // Test 2B: Test a debug function that returns arguments
         println!("\n=== Test 2B: Test what arguments contains ===");
         let query_debug = "RETURN function() { return arguments.length; }";
         println!("Query: {}", query_debug);
-        let result_debug = perspective.surreal_query(query_debug.to_string()).await.unwrap();
+        let result_debug = perspective
+            .surreal_query(query_debug.to_string())
+            .await
+            .unwrap();
         println!("Arguments length: {:?}", result_debug);
-        
+
         // Test 2C: Test fn::parse_literal() directly
         println!("\n=== Test 2C: Test fn::parse_literal() directly ===");
         let test_simple_literal = "literal://string:Hello%20World";
-        let query_test_fn = format!(
-            "RETURN fn::parse_literal('{}')",
-            test_simple_literal
-        );
+        let query_test_fn = format!("RETURN fn::parse_literal('{}')", test_simple_literal);
         println!("Query: {}", query_test_fn);
         let result_test_fn = perspective.surreal_query(query_test_fn).await.unwrap();
         println!("Result: {:?}", result_test_fn);
-        
+
         // Test 3: Now check what fn::parse_literal() returns for our data
         println!("\n=== Test 3: Check what fn::parse_literal() returns on link targets ===");
         let query_check = format!(
@@ -4128,7 +4303,7 @@ GROUP BY source
         println!("Query:\n{}", query_check);
         let results_check = perspective.surreal_query(query_check).await.unwrap();
         println!("Results: {} links", results_check.len());
-        
+
         for result in &results_check {
             let source = result.get("source").and_then(|v| v.as_str()).unwrap_or("?");
             let target = result.get("target").and_then(|v| v.as_str()).unwrap_or("?");
@@ -4137,7 +4312,7 @@ GROUP BY source
             println!("  Target: {}...", &target[..60.min(target.len())]);
             println!("  Parsed: {:?}", parsed);
         }
-        
+
         // Test 4: Try to match using parsed value
         println!("\n=== Test 4: Query with fn::parse_literal() to match data value ===");
         let query_parsed = format!(
@@ -4147,7 +4322,7 @@ GROUP BY source
         println!("Query:\n{}", query_parsed);
         let results_parsed = perspective.surreal_query(query_parsed).await.unwrap();
         println!("Results: {} matches", results_parsed.len());
-        
+
         if results_parsed.len() == 0 {
             println!("WARNING: fn::parse_literal() returned 0 results - function may not be working correctly");
             println!("This could be due to:");
@@ -4156,19 +4331,26 @@ GROUP BY source
             println!("  3. Closure not capturing $url parameter correctly");
             return; // Exit early to see the debug output
         }
-        
-        assert_eq!(results_parsed.len(), 1, "Should find exactly 1 match using fn::parse_literal()");
-        
+
+        assert_eq!(
+            results_parsed.len(),
+            1,
+            "Should find exactly 1 match using fn::parse_literal()"
+        );
+
         let result = &results_parsed[0];
         let source = result.get("source").and_then(|v| v.as_str()).unwrap();
         let parsed_data = result.get("parsed_data").and_then(|v| v.as_str()).unwrap();
-        
+
         println!("  Source: {}", source);
         println!("  Parsed data: {}", parsed_data);
-        
+
         assert_eq!(source, "literal://recipe1", "Should find recipe1");
-        assert_eq!(parsed_data, "Pasta Carbonara", "Should extract 'data' field from JSON");
-        
+        assert_eq!(
+            parsed_data, "Pasta Carbonara",
+            "Should extract 'data' field from JSON"
+        );
+
         // Test 5: Query multiple values with fn::parse_literal()
         println!("\n=== Test 5: Query with IN clause using fn::parse_literal() ===");
         let query_multiple = format!(
@@ -4178,19 +4360,36 @@ GROUP BY source
         println!("Query:\n{}", query_multiple);
         let results_multiple = perspective.surreal_query(query_multiple).await.unwrap();
         println!("Results: {} matches", results_multiple.len());
-        
-        assert_eq!(results_multiple.len(), 2, "Should find exactly 2 matches with IN clause");
-        
+
+        assert_eq!(
+            results_multiple.len(),
+            2,
+            "Should find exactly 2 matches with IN clause"
+        );
+
         let names: Vec<String> = results_multiple
             .iter()
-            .filter_map(|r| r.get("parsed_data").and_then(|v| v.as_str()).map(String::from))
+            .filter_map(|r| {
+                r.get("parsed_data")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
             .collect();
-        
+
         println!("  Found names: {:?}", names);
-        assert!(names.contains(&"Pasta Carbonara".to_string()), "Should find Pasta Carbonara");
-        assert!(names.contains(&"Pizza Margherita".to_string()), "Should find Pizza Margherita");
-        assert!(!names.contains(&"Salad".to_string()), "Should not find Salad");
-        
+        assert!(
+            names.contains(&"Pasta Carbonara".to_string()),
+            "Should find Pasta Carbonara"
+        );
+        assert!(
+            names.contains(&"Pizza Margherita".to_string()),
+            "Should find Pizza Margherita"
+        );
+        assert!(
+            !names.contains(&"Salad".to_string()),
+            "Should not find Salad"
+        );
+
         // Test 6: GROUP BY with fn::parse_literal() - cannot alias the grouped field!
         println!("\n=== Test 6: GROUP BY with fn::parse_literal() ===");
         let query_group = format!(
@@ -4200,19 +4399,24 @@ GROUP BY source
         println!("Query:\n{}", query_group);
         let results_group = perspective.surreal_query(query_group).await.unwrap();
         println!("Results: {} groups", results_group.len());
-        
+
         if results_group.len() == 0 {
-            println!("  WARNING: GROUP BY fn::function_call() returns 0 groups - SurrealDB limitation");
+            println!(
+                "  WARNING: GROUP BY fn::function_call() returns 0 groups - SurrealDB limitation"
+            );
             println!("  This is expected - SurrealDB doesn't support grouping by function results");
         } else {
             for group in &results_group {
-                println!("  Group object keys: {:?}", group.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                println!(
+                    "  Group object keys: {:?}",
+                    group.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                );
                 if let Some(sources) = group.get("sources").and_then(|v| v.as_array()) {
                     println!("  Group has {} sources", sources.len());
                 }
             }
         }
-        
+
         println!("\n=== ✓ SUCCESS ===");
         println!("✓ fn::parse_literal() correctly parses literal://json: URLs");
         println!("✓ Extracted 'data' field from Expression objects");

@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 use surrealdb::{
-    Surreal, Value as SurrealValue, engine::local::{Db, Mem}, opt::{Config, capabilities::Capabilities}
+    engine::local::{Db, Mem},
+    opt::{capabilities::Capabilities, Config},
+    Surreal, Value as SurrealValue,
 };
 use tokio::sync::RwLock;
 
@@ -19,12 +21,14 @@ fn unwrap_surreal_json(value: Value) -> Value {
             if obj.len() == 1 {
                 // Get the single key to check if it's a known enum variant
                 let key = obj.keys().next().unwrap().clone();
-                
+
                 match key.as_str() {
                     // Array wrapper - recursively unwrap contents
                     "Array" => {
                         if let Some(Value::Array(arr)) = obj.remove(&key) {
-                            return Value::Array(arr.into_iter().map(unwrap_surreal_json).collect());
+                            return Value::Array(
+                                arr.into_iter().map(unwrap_surreal_json).collect(),
+                            );
                         }
                     }
                     // Object wrapper - recursively unwrap all fields
@@ -48,8 +52,11 @@ fn unwrap_surreal_json(value: Value) -> Value {
                         if let Some(Value::Object(thing_obj)) = obj.remove(&key) {
                             // Format as "table:id"
                             let tb = thing_obj.get("tb").and_then(|v| v.as_str()).unwrap_or("");
-                            let id = thing_obj.get("id")
-                                .and_then(|v| unwrap_surreal_json(v.clone()).as_str().map(String::from))
+                            let id = thing_obj
+                                .get("id")
+                                .and_then(|v| {
+                                    unwrap_surreal_json(v.clone()).as_str().map(String::from)
+                                })
                                 .unwrap_or_default();
                             return Value::String(format!("{}:{}", tb, id));
                         }
@@ -57,18 +64,22 @@ fn unwrap_surreal_json(value: Value) -> Value {
                     // Unknown single-key object - recursively unwrap the value
                     _ => {
                         if let Some(val) = obj.remove(&key) {
-                            return Value::Object([(key, unwrap_surreal_json(val))].into_iter().collect());
+                            return Value::Object(
+                                [(key, unwrap_surreal_json(val))].into_iter().collect(),
+                            );
                         }
                     }
                 }
             }
-            
+
             // Multi-key object - recursively unwrap all values
-            Value::Object(obj.into_iter().map(|(k, v)| (k, unwrap_surreal_json(v))).collect())
+            Value::Object(
+                obj.into_iter()
+                    .map(|(k, v)| (k, unwrap_surreal_json(v)))
+                    .collect(),
+            )
         }
-        Value::Array(arr) => {
-            Value::Array(arr.into_iter().map(unwrap_surreal_json).collect())
-        }
+        Value::Array(arr) => Value::Array(arr.into_iter().map(unwrap_surreal_json).collect()),
         // Primitive values - return as is
         other => other,
     }
@@ -95,8 +106,7 @@ pub struct SurrealDBService {
 impl SurrealDBService {
     pub async fn new() -> Result<Self, Error> {
         // Enable scripting (and any other capabilities you want)
-        let config = Config::default()
-            .capabilities(Capabilities::default().with_scripting(true));
+        let config = Config::default().capabilities(Capabilities::default().with_scripting(true));
 
         // Initialize in-memory SurrealDB instance
         let db = Surreal::new::<Mem>(config).await?;
@@ -227,29 +237,29 @@ impl SurrealDBService {
         // Automatically inject perspective filter into the query
         // NOTE: Cannot alias grouped fields in SELECT when using GROUP BY - it breaks SurrealDB grouping!
         let query_upper = query.to_uppercase();
-        
+
         let filtered_query = if query_upper.contains("FROM LINK") {
             // Find all occurrences of "FROM link" (case insensitive)
             let mut result = query.clone();
             let mut search_start = 0;
-            
+
             loop {
                 let remaining = &result[search_start..];
                 let remaining_upper = remaining.to_uppercase();
-                
+
                 if let Some(pos) = remaining_upper.find("FROM LINK") {
                     let absolute_pos = search_start + pos;
-                    
+
                     // Check if this FROM LINK is already in a subquery
                     // Count opening and closing parentheses before this position
                     let _before = &result[..absolute_pos];
                     let _open_parens = _before.matches('(').count();
                     let _close_parens = _before.matches(')').count();
-                    
+
                     // If we're not inside a subquery (or we are but this is the innermost link table)
                     // we should wrap it
                     let end_pos = absolute_pos + 9; // "FROM link".len() = 9
-                    
+
                     // Check what comes after "link" - if there's already AS or a subquery, skip it
                     let after = &result[end_pos..].trim_start();
                     if after.starts_with("AS") || after.starts_with("as") {
@@ -257,15 +267,16 @@ impl SurrealDBService {
                         search_start = end_pos;
                         continue;
                     }
-                    
+
                     // Replace "FROM link" with "FROM link WHERE perspective = $perspective"
                     // But need to check if there's already a WHERE clause after this FROM
                     let after_from = &result[end_pos..];
                     let after_from_upper = after_from.trim_start().to_uppercase();
-                    
+
                     if after_from_upper.starts_with("WHERE") {
                         // Already has WHERE, inject AND condition
-                        let where_start = end_pos + after_from.len() - after_from.trim_start().len();
+                        let where_start =
+                            end_pos + after_from.len() - after_from.trim_start().len();
                         let where_end = where_start + 5; // "WHERE".len()
                         result = format!(
                             "{} perspective = $perspective AND{}",
@@ -282,13 +293,14 @@ impl SurrealDBService {
                             &result[..absolute_pos],
                             after_trimmed
                         );
-                        search_start = absolute_pos + "FROM link WHERE perspective = $perspective".len();
+                        search_start =
+                            absolute_pos + "FROM link WHERE perspective = $perspective".len();
                     }
                 } else {
                     break;
                 }
             }
-            
+
             result
         } else {
             // No "FROM link" found, return query as-is
@@ -304,15 +316,15 @@ impl SurrealDBService {
         // Take the results as a single SurrealDB Value
         // This will contain the query results in SurrealDB's native format
         let result: SurrealValue = response.take(0)?;
-        
+
         // Convert the SurrealDB value to JSON using round-trip serialization
         // This serializes with enum variant names as keys (e.g., {"Array": [...]})
         let json_string = serde_json::to_string(&result)?;
         let json_value: Value = serde_json::from_str(&json_string)?;
-        
+
         // Unwrap the SurrealDB enum structure to get clean JSON
         let unwrapped = unwrap_surreal_json(json_value);
-        
+
         // Extract array from the unwrapped result, propagating error if not an array
         match unwrapped {
             Value::Array(arr) => Ok(arr),
@@ -348,7 +360,7 @@ impl SurrealDBService {
             // Build a batch query with all CREATE statements
             // SurrealDB executes all statements in a single query atomically
             let mut query_builder = self.db.query("");
-            
+
             // Add each link as a CREATE statement in the batch
             for (idx, link) in links.iter().enumerate() {
                 let record = LinkRecord {
@@ -360,7 +372,7 @@ impl SurrealDBService {
                     author: link.author.clone(),
                     timestamp: link.timestamp.clone(),
                 };
-                
+
                 // Add CREATE statement with bound parameters for this link
                 // Use unique parameter name for each record to avoid conflicts
                 let param_name = format!("record{}", idx);
@@ -368,15 +380,15 @@ impl SurrealDBService {
                     .query(format!("CREATE link CONTENT ${};", param_name))
                     .bind((param_name, record));
             }
-            
+
             // Execute the batch query
             let mut response = query_builder.await?;
-            
+
             // Check results - verify each CREATE operation succeeded
             for idx in 0..links.len() {
-                let _: Option<LinkRecord> = response.take(idx).map_err(|e| {
-                    Error::msg(format!("Failed to insert link {}: {}", idx, e))
-                })?;
+                let _: Option<LinkRecord> = response
+                    .take(idx)
+                    .map_err(|e| Error::msg(format!("Failed to insert link {}: {}", idx, e)))?;
             }
         }
 

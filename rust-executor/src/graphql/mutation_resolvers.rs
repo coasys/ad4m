@@ -1028,7 +1028,8 @@ impl Mutation {
         )?;
 
         let perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        let (subscription_id, result_string) = perspective.subscribe_and_query_surreal(query).await?;
+        let (subscription_id, result_string) =
+            perspective.subscribe_and_query_surreal(query).await?;
 
         Ok(QuerySubscription {
             subscription_id,

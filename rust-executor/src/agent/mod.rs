@@ -137,7 +137,7 @@ impl AgentService {
 
     pub fn init_global_test_instance() {
         let mut agent_instance = AGENT_SERVICE.lock().unwrap();
-        
+
         *agent_instance = Some(AgentService {
             did: None,
             did_document: None,
