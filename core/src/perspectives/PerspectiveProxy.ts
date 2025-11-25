@@ -64,6 +64,8 @@ export class QuerySubscriptionProxy {
     #latestResult: AllInstancesResult|null;
     #disposed: boolean = false;
     #initialized: Promise<boolean>;
+    #initResolve?: (value: boolean) => void;
+    #initReject?: (reason?: any) => void;
     #initTimeoutId?: NodeJS.Timeout;
     #query: string;
 
@@ -78,26 +80,44 @@ export class QuerySubscriptionProxy {
         this.#client = client;
         this.#callbacks = new Set();
         this.#latestResult = null;
+        
+        // Create the promise once and store its resolve/reject
+        this.#initialized = new Promise<boolean>((resolve, reject) => {
+            this.#initResolve = resolve;
+            this.#initReject = reject;
+        });
     }
 
     async subscribe() {
-        // Initialize the query subscription
-        const initialResult = await this.#client.subscribeQuery(this.#uuid, this.#query);
-        this.#subscriptionId = initialResult.subscriptionId;
-
-        // Process the initial result immediately for fast UX
-        if (initialResult.result) {
-            this.#latestResult = initialResult.result;
-            this.#notifyCallbacks(initialResult.result);
-        } else {
-            console.warn('⚠️ No initial result returned from subscribeQuery!');
+        // Clean up previous subscription attempt if retrying
+        if (this.#unsubscribe) {
+            this.#unsubscribe();
+            this.#unsubscribe = undefined;
+        }
+        
+        // Clear any existing timeout
+        if (this.#initTimeoutId) {
+            clearTimeout(this.#initTimeoutId);
+            this.#initTimeoutId = undefined;
         }
 
-        // Subscribe to query updates
-        this.#initialized = new Promise<boolean>((resolve, reject) => {
-            // Timeout and resubscribe if subscription doesn't confirm within 30 seconds
+        try {
+            // Initialize the query subscription
+            const initialResult = await this.#client.subscribeQuery(this.#uuid, this.#query);
+            this.#subscriptionId = initialResult.subscriptionId;
+
+            // Process the initial result immediately for fast UX
+            if (initialResult.result) {
+                this.#latestResult = initialResult.result;
+                this.#notifyCallbacks(initialResult.result);
+            } else {
+                console.warn('⚠️ No initial result returned from subscribeQuery!');
+            }
+
+            // Set up timeout for retry
             this.#initTimeoutId = setTimeout(() => {
                 console.error('Subscription initialization timed out after 30 seconds. Resubscribing...');
+                // Recursively retry subscription
                 this.subscribe();
             }, 30000);
             
@@ -105,23 +125,38 @@ export class QuerySubscriptionProxy {
             this.#unsubscribe = this.#client.subscribeToQueryUpdates(
                 this.#subscriptionId,
                 (updateResult) => {
+                    // Clear timeout on first message
                     if (this.#initTimeoutId) {
                         clearTimeout(this.#initTimeoutId);
                         this.#initTimeoutId = undefined;
                     }
-                    resolve(true);
+                    
+                    // Resolve the initialization promise (only resolves once)
+                    if (this.#initResolve) {
+                        this.#initResolve(true);
+                        this.#initResolve = undefined;  // Prevent double-resolve
+                        this.#initReject = undefined;
+                    }
 
-                    // If the update result is one of those repeated initialization results
-                    // and we got a result before, we don't notify the callbacks
-                    // so they don't get confused (we could have gotten another 
-                    // more recent result in between)
+                    // Skip duplicate init messages
                     if (updateResult.isInit && this.#latestResult) return;
 
                     this.#latestResult = updateResult;
                     this.#notifyCallbacks(updateResult);
                 }
             );
-        });
+        } catch (error) {
+            console.error('Error setting up subscription:', error);
+            
+            // Reject the promise if this is the first attempt
+            if (this.#initReject) {
+                this.#initReject(error);
+                this.#initResolve = undefined;
+                this.#initReject = undefined;
+            }
+            
+            throw error; // Re-throw so caller knows it failed
+        }
 
         // Start keepalive loop using platform-agnostic setTimeout
         const keepaliveLoop = async () => {
@@ -159,15 +194,17 @@ export class QuerySubscriptionProxy {
         return this.#subscriptionId;
     }
 
-    /** Promise that resolves when the subscription has received its first result
-     * through the subscription channel. This ensures the subscription is fully
-     * set up before allowing access to results or updates.
-     * 
-     * The promise will reject if no result is received within 30 seconds.
-     * 
-     * Note: You typically don't need to await this directly since the subscription
-     * creation methods (like subscribeInfer) already wait for initialization.
-     */
+/** Promise that resolves when the subscription has received its first result
+ * through the subscription channel. This ensures the subscription is fully
+ * set up before allowing access to results or updates.
+ * 
+ * If no result is received within 30 seconds, the subscription will automatically
+ * retry. The promise will remain pending until a subscription message successfully
+ * arrives, or until a fatal error occurs during subscription setup.
+ * 
+ * Note: You typically don't need to await this directly since the subscription
+ * creation methods (like subscribeInfer) already wait for initialization.
+ */
     get initialized(): Promise<boolean> {
         return this.#initialized;
     }
