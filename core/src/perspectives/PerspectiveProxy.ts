@@ -101,6 +101,12 @@ export class QuerySubscriptionProxy {
             this.#initTimeoutId = undefined;
         }
 
+        // Clear any existing keepalive timer to prevent accumulation
+        if (this.#keepaliveTimer) {
+            clearTimeout(this.#keepaliveTimer);
+            this.#keepaliveTimer = undefined;
+        }
+
         try {
             // Initialize the query subscription
             const initialResult = await this.#client.subscribeQuery(this.#uuid, this.#query);
@@ -170,8 +176,14 @@ export class QuerySubscriptionProxy {
                 console.error('Error in keepalive:', e);
                 // try to reinitialize the subscription
                 console.log('Reinitializing subscription for query:', this.#query);
-                await this.subscribe();
-                console.log('Subscription reinitialized');
+                try {
+                    await this.subscribe();
+                    console.log('Subscription reinitialized');
+                } catch (resubscribeError) {
+                    console.error('Error during resubscription from keepalive:', resubscribeError);
+                    // Don't schedule another keepalive on resubscribe failure
+                    return;
+                }
             }
 
             // Schedule next keepalive if not disposed
