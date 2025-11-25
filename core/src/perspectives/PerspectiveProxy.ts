@@ -85,8 +85,6 @@ export class QuerySubscriptionProxy {
         const initialResult = await this.#client.subscribeQuery(this.#uuid, this.#query);
         this.#subscriptionId = initialResult.subscriptionId;
 
-        let subscriptionEstablished = false;
-
         // Process the initial result immediately for fast UX
         if (initialResult.result) {
             this.#latestResult = initialResult.result;
