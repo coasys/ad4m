@@ -117,8 +117,10 @@ export class QuerySubscriptionProxy {
             // Set up timeout for retry
             this.#initTimeoutId = setTimeout(() => {
                 console.error('Subscription initialization timed out after 30 seconds. Resubscribing...');
-                // Recursively retry subscription
-                this.subscribe();
+                // Recursively retry subscription, catching any errors
+                this.subscribe().catch(error => {
+                    console.error('Error during subscription retry after timeout:', error);
+                });
             }, 30000);
             
             // Subscribe to query updates
