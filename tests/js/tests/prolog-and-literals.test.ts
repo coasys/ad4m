@@ -2294,15 +2294,18 @@ describe("Prolog + Literals", () => {
                         model.name = "Perf Item";
                         model.status = "perf-test";
                         await model.save();
+                        const saveTime = Date.now();
 
                         // Poll until callback called
                         while (!surrealCallback.called) {
                             await sleep(10);
-                            if (Date.now() - start > 5000) throw new Error("Timeout waiting for subscription update");
+                            if (Date.now() - saveTime > 5000) throw new Error("Timeout waiting for subscription update");
                         }
 
-                        const latency = Date.now() - start;
-                        console.log(`SurrealDB subscription update latency: ${latency}ms`);
+                        const saveLatency = saveTime - start;
+                        const subscriptionLatency = Date.now() - saveTime;
+                        console.log("TestModel.sav() latency: ", saveLatency);
+                        console.log(`SurrealDB subscription update latency: ${subscriptionLatency}ms`);
                         
                         surrealBuilder.dispose();
                     });
