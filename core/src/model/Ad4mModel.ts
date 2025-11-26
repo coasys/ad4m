@@ -765,20 +765,34 @@ export class Ad4mModel {
     // Add filters for required properties
     for (const [propName, propMeta] of Object.entries(metadata.properties)) {
       if (propMeta.required) {
-        requiredFilters.push(
-          `source IN (SELECT VALUE source FROM link WHERE predicate = '${propMeta.predicate}')`
-        );
+        // For flag properties, also filter by the target value
+        if (propMeta.flag && propMeta.initial) {
+          requiredFilters.push(
+            `source IN (SELECT VALUE source FROM link WHERE predicate = '${propMeta.predicate}' AND target = '${propMeta.initial}')`
+          );
+        } else {
+          requiredFilters.push(
+            `source IN (SELECT VALUE source FROM link WHERE predicate = '${propMeta.predicate}')`
+          );
+        }
       }
     }
-    
+
     // If no required properties, we need at least one property to define the model
     // Use any property with an initial value as the defining characteristic
     if (requiredFilters.length === 0) {
       for (const [propName, propMeta] of Object.entries(metadata.properties)) {
         if (propMeta.initial) {
-          requiredFilters.push(
-            `source IN (SELECT VALUE source FROM link WHERE predicate = '${propMeta.predicate}')`
-          );
+          // For flag properties, also filter by the target value
+          if (propMeta.flag) {
+            requiredFilters.push(
+              `source IN (SELECT VALUE source FROM link WHERE predicate = '${propMeta.predicate}' AND target = '${propMeta.initial}')`
+            );
+          } else {
+            requiredFilters.push(
+              `source IN (SELECT VALUE source FROM link WHERE predicate = '${propMeta.predicate}')`
+            );
+          }
           break; // Just need one defining property
         }
       }
