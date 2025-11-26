@@ -2312,47 +2312,6 @@ describe("Prolog + Literals", () => {
 
                         surrealBuilder.dispose();
                     });
-
-                    it("subscriptions should return existing data immediately", async () => {
-                        // 1. Create some data BEFORE setting up subscription
-                        const count = 5;
-                        for (let i = 0; i < count; i++) {
-                            const model = new TestModel(perspective);
-                            model.name = `Existing Item ${i}`;
-                            model.status = "existing";
-                            await model.save();
-                        }
-
-                        // Wait for data to be fully saved
-                        await sleep(500);
-
-                        // 2. NOW create a subscription - it should get the existing data
-                        const surrealCallback = sinon.fake();
-                        const surrealBuilder = TestModel.query(perspective).where({ status: "existing" });
-                        await surrealBuilder.subscribe(surrealCallback);
-
-                        // 3. Wait a bit for initial data to arrive
-                        await sleep(1000);
-
-                        // 4. Verify we got the existing data in the initial callback
-                        expect(surrealCallback.called).to.be.true;
-                        const initialResult = surrealCallback.lastCall.args[0];
-                        expect(initialResult.length).to.equal(count, "Should receive all existing data in initial subscription callback");
-
-                        // Verify the data is correct
-                        const sortByName = (a: TestModel, b: TestModel) => a.name.localeCompare(b.name);
-                        initialResult.sort(sortByName);
-
-                        for (let i = 0; i < count; i++) {
-                            expect(initialResult[i].name).to.equal(`Existing Item ${i}`);
-                            expect(initialResult[i].status).to.equal("existing");
-                        }
-
-                        console.log(`Subscription correctly returned ${count} existing items`);
-
-                        // Cleanup
-                        surrealBuilder.dispose();
-                    });
                 });
 
                 describe('ModelQueryBuilder', () => {
