@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "deno run --no-check=remote --allow-all esbuild.ts"
+    "build": "deno cache --reload esbuild.ts && deno run --allow-all esbuild.ts"
   },
   "author": "",
   "license": "ISC",
