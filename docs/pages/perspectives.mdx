@@ -108,27 +108,53 @@ const links = await perspective.get({
 });
 ```
 
-### Prolog Integration
+### SurrealDB Integration (Recommended)
 
-Every Perspective is automatically enhanced with a Prolog engine, which:
-- Initializes with all Links as Prolog facts
-- Enables powerful semantic querying
-- Supports complex reasoning about graph structures
-- Provides real-time query subscriptions with automatic cleanup
+Every Perspective includes a high-performance **SurrealDB query engine** that provides **10-100x faster performance** than traditional Prolog queries. SurrealDB is the recommended query method for most use cases:
+
+```typescript
+// Direct SurrealQL query - fast and powerful
+const follows = await perspective.querySurrealDB(
+  "SELECT * FROM link WHERE predicate = 'follows'"
+);
+
+// Graph traversal using indexed fields (in.uri = source, out.uri = target)
+const aliceFollows = await perspective.querySurrealDB(
+  "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'follows'"
+);
+
+// Find who follows Alice (reverse traversal)
+const aliceFollowers = await perspective.querySurrealDB(
+  "SELECT source FROM link WHERE out.uri = 'user://alice' AND predicate = 'follows'"
+);
+
+// Aggregations and analytics
+const stats = await perspective.querySurrealDB(
+  "SELECT predicate, count() as total FROM link GROUP BY predicate"
+);
+```
+
+**Performance Note**: Use `in.uri` (source) and `out.uri` (target) for graph traversal - they're indexed and fast. Avoid subqueries (`IN (SELECT ...)`) as they can be very slow.
+
+**Security Note**: `querySurrealDB()` only allows read-only operations (SELECT, RETURN, etc.). Use `perspective.add()` and `perspective.remove()` to modify links.
+
+For comprehensive examples and graph traversal patterns, see the [SurrealDB Queries Guide](/developer-guides/surreal-queries).
+
+### Prolog Integration (Legacy)
+
+Perspectives also include a Prolog engine for backward compatibility and advanced logic programming:
 
 ```typescript
 // Basic Prolog query
-const results = await perspective.queryProlog(`
-    triple(Post, "sioc://likes", Agent),
-    triple(Agent, "foaf://knows", "did:key:z6Mk...")
-`);
+const results = await perspective.queryProlog(
+  'triple(Post, "sioc://likes", Agent), triple(Agent, "foaf://knows", "did:key:z6Mk...")'
+);
 // Finds posts liked by agents who know a specific person
 
 // Real-time query subscription
-const subscription = await perspective.subscribeInfer(`
-    triple(Post, "sioc://status", "active"),
-    triple(Post, "sioc://author", Author)
-`);
+const subscription = await perspective.subscribeInfer(
+  'triple(Post, "sioc://status", "active"), triple(Post, "sioc://author", Author)'
+);
 
 // Set up callback for updates
 subscription.onResult(results => {
@@ -151,6 +177,8 @@ Query subscriptions provide real-time updates but require proper cleanup:
    - Prevent memory leaks
 
 Always remember to call `dispose()` when you're done with a subscription.
+
+**Recommendation**: Use SurrealDB for most queries (faster), and reserve Prolog for complex logic programming or custom SDNA rules.
 
 ### Advanced Data Modeling
 

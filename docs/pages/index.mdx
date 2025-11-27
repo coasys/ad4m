@@ -196,11 +196,41 @@ behaviors, and logic that transform static Perspectives and Neighbourhoods into 
 crafting app-specific intelligence—whether it’s validating data, enforcing roles, or aggregating insights—all while keeping control distributed among agents. 
 It’s the engine driving AD4M’s vision of a Collective Intelligence network, turning linked data into actionable, shared understanding.
 
-### Prolog: The Foundation of Social DNA
-AD4M builds Social DNA on Prolog, a logic programming language optimized for reasoning over relational data like the RDF triples in Perspectives 
-(e.g., `<agent123> <posted> <QmXyz123://post456>`). 
-Prolog’s declarative nature lets developers write rules as predicates, executed locally by each agent’s instance. 
-A simple example illustrates this power: imagine a Neighbourhood where only members can post. Here’s the raw Prolog:
+### Query Engines: SurrealDB & Prolog
+
+AD4M provides two powerful query engines for working with graph data in Perspectives:
+
+#### SurrealDB: High-Performance Queries (Recommended)
+
+AD4M now includes **SurrealDB**, a modern database that provides **10-100x faster performance** than Prolog for most queries. SurrealDB uses SQL-like syntax (SurrealQL) and excels at:
+- Fast graph traversal using indexed `in.uri` and `out.uri` fields
+- Aggregations and analytics  
+- Complex filtering and sorting
+- Large dataset handling
+
+```javascript
+// Fast graph query - find who Alice follows
+const follows = await perspective.querySurrealDB(
+  "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'follows'"
+);
+
+// Find posts by Alice
+const posts = await perspective.querySurrealDB(
+  "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'authored'"
+);
+```
+
+**Performance Tip**: Use `in.uri` (source) and `out.uri` (target) for graph traversal - they're indexed and fast. Avoid subqueries (`IN (SELECT ...)`) as they're very slow.
+
+**Important**: `Ad4mModel` (described below) now **uses SurrealDB by default** for all operations, providing dramatic performance improvements with no code changes required.
+
+For detailed examples and graph traversal patterns, see the [SurrealDB Queries Guide](/developer-guides/surreal-queries).
+
+#### Prolog: Logic Programming (Legacy)
+
+For backward compatibility and advanced logic programming, AD4M also includes Prolog, optimized for reasoning over relational data like the RDF triples in Perspectives. 
+Prolog's declarative nature lets developers write rules as predicates:
+
 ```prolog
 % Check if an agent is a member
 member(Agent, Neighbourhood) :-
@@ -214,20 +244,21 @@ memberPost(Post, Agent, Neighbourhood) :-
 % Query all member posts
 ?- memberPost(Post, Agent, "neighbourhood://QmGroup789").
 ```
+
 This could be queried via the AD4M client:
 ```javascript
-const posts = await ad4mClient.perspective.queryProlog(`
-    memberPost(Post, Agent, 'neighbourhood://QmGroup789')
-`);
+const posts = await perspective.queryProlog(
+  "memberPost(Post, Agent, 'neighbourhood://QmGroup789')"
+);
 console.log(posts); // [{Post: "QmXyz123://post456", Agent: "did:key:z6Mk..."}, ...]
 ```
 
-While this raw Prolog works, AD4M simplifies the process for developers with a higher-level abstraction.
+While these raw query engines are powerful, AD4M simplifies development with a higher-level abstraction.
 
 ### Ad4mModel
-For app developers, writing Prolog directly is optional—AD4M’s Ad4mModel class and its decorators handle the heavy lifting. 
-This TypeScript base class lets you define model classes with properties and relationships, automatically generating the Prolog predicates for 
-Social DNA behind the scenes. Here’s how that same MemberPost concept becomes a model:
+For app developers, writing queries directly is optional—AD4M's `Ad4mModel` class and its decorators handle the heavy lifting. 
+This TypeScript base class lets you define model classes with properties and relationships, automatically using **SurrealDB** under the hood for 
+fast query performance (10-100x faster than Prolog). Here's how you define a model:
 ```typescript
 import { Ad4mModel, ModelOptions, Property, Collection, Flag, Optional, ReadOnly } from "@coasys/ad4m";
 
@@ -249,7 +280,7 @@ class Todo extends Ad4mModel {
     title: string = "";
 
     @ReadOnly({
-        getter: `triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true`
+        getter: 'triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true'
     })
     isLiked: boolean = false;
 
@@ -258,7 +289,7 @@ class Todo extends Ad4mModel {
 
     @Collection({ 
         through: "flux://entry_type",
-        where: { condition: `triple(Target, "flux://has_reaction", "flux://thumbsup")` }
+        where: { condition: 'triple(Target, "flux://has_reaction", "flux://thumbsup")' }
     })
     likedMessages: string[] = [];
 
@@ -275,39 +306,17 @@ class Todo extends Ad4mModel {
 }
 ```
 
-Behind this, the decorators generate Prolog rules like:
-```prolog
-subject_class("Todo", c).
-constructor(c, '[{action: "addLink", source: "this", predicate: "todo://state", target: "todo://ready"}]').
-instance(c, Base) :- triple(Base, "todo://state", _).
+Behind this, `Ad4mModel`:
+- **Uses SurrealDB by default** for fast queries (10-100x faster)
+- Generates efficient SurrealQL queries automatically
+- Stores data as graph links in the perspective
+- Provides type-safe TypeScript interfaces
 
-property(c, "state").
-property_getter(c, Base, "state", Value) :- triple(Base, "todo://state", Value).
-property_setter(c, "state", '[{action: "setSingleTarget", source: "this", predicate: "todo://state", target: "value"}]').
+For example, `Todo.findAll(perspective, { where: { state: "todo://done" } })` automatically generates and executes an optimized SurrealQL query.
 
-property(c, "title").
-property_resolve(c, "title").
-property_resolve_language(c, "title", "literal").
-property_getter(c, Base, "title", Value) :- triple(Base, "todo://has_title", Value).
-property_setter(c, "title", '[{action: "setSingleTarget", source: "this", predicate: "todo://has_title", target: "value"}]').
+For backward compatibility, Prolog is still supported (pass `useSurrealDB: false` to query methods). See the [Model Classes Guide](/developer-guides/model-classes) and [SurrealDB Queries Guide](/developer-guides/surreal-queries) for details.
 
-property(c, "isLiked").
-property_getter(c, Base, "isLiked", Value) :- triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true.
-
-collection(c, "comments").
-collection_getter(c, Base, "comments", List) :- findall(C, triple(Base, "todo://comment", C), List).
-collection_adder(c, "commentss", '[{action: "addLink", source: "this", predicate: "todo://comment", target: "value"}]').
-collection_remover(c, "commentss", '[{action: "removeLink", source: "this", predicate: "todo://comment", target: "value"}]').
-collection_setter(c, "commentss", '[{action: "collectionSetter", source: "this", predicate: "todo://comment", target: "value"}]').
-
-collection(c, "likedMessages").
-collection_getter(c, Base, "likedMessages", List) :- setof(Target, (triple(Base, "flux://entry_type", Target), triple(Target, "flux://has_reaction", "flux://thumbsup")), List).
-collection_adder(c, "likedMessagess", '[{action: "addLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
-collection_remover(c, "likedMessagess", '[{action: "removeLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
-collection_setter(c, "likedMessagess", '[{action: "collectionSetter", source: "this", predicate: "flux://entry_type", target: "value"}]').
-```
-
-You can then use this model to work with Todo items in a type-safe way:
+You can use this model to work with Todo items in a type-safe way:
 ```typescript
 // Create a new Todo
 const todo = new Todo(perspective);
@@ -327,7 +336,7 @@ await todo.update();
 await todo.delete();
 ```
 
-Developers define their app’s data model in familiar TypeScript, and AD4M handles the Social DNA—stored in a Perspective or Neighbourhood—making it both accessible and powerful. This abstraction lets you focus on app logic while Prolog ensures decentralized reasoning scales across the network.
+Developers define their app's data model in familiar TypeScript, and AD4M handles the Social DNA—stored in a Perspective or Neighbourhood—making it both accessible and powerful. This abstraction lets you focus on app logic while SurrealDB provides fast queries and Prolog enables decentralized reasoning that scales across the network.
 
 
 ## Why?

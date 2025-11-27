@@ -155,7 +155,7 @@ await recipe.update();
 ### Basic Querying
 
 ```typescript
-// Get all recipes
+// Get all recipes (uses SurrealDB by default - 10-100x faster)
 const allRecipes = await Recipe.findAll(perspective);
 
 // Get with simple conditions
@@ -163,6 +163,31 @@ const recipes = await Recipe.findAll(perspective, {
   where: { name: "Chocolate Cake" }
 });
 ```
+
+## Query Performance with SurrealDB
+
+**Important**: `Ad4mModel` now uses **SurrealDB by default** for all query operations, providing **10-100x faster performance** compared to the legacy Prolog engine. This means:
+
+- `findAll()` automatically uses SurrealDB
+- `findAllAndCount()` automatically uses SurrealDB  
+- Query builder methods automatically use SurrealDB
+- Live query subscriptions automatically use SurrealDB
+
+```typescript
+// Uses SurrealDB by default (fast!)
+const highRated = await Recipe.findAll(perspective, {
+  where: { rating: { gt: 4 } },
+  order: { rating: "DESC" },
+  limit: 10
+});
+
+// You can explicitly use Prolog if needed (for backward compatibility)
+const recipesProlog = await Recipe.findAll(perspective, {
+  where: { rating: { gt: 4 } }
+}, false); // useSurrealDB = false
+```
+
+For advanced graph traversal queries and direct SurrealQL access, see the [SurrealDB Queries Guide](/developer-guides/surreal-queries).
 
 ## Understanding the Underlying System
 
@@ -260,9 +285,10 @@ topReviews: string[] = [];
 
 ### Advanced Querying
 
-The query builder provides a fluent interface for complex queries:
+The query builder provides a fluent interface for complex queries and uses **SurrealDB by default** for optimal performance:
 
 ```typescript
+// Uses SurrealDB by default (10-100x faster)
 const recipes = await Recipe.query(perspective)
   .where({ 
     category: "MainCourse",
@@ -271,20 +297,41 @@ const recipes = await Recipe.query(perspective)
   .order({ createdAt: "DESC" })
   .limit(5)
   .get();
+
+// Explicitly control query engine
+const recipesSurreal = await Recipe.query(perspective)
+  .where({ rating: { gt: 4 } })
+  .useSurrealDB(true)  // Default is true
+  .get();
+
+// Use Prolog for backward compatibility
+const recipesProlog = await Recipe.query(perspective)
+  .where({ rating: { gt: 4 } })
+  .useSurrealDB(false)  // Switch to Prolog
+  .get();
 ```
 
 ### Real-time Updates
 
-Subscribe to changes in your data:
+Subscribe to changes in your data. Subscriptions also use **SurrealDB by default** for better performance:
 
 ```typescript
-// Create a query builder
+// Create a query builder (uses SurrealDB by default)
 const builder = Recipe.query(perspective)
   .where({ status: "cooking" });
 
 // Subscribe to updates
 const initialRecipes = await builder.subscribe(recipes => {
   console.log("Currently cooking:", recipes);
+});
+
+// Subscribe with Prolog (for backward compatibility)
+const builderProlog = Recipe.query(perspective)
+  .where({ status: "cooking" })
+  .useSurrealDB(false);  // Use Prolog
+
+await builderProlog.subscribe(recipes => {
+  console.log("Currently cooking (Prolog):", recipes);
 });
 
 // Important: Clean up when done
@@ -724,31 +771,45 @@ AD4M's model classes share concepts with SHACL (Shapes Constraint Language):
    reviews: Review[] = [];
    ```
 
-4. **Query Optimization**: Use specific queries instead of filtering in memory:
+4. **Query Optimization**: Use specific queries instead of filtering in memory, and leverage SurrealDB's performance:
    ```typescript
-   // Good
+   // Good - Let SurrealDB do the filtering (fast)
    const topRated = await Recipe.query(perspective)
      .where({ rating: { gt: 4 } })
      .get();
    
-   // Bad
+   // Bad - Fetching all and filtering in memory (slow)
    const all = await Recipe.findAll(perspective);
    const topRated = all.filter(r => r.rating > 4);
    ```
 
-5. **Subscriptions**: Clean up subscriptions when they're no longer needed:
+5. **Use SurrealDB by Default**: SurrealDB is 10-100x faster than Prolog for most queries:
    ```typescript
-   const subscription = await Recipe.query(perspective)
-     .where({ status: "active" })
-     .subscribe(recipes => {
-       // Handle updates
-     });
+   // Good - Uses SurrealDB by default
+   const recipes = await Recipe.findAll(perspective, {
+     where: { rating: { gt: 4 } }
+   });
    
-   // Later...
-   subscription.unsubscribe();
+   // Only use Prolog if you need backward compatibility
+   const recipesProlog = await Recipe.findAll(perspective, {
+     where: { rating: { gt: 4 } }
+   }, false); // useSurrealDB = false
    ```
 
-6. **Use Literals Appropriately**: 
+6. **Subscriptions**: Clean up subscriptions when they're no longer needed:
+   ```typescript
+   const builder = Recipe.query(perspective)
+     .where({ status: "active" });
+     
+   await builder.subscribe(recipes => {
+     // Handle updates
+   });
+   
+   // Later...
+   builder.dispose();
+   ```
+
+7. **Use Literals Appropriately**: 
    ```typescript
    // Good - Using literals for simple values
    @Property({
@@ -765,7 +826,7 @@ AD4M's model classes share concepts with SHACL (Shapes Constraint Language):
    instructions: string = "";
    ```
 
-7. **Meaningful Base Expressions**:
+8. **Meaningful Base Expressions**:
    ```typescript
    // Good - Descriptive base expression
    const recipe = new Recipe(perspective, "recipe://chocolate-cake-2024-03");
