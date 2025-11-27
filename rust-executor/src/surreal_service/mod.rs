@@ -215,10 +215,32 @@ impl SurrealDBService {
             })
             .await;
 
-        // Ignore duplicate errors - node already exists is fine
-        let _ = create_result;
-
-        Ok(node_id)
+        // Handle the result: ignore duplicate errors but propagate other failures
+        match create_result {
+            Ok(_) => {
+                // Node created successfully
+                Ok(node_id)
+            }
+            Err(e) => {
+                // Check if this is a duplicate/already exists error
+                let error_string = e.to_string().to_lowercase();
+                if error_string.contains("already exists")
+                    || error_string.contains("duplicate")
+                    || error_string.contains("unique")
+                {
+                    // This is expected - node already exists, which is fine
+                    Ok(node_id)
+                } else {
+                    // Unexpected database error - log and propagate
+                    log::warn!(
+                        "Unexpected database error in ensure_node for URI '{}': {}",
+                        uri,
+                        e
+                    );
+                    Err(e.into())
+                }
+            }
+        }
     }
 
     pub async fn new() -> Result<Self, Error> {
