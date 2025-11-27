@@ -4348,8 +4348,13 @@ GROUP BY source
             println!("  1. JavaScript functions not enabled (need --allow-scripting flag)");
             println!("  2. Function definition syntax error");
             println!("  3. Closure not capturing $url parameter correctly");
-            return; // Exit early to see the debug output
         }
+        
+        assert_ne!(
+            results_parsed.len(),
+            0,
+            "fn::parse_literal() should return results for matching data"
+        );
 
         assert_eq!(
             results_parsed.len(),
