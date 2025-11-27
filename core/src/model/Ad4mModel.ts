@@ -751,28 +751,30 @@ export class Ad4mModel {
   public static async queryToSurrealQL(perspective: PerspectiveProxy, query: Query): Promise<string> {
     const metadata = this.getModelMetadata();
     const { source, where, order, offset, limit } = query;
-    
-    // Build instance filter: sources must have ALL required properties
-    const requiredFilters: string[] = [];
-    
-    // Add source filter if specified (filter to instances linked from this source)
+
+    // Build list of graph traversal filters for required predicates
+    const graphTraversalFilters: string[] = [];
+
+    // Add source filter if specified (filter to nodes that are children of this source)
+    // Source filter means: find targets of 'ad4m://has_child' links from the specified source
     if (source) {
-      requiredFilters.push(
-        `source IN (SELECT VALUE target FROM link WHERE source = ${this.formatSurrealValue(source)} AND predicate = 'ad4m://has_child')`
+      // Use graph traversal: node must be target of has_child link from source
+      graphTraversalFilters.push(
+        `<-link[WHERE perspective = $perspective AND in.uri = ${this.formatSurrealValue(source)} AND predicate = 'ad4m://has_child']`
       );
     }
-    
+
     // Add filters for required properties
     for (const [propName, propMeta] of Object.entries(metadata.properties)) {
       if (propMeta.required) {
         // For flag properties, also filter by the target value
         if (propMeta.flag && propMeta.initial) {
-          requiredFilters.push(
-            `source IN (SELECT VALUE source FROM link WHERE predicate = '${propMeta.predicate}' AND target = '${propMeta.initial}')`
+          graphTraversalFilters.push(
+            `->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}' AND out.uri = '${propMeta.initial}']`
           );
         } else {
-          requiredFilters.push(
-            `source IN (SELECT VALUE source FROM link WHERE predicate = '${propMeta.predicate}')`
+          graphTraversalFilters.push(
+            `->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}']`
           );
         }
       }
@@ -780,66 +782,188 @@ export class Ad4mModel {
 
     // If no required properties, we need at least one property to define the model
     // Use any property with an initial value as the defining characteristic
-    if (requiredFilters.length === 0) {
+    if (graphTraversalFilters.length === 0) {
       for (const [propName, propMeta] of Object.entries(metadata.properties)) {
         if (propMeta.initial) {
           // For flag properties, also filter by the target value
           if (propMeta.flag) {
-            requiredFilters.push(
-              `source IN (SELECT VALUE source FROM link WHERE predicate = '${propMeta.predicate}' AND target = '${propMeta.initial}')`
+            graphTraversalFilters.push(
+              `->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}' AND out.uri = '${propMeta.initial}']`
             );
           } else {
-            requiredFilters.push(
-              `source IN (SELECT VALUE source FROM link WHERE predicate = '${propMeta.predicate}')`
+            graphTraversalFilters.push(
+              `->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}']`
             );
           }
           break; // Just need one defining property
         }
       }
     }
-    
-    // Build WHERE clause combining instance filter and user filters
-    const instanceFilter = requiredFilters.length > 0 ? requiredFilters.join(' AND ') : '';
-    const userWhereClause = this.buildSurrealWhereClause(metadata, where);
-    const whereClause = instanceFilter && userWhereClause 
-      ? `${instanceFilter} AND ${userWhereClause}`
-      : instanceFilter || userWhereClause;
-    
-    // Note: ORDER BY, LIMIT, and OFFSET are applied in JavaScript after fetching results
-    // because SurrealDB GROUP BY doesn't support complex ordering expressions on aggregated data.
-    // This approach is still much faster than Prolog because we're only fetching and processing
-    // the relevant links rather than running Prolog inference.
-    
-    // Query structure: Use GROUP BY with array::group() to aggregate all predicates and targets
-    // IMPORTANT: Cannot alias 'source' in SELECT when using GROUP BY - it breaks SurrealDB grouping!
-    // See: https://github.com/surrealdb/surrealdb/issues (aliasing grouped fields breaks GROUP BY in v2.1)
-    // Note: We need to collect entire link records, not individual fields,
-    // to maintain the pairing between predicate, target, author, and timestamp
+
+    // Build user WHERE clause filters using graph traversal
+    const userWhereClause = this.buildGraphTraversalWhereClause(metadata, where);
+
+    // Build complete WHERE clause using graph traversal filters
+    const whereConditions: string[] = [];
+
+    // Add all graph traversal filters for required properties
+    whereConditions.push(...graphTraversalFilters);
+
+    // Add user where conditions if any
+    if (userWhereClause) {
+      whereConditions.push(userWhereClause);
+    }
+
+    // Always ensure node has at least one link in this perspective
+    whereConditions.push(`count(->link[WHERE perspective = $perspective]) > 0`);
+
+    // Build the query FROM node using direct graph traversal in WHERE
+    // This avoids slow subqueries and uses graph indexes for fast traversal
     const fullQuery = `
 SELECT
-  source,
-  array::group({
-    predicate: predicate,
-    target: target,
-    author: author,
-    timestamp: timestamp
-  }) AS links
-FROM link
-${whereClause ? 'WHERE ' + whereClause : ''}
-GROUP BY source
+    id AS source,
+    uri AS source_uri,
+    ->link[WHERE perspective = $perspective] AS links
+FROM node
+WHERE ${whereConditions.join(' AND ')}
     `.trim();
-    
+
     return fullQuery;
   }
 
   /**
+   * Builds the WHERE clause for SurrealQL queries using graph traversal syntax.
+   *
+   * @description
+   * Translates where conditions into graph traversal filters: `->link[WHERE ...]`
+   * This is more efficient than nested SELECTs because SurrealDB can optimize graph traversals.
+   *
+   * Handles several condition types:
+   * - Simple equality: `{ name: "Pasta" }` → `->link[WHERE predicate = 'X' AND out.uri = 'Pasta']`
+   * - Arrays (IN clause): `{ name: ["Pasta", "Pizza"] }` → `->link[WHERE predicate = 'X' AND out.uri IN [...]]`
+   * - NOT operators: Use `NOT` prefix
+   * - Comparison operators (gt, gte, lt, lte, etc.): Handled in post-query JavaScript filtering
+   * - Special fields: base uses `uri` directly, author/timestamp handled post-query
+   *
+   * @param metadata - Model metadata containing property predicates
+   * @param where - Where conditions from the query
+   * @returns Graph traversal WHERE clause filters, or empty string if no conditions
+   *
+   * @private
+   */
+  private static buildGraphTraversalWhereClause(metadata: ModelMetadata, where?: Where): string {
+    if (!where) return '';
+
+    const conditions: string[] = [];
+
+    for (const [propertyName, condition] of Object.entries(where)) {
+      // Check if this is a special field (base, author, timestamp)
+      // Note: author and timestamp filtering is done in JavaScript after query
+      const isSpecial = ['base', 'author', 'timestamp'].includes(propertyName);
+
+      if (isSpecial) {
+        // Skip author and timestamp - they'll be filtered in JavaScript
+        // Only handle 'base' (which maps to 'uri') here
+        if (propertyName === 'author' || propertyName === 'timestamp') {
+          continue; // Skip - will be filtered post-query
+        }
+
+        const columnName = 'uri'; // base maps to uri in node table
+
+        // Handle base/uri field directly
+        if (Array.isArray(condition)) {
+          // Array values (IN clause)
+          const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
+          conditions.push(`${columnName} IN [${formattedValues}]`);
+        } else if (typeof condition === 'object' && condition !== null) {
+          // Operator object
+          const ops = condition as any;
+          if (ops.not !== undefined) {
+            if (Array.isArray(ops.not)) {
+              const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
+              conditions.push(`${columnName} NOT IN [${formattedValues}]`);
+            } else {
+              conditions.push(`${columnName} != ${this.formatSurrealValue(ops.not)}`);
+            }
+          }
+          if (ops.between !== undefined && Array.isArray(ops.between) && ops.between.length === 2) {
+            conditions.push(`${columnName} >= ${this.formatSurrealValue(ops.between[0])} AND ${columnName} <= ${this.formatSurrealValue(ops.between[1])}`);
+          }
+          if (ops.gt !== undefined) {
+            conditions.push(`${columnName} > ${this.formatSurrealValue(ops.gt)}`);
+          }
+          if (ops.gte !== undefined) {
+            conditions.push(`${columnName} >= ${this.formatSurrealValue(ops.gte)}`);
+          }
+          if (ops.lt !== undefined) {
+            conditions.push(`${columnName} < ${this.formatSurrealValue(ops.lt)}`);
+          }
+          if (ops.lte !== undefined) {
+            conditions.push(`${columnName} <= ${this.formatSurrealValue(ops.lte)}`);
+          }
+          if (ops.contains !== undefined) {
+            conditions.push(`${columnName} CONTAINS ${this.formatSurrealValue(ops.contains)}`);
+          }
+        } else {
+          // Simple equality
+          conditions.push(`${columnName} = ${this.formatSurrealValue(condition)}`);
+        }
+      } else {
+        // Handle regular properties via graph traversal
+        const propMeta = metadata.properties[propertyName];
+        if (!propMeta) continue; // Skip if property not found in metadata
+
+        const predicate = propMeta.predicate;
+        // Use fn::parse_literal() for properties with resolveLanguage
+        const targetField = propMeta.resolveLanguage === 'literal' ? 'fn::parse_literal(out.uri)' : 'out.uri';
+
+        if (Array.isArray(condition)) {
+          // Array values (IN clause)
+          const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
+          conditions.push(`->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND ${targetField} IN [${formattedValues}]]`);
+        } else if (typeof condition === 'object' && condition !== null) {
+          // Operator object
+          const ops = condition as any;
+          if (ops.not !== undefined) {
+            if (Array.isArray(ops.not)) {
+              // For NOT IN with array: must NOT have a link with value in the array
+              const formattedValues = ops.not.map(v => this.formatSurrealValue(v)).join(', ');
+              conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND ${targetField} IN [${formattedValues}]]) = 0`);
+            } else {
+              // For NOT with single value: must NOT have this value
+              conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(ops.not)}]) = 0`);
+            }
+          }
+          // Note: gt, gte, lt, lte, between, contains operators are filtered in JavaScript
+          // post-query because fn::parse_literal() comparisons in SurrealDB
+          // don't work reliably with numeric comparisons.
+          // These are handled in instancesFromSurrealResult along with author/timestamp filtering.
+          // However, we still need to ensure the property exists
+          const hasComparisonOps = ops.gt !== undefined || ops.gte !== undefined ||
+                                   ops.lt !== undefined || ops.lte !== undefined ||
+                                   ops.between !== undefined || ops.contains !== undefined;
+          if (hasComparisonOps) {
+            // Ensure we only get nodes that have this property
+            conditions.push(`->link[WHERE perspective = $perspective AND predicate = '${predicate}']`);
+          }
+        } else {
+          // Simple equality
+          conditions.push(`->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(condition)}]`);
+        }
+      }
+    }
+
+    return conditions.join(' AND ');
+  }
+
+  /**
    * Builds the WHERE clause for SurrealQL queries.
-   * 
+   *
    * @description
    * Translates the where conditions from the Query object into SurrealQL WHERE clause fragments.
    * For each property filter, generates a subquery that checks for links with the appropriate
    * predicate and target value.
-   * 
+   *
    * Handles several condition types:
    * - Simple equality: `{ name: "Pasta" }` → subquery checking for predicate and target match
    * - Arrays (IN clause): `{ name: ["Pasta", "Pizza"] }` → target IN [...]
@@ -849,13 +973,13 @@ GROUP BY source
    *   - between: range check
    *   - contains: substring/element check (uses SurrealQL CONTAINS)
    * - Special fields: base, author, timestamp are accessed directly, not via subqueries
-   * 
+   *
    * All conditions are joined with AND.
-   * 
+   *
    * @param metadata - Model metadata containing property predicates
    * @param where - Where conditions from the query
    * @returns WHERE clause string (without the "WHERE" keyword), or empty string if no conditions
-   * 
+   *
    * @private
    */
   private static buildSurrealWhereClause(metadata: ModelMetadata, where?: Where): string {
@@ -1144,16 +1268,18 @@ GROUP BY source
     const requestedProperties = query?.properties || [];
     const requestedCollections = query?.collections || [];
     
-    // The query used GROUP BY, so each row has:
-    // - source: the base expression (not aliased due to SurrealDB GROUP BY limitation)
+    // The query used GROUP BY with graph traversal, so each row has:
+    // - source: the node ID (e.g., "node:abc123")
+    // - source_uri: the actual URI (the base expression)
     // - links: array of link objects with {predicate, target, author, timestamp}
-    
+
     const instances: T[] = [];
     for (const row of result) {
       try {
-        const base = row.source; // Changed from row.base due to SurrealDB GROUP BY aliasing issue
-        
-        // Skip rows without a source field
+        // Use source_uri as the base (the actual URI), not the node ID
+        const base = row.source_uri;
+
+        // Skip rows without a source_uri field
         if (!base) {
           continue;
         }
