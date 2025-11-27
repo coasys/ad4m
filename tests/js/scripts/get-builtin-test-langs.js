@@ -1,6 +1,6 @@
-import fs from "https://esm.sh/fs-extra@11.1.1";
-import wget from "https://esm.sh/node-wget-js@1.0.1";
-import unzipper from "https://esm.sh/unzipper@0.10.14";
+import fs from "https://esm.sh/v135/fs-extra@11.1.1";
+import wget from "https://esm.sh/v135/node-wget-js@1.0.1";
+import unzipper from "https://esm.sh/v135/unzipper@0.10.14";
 import path from "node:path";
 import os from "node:os";
 

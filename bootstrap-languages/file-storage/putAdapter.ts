@@ -1,8 +1,8 @@
-import type { Address, AgentService, PublicSharing, LanguageContext, HolochainLanguageDelegate } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
-import pako from "https://esm.sh/pako@2.1.0";
+import type { Address, AgentService, PublicSharing, LanguageContext, HolochainLanguageDelegate } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
+import pako from "https://esm.sh/v135/pako@2.1.0";
 import { FileStorage } from "./file-storage.ts";
 import { DNA_NICK } from "./build/dna.js";
-//import { Blob } from "https://esm.sh/buffer@6.0.3";
+//import { Blob } from "https://esm.sh/v135/buffer@6.0.3";
 import type { FileExpression, FileMetadata } from "./types.ts";
 
 export interface FileData {
