@@ -2566,11 +2566,11 @@ impl PerspectiveInstance {
             .insert(subscription_id.clone(), subscribed_query);
 
         // Send initial result after 3 delays
-        let result_string = format!("#init#{}", result_string);
+        let init_string = format!("#init#{}", result_string);
         for delay in [100, 500, 1000, 10000, 15000, 20000, 25000] {
             self.send_subscription_update(
                 subscription_id.clone(),
-                result_string.clone(),
+                init_string.clone(),
                 Some(Duration::from_millis(delay)),
             )
             .await;
