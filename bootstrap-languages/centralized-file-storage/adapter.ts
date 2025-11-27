@@ -1,7 +1,7 @@
-import type { Address, Expression, ExpressionAdapter, PublicSharing, LanguageContext, AgentService } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import type { Address, Expression, ExpressionAdapter, PublicSharing, LanguageContext, AgentService } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
 import axiod from "https://deno.land/x/axiod/mod.ts";
 import { PROXY_URL } from "./index.ts";
-import { ExpressionGeneric } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import { ExpressionGeneric } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
 
 export interface FileData {
   name: string;

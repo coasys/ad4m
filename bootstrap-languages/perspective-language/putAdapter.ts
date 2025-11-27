@@ -1,4 +1,4 @@
-import type { Address, AgentService, PublicSharing, LanguageContext, Perspective } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import type { Address, AgentService, PublicSharing, LanguageContext, Perspective } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
 
 export class IpfsPutAdapter implements PublicSharing {
     #agent: AgentService

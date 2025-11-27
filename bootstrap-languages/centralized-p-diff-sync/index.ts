@@ -1,7 +1,7 @@
-import type { Address, Language, Interaction, HolochainLanguageDelegate, LanguageContext, AgentService } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import type { Address, Language, Interaction, HolochainLanguageDelegate, LanguageContext, AgentService } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
 import { LinkAdapter } from "./linksAdapter.ts";
 import { TelepresenceAdapterImplementation } from "./telepresenceAdapter.ts";
-import { io } from "https://esm.sh/socket.io-client@4.7.2";
+import { io } from "https://esm.sh/v135/socket.io-client@4.7.2";
 
 function interactions(expression: Address): Interaction[] {
   return [];
