@@ -2680,34 +2680,34 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Subscribes to the query and receives updates when results change.
-   * 
+   *
    * This method:
-   * 1. Creates and initializes a Prolog query subscription
+   * 1. Creates and initializes a SurrealDB live query subscription (default)
    * 2. Sets up the callback to process future updates
    * 3. Returns the initial results immediately
-   * 
+   *
    * Remember to call dispose() when you're done with the subscription
    * to clean up resources.
-   * 
+   *
    * @param callback - Function to call with updated results
    * @returns Initial results array
-   * 
+   *
    * @example
    * ```typescript
    * const builder = Recipe.query(perspective)
    *   .where({ status: "cooking" });
-   * 
+   *
    * const initialRecipes = await builder.subscribe(recipes => {
    *   console.log("Updated recipes:", recipes);
    * });
-   * 
+   *
    * // When done with subscription:
    * builder.dispose();
    * ```
-   * 
+   *
    * @remarks
-   * Note: Subscriptions currently only work with Prolog. This method always uses Prolog
-   * regardless of the useSurrealDB() setting. SurrealDB subscriptions will be added in a future phase.
+   * By default, this uses SurrealDB live queries for real-time updates.
+   * Prolog subscriptions remain available via `.useSurrealDB(false)`.
    */
   async subscribe(callback: (results: T[]) => void): Promise<T[]> {
     // Clean up any existing subscription
@@ -2784,30 +2784,34 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Subscribes to count updates for matching entities.
-   * 
+   *
    * This method:
-   * 1. Creates and initializes a Prolog query subscription for the count
+   * 1. Creates and initializes a SurrealDB live query subscription for the count (default)
    * 2. Sets up the callback to process future count updates
    * 3. Returns the initial count immediately
-   * 
+   *
    * Remember to call dispose() when you're done with the subscription
    * to clean up resources.
-   * 
+   *
    * @param callback - Function to call with updated count
    * @returns Initial count
-   * 
+   *
    * @example
    * ```typescript
    * const builder = Recipe.query(perspective)
    *   .where({ status: "active" });
-   * 
+   *
    * const initialCount = await builder.countSubscribe(count => {
    *   console.log("Active items:", count);
    * });
-   * 
+   *
    * // When done with subscription:
    * builder.dispose();
    * ```
+   *
+   * @remarks
+   * By default, this uses SurrealDB live queries for real-time updates.
+   * Prolog subscriptions remain available via `.useSurrealDB(false)`.
    */
   async countSubscribe(callback: (count: number) => void): Promise<number> {
     // Clean up any existing subscription
@@ -2875,32 +2879,36 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
 
   /**
    * Subscribes to paginated results updates.
-   * 
+   *
    * This method:
-   * 1. Creates and initializes a Prolog query subscription for the paginated results
+   * 1. Creates and initializes a SurrealDB live query subscription for the paginated results (default)
    * 2. Sets up the callback to process future page updates
    * 3. Returns the initial page immediately
-   * 
+   *
    * Remember to call dispose() when you're done with the subscription
    * to clean up resources.
-   * 
+   *
    * @param pageSize - Number of items per page
    * @param pageNumber - Which page to retrieve (1-based)
    * @param callback - Function to call with updated pagination results
    * @returns Initial pagination results
-   * 
+   *
    * @example
    * ```typescript
    * const builder = Recipe.query(perspective)
    *   .where({ category: "Main" });
-   * 
+   *
    * const initialPage = await builder.paginateSubscribe(10, 1, page => {
    *   console.log("Updated page:", page.results);
    * });
-   * 
+   *
    * // When done with subscription:
    * builder.dispose();
    * ```
+   *
+   * @remarks
+   * By default, this uses SurrealDB live queries for real-time updates.
+   * Prolog subscriptions remain available via `.useSurrealDB(false)`.
    */
   async paginateSubscribe(
     pageSize: number, 
