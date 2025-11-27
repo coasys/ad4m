@@ -2671,7 +2671,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       const { results } = await this.ctor.instancesFromSurrealResult(this.perspective, this.queryParams, result);
       return results as T[];
     } else {
-      const query = await this.ctor.queryToProlog(this.perspective, this.queryParams);
+      const query = await this.ctor.queryToProlog(this.perspective, this.queryParams, this.modelClassName);
       const result = await this.perspective.infer(query);
       const { results } = await this.ctor.instancesFromPrologResult(this.perspective, this.queryParams, result);
       return results as T[];
