@@ -1,6 +1,6 @@
-import type { TelepresenceAdapter, OnlineAgent, PerspectiveExpression, DID, TelepresenceSignalCallback, HolochainLanguageDelegate, LanguageContext } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";;
+import type { TelepresenceAdapter, OnlineAgent, PerspectiveExpression, DID, TelepresenceSignalCallback, HolochainLanguageDelegate, LanguageContext } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";;
 import axiod from "https://deno.land/x/axiod/mod.ts";
-import type { Socket, ServerToClientEvents, ClientToServerEvents } from "https://esm.sh/socket.io-client@4.7.2";
+import type { Socket, ServerToClientEvents, ClientToServerEvents } from "https://esm.sh/v135/socket.io-client@4.7.2";
 
 export class TelepresenceAdapterImplementation implements TelepresenceAdapter {
     me: DID

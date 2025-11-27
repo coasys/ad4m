@@ -1,4 +1,4 @@
-import type { TelepresenceAdapter, OnlineAgent, PerspectiveExpression, TelepresenceSignalCallback, HolochainLanguageDelegate, LanguageContext } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";;
+import type { TelepresenceAdapter, OnlineAgent, PerspectiveExpression, TelepresenceSignalCallback, HolochainLanguageDelegate, LanguageContext } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";;
 import { DNA_ROLE, ZOME_NAME } from "./build/happ.js";
 
 export class TelepresenceAdapterImplementation implements TelepresenceAdapter {

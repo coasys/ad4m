@@ -1,6 +1,6 @@
-import type { Address, Expression, ExpressionAdapter, PublicSharing, LanguageContext, HolochainLanguageDelegate } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import type { Address, Expression, ExpressionAdapter, PublicSharing, LanguageContext, HolochainLanguageDelegate } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
 import { FileStoragePutAdapter } from './putAdapter.ts'
-import pako from "https://esm.sh/pako@2.1.0";
+import pako from "https://esm.sh/v135/pako@2.1.0";
 import { FileStorage } from "./file-storage.ts";
 import { DNA_NICK } from "./build/dna.js";
 import type { FileExpression } from "./types.ts";
