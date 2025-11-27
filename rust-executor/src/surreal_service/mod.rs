@@ -502,7 +502,7 @@ impl SurrealDBService {
                 interval.tick().await;
                 let elapsed = execute_start_for_logging.elapsed();
                 log::warn!(
-                    "🦦⏰ Query still running after {:?}\nQuery: {:?}",
+                    "🦦⏰ Query still running after {:?}\nQuery: {}",
                     elapsed,
                     query_for_logging
                 );
