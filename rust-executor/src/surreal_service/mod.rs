@@ -205,7 +205,7 @@ impl SurrealDBService {
         let node_id = format!("node:{}", hash_prefix);
 
         // Use the SDK's create method with a specific record ID
-        // This will create the node or return error if exists (which we ignore)
+        // This will create the node or return error if exists
         let create_result: Result<Option<NodeRecord>, _> = self
             .db
             .create(("node", hash_prefix))
@@ -409,7 +409,7 @@ impl SurrealDBService {
 
         // Automatically inject perspective filter into the query
         // NOTE: Cannot alias grouped fields in SELECT when using GROUP BY - it breaks SurrealDB grouping!
-        let prep_start = std::time::Instant::now();
+        //let prep_start = std::time::Instant::now();
         let query_upper = query.to_uppercase();
 
         let filtered_query = if query_upper.contains("FROM LINK") {
@@ -535,13 +535,13 @@ impl SurrealDBService {
 
         // Take the results as a single SurrealDB Value
         // This will contain the query results in SurrealDB's native format
-        let take_start = std::time::Instant::now();
+        //let take_start = std::time::Instant::now();
         let result: SurrealValue = response.take(0)?;
         //log::info!("🦦📦 Result extraction took {:?}", take_start.elapsed());
 
         // Convert the SurrealDB value to JSON using round-trip serialization
         // This serializes with enum variant names as keys (e.g., {"Array": [...]})
-        let serialize_start = std::time::Instant::now();
+        //let serialize_start = std::time::Instant::now();
         let json_string = serde_json::to_string(&result)?;
         let json_value: Value = serde_json::from_str(&json_string)?;
 
