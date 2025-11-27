@@ -462,33 +462,30 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   it("should generate basic query with no filters", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, {});
 
-    expect(query).toContain("source");
-    expect(query).toContain("FROM link");
-    expect(query).toContain("GROUP BY source");
-    // New grouped object structure
-    expect(query).toContain("array::group({");
-    expect(query).toContain("}) AS links");
-    expect(query).toContain("predicate: predicate");
-    expect(query).toContain("target: target");
-    expect(query).toContain("author: author");
-    expect(query).toContain("timestamp: timestamp");
+    expect(query).toContain("id AS source");
+    expect(query).toContain("uri AS source_uri");
+    expect(query).toContain("FROM node");
+    expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
+    expect(query).toContain("WHERE");
+    // Should have graph traversal filters for required properties
+    expect(query).toContain("count(->link[WHERE");
   });
 
   it("should generate query with simple property filter", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: "Pasta" } });
     
-    // Should have required property filters AND user filter
-    expect(query).toContain("source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://name')");
-    expect(query).toContain("source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://rating')");
-    expect(query).toContain("source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://name' AND target = 'Pasta')");
+    // Should have graph traversal filters for required properties and user filter
+    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name']) > 0");
+    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://rating']) > 0");
+    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Pasta']) > 0");
   });
 
   it("should generate query with multiple property filters", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: "Pasta", rating: 5 } });
     
     expect(query).toContain("WHERE");
-    expect(query).toContain("source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://name' AND target = 'Pasta')");
-    expect(query).toContain("source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://rating' AND target = 5)");
+    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Pasta']) > 0");
+    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://rating' AND out.uri = 5]) > 0");
     expect(query).toContain("AND");
   });
 
@@ -497,8 +494,8 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     // Comparison operators for regular properties are now filtered in JavaScript post-query
     // The SQL just filters on the predicate existing
-    expect(query).toContain("FROM link");
-    expect(query).toContain("GROUP BY source");
+    expect(query).toContain("FROM node");
+    
     // Should NOT contain comparison operators in SQL for regular properties
     expect(query).not.toContain("target > 4");
   });
@@ -507,7 +504,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { rating: { lt: 3 } } });
 
     // Comparison operators are filtered in JavaScript post-query
-    expect(query).toContain("FROM link");
+    expect(query).toContain("FROM node");
     expect(query).not.toContain("target < 3");
   });
 
@@ -515,7 +512,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { rating: { gte: 3, lte: 5 } } });
 
     // Comparison operators are filtered in JavaScript post-query
-    expect(query).toContain("FROM link");
+    expect(query).toContain("FROM node");
     expect(query).not.toContain("target >= 3");
     expect(query).not.toContain("target <= 5");
   });
@@ -523,22 +520,22 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   it("should handle not operator with single value", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: { not: "Salad" } } });
 
-    // Not operator uses source NOT IN subquery pattern
-    expect(query).toContain("source NOT IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://name' AND target = 'Salad')");
+    // Not operator uses graph traversal with count = 0
+    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Salad']) = 0");
   });
 
   it("should handle not operator with array (NOT IN)", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: { not: ["Salad", "Soup"] } } });
 
-    // Not operator with array uses source NOT IN subquery with target IN clause
-    expect(query).toContain("source NOT IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://name' AND target IN ['Salad', 'Soup'])");
+    // Not operator with array uses graph traversal with count = 0
+    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri IN ['Salad', 'Soup']]) = 0");
   });
 
   it("should handle between operator (filtered in JavaScript, not SQL)", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { rating: { between: [3, 5] } } });
 
     // Between operator for regular properties is now filtered in JavaScript post-query
-    expect(query).toContain("FROM link");
+    expect(query).toContain("FROM node");
     expect(query).not.toContain("target >= 3");
     expect(query).not.toContain("target <= 5");
   });
@@ -547,7 +544,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: { contains: "Past" } } });
 
     // Contains operator for regular properties is now filtered in JavaScript post-query
-    expect(query).toContain("FROM link");
+    expect(query).toContain("FROM node");
     expect(query).not.toContain("target CONTAINS 'Past'");
   });
 
@@ -555,7 +552,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: { contains: "Salad" } } });
 
     // Contains operator is filtered in JavaScript post-query
-    expect(query).toContain("FROM link");
+    expect(query).toContain("FROM node");
     expect(query).not.toContain("target CONTAINS 'Salad'");
   });
 
@@ -564,7 +561,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     
     expect(query).toContain("WHERE author CONTAINS 'alice'");
     // Should not use a subquery pattern
-    expect(query).not.toContain("SELECT source FROM link");
+    expect(query).not.toContain("SELECT source FROM node");
   });
 
   it.skip("should handle contains operator on special field (base)", async () => {
@@ -576,7 +573,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   it("should handle array values (IN clause)", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { name: ["Pasta", "Pizza"] } });
     
-    expect(query).toContain("target IN ['Pasta', 'Pizza']");
+    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri IN ['Pasta', 'Pizza']]) > 0");
   });
 
   it.skip("should handle special fields (author, timestamp) without subqueries", async () => {
@@ -584,14 +581,14 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     
     expect(query).toContain("WHERE author = 'did:key:alice'");
     // Ensure it's NOT using a subquery pattern for author in WHERE clause
-    expect(normalizeQuery(query)).not.toMatch(/WHERE.*source IN.*SELECT source FROM link.*author/);
+    expect(normalizeQuery(query)).not.toMatch(/WHERE.*source IN.*SELECT source FROM node.*author/);
   });
 
   it("should not generate ORDER BY clause in SQL (handled in JavaScript)", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { order: { timestamp: "DESC" } });
 
     // ORDER BY is now handled in JavaScript post-query
-    expect(query).toContain("FROM link");
+    expect(query).toContain("FROM node");
     expect(query).not.toContain("ORDER BY");
   });
 
@@ -599,7 +596,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { limit: 10 });
 
     // LIMIT is now handled in JavaScript post-query
-    expect(query).toContain("FROM link");
+    expect(query).toContain("FROM node");
     expect(query).not.toContain("LIMIT");
   });
 
@@ -607,7 +604,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { offset: 20 });
 
     // START/offset is now handled in JavaScript post-query
-    expect(query).toContain("FROM link");
+    expect(query).toContain("FROM node");
     expect(query).not.toContain("START");
   });
 
@@ -619,10 +616,11 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
       offset: 20
     });
 
-    // WHERE clause includes simple property filter (name = 'Pasta')
+    // WHERE clause uses graph traversal filters
     expect(query).toContain("WHERE");
-    expect(query).toContain("source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://name' AND target = 'Pasta')");
+    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Pasta']) > 0");
     // Comparison operators (gt) are filtered in JavaScript, not SQL
+    expect(query).not.toContain("out.uri > 4");
     expect(query).not.toContain("target > 4");
     // ORDER BY, LIMIT, START are now handled in JavaScript post-query
     expect(query).not.toContain("ORDER BY");
@@ -634,8 +632,8 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { properties: ["name"] });
 
     // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
-    expect(query).toContain("array::group({");
-    expect(query).toContain("}) AS links");
+    expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
+    
   });
 
   it("should only select requested collections", async () => {
@@ -651,8 +649,8 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await MultiCollectionModel.queryToSurrealQL(mockPerspective, { collections: ["coll1"] });
 
     // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
-    expect(query).toContain("array::group({");
-    expect(query).toContain("}) AS links");
+    expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
+    
   });
 
   it("should escape single quotes in string values", async () => {
@@ -666,8 +664,8 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { rating: 5 } });
     
     // Numeric values should not have quotes around them
-    expect(query).toContain("target = 5");
-    expect(query).not.toContain("target = '5'");
+    expect(query).toContain("out.uri = 5");
+    expect(query).not.toContain("out.uri = '5'");
   });
 
   it("should handle complex nested query (comparisons, ORDER BY, LIMIT handled in JS)", async () => {
@@ -683,10 +681,12 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     const normalized = normalizeQuery(query);
 
-    // Verify simple equality WHERE conditions are present
-    expect(normalized).toContain("source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://name' AND target = 'Pasta')");
+    // Verify graph traversal filters are present
+    expect(normalized).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Pasta']) > 0");
     // Comparison operators (gte, lte) are filtered in JavaScript, not SQL
+    expect(normalized).not.toContain("out.uri >= 4");
     expect(normalized).not.toContain("target >= 4");
+    expect(normalized).not.toContain("out.uri <= 5");
     expect(normalized).not.toContain("target <= 5");
     // author and timestamp filtering is done in JavaScript post-query
     expect(normalized).not.toContain("author = 'did:key:alice'");
@@ -695,22 +695,22 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     expect(normalized).not.toContain("ORDER BY");
     expect(normalized).not.toContain("LIMIT");
 
-    // Verify query structure (GROUP BY)
-    expect(normalized).toContain("source");
-    expect(normalized).toContain("GROUP BY source");
+    // Verify query structure (FROM node, no GROUP BY)
+    expect(normalized).toContain("FROM node");
   });
 
   it("should handle empty query object", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, {});
     
     // Should generate valid query with WHERE clause for required properties (name and rating)
-    expect(query).toContain("source");
-    expect(query).toContain("FROM link");
-    expect(query).toContain("GROUP BY source");
-    // Should have WHERE clause filtering for required properties
+    expect(query).toContain("id AS source");
+    expect(query).toContain("uri AS source_uri");
+    expect(query).toContain("FROM node");
+    
+    // Should have WHERE clause filtering for required properties using graph traversal
     expect(query).toContain("WHERE");
-    expect(query).toContain("source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://name')");
-    expect(query).toContain("source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://rating')");
+    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name']) > 0");
+    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://rating']) > 0");
     expect(query).not.toContain("ORDER BY");
     expect(query).not.toContain("START");
   });
@@ -718,53 +718,53 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
   it("should handle base special field", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: "literal://test" } });
     
-    expect(query).toContain("source = 'literal://test'");
+    expect(query).toContain("uri = 'literal://test'");
   });
 
   it("should handle base special field with array (IN clause)", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: ["literal://test1", "literal://test2"] } });
     
-    expect(query).toContain("source IN ['literal://test1', 'literal://test2']");
+    expect(query).toContain("uri IN ['literal://test1', 'literal://test2']");
   });
 
   it("should handle base special field with not operator", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { not: "literal://test" } } });
     
-    expect(query).toContain("source != 'literal://test'");
+    expect(query).toContain("uri != 'literal://test'");
   });
 
   it("should handle base special field with not operator and array (NOT IN)", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { not: ["literal://test1", "literal://test2"] } } });
     
-    expect(query).toContain("source NOT IN ['literal://test1', 'literal://test2']");
+    expect(query).toContain("uri NOT IN ['literal://test1', 'literal://test2']");
   });
 
   it("should handle base special field with between operator", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { between: ["literal://a", "literal://z"] } } } as any);
     
     const normalized = normalizeQuery(query);
-    expect(normalized).toContain("source >= 'literal://a' AND source <= 'literal://z'");
+    expect(normalized).toContain("uri >= 'literal://a' AND uri <= 'literal://z'");
   });
 
   it("should handle base special field with gt operator", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { gt: "literal://m" } } } as any);
     
-    expect(query).toContain("source > 'literal://m'");
+    expect(query).toContain("uri > 'literal://m'");
   });
 
   it("should handle base special field with gte and lte operators", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { base: { gte: "literal://a", lte: "literal://z" } } } as any);
     
     const normalized = normalizeQuery(query);
-    expect(normalized).toContain("source >= 'literal://a'");
-    expect(normalized).toContain("source <= 'literal://z'");
+    expect(normalized).toContain("uri >= 'literal://a'");
+    expect(normalized).toContain("uri <= 'literal://z'");
   });
 
   it("should handle timestamp special field with gt operator (filtered in JavaScript)", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { timestamp: { gt: 1234567890 } } });
 
     // timestamp filtering is done in JavaScript post-query
-    expect(query).toContain("FROM link");
+    expect(query).toContain("FROM node");
     expect(query).not.toContain("timestamp > 1234567890");
   });
 
@@ -777,7 +777,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     });
 
     // author and timestamp filtering is done in JavaScript post-query
-    expect(query).toContain("FROM link");
+    expect(query).toContain("FROM node");
     expect(query).not.toContain("author = 'did:key:alice'");
     expect(query).not.toContain("timestamp > 1000");
   });
@@ -792,9 +792,10 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     });
 
     const normalized = normalizeQuery(query);
-    // Regular properties with simple equality use subqueries
-    expect(normalized).toContain("source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://name' AND target = 'Pasta')");
+    // Regular properties use graph traversal filters
+    expect(normalized).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://name' AND out.uri = 'Pasta']) > 0");
     // Comparison operators (gt) are filtered in JavaScript, not SQL
+    expect(normalized).not.toContain("out.uri > 4");
     expect(normalized).not.toContain("target > 4");
     // author filtering is done in JavaScript post-query
     expect(normalized).not.toContain("author = 'did:key:alice'");
@@ -809,13 +810,13 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
 
     const query = await Task.queryToSurrealQL(mockPerspective, { where: { completed: true } });
     
-    expect(query).toContain("target = true");
+    expect(query).toContain("out.uri = true");
   });
 
   it("should handle array of numbers", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { where: { rating: [4, 5] } });
     
-    expect(query).toContain("target IN [4, 5]");
+    expect(query).toContain("count(->link[WHERE perspective = $perspective AND predicate = 'recipe://rating' AND out.uri IN [4, 5]]) > 0");
   });
 
   it("should skip unknown properties in where clause", async () => {
@@ -823,7 +824,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     
     // Should not throw error, just skip the unknown property
     expect(query).toContain("source");
-    expect(query).toContain("GROUP BY source");
+    
     // Should not contain any condition for unknownProp
     expect(query).not.toContain("unknownProp");
   });
@@ -841,7 +842,7 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { order: { name: "ASC" } });
 
     // ORDER BY is now handled in JavaScript post-query
-    expect(query).toContain("FROM link");
+    expect(query).toContain("FROM node");
     expect(query).not.toContain("ORDER BY");
   });
 
@@ -849,16 +850,16 @@ describe("Ad4mModel.queryToSurrealQL()", () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { properties: ["name", "rating"], collections: [] });
 
     // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
-    expect(query).toContain("array::group({");
-    expect(query).toContain("}) AS links");
+    expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
+    
   });
 
   it("should generate query with only collections, no properties", async () => {
     const query = await Recipe.queryToSurrealQL(mockPerspective, { properties: [], collections: ["ingredients"] });
 
     // With array::group(), all link data is selected, filtering happens in instancesFromSurrealResult
-    expect(query).toContain("array::group({");
-    expect(query).toContain("}) AS links");
+    expect(query).toContain("->link[WHERE perspective = $perspective] AS links");
+    
   });
 });
 
@@ -898,7 +899,8 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
   it("should convert SurrealDB results to model instances", async () => {
     const surrealResults = [
       {
-        source: "literal://recipe1",
+        source: "node:abc123",
+        source_uri: "literal://recipe1",
         links: [
           { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
@@ -908,7 +910,8 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
         ]
       },
       {
-        source: "literal://recipe2",
+        source: "node:def456",
+        source_uri: "literal://recipe2",
         links: [
           { predicate: "recipe://name", target: "Pizza", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
           { predicate: "recipe://rating", target: "4", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
@@ -939,7 +942,8 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
   it("should filter properties when query specifies properties", async () => {
     const surrealResults = [
       {
-        source: "literal://recipe1",
+        source: "node:abc123",
+        source_uri: "literal://recipe1",
         links: [
           { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
@@ -970,7 +974,8 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
   it("should filter collections when query specifies collections", async () => {
     const surrealResults = [
       {
-        source: "literal://recipe1",
+        source: "node:abc123",
+        source_uri: "literal://recipe1",
         links: [
           { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
@@ -1015,7 +1020,8 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
   it("should use SurrealDB by default in findAll()", async () => {
     const surrealResults = [
       {
-        source: "literal://recipe1",
+        source: "node:abc123",
+        source_uri: "literal://recipe1",
         links: [
           { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
@@ -1054,7 +1060,8 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
   it("should use SurrealDB by default in findAllAndCount()", async () => {
     const surrealResults = [
       {
-        source: "literal://recipe1",
+        source: "node:abc123",
+        source_uri: "literal://recipe1",
         links: [
           { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
@@ -1076,7 +1083,8 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
   it("should use SurrealDB by default in paginate()", async () => {
     const surrealResults = [
       {
-        source: "literal://recipe1",
+        source: "node:abc123",
+        source_uri: "literal://recipe1",
         links: [
           { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
@@ -1100,7 +1108,8 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
     // Since count() uses result.length and GROUP BY returns one row per source,
     // mock 5 recipe sources
     const surrealResults = Array.from({ length: 5 }, (_, i) => ({
-      source: `literal://recipe${i+1}`,
+      source: `node:abc${i+1}`,
+      source_uri: `literal://recipe${i+1}`,
       links: [
         { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
         { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
@@ -1130,7 +1139,8 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
   it("should use SurrealDB by default in ModelQueryBuilder.get()", async () => {
     const surrealResults = [
       {
-        source: "literal://recipe1",
+        source: "node:abc123",
+        source_uri: "literal://recipe1",
         links: [
           { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
@@ -1174,7 +1184,8 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
   it("should use SurrealDB by default in ModelQueryBuilder.count()", async () => {
     // count() counts the number of rows returned by the query (one row per source)
     const surrealResults = Array.from({ length: 3 }, (_, i) => ({
-      source: `literal://recipe${i+1}`,
+      source: `node:abc${i+1}`,
+      source_uri: `literal://recipe${i+1}`,
       links: [
         { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
         { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
@@ -1194,7 +1205,8 @@ describe("Ad4mModel.instancesFromSurrealResult() and SurrealDB integration", () 
   it("should use SurrealDB by default in ModelQueryBuilder.paginate()", async () => {
     const surrealResults = [
       {
-        source: "literal://recipe1",
+        source: "node:abc123",
+        source_uri: "literal://recipe1",
         links: [
           { predicate: "recipe://name", target: "Pasta", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
@@ -1246,7 +1258,8 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
   it("should apply JS-level filtering for gt operator on properties in SurrealDB count()", async () => {
     // Mock SurrealDB results: 5 recipes with ratings 1, 2, 3, 4, 5
     const surrealResults = Array.from({ length: 5 }, (_, i) => ({
-      source: `literal://recipe${i+1}`,
+      source: `node:abc${i+1}`,
+      source_uri: `literal://recipe${i+1}`,
       links: [
         { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
         { predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
@@ -1268,7 +1281,8 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
   it("should apply JS-level filtering for between operator on properties in SurrealDB count()", async () => {
     // Mock SurrealDB results: 5 recipes with ratings 1, 2, 3, 4, 5
     const surrealResults = Array.from({ length: 5 }, (_, i) => ({
-      source: `literal://recipe${i+1}`,
+      source: `node:abc${i+1}`,
+      source_uri: `literal://recipe${i+1}`,
       links: [
         { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
         { predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
@@ -1290,7 +1304,8 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
   it("should apply JS-level filtering for timestamp gt operator in SurrealDB count()", async () => {
     // Mock SurrealDB results: 5 recipes with different timestamps
     const surrealResults = Array.from({ length: 5 }, (_, i) => ({
-      source: `literal://recipe${i+1}`,
+      source: `node:abc${i+1}`,
+      source_uri: `literal://recipe${i+1}`,
       links: [
         { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
         { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
@@ -1313,7 +1328,8 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
   it("should apply JS-level filtering for timestamp between operator in SurrealDB count()", async () => {
     // Mock SurrealDB results: 5 recipes with different timestamps
     const surrealResults = Array.from({ length: 5 }, (_, i) => ({
-      source: `literal://recipe${i+1}`,
+      source: `node:abc${i+1}`,
+      source_uri: `literal://recipe${i+1}`,
       links: [
         { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
         { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
@@ -1342,14 +1358,16 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
     // Mock SurrealDB results: 3 recipes by Alice and 2 by Bob
     const surrealResults = [
       ...Array.from({ length: 3 }, (_, i) => ({
-        source: `literal://recipe${i+1}`,
+        source: `node:abc${i+1}`,
+        source_uri: `literal://recipe${i+1}`,
         links: [
           { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
         ]
       })),
       ...Array.from({ length: 2 }, (_, i) => ({
-        source: `literal://recipe${i+4}`,
+        source: `node:def${i+4}`,
+        source_uri: `literal://recipe${i+4}`,
         links: [
           { predicate: "recipe://name", target: `Recipe ${i+4}`, author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" },
           { predicate: "recipe://rating", target: "5", author: "did:key:bob", timestamp: "2023-01-02T00:00:00Z" }
@@ -1372,7 +1390,8 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
   it("should apply JS-level filtering in ModelQueryBuilder.count() with gt operator", async () => {
     // Mock SurrealDB results: 5 recipes with ratings 1, 2, 3, 4, 5
     const surrealResults = Array.from({ length: 5 }, (_, i) => ({
-      source: `literal://recipe${i+1}`,
+      source: `node:abc${i+1}`,
+      source_uri: `literal://recipe${i+1}`,
       links: [
         { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" },
         { predicate: "recipe://rating", target: `${i+1}`, author: "did:key:alice", timestamp: "2023-01-01T00:00:00Z" }
@@ -1398,7 +1417,8 @@ describe("Ad4mModel.count() with advanced where conditions", () => {
   it("should apply JS-level filtering in ModelQueryBuilder.count() with timestamp between", async () => {
     // Mock SurrealDB results: 5 recipes with different timestamps
     const surrealResults = Array.from({ length: 5 }, (_, i) => ({
-      source: `literal://recipe${i+1}`,
+      source: `node:abc${i+1}`,
+      source_uri: `literal://recipe${i+1}`,
       links: [
         { predicate: "recipe://name", target: `Recipe ${i+1}`, author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` },
         { predicate: "recipe://rating", target: "5", author: "did:key:alice", timestamp: `2023-01-0${i+1}T00:00:00Z` }
