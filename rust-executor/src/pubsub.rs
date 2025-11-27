@@ -3,7 +3,7 @@ use crate::graphql::graphql_types::GetValue;
 use coasys_juniper::{graphql_value, FieldError, FieldResult};
 use futures::Stream;
 use futures::StreamExt;
-use log::{error, warn};
+use log::{error, warn, debug};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -42,7 +42,7 @@ impl PubSub {
             let mut i = 0;
             while i < subscribers_vec.len() {
                 if subscribers_vec[i].is_closed() {
-                    warn!("Found closed subscriber, removing...");
+                    debug!("Found closed subscriber, removing...");
                     subscribers_vec.remove(i);
                 } else {
                     i += 1;
