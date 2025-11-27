@@ -64,6 +64,8 @@ export class QuerySubscriptionProxy {
     #latestResult: AllInstancesResult|null;
     #disposed: boolean = false;
     #initialized: Promise<boolean>;
+    #initResolve?: (value: boolean) => void;
+    #initReject?: (reason?: any) => void;
     #initTimeoutId?: NodeJS.Timeout;
     #query: string;
     isSurrealDB: boolean = false;
@@ -79,48 +81,96 @@ export class QuerySubscriptionProxy {
         this.#client = client;
         this.#callbacks = new Set();
         this.#latestResult = null;
+        
+        // Create the promise once and store its resolve/reject
+        this.#initialized = new Promise<boolean>((resolve, reject) => {
+            this.#initResolve = resolve;
+            this.#initReject = reject;
+        });
     }
 
     async subscribe() {
-        // initialize the query subscription
-        let result;
-        if (this.isSurrealDB) {
-            result = await this.#client.perspectiveSubscribeSurrealQuery(this.#uuid, this.#query);
-        } else {
-            result = await this.#client.subscribeQuery(this.#uuid, this.#query);
+        // Clean up previous subscription attempt if retrying
+        if (this.#unsubscribe) {
+            this.#unsubscribe();
+            this.#unsubscribe = undefined;
         }
-        this.#subscriptionId = result.subscriptionId;
-        // Subscribe to query updates
-        this.#initialized = new Promise<boolean>((resolve, reject) => {
-            // Add timeout to prevent hanging promises
+        
+        // Clear any existing timeout
+        if (this.#initTimeoutId) {
+            clearTimeout(this.#initTimeoutId);
+            this.#initTimeoutId = undefined;
+        }
+
+        // Clear any existing keepalive timer to prevent accumulation
+        if (this.#keepaliveTimer) {
+            clearTimeout(this.#keepaliveTimer);
+            this.#keepaliveTimer = undefined;
+        }
+
+        try {
+            // Initialize the query subscription
+            let initialResult;
+            if (this.isSurrealDB) {
+                initialResult = await this.#client.perspectiveSubscribeSurrealQuery(this.#uuid, this.#query);
+            } else {
+                initialResult = await this.#client.subscribeQuery(this.#uuid, this.#query);
+            }
+            this.#subscriptionId = initialResult.subscriptionId;
+
+            // Process the initial result immediately for fast UX
+            if (initialResult.result) {
+                this.#latestResult = initialResult.result;
+                this.#notifyCallbacks(initialResult.result);
+            } else {
+                console.warn('⚠️ No initial result returned from subscribeQuery!');
+            }
+
+            // Set up timeout for retry
             this.#initTimeoutId = setTimeout(() => {
-                reject(new Error('Subscription initialization timed out after 30 seconds. Resubscribing...'));
-                this.subscribe();
-            }, 30000); // 30 seconds timeout
+                console.error('Subscription initialization timed out after 30 seconds. Resubscribing...');
+                // Recursively retry subscription, catching any errors
+                this.subscribe().catch(error => {
+                    console.error('Error during subscription retry after timeout:', error);
+                });
+            }, 30000);
             
             // Subscribe to query updates
             this.#unsubscribe = this.#client.subscribeToQueryUpdates(
                 this.#subscriptionId,
-                (result) => {
+                (updateResult) => {
+                    // Clear timeout on first message
                     if (this.#initTimeoutId) {
                         clearTimeout(this.#initTimeoutId);
                         this.#initTimeoutId = undefined;
                     }
-                    resolve(true);
-
-                    // if the result is one of those repeated initialization results
-                    // and we got a result before, we don't notify the callbacks
-                    // so they don't get confused (we could have gotten another 
-                    // more recent result in between)
-                    if(result.isInit && this.#latestResult) {
-                        return
+                    
+                    // Resolve the initialization promise (only resolves once)
+                    if (this.#initResolve) {
+                        this.#initResolve(true);
+                        this.#initResolve = undefined;  // Prevent double-resolve
+                        this.#initReject = undefined;
                     }
 
-                    this.#latestResult = result;
-                    this.#notifyCallbacks(result);
+                    // Skip duplicate init messages
+                    if (updateResult.isInit && this.#latestResult) return;
+
+                    this.#latestResult = updateResult;
+                    this.#notifyCallbacks(updateResult);
                 }
             );
-        });
+        } catch (error) {
+            console.error('Error setting up subscription:', error);
+            
+            // Reject the promise if this is the first attempt
+            if (this.#initReject) {
+                this.#initReject(error);
+                this.#initResolve = undefined;
+                this.#initReject = undefined;
+            }
+            
+            throw error; // Re-throw so caller knows it failed
+        }
 
         // Start keepalive loop using platform-agnostic setTimeout
         const keepaliveLoop = async () => {
@@ -136,8 +186,14 @@ export class QuerySubscriptionProxy {
                 console.error('Error in keepalive:', e);
                 // try to reinitialize the subscription
                 console.log('Reinitializing subscription for query:', this.#query);
-                await this.subscribe();
-                console.log('Subscription reinitialized');
+                try {
+                    await this.subscribe();
+                    console.log('Subscription reinitialized');
+                } catch (resubscribeError) {
+                    console.error('Error during resubscription from keepalive:', resubscribeError);
+                    // Don't schedule another keepalive on resubscribe failure
+                    return;
+                }
             }
 
             // Schedule next keepalive if not disposed
@@ -162,15 +218,17 @@ export class QuerySubscriptionProxy {
         return this.#subscriptionId;
     }
 
-    /** Promise that resolves when the subscription has received its first result
-     * through the subscription channel. This ensures the subscription is fully
-     * set up before allowing access to results or updates.
-     * 
-     * The promise will reject if no result is received within 30 seconds.
-     * 
-     * Note: You typically don't need to await this directly since the subscription
-     * creation methods (like subscribeInfer) already wait for initialization.
-     */
+/** Promise that resolves when the subscription has received its first result
+ * through the subscription channel. This ensures the subscription is fully
+ * set up before allowing access to results or updates.
+ * 
+ * If no result is received within 30 seconds, the subscription will automatically
+ * retry. The promise will remain pending until a subscription message successfully
+ * arrives, or until a fatal error occurs during subscription setup.
+ * 
+ * Note: You typically don't need to await this directly since the subscription
+ * creation methods (like subscribeInfer) already wait for initialization.
+ */
     get initialized(): Promise<boolean> {
         return this.#initialized;
     }
