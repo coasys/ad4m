@@ -1275,9 +1275,10 @@ WHERE ${whereConditions.join(' AND ')}
 
     const instances: T[] = [];
     for (const row of result) {
+      let base;
       try {
         // Use source_uri as the base (the actual URI), not the node ID
-        const base = row.source_uri;
+        base = row.source_uri;
 
         // Skip rows without a source_uri field
         if (!base) {
