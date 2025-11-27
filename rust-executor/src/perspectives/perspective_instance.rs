@@ -4349,7 +4349,7 @@ GROUP BY source
             println!("  2. Function definition syntax error");
             println!("  3. Closure not capturing $url parameter correctly");
         }
-        
+
         assert_ne!(
             results_parsed.len(),
             0,
