@@ -528,7 +528,11 @@ export class PerspectiveProxy {
      * Executes a SurrealQL query against the perspective's link cache.
      * This allows powerful SQL-like queries on the link data stored in SurrealDB.
      * 
-     * @param query - SurrealQL query string
+     * **Security Note:** Only read-only queries (SELECT, RETURN, etc.) are permitted.
+     * Mutating operations (DELETE, UPDATE, INSERT, CREATE, DROP, DEFINE, etc.) are
+     * blocked for security reasons. Use the perspective's add/remove methods to modify links.
+     * 
+     * @param query - SurrealQL query string (read-only operations only)
      * @returns Query results as parsed JSON
      * 
      * @example
@@ -539,6 +543,11 @@ export class PerspectiveProxy {
      * // Filter links by predicate
      * const follows = await perspective.querySurrealDB(
      *   "SELECT * FROM link WHERE predicate = 'follows'"
+     * );
+     * 
+     * // Complex aggregation query
+     * const stats = await perspective.querySurrealDB(
+     *   "SELECT predicate, count() as total FROM link GROUP BY predicate"
      * );
      * ```
      */

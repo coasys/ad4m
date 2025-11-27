@@ -155,8 +155,15 @@ export class PerspectiveClient {
         return JSON.parse(perspectiveQueryProlog)
     }
 
-    // Note: GraphQL field name is "perspectiveQuerySurrealDb" (lowercase "b" in "Db")
-    // as generated from Rust method "perspective_query_surreal_db"
+    /**
+     * Executes a read-only SurrealQL query against a perspective's link cache.
+     * 
+     * Security: Only SELECT, RETURN, and other read-only queries are permitted.
+     * Mutating operations (DELETE, UPDATE, INSERT, etc.) are blocked.
+     * 
+     * Note: GraphQL field name is "perspectiveQuerySurrealDb" (lowercase "b" in "Db")
+     * as generated from Rust method "perspective_query_surreal_db"
+     */
     async querySurrealDB(uuid: string, query: string): Promise<any> {
         const { perspectiveQuerySurrealDb } = unwrapApolloResult(await this.#apolloClient.query({
             query: gql`query perspectiveQuerySurrealDb($uuid: String!, $query: String!) {
