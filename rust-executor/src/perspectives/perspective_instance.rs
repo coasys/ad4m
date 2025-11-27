@@ -2328,40 +2328,6 @@ impl PerspectiveInstance {
         //log::info!("🎯 CREATE SUBJECT: Commands executed in {:?}", execute_start.elapsed());
         //log::info!("🎯 CREATE SUBJECT: Total create_subject took {:?}", create_start.elapsed());
 
-        if batch_id.is_some() {
-            return Ok(());
-        }
-
-        // Verify instance was created successfully
-        let mut tries = 0;
-        let mut instance_check_passed = false;
-        while !instance_check_passed && tries < 50 {
-            match self
-                .prolog_query(format!(
-                    "subject_class(\"{}\", C), instance(C, \"{}\").",
-                    class_name, expression_address
-                ))
-                .await
-            {
-                Ok(QueryResolution::True) => instance_check_passed = true,
-                Ok(QueryResolution::Matches(_)) => instance_check_passed = true,
-                Err(e) => log::warn!("Error trying to check instance after create_subject: {}", e),
-                Ok(_) => {} //log::info!("create_subject instance query returned: {:?}", r),
-            }
-            sleep(Duration::from_millis(10)).await;
-            tries += 1;
-        }
-
-        if instance_check_passed {
-            // log::info!(
-            //     "Subject class \"{}\" successfully instantiated around \"{}\".",
-            //     class_name,
-            //     expression_address
-            // );
-        } else {
-            log::warn!("create_subject: instance check still false after running constructor and waiting 5s. Something seems off with subject class: {}", class_name);
-        }
-
         Ok(())
     }
 
