@@ -241,7 +241,10 @@ impl PerspectiveInstance {
             persisted_guard.uuid.clone()
         };
 
-        log::info!("💾 SURREAL SYNC: Starting initial sync for perspective {}", uuid);
+        log::info!(
+            "💾 SURREAL SYNC: Starting initial sync for perspective {}",
+            uuid
+        );
         let sync_start = std::time::Instant::now();
 
         // Get all links from storage (Prolog)

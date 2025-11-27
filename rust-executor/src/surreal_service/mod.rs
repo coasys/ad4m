@@ -122,7 +122,7 @@ impl SurrealDBService {
     /// Helper to get or create a node record for a given URI
     /// Returns the node ID (node:hash)
     async fn ensure_node(&self, uri: &str) -> Result<String, Error> {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
 
         // Create a stable ID from the URI hash
         let mut hasher = Sha256::new();
@@ -133,7 +133,8 @@ impl SurrealDBService {
 
         // Use the SDK's create method with a specific record ID
         // This will create the node or return error if exists (which we ignore)
-        let create_result: Result<Option<NodeRecord>, _> = self.db
+        let create_result: Result<Option<NodeRecord>, _> = self
+            .db
             .create(("node", hash_prefix))
             .content(NodeRecord {
                 id: None,
@@ -241,7 +242,6 @@ impl SurrealDBService {
         perspective_uuid: &str,
         link: &DecoratedLinkExpression,
     ) -> Result<(), Error> {
-
         // Ensure source and target nodes exist
         let source_id = self.ensure_node(&link.data.source).await?;
         let target_id = self.ensure_node(&link.data.target).await?;
@@ -403,7 +403,11 @@ impl SurrealDBService {
             loop {
                 interval.tick().await;
                 let elapsed = execute_start_for_logging.elapsed();
-                log::warn!("🦦⏰ Query still running after {:?}\nQuery: {:?}", elapsed, query_for_logging);
+                log::warn!(
+                    "🦦⏰ Query still running after {:?}\nQuery: {:?}",
+                    elapsed,
+                    query_for_logging
+                );
             }
         });
 
@@ -414,11 +418,19 @@ impl SurrealDBService {
 
         let mut response = match response_result {
             Ok(r) => {
-                log::info!("🦦✅ Query execution succeeded in {:?}", execute_start.elapsed());
+                log::info!(
+                    "🦦✅ Query execution succeeded in {:?}",
+                    execute_start.elapsed()
+                );
                 r
             }
             Err(e) => {
-                log::error!("🦦💥 SurrealDB query failed after {:?}: {:?}\nQuery was: {}", execute_start.elapsed(), e, filtered_query);
+                log::error!(
+                    "🦦💥 SurrealDB query failed after {:?}: {:?}\nQuery was: {}",
+                    execute_start.elapsed(),
+                    e,
+                    filtered_query
+                );
                 return Err(e.into());
             }
         };
@@ -439,9 +451,15 @@ impl SurrealDBService {
         let unwrapped = unwrap_surreal_json(json_value);
         //log::info!("🦦🔄 Serialization/unwrapping took {:?}", serialize_start.elapsed());
 
-        log::info!("🦦🦦🦦 SurrealDB query:\n{}\n==>>Result count: {}",
+        log::info!(
+            "🦦🦦🦦 SurrealDB query:\n{}\n==>>Result count: {}",
             query,
-            if let Value::Array(ref arr) = unwrapped { arr.len() } else { 0 });
+            if let Value::Array(ref arr) = unwrapped {
+                arr.len()
+            } else {
+                0
+            }
+        );
         log::info!("🦦⏱️ TOTAL query time: {:?}", total_start.elapsed());
         // Extract array from the unwrapped result, propagating error if not an array
         match unwrapped {
@@ -678,21 +696,19 @@ mod tests {
         // Use ensure_node to create the node
         let _node_id = service.ensure_node(test_uri).await.unwrap();
 
-        let mut res = service.db.query("SELECT * FROM node")
-            .await
-            .unwrap();
+        let mut res = service.db.query("SELECT * FROM node").await.unwrap();
 
         // Use SurrealDB Value type and convert to JSON
         use surrealdb::Value as SurrealValue;
         let result: SurrealValue = res.take(0).unwrap();
-        
+
         // Convert to JSON and unwrap SurrealDB enum structure
         let json_string = serde_json::to_string(&result).unwrap();
         let json_value: serde_json::Value = serde_json::from_str(&json_string).unwrap();
         let unwrapped = unwrap_surreal_json(json_value);
-        
+
         let nodes = unwrapped.as_array().unwrap();
-        
+
         assert_eq!(nodes.len(), 1, "Node should be created and retrievable");
 
         // Check node id format and URI match
@@ -705,7 +721,6 @@ mod tests {
         assert_eq!(found_uri, test_uri, "Node uri should match");
     }
 
-    
     #[tokio::test]
     async fn test_nodes_are_created_for_links() {
         let service = SurrealDBService::new().await.unwrap();
@@ -727,17 +742,27 @@ mod tests {
         // Use SurrealDB Value type and convert to JSON
         use surrealdb::Value as SurrealValue;
         let result: SurrealValue = res.take(0).unwrap();
-        
+
         // Convert to JSON and unwrap SurrealDB enum structure
         let json_string = serde_json::to_string(&result).unwrap();
         let json_value: serde_json::Value = serde_json::from_str(&json_string).unwrap();
         let unwrapped = unwrap_surreal_json(json_value);
-        
+
         let nodes = unwrapped.as_array().unwrap();
-        
+
         // Filter to exclude test pollution if any, or just check for our URIs
-        let found_source = nodes.iter().any(|n| n.get("uri").and_then(|u| u.as_str()).map(|u| u == "source_node_uri").unwrap_or(false));
-        let found_target = nodes.iter().any(|n| n.get("uri").and_then(|u| u.as_str()).map(|u| u == "target_node_uri").unwrap_or(false));
+        let found_source = nodes.iter().any(|n| {
+            n.get("uri")
+                .and_then(|u| u.as_str())
+                .map(|u| u == "source_node_uri")
+                .unwrap_or(false)
+        });
+        let found_target = nodes.iter().any(|n| {
+            n.get("uri")
+                .and_then(|u| u.as_str())
+                .map(|u| u == "target_node_uri")
+                .unwrap_or(false)
+        });
 
         assert!(
             found_source && found_target,
@@ -1155,14 +1180,29 @@ mod tests {
         assert_eq!(initial_results.len(), 4, "Should have 4 initial links");
 
         // Verify specific initial link data
-        assert_eq!(initial_results[0]["source"].as_str().unwrap(), "ad4m://self");
-        assert_eq!(initial_results[0]["predicate"].as_str().unwrap(), "flux://entry_type");
-        assert_eq!(initial_results[0]["target"].as_str().unwrap(), "flux://has_community");
+        assert_eq!(
+            initial_results[0]["source"].as_str().unwrap(),
+            "ad4m://self"
+        );
+        assert_eq!(
+            initial_results[0]["predicate"].as_str().unwrap(),
+            "flux://entry_type"
+        );
+        assert_eq!(
+            initial_results[0]["target"].as_str().unwrap(),
+            "flux://has_community"
+        );
 
         // Test graph traversal BEFORE reload
         let graph_query_before = "SELECT * FROM link WHERE perspective = $perspective AND count(->link[WHERE predicate = 'flux://member']) > 0";
-        let graph_results_before = service.query_links(perspective_uuid, graph_query_before).await.unwrap();
-        println!("Graph traversal before reload found {} links", graph_results_before.len());
+        let graph_results_before = service
+            .query_links(perspective_uuid, graph_query_before)
+            .await
+            .unwrap();
+        println!(
+            "Graph traversal before reload found {} links",
+            graph_results_before.len()
+        );
 
         // Now reload with completely different links
         let new_links = vec![
@@ -1204,12 +1244,18 @@ mod tests {
         ];
 
         // Reload perspective
-        let reload_result = service.reload_perspective(perspective_uuid, new_links.clone()).await;
+        let reload_result = service
+            .reload_perspective(perspective_uuid, new_links.clone())
+            .await;
         assert!(reload_result.is_ok(), "Reload should succeed");
 
         // Verify new state - should have exactly 5 links now
         let reloaded_results = service.query_links(perspective_uuid, query).await.unwrap();
-        assert_eq!(reloaded_results.len(), 5, "Should have exactly 5 links after reload");
+        assert_eq!(
+            reloaded_results.len(),
+            5,
+            "Should have exactly 5 links after reload"
+        );
 
         // Verify that old links are completely gone
         for old_link in &initial_results {
@@ -1220,62 +1266,131 @@ mod tests {
                     && link["author"] == old_link["author"]
                     && link["timestamp"] == old_link["timestamp"]
             });
-            assert!(!found, "Old link should not exist after reload: {:?}", old_link);
+            assert!(
+                !found,
+                "Old link should not exist after reload: {:?}",
+                old_link
+            );
         }
 
         // Verify each new link is present with correct data
-        assert_eq!(reloaded_results[0]["target"].as_str().unwrap(), "flux://has_channel");
+        assert_eq!(
+            reloaded_results[0]["target"].as_str().unwrap(),
+            "flux://has_channel"
+        );
         assert_eq!(reloaded_results[0]["author"].as_str().unwrap(), "author3");
 
-        assert_eq!(reloaded_results[1]["target"].as_str().unwrap(), "New Channel Name");
+        assert_eq!(
+            reloaded_results[1]["target"].as_str().unwrap(),
+            "New Channel Name"
+        );
         assert_eq!(reloaded_results[1]["author"].as_str().unwrap(), "author3");
 
-        assert_eq!(reloaded_results[2]["target"].as_str().unwrap(), "message://1");
-        assert_eq!(reloaded_results[2]["predicate"].as_str().unwrap(), "flux://message");
+        assert_eq!(
+            reloaded_results[2]["target"].as_str().unwrap(),
+            "message://1"
+        );
+        assert_eq!(
+            reloaded_results[2]["predicate"].as_str().unwrap(),
+            "flux://message"
+        );
 
-        assert_eq!(reloaded_results[3]["target"].as_str().unwrap(), "message://2");
-        assert_eq!(reloaded_results[4]["target"].as_str().unwrap(), "message://3");
+        assert_eq!(
+            reloaded_results[3]["target"].as_str().unwrap(),
+            "message://2"
+        );
+        assert_eq!(
+            reloaded_results[4]["target"].as_str().unwrap(),
+            "message://3"
+        );
 
         // Verify predicates are correct
         let message_links: Vec<_> = reloaded_results
             .iter()
             .filter(|link| link["predicate"].as_str() == Some("flux://message"))
             .collect();
-        assert_eq!(message_links.len(), 3, "Should have exactly 3 message links");
+        assert_eq!(
+            message_links.len(),
+            3,
+            "Should have exactly 3 message links"
+        );
 
         // CRITICAL: Test graph traversal queries after reload (like Ad4mModel does)
         println!("\n=== Testing graph traversal after reload ===");
 
         // Test 1: Use graph traversal on source node (in.uri)
-        let graph_query1 = "SELECT * FROM link WHERE perspective = $perspective AND in.uri = 'ad4m://self'";
-        let graph_results1 = service.query_links(perspective_uuid, graph_query1).await.unwrap();
-        println!("Query 1: Links from source 'ad4m://self': {}", graph_results1.len());
-        assert_eq!(graph_results1.len(), 5, "Should find all 5 links with source 'ad4m://self' via graph traversal");
+        let graph_query1 =
+            "SELECT * FROM link WHERE perspective = $perspective AND in.uri = 'ad4m://self'";
+        let graph_results1 = service
+            .query_links(perspective_uuid, graph_query1)
+            .await
+            .unwrap();
+        println!(
+            "Query 1: Links from source 'ad4m://self': {}",
+            graph_results1.len()
+        );
+        assert_eq!(
+            graph_results1.len(),
+            5,
+            "Should find all 5 links with source 'ad4m://self' via graph traversal"
+        );
 
         // Test 2: Use graph traversal on target node (out.uri)
         let graph_query2 = "SELECT * FROM link WHERE perspective = $perspective AND out.uri = 'flux://has_channel'";
-        let graph_results2 = service.query_links(perspective_uuid, graph_query2).await.unwrap();
-        println!("Query 2: Links to target 'flux://has_channel': {}", graph_results2.len());
-        assert_eq!(graph_results2.len(), 1, "Should find 1 link to 'flux://has_channel' via graph traversal");
+        let graph_results2 = service
+            .query_links(perspective_uuid, graph_query2)
+            .await
+            .unwrap();
+        println!(
+            "Query 2: Links to target 'flux://has_channel': {}",
+            graph_results2.len()
+        );
+        assert_eq!(
+            graph_results2.len(),
+            1,
+            "Should find 1 link to 'flux://has_channel' via graph traversal"
+        );
 
         // Test 3: Combined source and predicate filter (common Ad4mModel pattern)
         let graph_query3 = "SELECT * FROM link WHERE perspective = $perspective AND in.uri = 'ad4m://self' AND predicate = 'flux://message'";
-        let graph_results3 = service.query_links(perspective_uuid, graph_query3).await.unwrap();
-        println!("Query 3: Links from 'ad4m://self' with predicate 'flux://message': {}", graph_results3.len());
+        let graph_results3 = service
+            .query_links(perspective_uuid, graph_query3)
+            .await
+            .unwrap();
+        println!(
+            "Query 3: Links from 'ad4m://self' with predicate 'flux://message': {}",
+            graph_results3.len()
+        );
         assert_eq!(graph_results3.len(), 3, "Should find 3 message links");
 
         // Test 4: Combined target and predicate filter
         let graph_query4 = "SELECT * FROM link WHERE perspective = $perspective AND out.uri = 'flux://has_channel' AND predicate = 'flux://entry_type'";
-        let graph_results4 = service.query_links(perspective_uuid, graph_query4).await.unwrap();
-        println!("Query 4: Links to 'flux://has_channel' with predicate 'flux://entry_type': {}", graph_results4.len());
+        let graph_results4 = service
+            .query_links(perspective_uuid, graph_query4)
+            .await
+            .unwrap();
+        println!(
+            "Query 4: Links to 'flux://has_channel' with predicate 'flux://entry_type': {}",
+            graph_results4.len()
+        );
         assert_eq!(graph_results4.len(), 1, "Should find 1 link");
 
         // Test 5: Testing the EXISTS pattern that Ad4mModel uses for required properties
         // This tests if there exists a link from ad4m://self with predicate flux://entry_type
         let graph_query5 = "SELECT * FROM link WHERE perspective = $perspective AND in.uri = 'ad4m://self' AND predicate IN ['flux://entry_type', 'rdf://name']";
-        let graph_results5 = service.query_links(perspective_uuid, graph_query5).await.unwrap();
-        println!("Query 5: Links from 'ad4m://self' with entry_type OR name predicates: {}", graph_results5.len());
-        assert_eq!(graph_results5.len(), 2, "Should find 2 links (entry_type and name)");
+        let graph_results5 = service
+            .query_links(perspective_uuid, graph_query5)
+            .await
+            .unwrap();
+        println!(
+            "Query 5: Links from 'ad4m://self' with entry_type OR name predicates: {}",
+            graph_results5.len()
+        );
+        assert_eq!(
+            graph_results5.len(),
+            2,
+            "Should find 2 links (entry_type and name)"
+        );
     }
 
     #[tokio::test]
@@ -1299,12 +1414,19 @@ mod tests {
         let initial_reload = service
             .reload_perspective(perspective_uuid, large_initial_links.clone())
             .await;
-        assert!(initial_reload.is_ok(), "Initial reload with 1000 links should succeed");
+        assert!(
+            initial_reload.is_ok(),
+            "Initial reload with 1000 links should succeed"
+        );
 
         // Verify count
         let query = "SELECT * FROM link WHERE perspective = $perspective";
         let results = service.query_links(perspective_uuid, query).await.unwrap();
-        assert_eq!(results.len(), 1000, "Should have 1000 links after initial reload");
+        assert_eq!(
+            results.len(),
+            1000,
+            "Should have 1000 links after initial reload"
+        );
 
         // Now reload with a different set of 1000 links
         let mut new_large_links = Vec::new();
@@ -1321,11 +1443,18 @@ mod tests {
         let second_reload = service
             .reload_perspective(perspective_uuid, new_large_links)
             .await;
-        assert!(second_reload.is_ok(), "Second reload with 1000 links should succeed");
+        assert!(
+            second_reload.is_ok(),
+            "Second reload with 1000 links should succeed"
+        );
 
         // Verify new count
         let new_results = service.query_links(perspective_uuid, query).await.unwrap();
-        assert_eq!(new_results.len(), 1000, "Should still have exactly 1000 links after second reload");
+        assert_eq!(
+            new_results.len(),
+            1000,
+            "Should still have exactly 1000 links after second reload"
+        );
 
         // Verify that none of the old links remain
         let old_sources_found = new_results
@@ -1364,28 +1493,59 @@ mod tests {
                     .map_or(false, |p| p.starts_with("new_predicate://"))
             })
             .count();
-        assert_eq!(new_predicate_count, 1000, "All predicates should be updated");
+        assert_eq!(
+            new_predicate_count, 1000,
+            "All predicates should be updated"
+        );
 
         // CRITICAL: Test graph traversal with large dataset
         println!("\n=== Testing graph traversal with large dataset ===");
 
         // Test graph traversal on source nodes
-        let graph_query_source = "SELECT * FROM link WHERE perspective = $perspective AND in.uri = 'new_source://0'";
-        let graph_results_source = service.query_links(perspective_uuid, graph_query_source).await.unwrap();
-        println!("Graph traversal for source 'new_source://0': {} links", graph_results_source.len());
-        assert_eq!(graph_results_source.len(), 1, "Should find exactly 1 link with source 'new_source://0' via graph traversal");
+        let graph_query_source =
+            "SELECT * FROM link WHERE perspective = $perspective AND in.uri = 'new_source://0'";
+        let graph_results_source = service
+            .query_links(perspective_uuid, graph_query_source)
+            .await
+            .unwrap();
+        println!(
+            "Graph traversal for source 'new_source://0': {} links",
+            graph_results_source.len()
+        );
+        assert_eq!(
+            graph_results_source.len(),
+            1,
+            "Should find exactly 1 link with source 'new_source://0' via graph traversal"
+        );
 
         // Test graph traversal on target nodes
-        let graph_query_target = "SELECT * FROM link WHERE perspective = $perspective AND out.uri = 'new_target://0'";
-        let graph_results_target = service.query_links(perspective_uuid, graph_query_target).await.unwrap();
-        println!("Graph traversal for target 'new_target://0': {} links", graph_results_target.len());
-        assert_eq!(graph_results_target.len(), 1, "Should find exactly 1 link with target 'new_target://0' via graph traversal");
+        let graph_query_target =
+            "SELECT * FROM link WHERE perspective = $perspective AND out.uri = 'new_target://0'";
+        let graph_results_target = service
+            .query_links(perspective_uuid, graph_query_target)
+            .await
+            .unwrap();
+        println!(
+            "Graph traversal for target 'new_target://0': {} links",
+            graph_results_target.len()
+        );
+        assert_eq!(
+            graph_results_target.len(),
+            1,
+            "Should find exactly 1 link with target 'new_target://0' via graph traversal"
+        );
 
         // Test graph traversal with predicate filter
         // Note: Combined filters work, just verifying the count
         let graph_query_predicate = "SELECT * FROM link WHERE perspective = $perspective AND predicate = 'new_predicate://0' AND in.uri = 'new_source://0'";
-        let graph_results_predicate = service.query_links(perspective_uuid, graph_query_predicate).await.unwrap();
-        println!("Graph traversal with predicate and source filter: {} links", graph_results_predicate.len());
+        let graph_results_predicate = service
+            .query_links(perspective_uuid, graph_query_predicate)
+            .await
+            .unwrap();
+        println!(
+            "Graph traversal with predicate and source filter: {} links",
+            graph_results_predicate.len()
+        );
         // The important thing is that both source and target queries work, so combined should work in real usage
     }
 
