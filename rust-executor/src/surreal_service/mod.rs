@@ -384,21 +384,22 @@ impl SurrealDBService {
             query.clone()
         };
 
-        log::info!("🦦🦦 SurrealDB query preparation took {:?}", prep_start.elapsed());
-        log::info!("🦦🦦 SurrealDB filtered query:\n{}", filtered_query);
+        //log::info!("🦦🦦 SurrealDB query preparation took {:?}", prep_start.elapsed());
+        //log::info!("🦦🦦 SurrealDB filtered query:\n{}", filtered_query);
 
         let execute_start = std::time::Instant::now();
         let mut query_obj = self.db.query(filtered_query.clone());
         query_obj = query_obj.bind(("perspective", perspective_uuid.clone()));
 
         // Execute query with periodic logging instead of timeout
-        log::info!("🦦⏳ Starting query execution...");
+        //log::info!("🦦⏳ Starting query execution...");
 
         // Spawn a task that logs every 10 seconds while the query is running
         let query_for_logging = filtered_query.clone();
         let execute_start_for_logging = execute_start.clone();
         let logging_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            interval.tick().await;
             loop {
                 interval.tick().await;
                 let elapsed = execute_start_for_logging.elapsed();
@@ -426,7 +427,7 @@ impl SurrealDBService {
         // This will contain the query results in SurrealDB's native format
         let take_start = std::time::Instant::now();
         let result: SurrealValue = response.take(0)?;
-        log::info!("🦦📦 Result extraction took {:?}", take_start.elapsed());
+        //log::info!("🦦📦 Result extraction took {:?}", take_start.elapsed());
 
         // Convert the SurrealDB value to JSON using round-trip serialization
         // This serializes with enum variant names as keys (e.g., {"Array": [...]})
@@ -436,9 +437,10 @@ impl SurrealDBService {
 
         // Unwrap the SurrealDB enum structure to get clean JSON
         let unwrapped = unwrap_surreal_json(json_value);
-        log::info!("🦦🔄 Serialization/unwrapping took {:?}", serialize_start.elapsed());
+        //log::info!("🦦🔄 Serialization/unwrapping took {:?}", serialize_start.elapsed());
 
-        log::info!("🦦🦦🦦 SurrealDB query result count: {}",
+        log::info!("🦦🦦🦦 SurrealDB query:\n{}\n==>>Result count: {}",
+            query,
             if let Value::Array(ref arr) = unwrapped { arr.len() } else { 0 });
         log::info!("🦦⏱️ TOTAL query time: {:?}", total_start.elapsed());
         // Extract array from the unwrapped result, propagating error if not an array
