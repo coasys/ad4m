@@ -1525,23 +1525,28 @@ impl PerspectiveInstance {
 
     /// Executes a SurrealQL query against the perspective's SurrealDB cache
     /// Returns results as JSON values for easy handling
+    ///
+    /// # Errors
+    /// Returns an error if the query fails to execute or contains invalid syntax.
+    /// Callers should handle errors appropriately rather than silently ignoring them.
     pub async fn surreal_query(&self, query: String) -> Result<Vec<serde_json::Value>, AnyError> {
         let uuid = {
             let persisted_guard = self.persisted.lock().await;
             persisted_guard.uuid.clone()
         };
 
-        match get_surreal_service().await.query_links(&uuid, &query).await {
-            Ok(results) => Ok(results),
-            Err(e) => {
-                log::warn!(
+        get_surreal_service()
+            .await
+            .query_links(&uuid, &query)
+            .await
+            .map_err(|e| {
+                log::error!(
                     "Failed to execute SurrealDB query for perspective {}: {:?}",
                     uuid,
                     e
                 );
-                Ok(vec![]) // Graceful degradation: return empty results
-            }
-        }
+                anyhow!("SurrealDB query failed for perspective {}: {}", uuid, e)
+            })
     }
 
     async fn update_surreal_cache(&self, diff: &DecoratedPerspectiveDiff) {
@@ -2702,25 +2707,36 @@ impl PerspectiveInstance {
             // Spawn query check future
             let self_clone = self.clone();
             let query_future = async move {
-                if let Ok(result_vec) = self_clone.surreal_query(query.query.clone()).await {
-                    if let Ok(result_string) = serde_json::to_string(&result_vec) {
-                        if result_string != query.last_result {
-                            // Update the query result and send notification immediately
-                            {
-                                self_clone
-                                    .send_subscription_update(
-                                        id.clone(),
-                                        result_string.clone(),
-                                        None,
-                                    )
-                                    .await;
-                                let mut queries =
-                                    self_clone.surreal_subscribed_queries.lock().await;
-                                if let Some(stored_query) = queries.get_mut(&id) {
-                                    stored_query.last_result = result_string.clone();
+                match self_clone.surreal_query(query.query.clone()).await {
+                    Ok(result_vec) => {
+                        if let Ok(result_string) = serde_json::to_string(&result_vec) {
+                            if result_string != query.last_result {
+                                // Update the query result and send notification immediately
+                                {
+                                    self_clone
+                                        .send_subscription_update(
+                                            id.clone(),
+                                            result_string.clone(),
+                                            None,
+                                        )
+                                        .await;
+                                    let mut queries =
+                                        self_clone.surreal_subscribed_queries.lock().await;
+                                    if let Some(stored_query) = queries.get_mut(&id) {
+                                        stored_query.last_result = result_string.clone();
+                                    }
                                 }
                             }
                         }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "SurrealDB subscription query failed for subscription {}: {}",
+                            id,
+                            e
+                        );
+                        // Note: We don't remove the subscription on query failure
+                        // to allow for transient errors. It will be removed on timeout.
                     }
                 }
             };
@@ -3753,14 +3769,20 @@ mod tests {
     async fn test_surreal_query_error_handling() {
         let perspective = setup().await;
 
-        // Test with invalid query syntax - should return empty vec, not crash
-        let results = perspective
+        // Test with invalid query syntax - should return an error, not crash
+        let result = perspective
             .surreal_query("INVALID QUERY SYNTAX".to_string())
-            .await
-            .unwrap();
+            .await;
 
-        // Should return empty vec on error
-        assert_eq!(results.len(), 0, "Expected empty results on query error");
+        // Should return an error for invalid query
+        assert!(result.is_err(), "Expected error for invalid query syntax");
+
+        // Verify error message contains useful information
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("SurrealDB query failed") || err_msg.contains("perspective"),
+            "Error message should contain context about the failure"
+        );
     }
 
     #[tokio::test]
@@ -4387,30 +4409,30 @@ GROUP BY source
             "Should not find Salad"
         );
 
-        // Test 6: GROUP BY with fn::parse_literal() - cannot alias the grouped field!
+        // Test 6: GROUP BY with fn::parse_literal() - this should fail as SurrealDB doesn't support it
         println!("\n=== Test 6: GROUP BY with fn::parse_literal() ===");
         let query_group = format!(
             "SELECT fn::parse_literal(target), array::group(source) AS sources FROM link WHERE perspective = '{}' AND predicate = 'recipe://name' GROUP BY fn::parse_literal(target)",
             uuid
         );
         println!("Query:\n{}", query_group);
-        let results_group = perspective.surreal_query(query_group).await.unwrap();
-        println!("Results: {} groups", results_group.len());
+        let result_group = perspective.surreal_query(query_group).await;
 
-        if results_group.len() == 0 {
-            println!(
-                "  WARNING: GROUP BY fn::function_call() returns 0 groups - SurrealDB limitation"
-            );
-            println!("  This is expected - SurrealDB doesn't support grouping by function results");
+        // This should fail - SurrealDB doesn't support grouping by function results
+        if result_group.is_err() {
+            println!("  ✓ Query failed as expected - SurrealDB doesn't support GROUP BY fn::function_call()");
+            println!("  Error: {}", result_group.unwrap_err());
         } else {
+            println!(
+                "  WARNING: Query succeeded unexpectedly! SurrealDB may have added this feature."
+            );
+            let results_group = result_group.unwrap();
+            println!("  Results: {} groups", results_group.len());
             for group in &results_group {
                 println!(
                     "  Group object keys: {:?}",
                     group.as_object().map(|o| o.keys().collect::<Vec<_>>())
                 );
-                if let Some(sources) = group.get("sources").and_then(|v| v.as_array()) {
-                    println!("  Group has {} sources", sources.len());
-                }
             }
         }
 
@@ -4441,13 +4463,16 @@ GROUP BY source
         // Try to DELETE (should be blocked)
         let delete_query = "DELETE FROM link".to_string();
         let result = perspective.surreal_query(delete_query).await;
-        // Note: the function returns Ok(vec![]) on error for graceful degradation
-        // But the underlying query should fail
-        let results = result.unwrap();
-        assert_eq!(
-            results.len(),
-            0,
-            "DELETE should be blocked and return empty results"
+        assert!(
+            result.is_err(),
+            "DELETE should be blocked and return an error"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("mutating operation"),
+            "Error should mention mutating operation"
         );
 
         // Verify data was NOT deleted
@@ -4462,41 +4487,33 @@ GROUP BY source
         // Try to UPDATE (should be blocked)
         let update_query = "UPDATE link SET predicate = 'hacked'".to_string();
         let result = perspective.surreal_query(update_query).await;
-        let results = result.unwrap();
-        assert_eq!(
-            results.len(),
-            0,
-            "UPDATE should be blocked and return empty results"
+        assert!(
+            result.is_err(),
+            "UPDATE should be blocked and return an error"
         );
 
         // Try to DROP (should be blocked)
         let drop_query = "DROP TABLE link".to_string();
         let result = perspective.surreal_query(drop_query).await;
-        let results = result.unwrap();
-        assert_eq!(
-            results.len(),
-            0,
-            "DROP should be blocked and return empty results"
+        assert!(
+            result.is_err(),
+            "DROP should be blocked and return an error"
         );
 
         // Try to CREATE (should be blocked)
         let create_query = "CREATE link CONTENT { source: 'evil', target: 'hack' }".to_string();
         let result = perspective.surreal_query(create_query).await;
-        let results = result.unwrap();
-        assert_eq!(
-            results.len(),
-            0,
-            "CREATE should be blocked and return empty results"
+        assert!(
+            result.is_err(),
+            "CREATE should be blocked and return an error"
         );
 
         // Try to DEFINE (should be blocked)
         let define_query = "DEFINE FIELD evil ON link TYPE string".to_string();
         let result = perspective.surreal_query(define_query).await;
-        let results = result.unwrap();
-        assert_eq!(
-            results.len(),
-            0,
-            "DEFINE should be blocked and return empty results"
+        assert!(
+            result.is_err(),
+            "DEFINE should be blocked and return an error"
         );
 
         println!("✓ All mutating operations were successfully blocked");
