@@ -760,7 +760,7 @@ export class Ad4mModel {
     if (source) {
       // Use graph traversal: node must be target of has_child link from source
       graphTraversalFilters.push(
-        `<-link[WHERE perspective = $perspective AND in.uri = ${this.formatSurrealValue(source)} AND predicate = 'ad4m://has_child']`
+        `count(<-link[WHERE perspective = $perspective AND in.uri = ${this.formatSurrealValue(source)} AND predicate = 'ad4m://has_child']) > 0`
       );
     }
 
@@ -770,11 +770,11 @@ export class Ad4mModel {
         // For flag properties, also filter by the target value
         if (propMeta.flag && propMeta.initial) {
           graphTraversalFilters.push(
-            `->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}' AND out.uri = '${propMeta.initial}']`
+            `count(->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}' AND out.uri = '${propMeta.initial}']) > 0`
           );
         } else {
           graphTraversalFilters.push(
-            `->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}']`
+            `count(->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}']) > 0`
           );
         }
       }
@@ -788,11 +788,11 @@ export class Ad4mModel {
           // For flag properties, also filter by the target value
           if (propMeta.flag) {
             graphTraversalFilters.push(
-              `->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}' AND out.uri = '${propMeta.initial}']`
+              `count(->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}' AND out.uri = '${propMeta.initial}']) > 0`
             );
           } else {
             graphTraversalFilters.push(
-              `->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}']`
+              `count(->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}']) > 0`
             );
           }
           break; // Just need one defining property
@@ -920,7 +920,7 @@ WHERE ${whereConditions.join(' AND ')}
         if (Array.isArray(condition)) {
           // Array values (IN clause)
           const formattedValues = condition.map(v => this.formatSurrealValue(v)).join(', ');
-          conditions.push(`->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND ${targetField} IN [${formattedValues}]]`);
+          conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND ${targetField} IN [${formattedValues}]]) > 0`);
         } else if (typeof condition === 'object' && condition !== null) {
           // Operator object
           const ops = condition as any;
@@ -944,11 +944,11 @@ WHERE ${whereConditions.join(' AND ')}
                                    ops.between !== undefined || ops.contains !== undefined;
           if (hasComparisonOps) {
             // Ensure we only get nodes that have this property
-            conditions.push(`->link[WHERE perspective = $perspective AND predicate = '${predicate}']`);
+            conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}']) > 0`);
           }
         } else {
           // Simple equality
-          conditions.push(`->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(condition)}]`);
+          conditions.push(`count(->link[WHERE perspective = $perspective AND predicate = '${predicate}' AND ${targetField} = ${this.formatSurrealValue(condition)}]) > 0`);
         }
       }
     }
