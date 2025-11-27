@@ -4421,4 +4421,85 @@ GROUP BY source
         println!("✓ IN clauses work with parsed values");
         println!("Note: GROUP BY fn::function_call() not supported in SurrealDB 2.1");
     }
+
+    #[tokio::test]
+    async fn test_surreal_query_blocks_mutating_operations() {
+        let mut perspective = setup().await;
+
+        // Add some test data
+        let link = create_link();
+        perspective
+            .add_link(link.clone(), LinkStatus::Shared, None)
+            .await
+            .unwrap();
+
+        // Verify data was added
+        let select_query = "SELECT * FROM link".to_string();
+        let results = perspective.surreal_query(select_query).await.unwrap();
+        assert_eq!(results.len(), 1, "Should have 1 link");
+
+        // Try to DELETE (should be blocked)
+        let delete_query = "DELETE FROM link".to_string();
+        let result = perspective.surreal_query(delete_query).await;
+        // Note: the function returns Ok(vec![]) on error for graceful degradation
+        // But the underlying query should fail
+        let results = result.unwrap();
+        assert_eq!(
+            results.len(),
+            0,
+            "DELETE should be blocked and return empty results"
+        );
+
+        // Verify data was NOT deleted
+        let verify_query = "SELECT * FROM link".to_string();
+        let results = perspective.surreal_query(verify_query).await.unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "Link should still exist after blocked DELETE"
+        );
+
+        // Try to UPDATE (should be blocked)
+        let update_query = "UPDATE link SET predicate = 'hacked'".to_string();
+        let result = perspective.surreal_query(update_query).await;
+        let results = result.unwrap();
+        assert_eq!(
+            results.len(),
+            0,
+            "UPDATE should be blocked and return empty results"
+        );
+
+        // Try to DROP (should be blocked)
+        let drop_query = "DROP TABLE link".to_string();
+        let result = perspective.surreal_query(drop_query).await;
+        let results = result.unwrap();
+        assert_eq!(
+            results.len(),
+            0,
+            "DROP should be blocked and return empty results"
+        );
+
+        // Try to CREATE (should be blocked)
+        let create_query = "CREATE link CONTENT { source: 'evil', target: 'hack' }".to_string();
+        let result = perspective.surreal_query(create_query).await;
+        let results = result.unwrap();
+        assert_eq!(
+            results.len(),
+            0,
+            "CREATE should be blocked and return empty results"
+        );
+
+        // Try to DEFINE (should be blocked)
+        let define_query = "DEFINE FIELD evil ON link TYPE string".to_string();
+        let result = perspective.surreal_query(define_query).await;
+        let results = result.unwrap();
+        assert_eq!(
+            results.len(),
+            0,
+            "DEFINE should be blocked and return empty results"
+        );
+
+        println!("✓ All mutating operations were successfully blocked");
+        println!("✓ Data integrity maintained - original link still exists");
+    }
 }

@@ -119,6 +119,79 @@ pub struct SurrealDBService {
 }
 
 impl SurrealDBService {
+    /// Validates that a query is read-only (SELECT or other safe operations)
+    /// Returns an error if the query contains mutating operations
+    fn validate_readonly_query(query: &str) -> Result<(), Error> {
+        let query_trimmed = query.trim();
+        let query_upper = query_trimmed.to_uppercase();
+
+        // List of mutating operations that should be rejected
+        let mutating_operations = [
+            "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "REMOVE", "DEFINE", "ALTER", "RELATE",
+            "BEGIN", "COMMIT", "CANCEL",
+        ];
+
+        // Check if the query starts with any mutating operation
+        // We need to be careful about queries like "SELECT ... FROM (DELETE ...)"
+        // So we check all occurrences, not just the start
+        for operation in &mutating_operations {
+            // Look for the operation as a standalone word (not part of another word)
+            // Use a simple heuristic: check if preceded by whitespace, start, or semicolon
+            let mut search_pos = 0;
+            while let Some(pos) = query_upper[search_pos..].find(operation) {
+                let absolute_pos = search_pos + pos;
+
+                // Check what comes before
+                let before_ok = if absolute_pos == 0 {
+                    true // Start of query
+                } else {
+                    let before_char = query_upper.chars().nth(absolute_pos - 1);
+                    matches!(
+                        before_char,
+                        Some(' ') | Some('\t') | Some('\n') | Some('\r') | Some(';') | Some('(')
+                    )
+                };
+
+                // Check what comes after
+                let after_pos = absolute_pos + operation.len();
+                let after_ok = if after_pos >= query_upper.len() {
+                    true // End of query
+                } else {
+                    let after_char = query_upper.chars().nth(after_pos);
+                    matches!(
+                        after_char,
+                        Some(' ') | Some('\t') | Some('\n') | Some('\r') | Some(';') | Some('(')
+                    )
+                };
+
+                if before_ok && after_ok {
+                    return Err(Error::msg(format!(
+                        "Query contains mutating operation '{}' which is not allowed. Only read-only queries (SELECT, RETURN, etc.) are permitted.",
+                        operation
+                    )));
+                }
+
+                search_pos = absolute_pos + 1;
+            }
+        }
+
+        // Additional check: queries should typically start with SELECT, RETURN, or LET
+        // (LET is for variable assignment which is safe in read context)
+        let first_word = query_upper.split_whitespace().next().unwrap_or("");
+
+        if !first_word.is_empty() && !matches!(first_word, "SELECT" | "RETURN" | "LET" | "WITH") {
+            log::warn!(
+                "Query starts with '{}' which is unusual for a read-only query: {}",
+                first_word,
+                query_trimmed
+            );
+            // Don't reject yet as there might be legitimate cases
+            // but log it for monitoring
+        }
+
+        Ok(())
+    }
+
     /// Helper to get or create a node record for a given URI
     /// Returns the node ID (node:hash)
     async fn ensure_node(&self, uri: &str) -> Result<String, Error> {
@@ -308,6 +381,9 @@ impl SurrealDBService {
         let total_start = std::time::Instant::now();
         let perspective_uuid = perspective_uuid.to_string();
         let query = query.trim().to_string();
+
+        // Validate that the query is read-only before executing
+        Self::validate_readonly_query(&query)?;
 
         // Automatically inject perspective filter into the query
         // NOTE: Cannot alias grouped fields in SELECT when using GROUP BY - it breaks SurrealDB grouping!
@@ -1688,5 +1764,220 @@ mod tests {
         let query = "SELECT * FROM link";
         let results = service.query_links(perspective_uuid, query).await.unwrap();
         assert_eq!(results.len(), 10, "Should have all 10 links");
+    }
+
+    #[tokio::test]
+    async fn test_query_validation_allows_select() {
+        let service = SurrealDBService::new().await.unwrap();
+        let perspective_uuid = "test_perspective_validation_1";
+
+        // Add a test link
+        let link = create_test_link(
+            "source1",
+            Some("predicate1"),
+            "target1",
+            "author1",
+            "2024-01-01T00:00:00Z",
+        );
+        service.add_link(perspective_uuid, &link).await.unwrap();
+
+        // SELECT queries should be allowed
+        let query = "SELECT * FROM link";
+        let result = service.query_links(perspective_uuid, query).await;
+        assert!(result.is_ok(), "SELECT queries should be allowed");
+
+        // SELECT with WHERE should be allowed
+        let query = "SELECT * FROM link WHERE predicate = 'predicate1'";
+        let result = service.query_links(perspective_uuid, query).await;
+        assert!(result.is_ok(), "SELECT with WHERE should be allowed");
+
+        // RETURN should be allowed
+        let query = "RETURN 42";
+        let result = service.query_links(perspective_uuid, query).await;
+        assert!(result.is_ok(), "RETURN queries should be allowed");
+    }
+
+    #[tokio::test]
+    async fn test_query_validation_blocks_delete() {
+        let service = SurrealDBService::new().await.unwrap();
+        let perspective_uuid = "test_perspective_validation_2";
+
+        // DELETE queries should be blocked
+        let query = "DELETE FROM link WHERE predicate = 'test'";
+        let result = service.query_links(perspective_uuid, query).await;
+        assert!(result.is_err(), "DELETE queries should be blocked");
+        assert!(
+            result.unwrap_err().to_string().contains("DELETE"),
+            "Error should mention DELETE operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_validation_blocks_update() {
+        let service = SurrealDBService::new().await.unwrap();
+        let perspective_uuid = "test_perspective_validation_3";
+
+        // UPDATE queries should be blocked
+        let query = "UPDATE link SET predicate = 'hacked'";
+        let result = service.query_links(perspective_uuid, query).await;
+        assert!(result.is_err(), "UPDATE queries should be blocked");
+        assert!(
+            result.unwrap_err().to_string().contains("UPDATE"),
+            "Error should mention UPDATE operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_validation_blocks_insert() {
+        let service = SurrealDBService::new().await.unwrap();
+        let perspective_uuid = "test_perspective_validation_4";
+
+        // INSERT queries should be blocked
+        let query = "INSERT INTO link (source, target) VALUES ('a', 'b')";
+        let result = service.query_links(perspective_uuid, query).await;
+        assert!(result.is_err(), "INSERT queries should be blocked");
+        assert!(
+            result.unwrap_err().to_string().contains("INSERT"),
+            "Error should mention INSERT operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_validation_blocks_create() {
+        let service = SurrealDBService::new().await.unwrap();
+        let perspective_uuid = "test_perspective_validation_5";
+
+        // CREATE queries should be blocked
+        let query = "CREATE link CONTENT { source: 'a', target: 'b' }";
+        let result = service.query_links(perspective_uuid, query).await;
+        assert!(result.is_err(), "CREATE queries should be blocked");
+        assert!(
+            result.unwrap_err().to_string().contains("CREATE"),
+            "Error should mention CREATE operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_validation_blocks_drop() {
+        let service = SurrealDBService::new().await.unwrap();
+        let perspective_uuid = "test_perspective_validation_6";
+
+        // DROP queries should be blocked
+        let query = "DROP TABLE link";
+        let result = service.query_links(perspective_uuid, query).await;
+        assert!(result.is_err(), "DROP queries should be blocked");
+        assert!(
+            result.unwrap_err().to_string().contains("DROP"),
+            "Error should mention DROP operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_validation_blocks_define() {
+        let service = SurrealDBService::new().await.unwrap();
+        let perspective_uuid = "test_perspective_validation_7";
+
+        // DEFINE queries should be blocked
+        let query = "DEFINE FIELD evil ON link TYPE string";
+        let result = service.query_links(perspective_uuid, query).await;
+        assert!(result.is_err(), "DEFINE queries should be blocked");
+        assert!(
+            result.unwrap_err().to_string().contains("DEFINE"),
+            "Error should mention DEFINE operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_validation_blocks_relate() {
+        let service = SurrealDBService::new().await.unwrap();
+        let perspective_uuid = "test_perspective_validation_8";
+
+        // RELATE queries should be blocked
+        let query = "RELATE node:a->link->node:b";
+        let result = service.query_links(perspective_uuid, query).await;
+        assert!(result.is_err(), "RELATE queries should be blocked");
+        assert!(
+            result.unwrap_err().to_string().contains("RELATE"),
+            "Error should mention RELATE operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_validation_blocks_transaction() {
+        let service = SurrealDBService::new().await.unwrap();
+        let perspective_uuid = "test_perspective_validation_9";
+
+        // BEGIN TRANSACTION should be blocked
+        let query = "BEGIN TRANSACTION";
+        let result = service.query_links(perspective_uuid, query).await;
+        assert!(result.is_err(), "BEGIN queries should be blocked");
+        assert!(
+            result.unwrap_err().to_string().contains("BEGIN"),
+            "Error should mention BEGIN operation"
+        );
+
+        // COMMIT should be blocked
+        let query = "COMMIT TRANSACTION";
+        let result = service.query_links(perspective_uuid, query).await;
+        assert!(result.is_err(), "COMMIT queries should be blocked");
+        assert!(
+            result.unwrap_err().to_string().contains("COMMIT"),
+            "Error should mention COMMIT operation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_validation_case_insensitive() {
+        let service = SurrealDBService::new().await.unwrap();
+        let perspective_uuid = "test_perspective_validation_10";
+
+        // Should block lowercase delete
+        let query = "delete from link";
+        let result = service.query_links(perspective_uuid, query).await;
+        assert!(result.is_err(), "Lowercase delete should be blocked");
+
+        // Should block mixed case DeLeTe
+        let query = "DeLeTe FrOm link";
+        let result = service.query_links(perspective_uuid, query).await;
+        assert!(result.is_err(), "Mixed case delete should be blocked");
+    }
+
+    #[tokio::test]
+    async fn test_query_validation_with_semicolons() {
+        let service = SurrealDBService::new().await.unwrap();
+        let perspective_uuid = "test_perspective_validation_11";
+
+        // Should block DELETE even with multiple statements
+        let query = "SELECT * FROM link; DELETE FROM link";
+        let result = service.query_links(perspective_uuid, query).await;
+        assert!(
+            result.is_err(),
+            "Query with DELETE after semicolon should be blocked"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_validation_allows_delete_in_string() {
+        let service = SurrealDBService::new().await.unwrap();
+        let perspective_uuid = "test_perspective_validation_12";
+
+        // Add a test link
+        let link = create_test_link(
+            "source1",
+            Some("predicate1"),
+            "target1",
+            "author1",
+            "2024-01-01T00:00:00Z",
+        );
+        service.add_link(perspective_uuid, &link).await.unwrap();
+
+        // Should allow "delete" as part of a word or string value
+        // This query searches for a predicate containing "delete" but doesn't DELETE
+        let query = "SELECT * FROM link WHERE predicate CONTAINS 'delete'";
+        let result = service.query_links(perspective_uuid, query).await;
+        assert!(
+            result.is_ok(),
+            "SELECT with 'delete' in string should be allowed"
+        );
     }
 }
