@@ -509,20 +509,22 @@ impl SurrealDBService {
             }
         });
 
-        let response_result = query_obj.await;
+        // Execute query with a 60-second timeout
+        let timeout_duration = std::time::Duration::from_secs(60);
+        let response_result = tokio::time::timeout(timeout_duration, query_obj).await;
 
-        // Cancel the logging task since query completed
+        // Cancel the logging task since query completed or timed out
         logging_handle.abort();
 
         let mut response = match response_result {
-            Ok(r) => {
+            Ok(Ok(r)) => {
                 log::info!(
                     "🦦✅ Query execution succeeded in {:?}",
                     execute_start.elapsed()
                 );
                 r
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 log::error!(
                     "🦦💥 SurrealDB query failed after {:?}: {:?}\nQuery was: {}",
                     execute_start.elapsed(),
@@ -530,6 +532,17 @@ impl SurrealDBService {
                     filtered_query
                 );
                 return Err(e.into());
+            }
+            Err(_) => {
+                log::error!(
+                    "🦦⏱️💥 Query timed out after {:?} (60s limit)\nQuery was: {}",
+                    execute_start.elapsed(),
+                    filtered_query
+                );
+                return Err(Error::msg(format!(
+                    "Query execution timed out after 60 seconds. Query: {}",
+                    filtered_query
+                )));
             }
         };
 
