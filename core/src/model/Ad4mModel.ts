@@ -1408,8 +1408,8 @@ WHERE ${whereConditions.join(' AND ')}
             }));
             // Sort by timestamp first, then by original index for stable sorting
             pairs.sort((a, b) => {
-              const tsA = a.timestamp || '';
-              const tsB = b.timestamp || '';
+              const tsA = String(a.timestamp || '');
+              const tsB = String(b.timestamp || '');
               const tsCompare = tsA.localeCompare(tsB);
               if (tsCompare !== 0) return tsCompare;
               // Use original index as tiebreaker for stable sorting
@@ -1436,7 +1436,7 @@ WHERE ${whereConditions.join(' AND ')}
         
         instances.push(instance);
       } catch (error) {
-        console.error(`Failed to process SurrealDB instance ${row.base}:`, error);
+        console.error(`Failed to process SurrealDB instance ${base}:`, error);
       }
     }
     
