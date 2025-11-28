@@ -1404,24 +1404,27 @@ impl PerspectiveInstance {
         F: FnOnce(Arc<PrologService>, String, String) -> Fut,
         Fut: Future<Output = Result<Result<QueryResolution, String>, AnyError>> + Send,
     {
-        //let prolog_start = std::time::Instant::now();
-        //log::info!("🔍 PROLOG QUERY: Starting query: {} (chars: {})",
-        //    query.chars().take(100).collect::<String>(), query.len());
+        let total_start = std::time::Instant::now();
+        log::trace!(
+            "🧠🧠 Prolog query starting: {} (chars: {})",
+            query.chars().take(100).collect::<String>(),
+            query.len()
+        );
 
-        //let ensure_start = std::time::Instant::now();
+        let ensure_start = std::time::Instant::now();
         self.ensure_prolog_engine_pool().await?;
-        //log::info!("🔍 PROLOG QUERY: Engine pool ensured in {:?}", ensure_start.elapsed());
+        log::trace!("🧠🔧 Engine pool ensured in {:?}", ensure_start.elapsed());
 
-        //let uuid_start = std::time::Instant::now();
+        let uuid_start = std::time::Instant::now();
         let uuid = {
             let persisted_guard = self.persisted.lock().await;
             persisted_guard.uuid.clone()
         };
-        //log::info!("🔍 PROLOG QUERY: UUID retrieved in {:?}", uuid_start.elapsed());
+        log::trace!("🧠🔑 UUID retrieved in {:?}", uuid_start.elapsed());
 
-        //let service_start = std::time::Instant::now();
+        let service_start = std::time::Instant::now();
         let service = get_prolog_service().await;
-        //log::info!("🔍 PROLOG QUERY: Service retrieved in {:?}", service_start.elapsed());
+        log::trace!("🧠📞 Service retrieved in {:?}", service_start.elapsed());
 
         let pool_name = pool_provider(&uuid);
 
@@ -1431,33 +1434,108 @@ impl PerspectiveInstance {
             query
         };
 
+        let lock_start = std::time::Instant::now();
         let _read_lock = if use_lock {
-            //log::info!("🔍 PROLOG QUERY: Waiting for prolog_update_mutex read lock...");
+            log::trace!("🧠🔒 Waiting for prolog_update_mutex read lock...");
             let guard = self.prolog_update_mutex.read().await;
-            //log::info!("🔍 PROLOG QUERY: Acquired prolog_update_mutex read lock in {:?}", lock_start.elapsed());
+            log::trace!(
+                "🧠✅ Acquired prolog_update_mutex read lock in {:?}",
+                lock_start.elapsed()
+            );
             Some(guard)
         } else {
             None
         };
 
-        // ⚠️ CRITICAL: This might be blocked waiting for prolog_update_mutex!
-        //let query_start = std::time::Instant::now();
-        //log::info!("🔍 PROLOG QUERY: About to execute query...");
+        // Execute query with periodic logging and timeout handling
+        log::trace!("🧠⏳ Starting query execution...");
+        let execute_start = std::time::Instant::now();
 
+        // Spawn a task that logs every 10 seconds while the query is running
+        let query_for_logging = query.clone();
+        let execute_start_for_logging = execute_start.clone();
+        let logging_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let elapsed = execute_start_for_logging.elapsed();
+                log::warn!(
+                    "🧠⏰ Prolog query still running after {:?}. Query:\n{}",
+                    elapsed,
+                    query_for_logging
+                );
+            }
+        });
+
+        // Execute query with a 60-second timeout
+        let timeout_duration = std::time::Duration::from_secs(60);
         let service = Arc::new(service);
-        let result: Result<Result<QueryResolution, String>, AnyError> =
-            executor(service, pool_name, query).await;
+        let query_clone = query.clone();
+        let result_future = executor(service, pool_name, query_clone);
+        let result_with_timeout = tokio::time::timeout(timeout_duration, result_future).await;
 
-        //log::info!("🔍 PROLOG QUERY: Query executed in {:?} (total: {:?})",
-        //    query_start.elapsed(), prolog_start.elapsed());
+        // Cancel the logging task since query completed or timed out
+        logging_handle.abort();
 
-        match result {
+        let result: Result<Result<QueryResolution, String>, AnyError> = match result_with_timeout {
+            Ok(r) => {
+                log::trace!(
+                    "🧠✅ Query execution succeeded in {:?}",
+                    execute_start.elapsed()
+                );
+                r
+            }
+            Err(_) => {
+                log::error!(
+                    "🧠⏱️💥 Prolog query timed out after {:?} (60s limit)\nQuery was: {}",
+                    execute_start.elapsed(),
+                    query
+                );
+                return Err(anyhow!(
+                    "Prolog query execution timed out after 60 seconds. Query: {}",
+                    query
+                ));
+            }
+        };
+
+        let match_result = match result {
             Err(e) => {
-                // Engine error is handled at pool level now
+                log::error!(
+                    "🧠💥 Prolog query failed after {:?}: {:?}\nQuery was: {}",
+                    execute_start.elapsed(),
+                    e,
+                    query
+                );
                 Err(anyhow!(e))
             }
-            Ok(resolution) => resolution.map_err(|e| anyhow!(e)),
+            Ok(resolution) => resolution.map_err(|e| {
+                log::error!(
+                    "🧠💥 Prolog query resolution error after {:?}: {}\nQuery was: {}",
+                    execute_start.elapsed(),
+                    e,
+                    query
+                );
+                anyhow!(e)
+            }),
+        };
+
+        // Log result count and total time
+        if let Ok(ref resolution) = match_result {
+            let result_count = match resolution {
+                QueryResolution::Matches(matches) => matches.len(),
+                QueryResolution::True => 1,
+                QueryResolution::False => 0,
+            };
+            log::trace!(
+                "🧠🧠🧠 Prolog query:\n{}\n==>> Result count: {}",
+                query,
+                result_count
+            );
         }
+        log::trace!("🧠⏱️ TOTAL query time: {:?}", total_start.elapsed());
+
+        match_result
     }
 
     /// Executes a Prolog query against the perspective's main pool
