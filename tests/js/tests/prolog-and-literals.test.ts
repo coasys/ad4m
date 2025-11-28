@@ -2431,7 +2431,6 @@ describe("Prolog + Literals", () => {
                         // Verify callback was called with new count
                         expect(countCallback.called).to.be.true;
                         expect(countCallback.lastCall.args[0]).to.equal(1);
-                        console.log("countCallback", countCallback.lastCall.args[0])
                         let count = countCallback.callCount
 
                         // Dispose subscription
