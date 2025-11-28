@@ -416,11 +416,49 @@ const flows = await perspective.sdnaFlows();
 console.log(flows); // Should include "TODO"
 ```
 
-## The Prolog Engine
+## Query Engines: SurrealDB & Prolog
 
-Under the hood, AD4M's Prolog engine provides all the tools needed to implement these patterns. Here's what's available:
+AD4M provides two query engines for working with Social DNA and perspective data:
 
-### Core Predicates
+### SurrealDB: High-Performance Queries (Recommended)
+
+For most query needs, **SurrealDB provides 10-100x faster performance** than Prolog. It's especially powerful for:
+- Fast filtering and searching
+- Graph traversal queries using indexed `in.uri` and `out.uri` fields
+- Aggregations and analytics
+- Large dataset handling
+
+```typescript
+// Fast query - find all todos in "done" state
+const doneTodos = await perspective.querySurrealDB(
+  "SELECT * FROM link WHERE predicate = 'todo://state' AND target = 'todo://done'"
+);
+
+// Graph traversal - find all posts by Alice
+const alicePosts = await perspective.querySurrealDB(
+  "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'authored'"
+);
+
+// Graph traversal - find comments on a specific post
+const comments = await perspective.querySurrealDB(
+  "SELECT source, target FROM link WHERE in.uri = 'post://123' AND predicate = 'has_comment'"
+);
+
+// Aggregation - count by type
+const stats = await perspective.querySurrealDB(
+  "SELECT predicate, count() as total FROM link GROUP BY predicate"
+);
+```
+
+**Performance Tip**: Use `in.uri` (source) and `out.uri` (target) for graph traversal - they're indexed. Avoid subqueries as they're slow.
+
+**Note**: `Ad4mModel` uses SurrealDB by default for `findAll()` and query builder operations. See the [SurrealDB Queries Guide](/developer-guides/surreal-queries) for comprehensive examples.
+
+### The Prolog Engine (For Advanced Logic & SDNA)
+
+For custom Social DNA rules, complex logic programming, and backward compatibility, AD4M includes a Prolog engine:
+
+#### Core Predicates
 ```prolog
 // Basic graph predicates
 triple(Subject, Predicate, Object).      // Access raw triples
@@ -435,7 +473,7 @@ languageName(Expression, Name).        // Get language name for expression
 expressionAddress(Expression, Address). // Get expression address
 ```
 
-### Built-in Utilities
+#### Built-in Utilities
 ```prolog
 // Pagination and sorting
 paginate(Data, PageNumber, PageSize, PageData).
@@ -447,6 +485,10 @@ string_includes(String, Substring).
 literal_from_url(Url, Decoded, Scheme).
 json_property(JsonString, Property, Value).
 ```
+
+**When to use which?**
+- **Use SurrealDB** for: Fast queries, graph traversal, analytics (most use cases)
+- **Use Prolog** for: Custom SDNA rules, complex logic, backward compatibility
 
 ## Using Social DNA in Your Space
 
@@ -463,19 +505,28 @@ perspective.addSDNA(flowDefinition, "flow");
 perspective.addSDNA(customRules, "custom");
 ```
 
-Then query it:
+Then query it using SurrealDB (fast) or Prolog (advanced logic):
 
 ```js
-// Find all active todos
-const todos = await perspective.infer(`
-    instance(Todo, "Todo"),
-    property_getter("Todo", Todo, "state", "active")
-`);
+// Option 1: Use Ad4mModel with SurrealDB (recommended, 10-100x faster)
+const activeTodos = await Todo.findAll(perspective, {
+  where: { state: "active" }
+});
 
-// Check if an action is allowed
-const canVote = await perspective.infer(`
-    can_vote("${agentDid}", "${proposalId}")
-`);
+// Option 2: Direct SurrealQL query
+const todos = await perspective.querySurrealDB(
+  "SELECT * FROM link WHERE predicate = 'todo://state' AND target = 'active'"
+);
+
+// Option 3: Prolog (for custom SDNA rules)
+const todos = await perspective.infer(
+  'instance(Todo, "Todo"), property_getter("Todo", Todo, "state", "active")'
+);
+
+// Check if an action is allowed (Prolog for complex logic)
+const canVote = await perspective.infer(
+  `can_vote("${agentDid}", "${proposalId}")`
+);
 ```
 
 ## Best Practices

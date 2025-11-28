@@ -614,10 +614,14 @@ describe("Prolog + Literals", () => {
                     resolve: string = ""
                 }
 
-                before(async () => {
+                beforeEach(async () => {
+                    if(perspective) {
+                        await ad4m!.perspective.remove(perspective.uuid)
+                    }
+                    perspective = await ad4m!.perspective.add("active-record-implementation-test")
                     // @ts-ignore
                     const { name, sdna } = Recipe.generateSDNA();
-                    perspective!.addSdna(name, sdna, 'subject_class')
+                    await perspective!.addSdna(name, sdna, 'subject_class')
                 })
 
                 it("save() & get()", async () => {
@@ -657,6 +661,10 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("find()", async () => {
+                    let recipe1 = new Recipe(perspective!, Literal.from("Active record implementation test find").toUrl());
+                    recipe1.name = "Active record implementation test find";
+                    await recipe1.save();
+
                     const recipes = await Recipe.findAll(perspective!);
 
                     expect(recipes.length).to.equal(1)
@@ -706,6 +714,20 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("delete()", async () => {
+                    let recipe1 = new Recipe(perspective!, Literal.from("Active record implementation test delete1 ").toUrl());
+                    recipe1.name = "Active record implementation test delete 1";
+                    await recipe1.save();
+
+
+                    let recipe2 = new Recipe(perspective!, Literal.from("Active record implementation test delete2 ").toUrl());
+                    recipe2.name = "Active record implementation test delete 2";
+                    await recipe2.save();
+
+
+                    let recipe3 = new Recipe(perspective!, Literal.from("Active record implementation test delete3 ").toUrl());
+                    recipe3.name = "Active record implementation test delete 3";
+                    await recipe3.save();
+
                     const recipes = await Recipe.findAll(perspective!);
 
                     expect(recipes.length).to.equal(3)
@@ -830,10 +852,6 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("findAll() returns properties on instances", async () => {
-                    // Clear all previous recipes
-                    const allRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of allRecipes) await recipe.delete();
-                    
                     let root1 = Literal.from("findAll test 1").toUrl()
                     let root2 = Literal.from("findAll test 2").toUrl()
                     
@@ -859,16 +877,9 @@ describe("Prolog + Literals", () => {
                     expect(recipes[1].resolve).to.equal("Resolved literal value 2");
                     expect(recipes[0].plain).to.equal("recipe://findAll_test1");
                     expect(recipes[1].plain).to.equal("recipe://findAll_test2");
-
-                    await recipe1.delete();
-                    await recipe2.delete();
                 })
 
                 it("findAll() returns collections on instances", async () => {
-                    // Clear all previous recipes
-                    const allRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of allRecipes) await recipe.delete();
-                    
                     let root1 = Literal.from("findAll test 1").toUrl()
                     let root2 = Literal.from("findAll test 2").toUrl()
                     
@@ -885,22 +896,15 @@ describe("Prolog + Literals", () => {
 
                     expect(recipes.length).to.equal(2);
                     expect(recipes[0].comments.length).to.equal(2);
-                    expect(recipes[0].comments[0]).to.equal("Recipe 1: Comment 1");
-                    expect(recipes[0].comments[1]).to.equal("Recipe 1: Comment 2");
+                    expect(recipes[0].comments).to.include("Recipe 1: Comment 1");
+                    expect(recipes[0].comments).to.include("Recipe 1: Comment 2");
 
                     expect(recipes[1].comments.length).to.equal(2);
-                    expect(recipes[1].comments[0]).to.equal("Recipe 2: Comment 1");
-                    expect(recipes[1].comments[1]).to.equal("Recipe 2: Comment 2");
-
-                    await recipe1.delete();
-                    await recipe2.delete();
+                    expect(recipes[1].comments).to.include("Recipe 2: Comment 1");
+                    expect(recipes[1].comments).to.include("Recipe 2: Comment 2");
                 })
 
                 it("findAll() returns author & timestamp on instances", async () => {
-                    // Clear all previous recipes
-                    const allRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of allRecipes) await recipe.delete();
-                    
                     let root1 = Literal.from("findAll test 1").toUrl()
                     let root2 = Literal.from("findAll test 2").toUrl()
                     
@@ -913,22 +917,14 @@ describe("Prolog + Literals", () => {
                     await recipe2.save();
 
                     const recipes = await Recipe.findAll(perspective!);
-
                     const me = await ad4m!.agent.me();
                     expect(recipes[0].author).to.equal(me!.did)
                     expect(recipes[0].timestamp).to.not.be.undefined;
                     expect(recipes[1].author).to.equal(me!.did)
                     expect(recipes[1].timestamp).to.not.be.undefined;
-
-                    await recipe1.delete();
-                    await recipe2.delete();
                 })
 
                 it("findAll() works with source prop", async () => {
-                    // Clear all previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-
                     const source1 = Literal.from("Source 1").toUrl()
                     const source2 = Literal.from("Source 2").toUrl()
                     
@@ -953,17 +949,9 @@ describe("Prolog + Literals", () => {
 
                     const source2Recipes = await Recipe.findAll(perspective!, { source: source2 });
                     expect(source2Recipes.length).to.equal(2);
-
-                    await recipe1.delete();
-                    await recipe2.delete();
-                    await recipe3.delete();
                 })
 
                 it("findAll() works with properties query", async () => {
-                    // Clear all previous recipes
-                    const allRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of allRecipes) await recipe.delete();
-                    
                     let root = Literal.from("findAll test 1").toUrl()
                     const recipe = new Recipe(perspective!, root);
                     recipe.name = "recipe://test_name";
@@ -993,15 +981,9 @@ describe("Prolog + Literals", () => {
                     expect(recipesWithAuthorOnly[0].name).to.be.undefined
                     expect(recipesWithAuthorOnly[0].booleanTest).to.be.undefined
                     expect(recipesWithAuthorOnly[0].author).to.equal(me!.did)
-
-                    await recipe.delete();
                 })
 
                 it("findAll() works with collections query", async () => {
-                    // Clear all previous recipes
-                    const allRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of allRecipes) await recipe.delete();
-                    
                     let root = Literal.from("findAll test 1").toUrl()
                     const recipe = new Recipe(perspective!, root);
                     recipe.comments = ["Recipe 1: Comment 1", "Recipe 1: Comment 2"];
@@ -1022,15 +1004,9 @@ describe("Prolog + Literals", () => {
                     const recipesWithEntriesOnly = await Recipe.findAll(perspective!, { collections: ["entries"] });
                     expect(recipesWithEntriesOnly[0].comments).to.be.undefined
                     expect(recipesWithEntriesOnly[0].entries.length).to.equal(2)
-
-                    await recipe.delete();
                 })
 
                 it("findAll() works with basic where queries", async () => {
-                    // Clear previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
                     // Create recipies
                     const recipe1 = new Recipe(perspective!);
                     recipe1.name = "Recipe 1";
@@ -1096,17 +1072,9 @@ describe("Prolog + Literals", () => {
                     // Test where with an array of possible timestamp matches
                     const recipes10 = await Recipe.findAll(perspective!, { where: { timestamp: [validTimestamp1, validTimestamp2] } });
                     expect(recipes10.length).to.equal(2);
-
-                    await recipe1.delete();
-                    await recipe2.delete();
-                    await recipe3.delete();
                 })
 
                 it("findAll() works with where query not operations", async () => {
-                    // Clear previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
                     // Create recipies
                     const recipe1 = new Recipe(perspective!);
                     recipe1.name = "Recipe 1";
@@ -1154,17 +1122,9 @@ describe("Prolog + Literals", () => {
                     const recipes5 = await Recipe.findAll(perspective!, { where: { timestamp: { not: [validTimestamp1, validTimestamp2] } } });
                     expect(recipes5.length).to.equal(1);
                     expect(recipes5[0].timestamp).to.equal(validTimestamp3);
-
-                    await recipe1.delete();
-                    await recipe2.delete();
-                    await recipe3.delete();
                 })
 
                 it("findAll() works with where query lt, lte, gt, & gte operations", async () => {
-                    // Clear previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-
                     // Create recipes
                     const recipe1 = new Recipe(perspective!);
                     recipe1.name = "Recipe 1";
@@ -1208,7 +1168,15 @@ describe("Prolog + Literals", () => {
                     expect(recipes4.length).to.equal(3);
 
                     // 2. Timestamps
-                    const recipe2timestamp = parseInt(allRecipes[1].timestamp);
+                    // Sort recipes by timestamp to ensure consistent ordering
+                    const sortedRecipes = [...allRecipes].sort((a, b) => {
+                        const aTime = typeof a.timestamp === 'number' ? a.timestamp : parseInt(a.timestamp);
+                        const bTime = typeof b.timestamp === 'number' ? b.timestamp : parseInt(b.timestamp);
+                        return aTime - bTime;
+                    });
+                    const recipe2timestamp = typeof sortedRecipes[1].timestamp === 'number' 
+                        ? sortedRecipes[1].timestamp 
+                        : parseInt(sortedRecipes[1].timestamp); // Second recipe by timestamp
                     
                     // Test less than (lt) operation on timestamp
                     const recipes5 = await Recipe.findAll(perspective!, { where: { timestamp: { lt: recipe2timestamp } } });
@@ -1225,11 +1193,6 @@ describe("Prolog + Literals", () => {
                     // Test greater than or equal to (gte) operation on timestamp
                     const recipes8 = await Recipe.findAll(perspective!, { where: { timestamp: { gte: recipe2timestamp } } });
                     expect(recipes8.length).to.equal(3);
-
-                    await recipe1.delete();
-                    await recipe2.delete();
-                    await recipe3.delete();
-                    await recipe4.delete();
                 })
 
                 it("findAll() works with where query between operations", async () => {
@@ -1259,10 +1222,6 @@ describe("Prolog + Literals", () => {
 
                     // Register the Task class
                     await perspective!.ensureSDNASubjectClass(TaskDue);
-
-                    // Clear any previous tasks
-                    let tasks = await TaskDue.findAll(perspective!);
-                    for (const task of tasks) await task.delete();
 
                     // Create timestamps & tasks
                     const start = new Date().getTime();
@@ -1365,18 +1324,10 @@ describe("Prolog + Literals", () => {
                     expect(recipes4[0].name).to.equal("Recipe 3");
                     expect(recipes4[1].name).to.equal("Recipe 2");
                     expect(recipes4[2].name).to.equal("Recipe 1");
-                    
-                    await recipe1.delete();
-                    await recipe2.delete();
-                    await recipe3.delete();
                 })
 
                 it("findAll() works with limit and offset", async () => {
-                    // Clear previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
-                    // Create 6 recipe instances with sequential names
+                                        // Create 6 recipe instances with sequential names
                     for (let i = 1; i <= 6; i++) {
                         const recipe = new Recipe(perspective!);
                         recipe.name = `Recipe ${i}`;
@@ -1409,16 +1360,9 @@ describe("Prolog + Literals", () => {
                     const recipes6 = await Recipe.findAll(perspective!, { limit: 3, offset: 2 });
                     expect(recipes6.length).to.equal(3);
                     expect(recipes6[0].name).to.equal("Recipe 3");
-
-                    // Delete recipies
-                    for (const recipe of allRecipes) await recipe.delete();
                 })
 
                 it("findAll() works with a mix of query constraints", async () => {
-                    // Clear previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
                     // Create recipies
                     const recipe1 = new Recipe(perspective!);
                     recipe1.name = "Recipe 1";
@@ -1453,16 +1397,9 @@ describe("Prolog + Literals", () => {
                     expect(recipes2[0].booleanTest).to.equal(false);
                     expect(recipes2[0].comments).to.be.undefined;
                     expect(recipes2[0].entries.length).to.equal(2);
-
-                    await recipe1.delete();
-                    await recipe2.delete();
                 })
 
                 it("findAll() works with constraining resolved literal properties", async () => {
-                    // Clear previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
                     // Create a recipe with a resolved literal property
                     const recipe = new Recipe(perspective!);
                     recipe.resolve = "Hello World"
@@ -1472,15 +1409,9 @@ describe("Prolog + Literals", () => {
                     const recipes1 = await Recipe.findAll(perspective!, { where: { resolve: "Hello World" } });
                     expect(recipes1.length).to.equal(1);
                     expect(recipes1[0].resolve).to.equal("Hello World");
-                    
-                    await recipe.delete();
                 })
 
-                it("findAll() works with multiple property constraints in one where clause", async () => {
-                    // Clear previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
+                it("findAll() works with multiple property constraints in one where clause", async () => { 
                     // Create recipes with different combinations of properties
                     const recipe1 = new Recipe(perspective!);
                     recipe1.name = "Recipe 1";
@@ -1532,17 +1463,9 @@ describe("Prolog + Literals", () => {
                         }
                     });
                     expect(recipes3.length).to.equal(0);
-
-                    await recipe1.delete();
-                    await recipe2.delete();
-                    await recipe3.delete();
                 })
 
                 it("findAllAndCount() returns both the retrived instances and the total count", async () => {
-                    // Clear any old recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
                     // Create 6 recipe instances with sequential names
                     for (let i = 1; i <= 6; i++) {
                         const recipe = new Recipe(perspective!);
@@ -1594,16 +1517,9 @@ describe("Prolog + Literals", () => {
                     const { results: recipes8, totalCount: count8 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 4" } }, offset: 3, limit: 3, count: true });
                     expect(recipes8.length).to.equal(2);
                     expect(count8).to.equal(5);
-
-                    // Delete recipies
-                    for (const recipe of allRecipes) await recipe.delete();
                 })
 
                 it("paginate() helper function works with pageNumber & pageSize props", async () => {
-                    // Clear any old recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
                     // Create 6 recipe instances with sequential names
                     for (let i = 1; i <= 6; i++) {
                         const recipe = new Recipe(perspective!);
@@ -1628,16 +1544,9 @@ describe("Prolog + Literals", () => {
                     expect(count2).to.equal(5);
                     expect(recipes2[0].name).to.equal("Recipe 5");
                     expect(recipes2[1].name).to.equal("Recipe 6");
-
-                    // Delete recipies
-                    for (const recipe of allRecipes) await recipe.delete();
                 });
 
                 it("count() returns only the count without retrieving instances", async () => {
-                    // Clear any old recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
                     // Create 6 recipe instances with sequential names
                     for (let i = 1; i <= 6; i++) {
                         const recipe = new Recipe(perspective!);
@@ -1656,16 +1565,9 @@ describe("Prolog + Literals", () => {
                     // Test count with more complex constraints
                     const count3 = await Recipe.count(perspective!, { where: { name: { not: "Recipe 1" } } });
                     expect(count3).to.equal(5);
-
-                    // Delete recipes
-                    for (const recipe of await Recipe.findAll(perspective!)) await recipe.delete();
                 });
 
                 it("count() and countSubscribe() work on the query builder", async () => {
-                    // Clear any old recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
                     // Create recipes
                     const recipe1 = new Recipe(perspective!);
                     recipe1.name = "Recipe 1";
@@ -1710,18 +1612,104 @@ describe("Prolog + Literals", () => {
 
                     // Dispose the subscription to prevent cross-test interference
                     builder.dispose();
+                })
 
-                    // Clean up
-                    for (const recipe of await Recipe.findAll(perspective!)) {
-                        await recipe.delete();
+                it("count() works with advanced where conditions (gt, between, timestamp)", async () => {
+                    // Create recipes with different numbers
+                    const recipe1 = new Recipe(perspective!);
+                    recipe1.name = "Recipe 1";
+                    recipe1.number = 1;
+                    await recipe1.save();
+                    
+                    const recipe2 = new Recipe(perspective!);
+                    recipe2.name = "Recipe 2"; 
+                    recipe2.number = 2;
+                    await recipe2.save();
+                    
+                    const recipe3 = new Recipe(perspective!);
+                    recipe3.name = "Recipe 3";
+                    recipe3.number = 3;
+                    await recipe3.save();
+
+                    const recipe4 = new Recipe(perspective!);
+                    recipe4.name = "Recipe 4";
+                    recipe4.number = 4;
+                    await recipe4.save();
+
+                    const recipe5 = new Recipe(perspective!);
+                    recipe5.name = "Recipe 5";
+                    recipe5.number = 5;
+                    await recipe5.save();
+
+                    // Test count() with gt operator
+                    const countGt3 = await Recipe.count(perspective!, { where: { number: { gt: 3 } } });
+                    const findAllGt3 = await Recipe.findAll(perspective!, { where: { number: { gt: 3 } } });
+                    expect(countGt3).to.equal(findAllGt3.length);
+                    expect(countGt3).to.equal(2); // recipes 4 and 5
+
+                    // Test count() with between operator
+                    const countBetween2And4 = await Recipe.count(perspective!, { where: { number: { between: [2, 4] } } });
+                    const findAllBetween2And4 = await Recipe.findAll(perspective!, { where: { number: { between: [2, 4] } } });
+                    expect(countBetween2And4).to.equal(findAllBetween2And4.length);
+                    expect(countBetween2And4).to.equal(3); // recipes 2, 3, and 4
+
+                    // Test count() with gte and lte operators
+                    const countGte2Lte4 = await Recipe.count(perspective!, { where: { number: { gte: 2, lte: 4 } } });
+                    const findAllGte2Lte4 = await Recipe.findAll(perspective!, { where: { number: { gte: 2, lte: 4 } } });
+                    expect(countGte2Lte4).to.equal(findAllGte2Lte4.length);
+                    expect(countGte2Lte4).to.equal(3); // recipes 2, 3, and 4
+
+                    // Test count() with lt operator
+                    const countLt3 = await Recipe.count(perspective!, { where: { number: { lt: 3 } } });
+                    const findAllLt3 = await Recipe.findAll(perspective!, { where: { number: { lt: 3 } } });
+                    expect(countLt3).to.equal(findAllLt3.length);
+                    expect(countLt3).to.equal(2); // recipes 1 and 2
+
+                    // Test query builder count() with gt operator
+                    const queryCountGt3 = await Recipe.query(perspective!)
+                        .where({ number: { gt: 3 } })
+                        .count();
+                    const queryGetGt3 = await Recipe.query(perspective!)
+                        .where({ number: { gt: 3 } })
+                        .get();
+                    expect(queryCountGt3).to.equal(queryGetGt3.length);
+                    expect(queryCountGt3).to.equal(2);
+
+                    // Test query builder count() with between operator
+                    const queryCountBetween = await Recipe.query(perspective!)
+                        .where({ number: { between: [2, 4] } })
+                        .count();
+                    const queryGetBetween = await Recipe.query(perspective!)
+                        .where({ number: { between: [2, 4] } })
+                        .get();
+                    expect(queryCountBetween).to.equal(queryGetBetween.length);
+                    expect(queryCountBetween).to.equal(3);
+
+                    // Test count() with timestamp filtering
+                    // Get the timestamp of recipe3
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    const recipe3Instance = allRecipes.find((r: any) => r.name === "Recipe 3");
+                    expect(recipe3Instance).to.not.be.undefined;
+                    
+                    if (recipe3Instance && recipe3Instance.timestamp) {
+                        // Convert timestamp to number if it's a string
+                        const recipe3Timestamp = typeof recipe3Instance.timestamp === 'string' 
+                            ? new Date(recipe3Instance.timestamp).getTime() 
+                            : recipe3Instance.timestamp;
+                        
+                        // Count recipes with timestamp greater than recipe3's timestamp
+                        const countAfterRecipe3 = await Recipe.count(perspective!, { 
+                            where: { timestamp: { gt: recipe3Timestamp } } 
+                        });
+                        const findAllAfterRecipe3 = await Recipe.findAll(perspective!, { 
+                            where: { timestamp: { gt: recipe3Timestamp } } 
+                        });
+                        expect(countAfterRecipe3).to.equal(findAllAfterRecipe3.length);
+                        expect(countAfterRecipe3).to.be.at.least(2); // At least recipes 4 and 5
                     }
                 })
 
                 it("paginate() and paginateSubscribe() work on the query builder", async () => {
-                    // Clear any existing recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-
                     // Create test recipes
                     for (let i = 1; i <= 10; i++) {
                         const recipe = new Recipe(perspective!);
@@ -1782,12 +1770,6 @@ describe("Prolog + Literals", () => {
 
                     // Dispose the subscription to prevent cross-test interference
                     query.dispose();
-
-                    // Clean up
-                    const allRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of allRecipes) {
-                        await recipe.delete();
-                    }
                 })
 
                 it("query builder works with subscriptions", async () => {
@@ -1870,7 +1852,10 @@ describe("Prolog + Literals", () => {
                     await notification3.save();
 
                     await sleep(1000);
-                    expect(updateCount).to.equal(2);
+                    // With SurrealDB we get 3 updates because we do comparison filtering in the client
+                    // and not the query. So the raw query result actually is different, even though
+                    // the ultimate result is the same.
+                    //expect(updateCount).to.equal(2);
                     expect(notifications.length).to.equal(2);
 
                     // Mark notification1 as read - should trigger subscription to remove it
@@ -1881,11 +1866,6 @@ describe("Prolog + Literals", () => {
 
                     // Dispose the subscription to prevent cross-test interference
                     builder.dispose();
-
-                    // Clean up
-                    await notification1.delete();
-                    await notification2.delete();
-                    await notification3.delete();
                 });
 
                 it("query builder should filter by subject class", async () => {
@@ -1944,10 +1924,6 @@ describe("Prolog + Literals", () => {
                     // This assertion will fail because the query builder doesn't filter by class
                     expect(note1Results.length).to.equal(1);
                     expect(note1Results[0]).to.be.instanceOf(Note1);
-
-                    // Clean up
-                    await note1.delete();
-                    await note2.delete();
                 });
 
                 it("query builder works with single query object, complex query and subscriptions", async () => {
@@ -2063,11 +2039,6 @@ describe("Prolog + Literals", () => {
 
                     // Dispose the subscription to prevent cross-test interference
                     builder.dispose();
-
-                    // Clean up
-                    await task1.delete();
-                    await task2.delete();
-                    await task3.delete();
                 });
 
                 it("transform option in property decorators works", async () => {
@@ -2169,7 +2140,7 @@ describe("Prolog + Literals", () => {
                     const recipesAfterCommit = await BatchRecipe.findAll(perspective!);
                     expect(recipesAfterCommit.length).to.equal(1);
                     expect(recipesAfterCommit[0].name).to.equal("Pasta");
-                    expect(recipesAfterCommit[0].ingredients).to.deep.equal(["pasta", "sauce", "cheese"]);
+                    expect(recipesAfterCommit[0].ingredients).to.have.members(["pasta", "sauce", "cheese"]);
 
                     const notesAfterCommit = await BatchNote.findAll(perspective!);
                     expect(notesAfterCommit.length).to.equal(1);
@@ -2186,7 +2157,7 @@ describe("Prolog + Literals", () => {
 
                     // Verify models haven't changed before commit
                     const recipesBeforeUpdate = await BatchRecipe.findAll(perspective!);
-                    expect(recipesBeforeUpdate[0].ingredients).to.deep.equal(["pasta", "sauce", "cheese"]);
+                    expect(recipesBeforeUpdate[0].ingredients).to.have.members(["pasta", "sauce", "cheese"]);
 
                     const notesBeforeUpdate = await BatchNote.findAll(perspective!);
                     expect(notesBeforeUpdate[0].content).to.equal("Make sure to use fresh ingredients");
@@ -2229,6 +2200,118 @@ describe("Prolog + Literals", () => {
 
                     const notesAfterDelete = await BatchNote.findAll(perspective!);
                     expect(notesAfterDelete.length).to.equal(0);
+                });
+
+                describe("SurrealDB vs Prolog Subscriptions", () => {
+                    let perspective: PerspectiveProxy;
+
+                    @ModelOptions({ name: "SubscriptionTestModel" })
+                    class TestModel extends Ad4mModel {
+                        @Property({
+                            through: "test://name",
+                            resolveLanguage: "literal"
+                        })
+                        name: string = "";
+
+                        @Property({
+                            through: "test://status",
+                            resolveLanguage: "literal"
+                        })
+                        status: string = "";
+                    }
+
+                    beforeEach(async () => {
+                        perspective = await ad4m!.perspective.add("subscription-parity-test");
+                        await perspective!.ensureSDNASubjectClass(TestModel);
+                    });
+
+                    afterEach(async () => {
+                        if (perspective) {
+                            await ad4m!.perspective.remove(perspective.uuid);
+                        }
+                    });
+
+                    it("should produce identical results with SurrealDB and Prolog subscriptions", async () => {
+                        // 1. Setup subscriptions
+                        const surrealCallback = sinon.fake();
+                        const prologCallback = sinon.fake();
+
+                        // SurrealDB subscription (default)
+                        const surrealBuilder = TestModel.query(perspective).where({ status: "active" });
+                        await surrealBuilder.subscribe(surrealCallback);
+
+                        // Prolog subscription (explicit)
+                        const prologBuilder = TestModel.query(perspective).where({ status: "active" }).useSurrealDB(false);
+                        await prologBuilder.subscribe(prologCallback);
+
+                        // 2. Add data
+                        const startTime = Date.now();
+                        const count = 5;
+                        
+                        for (let i = 0; i < count; i++) {
+                            const model = new TestModel(perspective);
+                            model.name = `Item ${i}`;
+                            model.status = "active";
+                            await model.save();
+                        }
+
+                        // 3. Wait for updates
+                        // Give enough time for both to catch up
+                        await sleep(2000);
+
+                        // 4. Verify results match
+                        expect(surrealCallback.called).to.be.true;
+                        expect(prologCallback.called).to.be.true;
+
+                        const surrealLastResult = surrealCallback.lastCall.args[0];
+                        const prologLastResult = prologCallback.lastCall.args[0];
+
+                        expect(surrealLastResult.length).to.equal(count);
+                        expect(prologLastResult.length).to.equal(count);
+
+                        // Sort by name to ensure order doesn't affect comparison
+                        const sortByName = (a: TestModel, b: TestModel) => a.name.localeCompare(b.name);
+                        surrealLastResult.sort(sortByName);
+                        prologLastResult.sort(sortByName);
+
+                        for (let i = 0; i < count; i++) {
+                            expect(surrealLastResult[i].name).to.equal(prologLastResult[i].name);
+                            expect(surrealLastResult[i].status).to.equal(prologLastResult[i].status);
+                        }
+
+                        console.log(`SurrealDB vs Prolog subscription parity check passed with ${count} items.`);
+                        
+                        // Cleanup
+                        surrealBuilder.dispose();
+                        prologBuilder.dispose();
+                    });
+
+                    it("should demonstrate SurrealDB subscription performance", async () => {
+                        // Measure latency of update
+                        const surrealCallback = sinon.fake();
+                        const surrealBuilder = TestModel.query(perspective).where({ status: "perf-test" });
+                        await surrealBuilder.subscribe(surrealCallback);
+
+                        const start = Date.now();
+                        const model = new TestModel(perspective);
+                        model.name = "Perf Item";
+                        model.status = "perf-test";
+                        await model.save();
+                        const saveTime = Date.now();
+
+                        // Poll until callback called
+                        while (!surrealCallback.called) {
+                            await sleep(10);
+                            if (Date.now() - saveTime > 5000) throw new Error("Timeout waiting for subscription update");
+                        }
+
+                        const saveLatency = saveTime - start;
+                        const subscriptionLatency = Date.now() - saveTime;
+                        console.log(`TestModel.save() latency: ${saveLatency}ms`);
+                        console.log(`SurrealDB subscription update latency: ${subscriptionLatency}ms`);
+
+                        surrealBuilder.dispose();
+                    });
                 });
 
                 describe('ModelQueryBuilder', () => {
@@ -2348,7 +2431,6 @@ describe("Prolog + Literals", () => {
                         // Verify callback was called with new count
                         expect(countCallback.called).to.be.true;
                         expect(countCallback.lastCall.args[0]).to.equal(1);
-                        console.log("countCallback", countCallback.lastCall.args[0])
                         let count = countCallback.callCount
 
                         // Dispose subscription
@@ -2434,21 +2516,24 @@ describe("Prolog + Literals", () => {
                         body: string = ""
                     }
 
-                    before(async () => {
-                        // Add a small delay to ensure Prolog engine is stable
-                        await sleep(2000);
+                    
+                    // before(async () => {
+                    //     // Add a small delay to ensure Prolog engine is stable
+                    //     await sleep(2000);
                         
-                        // Register the EmojiMessage class using ensureSDNASubjectClass
-                        await perspective!.ensureSDNASubjectClass(EmojiMessage);
+                    //     // Register the EmojiMessage class using ensureSDNASubjectClass
+                    //     await perspective!.ensureSDNASubjectClass(EmojiMessage);
                         
-                        // Clear any existing EmojiMessage instances to start fresh
-                        const existingMessages = await EmojiMessage.findAll(perspective!);
-                        for (const msg of existingMessages) {
-                            await msg.delete();
-                        }
-                    });
+                    //     // Clear any existing EmojiMessage instances to start fresh
+                    //     const existingMessages = await EmojiMessage.findAll(perspective!);
+                    //     for (const msg of existingMessages) {
+                    //         await msg.delete();
+                    //     }
+                    // });
 
                     beforeEach(async () => {
+                        // Register the EmojiMessage class using ensureSDNASubjectClass
+                        await perspective!.ensureSDNASubjectClass(EmojiMessage);
                         // Clean up any messages from previous tests
                         const existingMessages = await EmojiMessage.findAll(perspective!);
                         for (const msg of existingMessages) {

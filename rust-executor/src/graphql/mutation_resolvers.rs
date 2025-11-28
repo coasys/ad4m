@@ -1016,6 +1016,27 @@ impl Mutation {
         })
     }
 
+    async fn perspective_subscribe_surreal_query(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        query: String,
+    ) -> FieldResult<QuerySubscription> {
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
+
+        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let (subscription_id, result_string) =
+            perspective.subscribe_and_query_surreal(query).await?;
+
+        Ok(QuerySubscription {
+            subscription_id,
+            result: result_string,
+        })
+    }
+
     async fn perspective_keep_alive_query(
         &self,
         context: &RequestContext,
@@ -1029,6 +1050,22 @@ impl Mutation {
 
         let perspective = get_perspective_with_uuid_field_error(&uuid)?;
         perspective.keepalive_query(subscription_id).await?;
+        Ok(true)
+    }
+
+    async fn perspective_keep_alive_surreal_query(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        subscription_id: String,
+    ) -> FieldResult<bool> {
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
+
+        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        perspective.keepalive_surreal_query(subscription_id).await?;
         Ok(true)
     }
 
@@ -1046,6 +1083,23 @@ impl Mutation {
         let perspective = get_perspective_with_uuid_field_error(&uuid)?;
         Ok(perspective
             .dispose_query_subscription(subscription_id)
+            .await?)
+    }
+
+    async fn perspective_dispose_surreal_query_subscription(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+        subscription_id: String,
+    ) -> FieldResult<bool> {
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
+
+        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        Ok(perspective
+            .dispose_surreal_query_subscription(subscription_id)
             .await?)
     }
 
