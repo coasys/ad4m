@@ -409,7 +409,7 @@ impl SurrealDBService {
 
         // Automatically inject perspective filter into the query
         // NOTE: Cannot alias grouped fields in SELECT when using GROUP BY - it breaks SurrealDB grouping!
-        //let prep_start = std::time::Instant::now();
+        let prep_start = std::time::Instant::now();
         let query_upper = query.to_uppercase();
 
         let filtered_query = if query_upper.contains("FROM LINK") {
@@ -482,15 +482,15 @@ impl SurrealDBService {
             query.clone()
         };
 
-        //log::info!("🦦🦦 SurrealDB query preparation took {:?}", prep_start.elapsed());
-        //log::info!("🦦🦦 SurrealDB filtered query:\n{}", filtered_query);
+        log::trace!("🦦🦦 SurrealDB query preparation took {:?}", prep_start.elapsed());
+        log::trace!("🦦🦦 SurrealDB filtered query:\n{}", filtered_query);
 
         let execute_start = std::time::Instant::now();
         let mut query_obj = self.db.query(filtered_query.clone());
         query_obj = query_obj.bind(("perspective", perspective_uuid.clone()));
 
         // Execute query with periodic logging instead of timeout
-        //log::info!("🦦⏳ Starting query execution...");
+        log::trace!("🦦⏳ Starting query execution...");
 
         // Spawn a task that logs every 10 seconds while the query is running
         let query_for_logging = filtered_query.clone();
@@ -518,7 +518,7 @@ impl SurrealDBService {
 
         let mut response = match response_result {
             Ok(Ok(r)) => {
-                log::info!(
+                log::trace!(
                     "🦦✅ Query execution succeeded in {:?}",
                     execute_start.elapsed()
                 );
@@ -548,22 +548,22 @@ impl SurrealDBService {
 
         // Take the results as a single SurrealDB Value
         // This will contain the query results in SurrealDB's native format
-        //let take_start = std::time::Instant::now();
+        let take_start = std::time::Instant::now();
         let result: SurrealValue = response.take(0)?;
-        //log::info!("🦦📦 Result extraction took {:?}", take_start.elapsed());
+        log::trace!("🦦📦 Result extraction took {:?}", take_start.elapsed());
 
         // Convert the SurrealDB value to JSON using round-trip serialization
         // This serializes with enum variant names as keys (e.g., {"Array": [...]})
-        //let serialize_start = std::time::Instant::now();
+        let serialize_start = std::time::Instant::now();
         let json_string = serde_json::to_string(&result)?;
         let json_value: Value = serde_json::from_str(&json_string)?;
 
         // Unwrap the SurrealDB enum structure to get clean JSON
         let unwrapped = unwrap_surreal_json(json_value);
-        //log::info!("🦦🔄 Serialization/unwrapping took {:?}", serialize_start.elapsed());
+        log::trace!("🦦🔄 Serialization/unwrapping took {:?}", serialize_start.elapsed());
 
-        log::info!(
-            "🦦🦦🦦 SurrealDB query:\n{}\n==>>Result count: {}",
+        log::trace!(
+            "🦦🦦🦦 SurrealDB query:\n{}\n==>> Result count: {}",
             query,
             if let Value::Array(ref arr) = unwrapped {
                 arr.len()
@@ -571,7 +571,7 @@ impl SurrealDBService {
                 0
             }
         );
-        log::info!("🦦⏱️ TOTAL query time: {:?}", total_start.elapsed());
+        log::trace!("🦦⏱️ TOTAL query time: {:?}", total_start.elapsed());
         // Extract array from the unwrapped result, propagating error if not an array
         match unwrapped {
             Value::Array(arr) => Ok(arr),
