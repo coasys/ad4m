@@ -2717,7 +2717,7 @@ impl PerspectiveInstance {
         // Send initial result with #init# prefix for compatibility
         let init_msg = format!("#init#{}", result_string);
         // Send multiple updates to ensure client gets it (same as Prolog implementation)
-        for delay in [100, 500, 1000, 2000] {
+        for delay in [100, 500, 1000, 10000, 15000, 20000, 25000] {
             self.send_subscription_update(
                 subscription_id.clone(),
                 init_msg.clone(),
