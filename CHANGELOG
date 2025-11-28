@@ -6,10 +6,18 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Fixed
-  
+- Subscription fixes [#634](https://github.com/coasys/ad4m/pull/634)
+- Async Runtime Performance Optimization: Fix CPU Thrashing Issues [#626](https://github.com/coasys/ad4m/pull/626)
+
 ### Added
+- SurrealDB Query Engine Integration for blazing fast Ad4mModel operations [#632](https://github.com/coasys/ad4m/pull/632)
+- Add `fromJSONSchema()` method to Ad4mModel for dynamic model generation [#628](https://github.com/coasys/ad4m/pull/628)
+- p-diff-sync: Add validation to ensure parent commits exist before accepting PerspectiveDiffEntryReference [#627](https://github.com/coasys/ad4m/pull/627)
 
 ### Changed
+- Deno lockfile updates [#635](https://github.com/coasys/ad4m/pull/635)
+- Holochain bump to 0.6.0 [#633](https://github.com/coasys/ad4m/pull/633)
+- Update to Holochain 0.6.0-rc.0 [#630](https://github.com/coasys/ad4m/pull/630)
 
 
 ## [0.10.1] - 15/09/2025
