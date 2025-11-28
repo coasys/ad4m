@@ -2696,6 +2696,36 @@ impl PerspectiveInstance {
         &self,
         query: String,
     ) -> Result<(String, String), AnyError> {
+        // Check if we already have a subscription with the same query
+        let existing_subscription = {
+            let queries = self.surreal_subscribed_queries.lock().await;
+            queries
+                .iter()
+                .find(|(_, q)| q.query == query)
+                .map(|(id, _)| id.clone())
+        };
+
+        // Return existing subscription if found
+        if let Some(existing_id) = existing_subscription {
+            let existing_result = {
+                let queries = self.surreal_subscribed_queries.lock().await;
+                queries.get(&existing_id).map(|q| q.last_result.clone())
+            };
+
+            if let Some(last_result) = existing_result {
+                let result_string = format!("#init#{}", last_result);
+                for delay in [100, 500, 1000, 10000, 15000, 20000, 25000] {
+                    self.send_subscription_update(
+                        existing_id.clone(),
+                        result_string.clone(),
+                        Some(Duration::from_millis(delay)),
+                    )
+                    .await;
+                }
+                return Ok((existing_id, last_result));
+            }
+        }
+
         let subscription_id = Uuid::new_v4().to_string();
 
         // Execute surreal query without holding any locks
