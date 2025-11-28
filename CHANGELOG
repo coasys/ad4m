@@ -6,6 +6,14 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Fixed
+
+### Added
+
+### Changed
+
+## [0.11.0] - 28/11/2025
+
+### Fixed
 - Subscription fixes [#634](https://github.com/coasys/ad4m/pull/634)
 - Async Runtime Performance Optimization: Fix CPU Thrashing Issues [#626](https://github.com/coasys/ad4m/pull/626)
 
