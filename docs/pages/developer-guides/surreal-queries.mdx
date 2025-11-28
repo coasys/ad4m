@@ -92,10 +92,16 @@ const stats = await perspective.querySurrealDB(
 //   { predicate: "likes", total: 156 }
 // ]
 
-// Average, sum, min, max
-const metrics = await perspective.querySurrealDB(
-  "SELECT count() as total_links, count(DISTINCT source) as unique_sources, count(DISTINCT author) as unique_authors FROM link"
+// Count total links
+const totalLinks = await perspective.querySurrealDB(
+  "SELECT count() as total FROM link"
 );
+
+// Count unique sources using GROUP BY
+const uniqueSources = await perspective.querySurrealDB(
+  "SELECT source FROM link GROUP BY source"
+);
+// uniqueSources.length gives you the count of unique sources
 ```
 
 ## Graph Traversal Queries
@@ -170,11 +176,13 @@ Use the `->` operator to traverse multiple hops in a single efficient query:
 ```typescript
 // Find friends of friends (2-hop traversal)
 // Traverse: Alice -> Friends -> Their Friends
+// Note: Use GROUP BY instead of DISTINCT for unique results
 const friendsOfFriends = await perspective.querySurrealDB(`
-  SELECT DISTINCT out->link[WHERE predicate = 'follows'].out.uri AS friend_of_friend
+  SELECT out->link[WHERE predicate = 'follows'].out.uri AS friend_of_friend
   FROM link
   WHERE in.uri = 'user://alice' AND predicate = 'follows'
 `);
+// Deduplicate in JavaScript if needed: [...new Set(friendsOfFriends.map(f => f.friend_of_friend))]
 
 // Get user profiles 2 hops away
 // Traverse: User -> Follows -> Profile
@@ -556,9 +564,11 @@ Here's what you can expect from SurrealDB vs Prolog:
 
 ```typescript
 // Find posts with more than 10 likes
-const popularPosts = await perspective.querySurrealDB(
-  "SELECT out.uri as post, count() as like_count FROM link WHERE predicate = 'likes' GROUP BY out.uri HAVING like_count > 10"
+// Note: SurrealDB doesn't support HAVING clause, so filter in JavaScript
+const allPosts = await perspective.querySurrealDB(
+  "SELECT out.uri as post, count() as like_count FROM link WHERE predicate = 'likes' GROUP BY out.uri"
 );
+const popularPosts = allPosts.filter(p => p.like_count > 10);
 
 // Count followers per user
 const followerCounts = await perspective.querySurrealDB(
@@ -570,13 +580,14 @@ const followerCounts = await perspective.querySurrealDB(
 
 ```typescript
 // Get all unique predicates used
+// Note: Use GROUP BY instead of SELECT DISTINCT
 const predicates = await perspective.querySurrealDB(
-  "SELECT DISTINCT predicate FROM link"
+  "SELECT predicate FROM link GROUP BY predicate"
 );
 
 // Get unique authors
 const authors = await perspective.querySurrealDB(
-  "SELECT DISTINCT author FROM link"
+  "SELECT author FROM link GROUP BY author"
 );
 ```
 
