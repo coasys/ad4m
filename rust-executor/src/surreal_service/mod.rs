@@ -482,7 +482,10 @@ impl SurrealDBService {
             query.clone()
         };
 
-        log::trace!("🦦🦦 SurrealDB query preparation took {:?}", prep_start.elapsed());
+        log::trace!(
+            "🦦🦦 SurrealDB query preparation took {:?}",
+            prep_start.elapsed()
+        );
         log::trace!("🦦🦦 SurrealDB filtered query:\n{}", filtered_query);
 
         let execute_start = std::time::Instant::now();
@@ -560,7 +563,10 @@ impl SurrealDBService {
 
         // Unwrap the SurrealDB enum structure to get clean JSON
         let unwrapped = unwrap_surreal_json(json_value);
-        log::trace!("🦦🔄 Serialization/unwrapping took {:?}", serialize_start.elapsed());
+        log::trace!(
+            "🦦🔄 Serialization/unwrapping took {:?}",
+            serialize_start.elapsed()
+        );
 
         log::trace!(
             "🦦🦦🦦 SurrealDB query:\n{}\n==>> Result count: {}",
