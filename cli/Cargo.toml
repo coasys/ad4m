@@ -1,7 +1,7 @@
 [package]
 name = "ad4m"
 
-version = "0.10.1-dev"
+version = "0.11.0"
 
 edition = "2021"
 authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
@@ -27,8 +27,8 @@ metal = ["ad4m-executor/metal"]
 cuda = ["ad4m-executor/cuda"]
 
 [dependencies]
-ad4m-client = { path = "../rust-client", version="0.10.1-dev" }
-ad4m-executor = { path = "../rust-executor", version="0.10.1-dev" }
+ad4m-client = { path = "../rust-client", version="0.11.0" }
+ad4m-executor = { path = "../rust-executor", version="0.11.0" }
 anyhow = "1.0.65"
 clap = { version = "4.0.8", features = ["derive"] }
 futures = "0.3"
