@@ -4642,11 +4642,14 @@ GROUP BY source
             .iter()
             .find(|s| s.get("predicate").and_then(|v| v.as_str()) == Some("likes"))
             .expect("Should find likes stat");
-        let likes_count = likes_stat.get("total").and_then(|v| {
-            v.as_u64()
-                .or_else(|| v.get("Int").and_then(|i| i.as_u64()))
-                .or_else(|| v.as_array().map(|a| a.len() as u64))
-        }).unwrap();
+        let likes_count = likes_stat
+            .get("total")
+            .and_then(|v| {
+                v.as_u64()
+                    .or_else(|| v.get("Int").and_then(|i| i.as_u64()))
+                    .or_else(|| v.as_array().map(|a| a.len() as u64))
+            })
+            .unwrap();
         assert_eq!(likes_count, 2, "Should have 2 likes");
     }
 
@@ -4696,15 +4699,25 @@ GROUP BY source
         // SurrealDB's count() might return multiple rows or a single aggregated row
         let total: u64 = if total_links.len() == 1 {
             // Single aggregated row
-            total_links[0].get("total")
+            total_links[0]
+                .get("total")
                 .and_then(|v| v.as_u64().or_else(|| v.get("Int").and_then(|i| i.as_u64())))
-                .or_else(|| total_links[0].get("count").and_then(|v| v.as_u64().or_else(|| v.get("Int").and_then(|i| i.as_u64()))))
+                .or_else(|| {
+                    total_links[0]
+                        .get("count")
+                        .and_then(|v| v.as_u64().or_else(|| v.get("Int").and_then(|i| i.as_u64())))
+                })
                 .unwrap()
         } else {
             // Multiple rows, sum them up
-            total_links.iter().map(|row| {
-                row.get("count").and_then(|v| v.get("Int").and_then(|i| i.as_u64())).unwrap_or(1)
-            }).sum()
+            total_links
+                .iter()
+                .map(|row| {
+                    row.get("count")
+                        .and_then(|v| v.get("Int").and_then(|i| i.as_u64()))
+                        .unwrap_or(1)
+                })
+                .sum()
         };
         assert!(total >= 2, "Should have at least 2 links");
 
@@ -5267,7 +5280,10 @@ GROUP BY source
             .unwrap();
 
         // Should get authors from nested items
-        assert!(participants.len() == 0 || participants.len() > 0, "Query should execute successfully");
+        assert!(
+            participants.len() == 0 || participants.len() > 0,
+            "Query should execute successfully"
+        );
     }
 
     #[tokio::test]
@@ -5313,19 +5329,25 @@ GROUP BY source
         let popular_posts: Vec<_> = all_posts
             .iter()
             .filter(|p| {
-                let count = p.get("like_count").and_then(|v| {
-                    v.as_u64()
-                        .or_else(|| v.get("Int").and_then(|i| i.as_u64()))
-                        .or_else(|| v.as_array().map(|a| a.len() as u64))
-                }).unwrap_or(0);
+                let count = p
+                    .get("like_count")
+                    .and_then(|v| {
+                        v.as_u64()
+                            .or_else(|| v.get("Int").and_then(|i| i.as_u64()))
+                            .or_else(|| v.as_array().map(|a| a.len() as u64))
+                    })
+                    .unwrap_or(0);
                 count > 10
             })
             .collect();
 
         // Due to test isolation issues, we just verify the query works and filters correctly
         // Either we find exactly post://2 with >10 likes, or the test ran after others
-        assert!(!popular_posts.is_empty(), "Should find at least 1 popular post with >10 likes");
-        
+        assert!(
+            !popular_posts.is_empty(),
+            "Should find at least 1 popular post with >10 likes"
+        );
+
         // Verify the filtering logic works - all returned posts should have >10 likes
         for post in &popular_posts {
             let like_count = post
@@ -5336,7 +5358,11 @@ GROUP BY source
                         .or_else(|| v.as_array().map(|a| a.len() as u64))
                 })
                 .unwrap();
-            assert!(like_count > 10, "All filtered posts should have >10 likes, got {}", like_count);
+            assert!(
+                like_count > 10,
+                "All filtered posts should have >10 likes, got {}",
+                like_count
+            );
         }
     }
 
@@ -5411,16 +5437,11 @@ GROUP BY source
         for i in 0..5 {
             let mut link = create_link();
             link.target = format!("target://{}", i);
-            let mut signed_link =
-                create_signed_expression(link).expect("Failed to create link");
+            let mut signed_link = create_signed_expression(link).expect("Failed to create link");
             signed_link.timestamp = (now - chrono::Duration::minutes(i as i64)).to_rfc3339();
 
             perspective
-                .add_link_expression(
-                    LinkExpression::from(signed_link),
-                    LinkStatus::Shared,
-                    None,
-                )
+                .add_link_expression(LinkExpression::from(signed_link), LinkStatus::Shared, None)
                 .await
                 .unwrap();
         }
@@ -5516,7 +5537,11 @@ GROUP BY source
         recent_signed.timestamp = (now - chrono::Duration::hours(1)).to_rfc3339();
 
         perspective
-            .add_link_expression(LinkExpression::from(recent_signed), LinkStatus::Shared, None)
+            .add_link_expression(
+                LinkExpression::from(recent_signed),
+                LinkStatus::Shared,
+                None,
+            )
             .await
             .unwrap();
 
@@ -5615,11 +5640,11 @@ GROUP BY source
             .unwrap();
 
         assert_eq!(result.len(), 1, "Should find 1 result");
-        
+
         // fn::parse_literal returns a number (might be nested in object structure)
         let count_value = result[0].get("count");
         assert!(count_value.is_some(), "Should have count field");
-        
+
         // Extract the number - it might be in a nested Float/Int object or directly as a number
         let count = count_value.and_then(|v| {
             // First try direct access
@@ -5630,7 +5655,7 @@ GROUP BY source
                 .or_else(|| v.get("Float").and_then(|f| f.as_f64().map(|f| f as i64)))
                 .or_else(|| v.get("Int").and_then(|i| i.as_i64()))
         });
-        
+
         assert!(count.is_some(), "Should be able to extract number");
         assert_eq!(count, Some(42), "Should parse number literal correctly");
     }
