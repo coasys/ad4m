@@ -247,7 +247,7 @@ memberPost(Post, Agent, Neighbourhood) :-
 
 This could be queried via the AD4M client:
 ```javascript
-const posts = await perspective.queryProlog(
+const posts = await perspective.infer(
   "memberPost(Post, Agent, 'neighbourhood://QmGroup789')"
 );
 console.log(posts); // [{Post: "QmXyz123://post456", Agent: "did:key:z6Mk..."}, ...]
