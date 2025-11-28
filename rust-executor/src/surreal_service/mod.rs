@@ -434,41 +434,90 @@ impl SurrealDBService {
                     // we should wrap it
                     let end_pos = absolute_pos + 9; // "FROM link".len() = 9
 
-                    // Check what comes after "link" - if there's already AS or a subquery, skip it
+                    // Check what comes after "link" - handle aliases
                     let after = &result[end_pos..].trim_start();
+                    let mut injection_point = end_pos;
+                    let mut has_alias = false;
+
+                    // If there's an alias, we need to find the injection point after the alias
                     if after.starts_with("AS") || after.starts_with("as") {
-                        // Already aliased, skip this one
-                        search_start = end_pos;
-                        continue;
+                        has_alias = true;
+                        // Skip "AS" or "as"
+                        let alias_start = if after.starts_with("AS") { 2 } else { 2 };
+                        let after_as = &after[alias_start..].trim_start();
+
+                        // Find the end of the alias identifier
+                        let alias_end = after_as
+                            .find(|c: char| !c.is_alphanumeric() && c != '_')
+                            .unwrap_or(after_as.len());
+
+                        // Update injection point to be after the alias
+                        injection_point = end_pos
+                            + (after.len() - after.trim_start().len())
+                            + alias_start
+                            + (after_as.len() - after_as.trim_start().len())
+                            + alias_end;
                     }
 
-                    // Replace "FROM link" with "FROM link WHERE perspective = $perspective"
+                    // Replace "FROM link" (or "FROM link AS alias") with appropriate WHERE clause
                     // But need to check if there's already a WHERE clause after this FROM
-                    let after_from = &result[end_pos..];
+                    let after_from = &result[injection_point..];
                     let after_from_upper = after_from.trim_start().to_uppercase();
 
                     if after_from_upper.starts_with("WHERE") {
-                        // Already has WHERE, inject AND condition
+                        // Already has WHERE, inject AND condition with proper parenthesization
                         let where_start =
-                            end_pos + after_from.len() - after_from.trim_start().len();
+                            injection_point + after_from.len() - after_from.trim_start().len();
                         let where_end = where_start + 5; // "WHERE".len()
-                        result = format!(
-                            "{} perspective = $perspective AND{}",
-                            &result[..where_end],
-                            &result[where_end..]
-                        );
-                        search_start = where_end + 35;
+
+                        // Extract the original WHERE condition (only up to GROUP BY, ORDER BY, LIMIT, etc.)
+                        let after_where = &result[where_end..];
+                        let after_where_upper = after_where.to_uppercase();
+
+                        // Find where the WHERE clause ends (before GROUP BY, ORDER BY, LIMIT, OFFSET, etc.)
+                        let clause_keywords = ["GROUP BY", "ORDER BY", "LIMIT", "OFFSET", "FETCH"];
+                        let mut where_clause_end = after_where.len();
+
+                        for keyword in &clause_keywords {
+                            if let Some(pos) = after_where_upper.find(keyword) {
+                                where_clause_end = where_clause_end.min(pos);
+                            }
+                        }
+
+                        let original_condition = after_where[..where_clause_end].trim().to_string();
+                        let rest_of_query = after_where[where_clause_end..].to_string();
+                        let before_where = result[..where_end].to_string();
+
+                        let injection_text =
+                            format!(" perspective = $perspective AND ({})", original_condition);
+
+                        // Wrap original condition in parentheses to preserve operator precedence
+                        result = format!("{}{}{}", before_where, injection_text, rest_of_query);
+                        // Move search_start past the injection point to avoid reprocessing
+                        search_start = where_end + injection_text.len();
                     } else {
                         // No WHERE yet, add one
-                        // Trim the after part to avoid double spaces
-                        let after_trimmed = &result[end_pos..].trim_start();
-                        result = format!(
-                            "{}FROM link WHERE perspective = $perspective {}",
-                            &result[..absolute_pos],
-                            after_trimmed
-                        );
-                        search_start =
-                            absolute_pos + "FROM link WHERE perspective = $perspective".len();
+                        let after_trimmed = &result[injection_point..].trim_start();
+
+                        if has_alias {
+                            // We already have the alias, just inject WHERE after it
+                            result = format!(
+                                "{} WHERE perspective = $perspective {}",
+                                &result[..injection_point],
+                                after_trimmed
+                            );
+                            search_start =
+                                injection_point + " WHERE perspective = $perspective".len();
+                        } else {
+                            // No alias, inject WHERE directly after "FROM link"
+                            result = format!(
+                                "{}FROM link WHERE perspective = $perspective {}",
+                                &result[..absolute_pos],
+                                after_trimmed
+                            );
+                            search_start =
+                                absolute_pos + "FROM link WHERE perspective = $perspective".len();
+                        }
                     }
                 } else {
                     break;
