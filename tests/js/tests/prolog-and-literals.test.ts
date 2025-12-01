@@ -828,7 +828,6 @@ describe("Prolog + Literals", () => {
 
                     // Retrieve the recipe and verify the image was resolved and transformed
                     const results = await Recipe.findAll(perspective!, { where: { name: "Test with image" } });
-                    await recipe2.get();
                     const recipe2 = results[0];
                     
                     expect(recipe2.name).to.equal("Test with image");
