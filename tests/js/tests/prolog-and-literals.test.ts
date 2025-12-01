@@ -827,8 +827,9 @@ describe("Prolog + Literals", () => {
                     expect(links[0].data.target).to.equal(imageExprUrl);
 
                     // Retrieve the recipe and verify the image was resolved and transformed
-                    const recipe2 = new Recipe(perspective!, root);
+                    const results = await Recipe.findAll(perspective!, { where: { name: "Test with image" } });
                     await recipe2.get();
+                    const recipe2 = results[0];
                     
                     expect(recipe2.name).to.equal("Test with image");
                     // The image should be resolved from the note-store language and transformed to a data URL
