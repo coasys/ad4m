@@ -268,7 +268,9 @@ impl PerspectiveInstance {
         }
 
         // Reload perspective in SurrealDB
-        self.surreal_service.reload_perspective(&uuid, all_links).await?;
+        self.surreal_service
+            .reload_perspective(&uuid, all_links)
+            .await?;
 
         log::info!("💾 SURREAL SYNC: Completed in {:?}", sync_start.elapsed());
         Ok(())
@@ -4146,9 +4148,7 @@ property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predi
         };
 
         // Debug: First, check raw data in SurrealDB including IDs
-        let raw_query = format!(
-            "SELECT id, source, predicate, target FROM link ",
-        );
+        let raw_query = format!("SELECT id, source, predicate, target FROM link ",);
         let raw_results = perspective.surreal_query(raw_query).await.unwrap();
         println!("Debug - Raw links in SurrealDB: {}", raw_results.len());
         for (i, link) in raw_results.iter().enumerate() {
@@ -4239,7 +4239,8 @@ WHERE
   source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://name')
   AND source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://rating')
 GROUP BY source
-"#.to_string();
+"#
+        .to_string();
 
         println!("\n=== Running structural query for Recipe instances ===");
         println!("Query:\n{}", query);

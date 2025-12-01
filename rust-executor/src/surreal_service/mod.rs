@@ -505,9 +505,7 @@ impl SurrealDBService {
     pub async fn clear_perspective(&self, _perspective_uuid: &str) -> Result<(), Error> {
         // Clear all links in this perspective's database
         // (each perspective has its own database, so no filter needed)
-        self.db
-            .query("DELETE FROM link")
-            .await?;
+        self.db.query("DELETE FROM link").await?;
 
         Ok(())
     }
@@ -520,9 +518,7 @@ impl SurrealDBService {
     ) -> Result<(), Error> {
         // Clear all links in this perspective's database
         // (each perspective has its own database, so no filter needed)
-        self.db
-            .query("DELETE FROM link")
-            .await?;
+        self.db.query("DELETE FROM link").await?;
 
         if links.is_empty() {
             return Ok(());
@@ -1584,7 +1580,9 @@ mod tests {
     #[tokio::test]
     async fn test_global_service_initialization() {
         // Create a test service (each perspective gets its own in production)
-        let service = SurrealDBService::new("ad4m", "test_global_init").await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_global_init")
+            .await
+            .unwrap();
 
         // Test that the service works
         let perspective_uuid = "test_global_init";

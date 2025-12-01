@@ -44,9 +44,10 @@ pub fn initialize_from_db() {
         // Spawn async task to create service and initialize perspective
         tokio::spawn(async move {
             // Create a per-perspective SurrealDB instance
-            let surreal_service = crate::surreal_service::SurrealDBService::new("ad4m", &handle_clone.uuid)
-                .await
-                .expect("Failed to create SurrealDB service for perspective");
+            let surreal_service =
+                crate::surreal_service::SurrealDBService::new("ad4m", &handle_clone.uuid)
+                    .await
+                    .expect("Failed to create SurrealDB service for perspective");
 
             let p = PerspectiveInstance::new(handle_clone.clone(), None, surreal_service);
 
