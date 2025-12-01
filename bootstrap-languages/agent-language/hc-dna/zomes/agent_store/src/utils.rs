@@ -15,7 +15,7 @@ pub(crate) fn get_latest_link(base: EntryHash, tag: Option<LinkTag>) -> ExternRe
         query = query.tag_prefix(t);
     }
 
-    let profile_info = get_links(query, GetStrategy::Network)?;
+    let profile_info = get_links(query, GetStrategy::Local)?;
 
     // Find the latest
     let latest_info =
