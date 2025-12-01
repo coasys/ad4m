@@ -37,29 +37,39 @@ pub fn initialize_from_db() {
         .expect("Ad4mDb not initialized")
         .get_all_perspectives()
         .expect("Couldn't get perspectives from db");
-    let mut perspectives = PERSPECTIVES.write().unwrap();
-    for handle in handles {
-        let p = PerspectiveInstance::new(handle.clone(), None);
 
-        // Sync existing links to SurrealDB before starting background tasks
-        // This must complete before background tasks start to avoid race conditions
-        let p_clone = p.clone();
-        let handle_uuid = handle.uuid.clone();
+    for handle in handles {
+        let handle_clone = handle.clone();
+
+        // Spawn async task to create service and initialize perspective
         tokio::spawn(async move {
-            // First, complete the sync
-            if let Err(e) = p_clone.sync_existing_links_to_surreal().await {
+            // Create a per-perspective SurrealDB instance
+            let surreal_service =
+                crate::surreal_service::SurrealDBService::new("ad4m", &handle_clone.uuid)
+                    .await
+                    .expect("Failed to create SurrealDB service for perspective");
+
+            let p = PerspectiveInstance::new(handle_clone.clone(), None, surreal_service);
+
+            // Store the perspective
+            {
+                let mut perspectives = PERSPECTIVES.write().unwrap();
+                perspectives.insert(handle_clone.uuid.clone(), RwLock::new(p.clone()));
+            }
+
+            // Sync existing links to SurrealDB before starting background tasks
+            // This must complete before background tasks start to avoid race conditions
+            if let Err(e) = p.sync_existing_links_to_surreal().await {
                 log::warn!(
                     "Failed to sync existing links to SurrealDB for perspective {}: {:?}",
-                    handle_uuid,
+                    handle_clone.uuid,
                     e
                 );
             }
 
             // Only start background tasks after sync completes
-            tokio::spawn(p_clone.start_background_tasks());
+            tokio::spawn(p.start_background_tasks());
         });
-
-        perspectives.insert(handle.uuid.clone(), RwLock::new(p));
     }
 }
 
@@ -82,7 +92,12 @@ pub async fn add_perspective(
         .add_perspective(&handle)
         .map_err(|e| e.to_string())?;
 
-    let p = PerspectiveInstance::new(handle.clone(), created_from_join);
+    // Create a per-perspective SurrealDB instance
+    let surreal_service = crate::surreal_service::SurrealDBService::new("ad4m", &handle.uuid)
+        .await
+        .expect("Failed to create SurrealDB service for perspective");
+
+    let p = PerspectiveInstance::new(handle.clone(), created_from_join, surreal_service);
     tokio::spawn(p.clone().start_background_tasks());
 
     {
