@@ -835,7 +835,7 @@ describe("Prolog + Literals", () => {
                     // The image should be resolved from the note-store language and transformed to a data URL
                     expect(recipe2.image).to.equal(`data:image/png;base64,${testImageData.data_base64}`);
                 })
-/*
+
                 it("works with very long property values", async() => {
                     let root = Literal.from("Active record implementation test long value").toUrl()
                     const recipe = new Recipe(perspective!, root)
@@ -2367,7 +2367,7 @@ describe("Prolog + Literals", () => {
                         surrealBuilder.dispose();
                     });
                 });
-*/
+
                 describe('ModelQueryBuilder', () => {
                     let perspective: PerspectiveProxy;
 
