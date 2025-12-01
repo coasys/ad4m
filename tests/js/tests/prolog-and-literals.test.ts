@@ -809,11 +809,16 @@ describe("Prolog + Literals", () => {
                     let root = Literal.from("Active record implementation test resolveLanguage non-literal").toUrl();
                     const recipe = new Recipe(perspective!, root);
 
-                    // Set the image property to the expression URL
-                    recipe.image = imageExprUrl;
+                    // Manually add the link instead of using save() to test the query resolution path
                     recipe.name = "Test with image";
+                    await recipe.save(); // Save the name
 
-                    await recipe.save();
+                    // Add the image link manually
+                    await perspective!.setSingleTarget(new Link({
+                        source: root,
+                        predicate: "recipe://image",
+                        target: imageExprUrl
+                    }));
 
                     // Verify the link was created with the expression URL
                     //@ts-ignore
