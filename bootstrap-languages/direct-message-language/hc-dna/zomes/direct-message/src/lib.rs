@@ -215,7 +215,7 @@ pub fn fetch_inbox(_: ()) -> ExternResult<()> {
         )?
         .tag_prefix(LinkTag::new("message"));
 
-        for link in get_links(query, GetStrategy::Network)? {
+        for link in get_links(query, GetStrategy::Local)? {
             //debug!("fetch_inbox link");
             if let Some(message_entry) = get(
                 link.target

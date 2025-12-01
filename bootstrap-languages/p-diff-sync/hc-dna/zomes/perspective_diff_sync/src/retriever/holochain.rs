@@ -172,7 +172,7 @@ pub fn get_active_agents() -> SocialContextResult<Vec<AgentPubKey>> {
         LinkTypes::Index
     )?
     .tag_prefix(LinkTag::new("active_agent"));
-    let recent_agents = get_links(query, GetStrategy::Network)?;
+    let recent_agents = get_links(query, GetStrategy::Local)?;
 
     let recent_agents = recent_agents
         .into_iter()
