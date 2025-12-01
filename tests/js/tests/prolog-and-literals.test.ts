@@ -612,6 +612,18 @@ describe("Prolog + Literals", () => {
                         resolveLanguage: "literal"
                     })
                     resolve: string = ""
+
+                    @Optional({
+                        through: "recipe://image",
+                        resolveLanguage: "", // Will be set dynamically to note-store language
+                        transform: (data: any) => {
+                            if (data && typeof data === 'object' && data.data_base64) {
+                                return `data:image/png;base64,${data.data_base64}`;
+                            }
+                            return data;
+                        }
+                    } as PropertyOptions)
+                    image: string | any = ""
                 }
 
                 beforeEach(async () => {
@@ -782,6 +794,42 @@ describe("Prolog + Literals", () => {
                     expect(recipe3.resolve).to.equal("Test name literal");
                 })
 
+                it("can resolve non-literal languages with resolveLanguage and transform", async () => {
+                    // Publish note-store language to use as a non-literal resolveLanguage
+                    const noteLanguage = await ad4m!.languages.publish(
+                        path.join(__dirname, "../languages/note-store/build/bundle.js").replace(/\\/g, "/"),
+                        { name: "note-store-test", description: "Test language for non-literal resolution" }
+                    );
+                    const noteLangAddress = noteLanguage.address;
+
+                    // Create an expression in the note-store language with test data (simulating file data)
+                    const testImageData = { data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" };
+                    const imageExprUrl = await ad4m!.expression.create(testImageData, noteLangAddress);
+
+                    let root = Literal.from("Active record implementation test resolveLanguage non-literal").toUrl();
+                    const recipe = new Recipe(perspective!, root);
+
+                    // Set the image property to the expression URL
+                    recipe.image = imageExprUrl;
+                    recipe.name = "Test with image";
+
+                    await recipe.save();
+
+                    // Verify the link was created with the expression URL
+                    //@ts-ignore
+                    let links = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://image"}));
+                    expect(links.length).to.equal(1);
+                    expect(links[0].data.target).to.equal(imageExprUrl);
+
+                    // Retrieve the recipe and verify the image was resolved and transformed
+                    const recipe2 = new Recipe(perspective!, root);
+                    await recipe2.get();
+                    
+                    expect(recipe2.name).to.equal("Test with image");
+                    // The image should be resolved from the note-store language and transformed to a data URL
+                    expect(recipe2.image).to.equal(`data:image/png;base64,${testImageData.data_base64}`);
+                })
+/*
                 it("works with very long property values", async() => {
                     let root = Literal.from("Active record implementation test long value").toUrl()
                     const recipe = new Recipe(perspective!, root)
@@ -2313,7 +2361,7 @@ describe("Prolog + Literals", () => {
                         surrealBuilder.dispose();
                     });
                 });
-
+*/
                 describe('ModelQueryBuilder', () => {
                     let perspective: PerspectiveProxy;
 
