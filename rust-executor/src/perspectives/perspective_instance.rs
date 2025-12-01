@@ -25,7 +25,7 @@ use crate::pubsub::{
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
     RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
-use crate::surreal_service::get_surreal_service;
+use crate::surreal_service::SurrealDBService;
 use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
 use chrono::DateTime;
@@ -189,10 +189,19 @@ pub struct PerspectiveInstance {
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
+    // Each perspective has its own isolated SurrealDB instance
+    surreal_service: Arc<SurrealDBService>,
 }
 
 impl PerspectiveInstance {
-    pub fn new(handle: PerspectiveHandle, created_from_join: Option<bool>) -> Self {
+    pub fn new(
+        handle: PerspectiveHandle,
+        created_from_join: Option<bool>,
+        surreal_service: SurrealDBService,
+    ) -> Self {
+        // Each perspective gets its own isolated SurrealDB database
+        // The service is created by the caller in an async context
+
         PerspectiveInstance {
             persisted: Arc::new(Mutex::new(handle.clone())),
 
@@ -214,6 +223,8 @@ impl PerspectiveInstance {
             // Initialize fallback sync tracking
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
             fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
+            // Each perspective gets its own isolated SurrealDB database
+            surreal_service: Arc::new(surreal_service),
         }
     }
 
@@ -257,8 +268,9 @@ impl PerspectiveInstance {
         }
 
         // Reload perspective in SurrealDB
-        let surreal_service = get_surreal_service().await;
-        surreal_service.reload_perspective(&uuid, all_links).await?;
+        self.surreal_service
+            .reload_perspective(&uuid, all_links)
+            .await?;
 
         log::info!("💾 SURREAL SYNC: Completed in {:?}", sync_start.elapsed());
         Ok(())
@@ -1613,8 +1625,7 @@ impl PerspectiveInstance {
             persisted_guard.uuid.clone()
         };
 
-        get_surreal_service()
-            .await
+        self.surreal_service
             .query_links(&uuid, &query)
             .await
             .map_err(|e| {
@@ -1635,8 +1646,6 @@ impl PerspectiveInstance {
         };
 
         // Update SurrealDB synchronously
-        let surreal_service = get_surreal_service().await;
-
         // IMPORTANT: Process removals BEFORE additions!
         // The remove_link function matches by source/predicate/target (not unique ID).
         // If we add first and remove second, we'd delete the newly added links too.
@@ -1644,7 +1653,7 @@ impl PerspectiveInstance {
         // Wrong order: add 4 links, then remove 3 -> only garlic remains
         // Correct order: remove 3 old links, then add 4 new links -> all 4 remain
         for removal in &diff.removals {
-            if let Err(e) = surreal_service.remove_link(&uuid, removal).await {
+            if let Err(e) = self.surreal_service.remove_link(&uuid, removal).await {
                 log::warn!(
                     "Failed to remove link from SurrealDB for perspective {}: {:?}",
                     uuid,
@@ -1653,7 +1662,7 @@ impl PerspectiveInstance {
             }
         }
         for addition in &diff.additions {
-            if let Err(e) = surreal_service.add_link(&uuid, addition).await {
+            if let Err(e) = self.surreal_service.add_link(&uuid, addition).await {
                 log::warn!(
                     "Failed to add link to SurrealDB for perspective {}: {:?}",
                     uuid,
@@ -3231,7 +3240,7 @@ mod tests {
     use crate::graphql::graphql_types::PerspectiveState;
     use crate::perspectives::perspective_instance::PerspectiveHandle;
     use crate::prolog_service::init_prolog_service;
-    use crate::surreal_service::init_surreal_service;
+    use crate::surreal_service::{init_surreal_service, SurrealDBService};
     use crate::test_utils::setup_wallet;
     use fake::{Fake, Faker};
     use uuid::Uuid;
@@ -3247,15 +3256,21 @@ mod tests {
             .await
             .expect("Failed to init surreal service");
 
+        let uuid = Uuid::new_v4().to_string();
+        let surreal_service = SurrealDBService::new("ad4m", &uuid)
+            .await
+            .expect("Failed to create SurrealDB service");
+
         let instance = PerspectiveInstance::new(
             PerspectiveHandle {
-                uuid: Uuid::new_v4().to_string(),
+                uuid,
                 name: Some("Test Perspective".to_string()),
                 shared_url: None,
                 neighbourhood: None,
                 state: PerspectiveState::Private,
             },
             None,
+            surreal_service,
         );
 
         // Ensure prolog engine pool is initialized
@@ -3268,15 +3283,21 @@ mod tests {
     }
 
     async fn create_perspective() -> PerspectiveInstance {
+        let uuid = Uuid::new_v4().to_string();
+        let surreal_service = SurrealDBService::new("ad4m", &uuid)
+            .await
+            .expect("Failed to create SurrealDB service");
+
         let instance = PerspectiveInstance::new(
             PerspectiveHandle {
-                uuid: Uuid::new_v4().to_string(),
+                uuid,
                 name: Some("Test Perspective".to_string()),
                 shared_url: None,
                 neighbourhood: None,
                 state: PerspectiveState::Private,
             },
             None,
+            surreal_service,
         );
 
         // Ensure prolog engine pool is initialized
@@ -3718,10 +3739,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_link_surreal_query() {
+        println!("test_add_link_surreal_query");
         let mut perspective = setup().await;
 
+        println!("test_add_link_surreal_query");
         // Add a link
         let link = create_link();
+        println!("link: {:?}", link);
         let source = link.source.clone();
         let predicate = link.predicate.clone().unwrap_or_default();
         let target = link.target.clone();
@@ -3730,13 +3754,14 @@ mod tests {
             .add_link(link.clone(), LinkStatus::Shared, None)
             .await
             .unwrap();
+        println!("link added");
 
         // Query SurrealDB
         let results = perspective
             .surreal_query("SELECT * FROM link".to_string())
             .await
             .unwrap();
-
+        println!("results: {:?}", results);
         // Verify link was added to SurrealDB
         assert!(results.len() > 0, "Expected at least one link in SurrealDB");
 
@@ -4123,10 +4148,7 @@ property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predi
         };
 
         // Debug: First, check raw data in SurrealDB including IDs
-        let raw_query = format!(
-            "SELECT id, source, predicate, target FROM link WHERE perspective = '{}'",
-            uuid
-        );
+        let raw_query = format!("SELECT id, source, predicate, target FROM link ",);
         let raw_results = perspective.surreal_query(raw_query).await.unwrap();
         println!("Debug - Raw links in SurrealDB: {}", raw_results.len());
         for (i, link) in raw_results.iter().enumerate() {
@@ -4186,8 +4208,7 @@ property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predi
 
         // Debug: Test GROUP BY with manual perspective filter
         let simple_group_query = format!(
-            "SELECT source AS base, array::group(predicate) AS predicates FROM link WHERE perspective = '{}' GROUP BY source",
-            uuid
+            "SELECT source AS base, array::group(predicate) AS predicates FROM link  GROUP BY source"
         );
         println!("\nDebug - GROUP BY with WHERE: {}", simple_group_query);
         let simple_group_results = perspective.surreal_query(simple_group_query).await.unwrap();
@@ -4208,21 +4229,18 @@ property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predi
         // This emulates Prolog's instance(C, Base) check
         // Using manual perspective filter since auto-injection is temporarily disabled
         // NOTE: Cannot alias 'source' in SELECT when using GROUP BY source - it breaks SurrealDB grouping!
-        let query = format!(
-            r#"
-SELECT 
+        let query = r#"
+SELECT
   source,
   array::group(predicate) AS predicates,
   array::group(target) AS targets
 FROM link
-WHERE 
-  perspective = '{}'
-  AND source IN (SELECT VALUE source FROM link WHERE perspective = '{}' AND predicate = 'recipe://name')
-  AND source IN (SELECT VALUE source FROM link WHERE perspective = '{}' AND predicate = 'recipe://rating')
+WHERE
+  source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://name')
+  AND source IN (SELECT VALUE source FROM link WHERE predicate = 'recipe://rating')
 GROUP BY source
-"#,
-            uuid, uuid, uuid
-        );
+"#
+        .to_string();
 
         println!("\n=== Running structural query for Recipe instances ===");
         println!("Query:\n{}", query);
@@ -4381,8 +4399,8 @@ GROUP BY source
         // Test 1: Query without fn::parse_literal() - should match the full literal URL
         println!("\n=== Test 1: Query without fn::parse_literal() ===");
         let query_raw = format!(
-            "SELECT source, target FROM link WHERE perspective = '{}' AND predicate = 'recipe://name' AND target = '{}'",
-            uuid, recipe1_name_literal
+            "SELECT source, target FROM link WHERE predicate = 'recipe://name' AND target = '{}'",
+            recipe1_name_literal
         );
         println!("Query: {}", query_raw);
         let results_raw = perspective.surreal_query(query_raw).await.unwrap();
@@ -4424,8 +4442,7 @@ GROUP BY source
         // Test 3: Now check what fn::parse_literal() returns for our data
         println!("\n=== Test 3: Check what fn::parse_literal() returns on link targets ===");
         let query_check = format!(
-            "SELECT source, target, fn::parse_literal(target) AS parsed_data FROM link WHERE perspective = '{}' AND predicate = 'recipe://name'",
-            uuid
+            "SELECT source, target, fn::parse_literal(target) AS parsed_data FROM link WHERE predicate = 'recipe://name'",
         );
         println!("Query:\n{}", query_check);
         let results_check = perspective.surreal_query(query_check).await.unwrap();
@@ -4443,8 +4460,7 @@ GROUP BY source
         // Test 4: Try to match using parsed value
         println!("\n=== Test 4: Query with fn::parse_literal() to match data value ===");
         let query_parsed = format!(
-            "SELECT source, target, fn::parse_literal(target) AS parsed_data FROM link WHERE perspective = '{}' AND predicate = 'recipe://name' AND fn::parse_literal(target) = 'Pasta Carbonara'",
-            uuid
+            "SELECT source, target, fn::parse_literal(target) AS parsed_data FROM link WHERE predicate = 'recipe://name' AND fn::parse_literal(target) = 'Pasta Carbonara'",
         );
         println!("Query:\n{}", query_parsed);
         let results_parsed = perspective.surreal_query(query_parsed).await.unwrap();
@@ -4486,8 +4502,7 @@ GROUP BY source
         // Test 5: Query multiple values with fn::parse_literal()
         println!("\n=== Test 5: Query with IN clause using fn::parse_literal() ===");
         let query_multiple = format!(
-            "SELECT source, fn::parse_literal(target) AS parsed_data FROM link WHERE perspective = '{}' AND predicate = 'recipe://name' AND fn::parse_literal(target) IN ['Pasta Carbonara', 'Pizza Margherita']",
-            uuid
+            "SELECT source, fn::parse_literal(target) AS parsed_data FROM link WHERE predicate = 'recipe://name' AND fn::parse_literal(target) IN ['Pasta Carbonara', 'Pizza Margherita']",
         );
         println!("Query:\n{}", query_multiple);
         let results_multiple = perspective.surreal_query(query_multiple).await.unwrap();
@@ -4525,8 +4540,7 @@ GROUP BY source
         // Test 6: GROUP BY with fn::parse_literal() - this should fail as SurrealDB doesn't support it
         println!("\n=== Test 6: GROUP BY with fn::parse_literal() ===");
         let query_group = format!(
-            "SELECT fn::parse_literal(target), array::group(source) AS sources FROM link WHERE perspective = '{}' AND predicate = 'recipe://name' GROUP BY fn::parse_literal(target)",
-            uuid
+            "SELECT fn::parse_literal(target), array::group(source) AS sources FROM link WHERE predicate = 'recipe://name' GROUP BY fn::parse_literal(target)",
         );
         println!("Query:\n{}", query_group);
         let result_group = perspective.surreal_query(query_group).await;

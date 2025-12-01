@@ -96,6 +96,7 @@ struct NodeRecord {
 
 /// Link edge record connecting two nodes in the graph
 /// This is used with RELATE statements: node->link->node
+/// Note: No 'perspective' field - each perspective has its own isolated database
 #[derive(Debug, Serialize, Deserialize)]
 struct LinkEdge {
     #[serde(skip)]
@@ -107,7 +108,6 @@ struct LinkEdge {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[allow(dead_code)]
     out: Option<serde_json::Value>, // Target node (auto-created by RELATE)
-    perspective: String,
     predicate: String,
     author: String,
     timestamp: String,
@@ -243,15 +243,15 @@ impl SurrealDBService {
         }
     }
 
-    pub async fn new() -> Result<Self, Error> {
+    pub async fn new(namespace: &str, database: &str) -> Result<Self, Error> {
         // Enable scripting (and any other capabilities you want)
         let config = Config::default().capabilities(Capabilities::default().with_scripting(true));
 
         // Initialize in-memory SurrealDB instance
         let db = Surreal::new::<Mem>(config).await?;
 
-        // Set namespace and database
-        db.use_ns("ad4m").use_db("perspectives").await?;
+        // Set namespace and database (each perspective gets its own database for isolation)
+        db.use_ns(namespace).use_db(database).await?;
 
         // Define schema with graph structure for optimal traversal
         db.query(
@@ -264,22 +264,20 @@ impl SurrealDBService {
             -- Link table is a graph edge connecting nodes
             -- RELATE automatically creates 'in' (source node) and 'out' (target node) fields pointing to nodes
             -- We ALSO store source/target as explicit string fields for simple WHERE clause filtering
+            -- Note: No 'perspective' field needed - each perspective has its own database
             DEFINE TABLE IF NOT EXISTS link SCHEMAFULL TYPE RELATION IN node OUT node;
             DEFINE FIELD IF NOT EXISTS source ON link TYPE string;
             DEFINE FIELD IF NOT EXISTS target ON link TYPE string;
-            DEFINE FIELD IF NOT EXISTS perspective ON link TYPE string;
             DEFINE FIELD IF NOT EXISTS predicate ON link TYPE string;
             DEFINE FIELD IF NOT EXISTS author ON link TYPE string;
             DEFINE FIELD IF NOT EXISTS timestamp ON link TYPE string;
 
             -- Indexes for fast queries (both graph traversal and string-based)
-            DEFINE INDEX IF NOT EXISTS perspective_idx ON link FIELDS perspective;
             DEFINE INDEX IF NOT EXISTS predicate_idx ON link FIELDS predicate;
             DEFINE INDEX IF NOT EXISTS source_idx ON link FIELDS source;
             DEFINE INDEX IF NOT EXISTS target_idx ON link FIELDS target;
             DEFINE INDEX IF NOT EXISTS in_predicate_idx ON link FIELDS in, predicate;
             DEFINE INDEX IF NOT EXISTS out_predicate_idx ON link FIELDS out, predicate;
-            DEFINE INDEX IF NOT EXISTS perspective_predicate_idx ON link FIELDS perspective, predicate;
             DEFINE INDEX IF NOT EXISTS source_predicate_idx ON link FIELDS source, predicate;
             DEFINE INDEX IF NOT EXISTS target_predicate_idx ON link FIELDS target, predicate;
 
@@ -334,7 +332,7 @@ impl SurrealDBService {
 
     pub async fn add_link(
         &self,
-        perspective_uuid: &str,
+        _perspective_uuid: &str, // Kept for API compatibility but unused (each perspective has its own DB)
         link: &DecoratedLinkExpression,
     ) -> Result<(), Error> {
         // Ensure source and target nodes exist
@@ -346,7 +344,7 @@ impl SurrealDBService {
         let predicate = link.data.predicate.clone().unwrap_or_default();
 
         let relate_query = format!(
-            "RELATE {}->link->{} SET source = $source, target = $target, perspective = $perspective, predicate = $predicate, author = $author, timestamp = $timestamp",
+            "RELATE {}->link->{} SET source = $source, target = $target, predicate = $predicate, author = $author, timestamp = $timestamp",
             source_id, target_id
         );
 
@@ -354,7 +352,6 @@ impl SurrealDBService {
             .query(&relate_query)
             .bind(("source", link.data.source.clone()))
             .bind(("target", link.data.target.clone()))
-            .bind(("perspective", perspective_uuid.to_string()))
             .bind(("predicate", predicate))
             .bind(("author", link.author.clone()))
             .bind(("timestamp", link.timestamp.clone()))
@@ -365,30 +362,26 @@ impl SurrealDBService {
 
     pub async fn remove_link(
         &self,
-        perspective_uuid: &str,
+        _perspective_uuid: &str, // Kept for API compatibility but unused (each perspective has its own DB)
         link: &DecoratedLinkExpression,
     ) -> Result<(), Error> {
-        let perspective_uuid = perspective_uuid.to_string();
-
         // Get node IDs for source and target
         let source_id = self.ensure_node(&link.data.source).await?;
         let target_id = self.ensure_node(&link.data.target).await?;
 
         let predicate = link.data.predicate.clone().unwrap_or_default();
 
-        // Delete the graph edge matching in, out, and other criteria
+        // Delete the graph edge matching in, out, and predicate
         // In graph edges, 'in' is source and 'out' is target
         self.db
             .query(
                 "DELETE FROM link WHERE
                 in = type::thing($source_id) AND
                 out = type::thing($target_id) AND
-                perspective = $perspective AND
                 predicate = $predicate",
             )
             .bind(("source_id", source_id))
             .bind(("target_id", target_id))
-            .bind(("perspective", perspective_uuid.to_string()))
             .bind(("predicate", predicate))
             .await?;
 
@@ -397,155 +390,27 @@ impl SurrealDBService {
 
     pub async fn query_links(
         &self,
-        perspective_uuid: &str,
+        _perspective_uuid: &str, // Kept for API compatibility but unused (each perspective has its own DB)
         query: &str,
     ) -> Result<Vec<Value>, Error> {
         let total_start = std::time::Instant::now();
-        let perspective_uuid = perspective_uuid.to_string();
         let query = query.trim().to_string();
 
         // Validate that the query is read-only before executing
         Self::validate_readonly_query(&query)?;
 
-        // Automatically inject perspective filter into the query
-        // NOTE: Cannot alias grouped fields in SELECT when using GROUP BY - it breaks SurrealDB grouping!
-        let prep_start = std::time::Instant::now();
-        let query_upper = query.to_uppercase();
-
-        let filtered_query = if query_upper.contains("FROM LINK") {
-            // Find all occurrences of "FROM link" (case insensitive)
-            let mut result = query.clone();
-            let mut search_start = 0;
-
-            loop {
-                let remaining = &result[search_start..];
-                let remaining_upper = remaining.to_uppercase();
-
-                if let Some(pos) = remaining_upper.find("FROM LINK") {
-                    let absolute_pos = search_start + pos;
-
-                    // Check if this FROM LINK is already in a subquery
-                    // Count opening and closing parentheses before this position
-                    let _before = &result[..absolute_pos];
-                    let _open_parens = _before.matches('(').count();
-                    let _close_parens = _before.matches(')').count();
-
-                    // If we're not inside a subquery (or we are but this is the innermost link table)
-                    // we should wrap it
-                    let end_pos = absolute_pos + 9; // "FROM link".len() = 9
-
-                    // Check what comes after "link" - handle aliases
-                    let after = &result[end_pos..].trim_start();
-                    let mut injection_point = end_pos;
-                    let mut has_alias = false;
-
-                    // If there's an alias, we need to find the injection point after the alias
-                    if after.starts_with("AS") || after.starts_with("as") {
-                        has_alias = true;
-                        // Skip "AS" or "as"
-                        let alias_start = if after.starts_with("AS") { 2 } else { 2 };
-                        let after_as = &after[alias_start..].trim_start();
-
-                        // Find the end of the alias identifier
-                        let alias_end = after_as
-                            .find(|c: char| !c.is_alphanumeric() && c != '_')
-                            .unwrap_or(after_as.len());
-
-                        // Update injection point to be after the alias
-                        injection_point = end_pos
-                            + (after.len() - after.trim_start().len())
-                            + alias_start
-                            + (after_as.len() - after_as.trim_start().len())
-                            + alias_end;
-                    }
-
-                    // Replace "FROM link" (or "FROM link AS alias") with appropriate WHERE clause
-                    // But need to check if there's already a WHERE clause after this FROM
-                    let after_from = &result[injection_point..];
-                    let after_from_upper = after_from.trim_start().to_uppercase();
-
-                    if after_from_upper.starts_with("WHERE") {
-                        // Already has WHERE, inject AND condition with proper parenthesization
-                        let where_start =
-                            injection_point + after_from.len() - after_from.trim_start().len();
-                        let where_end = where_start + 5; // "WHERE".len()
-
-                        // Extract the original WHERE condition (only up to GROUP BY, ORDER BY, LIMIT, etc.)
-                        let after_where = &result[where_end..];
-                        let after_where_upper = after_where.to_uppercase();
-
-                        // Find where the WHERE clause ends (before GROUP BY, ORDER BY, LIMIT, OFFSET, etc.)
-                        let clause_keywords = ["GROUP BY", "ORDER BY", "LIMIT", "OFFSET", "FETCH"];
-                        let mut where_clause_end = after_where.len();
-
-                        for keyword in &clause_keywords {
-                            if let Some(pos) = after_where_upper.find(keyword) {
-                                where_clause_end = where_clause_end.min(pos);
-                            }
-                        }
-
-                        let original_condition = after_where[..where_clause_end].trim().to_string();
-                        let rest_of_query = after_where[where_clause_end..].to_string();
-                        let before_where = result[..where_end].to_string();
-
-                        let injection_text =
-                            format!(" perspective = $perspective AND ({})", original_condition);
-
-                        // Wrap original condition in parentheses to preserve operator precedence
-                        result = format!("{}{}{}", before_where, injection_text, rest_of_query);
-                        // Move search_start past the injection point to avoid reprocessing
-                        search_start = where_end + injection_text.len();
-                    } else {
-                        // No WHERE yet, add one
-                        let after_trimmed = &result[injection_point..].trim_start();
-
-                        if has_alias {
-                            // We already have the alias, just inject WHERE after it
-                            result = format!(
-                                "{} WHERE perspective = $perspective {}",
-                                &result[..injection_point],
-                                after_trimmed
-                            );
-                            search_start =
-                                injection_point + " WHERE perspective = $perspective".len();
-                        } else {
-                            // No alias, inject WHERE directly after "FROM link"
-                            result = format!(
-                                "{}FROM link WHERE perspective = $perspective {}",
-                                &result[..absolute_pos],
-                                after_trimmed
-                            );
-                            search_start =
-                                absolute_pos + "FROM link WHERE perspective = $perspective".len();
-                        }
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            result
-        } else {
-            // No "FROM link" found, return query as-is
-            // This might be a complex query or error, but we'll let SurrealDB handle it
-            query.clone()
-        };
-
-        log::trace!(
-            "🦦🦦 SurrealDB query preparation took {:?}",
-            prep_start.elapsed()
-        );
-        log::trace!("🦦🦦 SurrealDB filtered query:\n{}", filtered_query);
+        // No filtering needed! Each perspective has its own isolated database.
+        // This eliminates 200+ lines of fragile string manipulation that was causing bugs.
+        log::trace!("🦦🦦 SurrealDB query (no filtering needed):\n{}", query);
 
         let execute_start = std::time::Instant::now();
-        let mut query_obj = self.db.query(filtered_query.clone());
-        query_obj = query_obj.bind(("perspective", perspective_uuid.clone()));
+        let query_obj = self.db.query(query.clone());
 
         // Execute query with periodic logging instead of timeout
         log::trace!("🦦⏳ Starting query execution...");
 
         // Spawn a task that logs every 10 seconds while the query is running
-        let query_for_logging = filtered_query.clone();
+        let query_for_logging = query.clone();
         let execute_start_for_logging = execute_start.clone();
         let logging_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
@@ -581,7 +446,7 @@ impl SurrealDBService {
                     "🦦💥 SurrealDB query failed after {:?}: {:?}\nQuery was: {}",
                     execute_start.elapsed(),
                     e,
-                    filtered_query
+                    query
                 );
                 return Err(e.into());
             }
@@ -589,11 +454,11 @@ impl SurrealDBService {
                 log::error!(
                     "🦦⏱️💥 Query timed out after {:?} (60s limit)\nQuery was: {}",
                     execute_start.elapsed(),
-                    filtered_query
+                    query
                 );
                 return Err(Error::msg(format!(
                     "Query execution timed out after 60 seconds. Query: {}",
-                    filtered_query
+                    query
                 )));
             }
         };
@@ -637,13 +502,10 @@ impl SurrealDBService {
     }
 
     #[allow(dead_code)]
-    pub async fn clear_perspective(&self, perspective_uuid: &str) -> Result<(), Error> {
-        let perspective_uuid = perspective_uuid.to_string();
-
-        self.db
-            .query("DELETE FROM link WHERE perspective = $perspective")
-            .bind(("perspective", perspective_uuid))
-            .await?;
+    pub async fn clear_perspective(&self, _perspective_uuid: &str) -> Result<(), Error> {
+        // Clear all links in this perspective's database
+        // (each perspective has its own database, so no filter needed)
+        self.db.query("DELETE FROM link").await?;
 
         Ok(())
     }
@@ -654,13 +516,9 @@ impl SurrealDBService {
         perspective_uuid: &str,
         links: Vec<DecoratedLinkExpression>,
     ) -> Result<(), Error> {
-        let perspective_uuid_str = perspective_uuid.to_string();
-
-        // Clear existing links for this perspective
-        self.db
-            .query("DELETE FROM link WHERE perspective = $perspective")
-            .bind(("perspective", perspective_uuid_str.clone()))
-            .await?;
+        // Clear all links in this perspective's database
+        // (each perspective has its own database, so no filter needed)
+        self.db.query("DELETE FROM link").await?;
 
         if links.is_empty() {
             return Ok(());
@@ -680,7 +538,9 @@ lazy_static! {
 }
 
 pub async fn init_surreal_service() -> Result<(), Error> {
-    let service = SurrealDBService::new().await?;
+    // Create a default global service instance for backward compatibility
+    // Note: This is legacy - new code should create per-perspective instances
+    let service = SurrealDBService::new("ad4m", "default").await?;
     let mut lock = SURREAL_SERVICE.write().await;
     *lock = Some(service);
     Ok(())
@@ -724,13 +584,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_new_service_initializes_successfully() {
-        let service = SurrealDBService::new().await;
+        let service = SurrealDBService::new("ad4m", "test_init").await;
         assert!(service.is_ok(), "Service should initialize successfully");
     }
 
     #[tokio::test]
     async fn test_add_single_link() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_1";
         let link = create_test_link(
             "source1",
@@ -751,7 +611,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_link_with_none_predicate() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_2";
         let link = create_test_link(
             "source1",
@@ -774,7 +634,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_multiple_links() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_3";
 
         let link1 = create_test_link(
@@ -810,7 +670,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_link() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_4";
         let link = create_test_link(
             "source1",
@@ -839,7 +699,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_nonexistent_link() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_5";
         let link = create_test_link(
             "source1",
@@ -856,7 +716,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ensure_node_creates_node() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let test_uri = "testnode://example";
 
         // Use ensure_node to create the node
@@ -889,7 +749,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_nodes_are_created_for_links() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_nodes";
 
         // Create and add a link (which should ensure two nodes exist)
@@ -943,7 +803,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_links_by_source() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_6";
 
         let link1 = create_test_link(
@@ -984,7 +844,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_links_by_predicate() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_7";
 
         let link1 = create_test_link(
@@ -1024,7 +884,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_links_by_target() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_8";
 
         let link1 = create_test_link(
@@ -1065,7 +925,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_links_composite_source_and_predicate() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_9";
 
         let link1 = create_test_link(
@@ -1106,7 +966,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clear_perspective() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_10";
 
         let link1 = create_test_link(
@@ -1143,9 +1003,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_perspective_isolation() {
-        let service = SurrealDBService::new().await.unwrap();
+        // Each perspective gets its own isolated database
         let perspective1 = "test_perspective_11";
         let perspective2 = "test_perspective_12";
+        let service1 = SurrealDBService::new("ad4m", perspective1).await.unwrap();
+        let service2 = SurrealDBService::new("ad4m", perspective2).await.unwrap();
 
         let link1 = create_test_link(
             "source1",
@@ -1162,12 +1024,12 @@ mod tests {
             "2024-01-01T00:00:01Z",
         );
 
-        service.add_link(perspective1, &link1).await.unwrap();
-        service.add_link(perspective2, &link2).await.unwrap();
+        service1.add_link(perspective1, &link1).await.unwrap();
+        service2.add_link(perspective2, &link2).await.unwrap();
 
         // Query perspective1
         let query = "SELECT * FROM link";
-        let results1 = service.query_links(perspective1, query).await.unwrap();
+        let results1 = service1.query_links(perspective1, query).await.unwrap();
         assert_eq!(
             results1.len(),
             1,
@@ -1175,7 +1037,7 @@ mod tests {
         );
 
         // Query perspective2
-        let results2 = service.query_links(perspective2, query).await.unwrap();
+        let results2 = service2.query_links(perspective2, query).await.unwrap();
         assert_eq!(
             results2.len(),
             1,
@@ -1183,9 +1045,9 @@ mod tests {
         );
 
         // Clear perspective1 should not affect perspective2
-        service.clear_perspective(perspective1).await.unwrap();
-        let results1_after = service.query_links(perspective1, query).await.unwrap();
-        let results2_after = service.query_links(perspective2, query).await.unwrap();
+        service1.clear_perspective(perspective1).await.unwrap();
+        let results1_after = service1.query_links(perspective1, query).await.unwrap();
+        let results2_after = service2.query_links(perspective2, query).await.unwrap();
 
         assert_eq!(
             results1_after.len(),
@@ -1201,7 +1063,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reload_perspective() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_13";
 
         // Add initial links
@@ -1268,7 +1130,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reload_perspective_with_empty_list() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_14";
 
         // Add initial links
@@ -1300,7 +1162,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reload_perspective_data_integrity() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_reload_integrity";
 
         // Add initial links with specific data
@@ -1561,7 +1423,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reload_perspective_with_large_dataset() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_large_reload";
 
         // Create a larger dataset to simulate real-world usage (1000 links)
@@ -1717,18 +1579,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_global_service_initialization() {
-        // Initialize the global service
-        let init_result = init_surreal_service().await;
-        assert!(
-            init_result.is_ok(),
-            "Global service initialization should succeed"
-        );
-
-        // Get the global service
-        let service = get_surreal_service().await;
+        // Create a test service (each perspective gets its own in production)
+        let service = SurrealDBService::new("ad4m", "test_global_init")
+            .await
+            .unwrap();
 
         // Test that the service works
-        let perspective_uuid = "test_perspective_15";
+        let perspective_uuid = "test_global_init";
         let link = create_test_link(
             "source1",
             Some("predicate1"),
@@ -1743,7 +1600,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_without_perspective_binding() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_16";
 
         let link = create_test_link(
@@ -1767,11 +1624,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_automatic_perspective_filtering() {
-        // This test verifies that perspective filtering is enforced automatically
-        // even when the query doesn't explicitly mention perspective
-        let service = SurrealDBService::new().await.unwrap();
+        // This test verifies that perspective isolation is enforced automatically
+        // Each perspective has its own database
         let perspective1 = "test_perspective_auto_1";
         let perspective2 = "test_perspective_auto_2";
+        let service1 = SurrealDBService::new("ad4m", perspective1).await.unwrap();
+        let service2 = SurrealDBService::new("ad4m", perspective2).await.unwrap();
 
         // Add links to perspective1
         let link1 = create_test_link(
@@ -1781,7 +1639,7 @@ mod tests {
             "author1",
             "2024-01-01T00:00:00Z",
         );
-        service.add_link(perspective1, &link1).await.unwrap();
+        service1.add_link(perspective1, &link1).await.unwrap();
 
         // Add links to perspective2 with same source/predicate
         let link2 = create_test_link(
@@ -1791,11 +1649,11 @@ mod tests {
             "author2",
             "2024-01-01T00:00:01Z",
         );
-        service.add_link(perspective2, &link2).await.unwrap();
+        service2.add_link(perspective2, &link2).await.unwrap();
 
         // Query without mentioning perspective - should only return perspective1's data
         let query = "SELECT * FROM link WHERE in.uri = 'shared_source'";
-        let results1 = service.query_links(perspective1, query).await.unwrap();
+        let results1 = service1.query_links(perspective1, query).await.unwrap();
         assert_eq!(
             results1.len(),
             1,
@@ -1803,7 +1661,7 @@ mod tests {
         );
 
         // Same query on perspective2 - should only return perspective2's data
-        let results2 = service.query_links(perspective2, query).await.unwrap();
+        let results2 = service2.query_links(perspective2, query).await.unwrap();
         assert_eq!(
             results2.len(),
             1,
@@ -1822,7 +1680,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_operations() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_17";
 
         // Create multiple links
@@ -1858,7 +1716,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_allows_select() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_validation_1";
 
         // Add a test link
@@ -1889,7 +1747,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_blocks_delete() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_validation_2";
 
         // DELETE queries should be blocked
@@ -1904,7 +1762,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_blocks_update() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_validation_3";
 
         // UPDATE queries should be blocked
@@ -1919,7 +1777,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_blocks_insert() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_validation_4";
 
         // INSERT queries should be blocked
@@ -1934,7 +1792,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_blocks_create() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_validation_5";
 
         // CREATE queries should be blocked
@@ -1949,7 +1807,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_blocks_drop() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_validation_6";
 
         // DROP queries should be blocked
@@ -1964,7 +1822,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_blocks_define() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_validation_7";
 
         // DEFINE queries should be blocked
@@ -1979,7 +1837,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_blocks_relate() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_validation_8";
 
         // RELATE queries should be blocked
@@ -1994,7 +1852,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_blocks_transaction() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_validation_9";
 
         // BEGIN TRANSACTION should be blocked
@@ -2018,7 +1876,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_case_insensitive() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_validation_10";
 
         // Should block lowercase delete
@@ -2034,7 +1892,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_with_semicolons() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_validation_11";
 
         // Should block DELETE even with multiple statements
@@ -2048,7 +1906,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_allows_delete_in_string() {
-        let service = SurrealDBService::new().await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db").await.unwrap();
         let perspective_uuid = "test_perspective_validation_12";
 
         // Add a test link
