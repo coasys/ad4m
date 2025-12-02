@@ -612,6 +612,18 @@ describe("Prolog + Literals", () => {
                         resolveLanguage: "literal"
                     })
                     resolve: string = ""
+
+                    @Optional({
+                        through: "recipe://image",
+                        resolveLanguage: "", // Will be set dynamically to note-store language
+                        transform: (data: any) => {
+                            if (data && typeof data === 'object' && data.data_base64) {
+                                return `data:image/png;base64,${data.data_base64}`;
+                            }
+                            return data;
+                        }
+                    } as PropertyOptions)
+                    image: string | any = ""
                 }
 
                 beforeEach(async () => {
@@ -780,6 +792,47 @@ describe("Prolog + Literals", () => {
                     const recipe3 = new Recipe(perspective!, root);
                     await recipe3.get();
                     expect(recipe3.resolve).to.equal("Test name literal");
+                })
+
+                it("can resolve non-literal languages with resolveLanguage and transform", async () => {
+                    // Publish note-store language to use as a non-literal resolveLanguage
+                    const noteLanguage = await ad4m!.languages.publish(
+                        path.join(__dirname, "../languages/note-store/build/bundle.js").replace(/\\/g, "/"),
+                        { name: "note-store-test", description: "Test language for non-literal resolution" }
+                    );
+                    const noteLangAddress = noteLanguage.address;
+
+                    // Create an expression in the note-store language with test data (simulating file data)
+                    const testImageData = { data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" };
+                    const imageExprUrl = await ad4m!.expression.create(testImageData, noteLangAddress);
+
+                    let root = Literal.from("Active record implementation test resolveLanguage non-literal").toUrl();
+                    const recipe = new Recipe(perspective!, root);
+
+                    // Manually add the link instead of using save() to test the query resolution path
+                    recipe.name = "Test with image";
+                    await recipe.save(); // Save the name
+
+                    // Add the image link manually
+                    await perspective!.setSingleTarget(new Link({
+                        source: root,
+                        predicate: "recipe://image",
+                        target: imageExprUrl
+                    }));
+
+                    // Verify the link was created with the expression URL
+                    //@ts-ignore
+                    let links = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://image"}));
+                    expect(links.length).to.equal(1);
+                    expect(links[0].data.target).to.equal(imageExprUrl);
+
+                    // Retrieve the recipe and verify the image was resolved and transformed
+                    const results = await Recipe.findAll(perspective!, { where: { name: "Test with image" } });
+                    const recipe2 = results[0];
+                    
+                    expect(recipe2.name).to.equal("Test with image");
+                    // The image should be resolved from the note-store language and transformed to a data URL
+                    expect(recipe2.image).to.equal(`data:image/png;base64,${testImageData.data_base64}`);
                 })
 
                 it("works with very long property values", async() => {
@@ -2042,6 +2095,7 @@ describe("Prolog + Literals", () => {
                 });
 
                 it("transform option in property decorators works", async () => {
+                    const transformTestPerspective = await ad4m?.perspective.add("transform-test");
                     @ModelOptions({ name: "ImagePost" })
                     class ImagePost extends Ad4mModel {
                         @Property({
@@ -2057,10 +2111,10 @@ describe("Prolog + Literals", () => {
                     }
 
                     // Register the ImagePost class
-                    await perspective!.ensureSDNASubjectClass(ImagePost);
+                    await transformTestPerspective!.ensureSDNASubjectClass(ImagePost);
 
                     // Create a new image post
-                    const post = new ImagePost(perspective!);
+                    const post = new ImagePost(transformTestPerspective!);
                     const imageData = "abc123";
                     //const imageData = { data_base64: "abc123" };
                     
@@ -2068,7 +2122,7 @@ describe("Prolog + Literals", () => {
                     await post.save();
 
                     // Retrieve the post and check transformed values
-                    const [retrieved] = await ImagePost.findAll(perspective!);
+                    const [retrieved] = await ImagePost.findAll(transformTestPerspective!);
                     expect(retrieved.image).to.equal("data:image/png;base64,abc123");
                 });
 
