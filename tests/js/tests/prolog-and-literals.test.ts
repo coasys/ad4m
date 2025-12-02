@@ -2095,6 +2095,7 @@ describe("Prolog + Literals", () => {
                 });
 
                 it("transform option in property decorators works", async () => {
+                    const transformTestPerspective = await ad4m?.perspective.add("transform-test");
                     @ModelOptions({ name: "ImagePost" })
                     class ImagePost extends Ad4mModel {
                         @Property({
@@ -2110,10 +2111,10 @@ describe("Prolog + Literals", () => {
                     }
 
                     // Register the ImagePost class
-                    await perspective!.ensureSDNASubjectClass(ImagePost);
+                    await transformTestPerspective!.ensureSDNASubjectClass(ImagePost);
 
                     // Create a new image post
-                    const post = new ImagePost(perspective!);
+                    const post = new ImagePost(transformTestPerspective!);
                     const imageData = "abc123";
                     //const imageData = { data_base64: "abc123" };
                     
@@ -2121,7 +2122,7 @@ describe("Prolog + Literals", () => {
                     await post.save();
 
                     // Retrieve the post and check transformed values
-                    const [retrieved] = await ImagePost.findAll(perspective!);
+                    const [retrieved] = await ImagePost.findAll(transformTestPerspective!);
                     expect(retrieved.image).to.equal("data:image/png;base64,abc123");
                 });
 
