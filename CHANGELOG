@@ -6,10 +6,14 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Fixed
+- Avoid delays in Ad4mModel.save() and batch.commit() [#639](https://github.com/coasys/ad4m/pull/639)
+- Set get strategy to local for all HC DNAs to avoid timeouts [#638](https://github.com/coasys/ad4m/pull/638)
+- Support non-literal resolveLanguage with transform in SurrealDB queries [#637](https://github.com/coasys/ad4m/pull/637)
 
 ### Added
 
 ### Changed
+- Refactor: Use Separate SurrealDB Database per Perspective [#636](https://github.com/coasys/ad4m/pull/636)
 
 ## [0.11.0] - 28/11/2025
 
