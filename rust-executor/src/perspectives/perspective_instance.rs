@@ -3198,13 +3198,10 @@ impl PerspectiveInstance {
             //log::info!("🔄 BATCH COMMIT: Starting prolog facts update - {} add, {} rem",
             //    combined_diff.additions.len(), combined_diff.removals.len());
 
-            // Create oneshot channel for prolog facts update completion
-            let (completion_sender, completion_receiver) = tokio::sync::oneshot::channel();
 
             // Update prolog facts once for all changes and wait for completion
-            self.spawn_prolog_facts_update(combined_diff.clone(), Some(completion_sender));
+            self.spawn_prolog_facts_update(combined_diff.clone(), None);
             self.update_surreal_cache(&combined_diff).await;
-            let _ = completion_receiver.await;
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
         }
