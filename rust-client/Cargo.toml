@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-client"
-version = "0.11.0"
+version = "0.11.1-dev"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas@coasys.org>"]
 description = "Client library wrapping AD4M's GraphQL interface"
