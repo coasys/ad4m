@@ -3219,7 +3219,6 @@ impl PerspectiveInstance {
             //log::info!("🔄 BATCH COMMIT: Starting prolog facts update - {} add, {} rem",
             //    combined_diff.additions.len(), combined_diff.removals.len());
 
-
             // Update prolog facts once for all changes and wait for completion
             self.spawn_prolog_facts_update(combined_diff.clone(), None);
             self.update_surreal_cache(&combined_diff).await;
