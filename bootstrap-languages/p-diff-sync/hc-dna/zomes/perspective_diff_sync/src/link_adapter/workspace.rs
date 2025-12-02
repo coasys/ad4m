@@ -668,7 +668,7 @@ impl Workspace {
             LinkTypes::Snapshot
         )?
         .tag_prefix(LinkTag::new("snapshot"));
-        let mut snapshot_links = get_links(query, GetStrategy::Network)?;
+        let mut snapshot_links = get_links(query, GetStrategy::Local)?;
 
         if snapshot_links.len() > 0 {
             let snapshot = get(

@@ -46,7 +46,7 @@ pub fn generate_snapshot(
                 LinkTypes::Snapshot
             )?
             .tag_prefix(LinkTag::new("snapshot"));
-            let mut snapshot_links = get_links(query, GetStrategy::Network)?;
+            let mut snapshot_links = get_links(query, GetStrategy::Local)?;
             let after = get_now()?.time();
             debug!("===PerspectiveDiffSync.generate_snapshot() - Profiling: Took {} to get the snapshot links", (after - now).num_milliseconds());
             if snapshot_links.len() == 0 {

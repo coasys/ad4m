@@ -2,7 +2,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { Address, Expression } from '@coasys/ad4m';
 
-export let ad4mExecutorVersion = "0.11.0";
+export let ad4mExecutorVersion = "0.11.1-dev";
 export let agentLanguageAlias = "did";
 export let languageLanguageAlias = "lang";
 export let neighbourhoodLanguageAlias = "neighbourhood";
