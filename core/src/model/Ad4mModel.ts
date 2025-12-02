@@ -1319,24 +1319,48 @@ WHERE ${whereConditions.join(' AND ')}
               if (!currentValue || currentValue === "" || currentValue === 0 || isEmptyObject) {
                 let convertedValue = target;
                 
-                // Parse literal URLs if property has resolveLanguage
-                if (propMeta.resolveLanguage === 'literal' && typeof target === 'string' && target.startsWith('literal://')) {
-                  try {
-                    convertedValue = Literal.fromUrl(target).get();
-                    if(convertedValue.data !== undefined) {
-                      convertedValue = convertedValue.data;
+                // Only process if target has a value
+                if (target !== undefined && target !== null) {
+                  // Check if we need to resolve a non-literal language expression
+                  if (propMeta.resolveLanguage != undefined && propMeta.resolveLanguage !== 'literal' && typeof target === 'string') {
+                    // For non-literal languages, resolve the expression via perspective.getExpression()
+                    // Note: Literals are already parsed by SurrealDB's fn::parse_literal()
+                    try {
+                      const expression = await perspective.getExpression(target);
+                      if (expression) {
+                        // Parse the expression data if it's a JSON string
+                        try {
+                          convertedValue = JSON.parse(expression.data);
+                        } catch {
+                          // If parsing fails, use the data as-is
+                          convertedValue = expression.data;
+                        }
+                      }
+                    } catch (e) {
+                      console.warn(`Failed to resolve expression for ${propName}:`, e);
+                      convertedValue = target; // Fall back to raw value
                     }
-                  } catch (e) {
-                    console.warn(`Failed to parse literal URL for ${propName}:`, e);
-                    convertedValue = target; // Fall back to raw value
-                  }
-                } else {
-                  // Type conversion: check the instance property's current type
-                  const expectedType = typeof instance[propName];
-                  if (expectedType === 'number' && typeof target === 'string') {
-                    convertedValue = Number(target);
-                  } else if (expectedType === 'boolean' && typeof target === 'string') {
-                    convertedValue = target === 'true' || target === '1';
+                  } else if (typeof target === 'string' && target.startsWith('literal://')) {
+                    // Fallback: If we somehow got a literal URL that wasn't parsed by SurrealDB, parse it now
+                    try {
+                      const parsed = Literal.fromUrl(target).get();
+                      if(parsed.data !== undefined) {
+                        convertedValue = parsed.data;
+                      } else {
+                        convertedValue = parsed;
+                      }
+                    } catch (e) {
+                      // If literal parsing fails, just use the value as-is (don't bail)
+                      convertedValue = target;
+                    }
+                  } else if (typeof target === 'string') {
+                    // Type conversion: check the instance property's current type
+                    const expectedType = typeof instance[propName];
+                    if (expectedType === 'number') {
+                      convertedValue = Number(target);
+                    } else if (expectedType === 'boolean') {
+                      convertedValue = target === 'true' || target === '1';
+                    }
                   }
                 }
 
