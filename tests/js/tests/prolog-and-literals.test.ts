@@ -1229,10 +1229,14 @@ describe("Prolog + Literals", () => {
                     task1.dueDate = start;
                     await task1.save();
 
-                    // Small delay to ensure different timestamps - 5ms is enough
-                    await sleep(5);
+                    // Small delay to ensure different timestamps
+                    await sleep(10);
 
-                    const mid = new Date().getTime();
+                    let mid = new Date().getTime();
+                    // Ensure mid > start even if system clock resolution is low
+                    if (mid <= start) {
+                        mid = start + 1;
+                    }
 
                     const task2 = new TaskDue(perspective!);
                     task2.title = "Medium priority task";
@@ -1246,10 +1250,14 @@ describe("Prolog + Literals", () => {
                     task3.dueDate = mid + 2;
                     await task3.save();
 
-                    // Small delay to ensure different timestamps - 5ms is enough
-                    await sleep(5);
+                    // Small delay to ensure different timestamps
+                    await sleep(10);
 
-                    const end = new Date().getTime();
+                    let end = new Date().getTime();
+                    // Ensure end > mid even if system clock resolution is low
+                    if (end <= mid) {
+                        end = mid + 1;
+                    }
 
                     // Check all tasks are there
                     const allTasks = await TaskDue.findAll(perspective!);
