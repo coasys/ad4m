@@ -180,13 +180,11 @@ describe("Prolog + Literals", () => {
 
                 //@ts-ignore
                 await subject.addComments(c1)
-                await sleep(100)
                 //@ts-ignore
                 expect(await subject.comments).to.deep.equal([c1])
 
                 //@ts-ignore
                 await subject.addComments(c2)
-                await sleep(100)
                 //@ts-ignore
                 expect(await subject.comments).to.deep.equal([c1, c2])
             })
@@ -396,7 +394,6 @@ describe("Prolog + Literals", () => {
                 expect(todo2).to.have.property("comments")
                 // @ts-ignore
                 await todo.setState("todo://review")
-                await sleep(1000)
                 expect(await todo.state).to.equal("todo://review")
                 expect(await todo.comments).to.be.empty
 
@@ -1285,9 +1282,14 @@ describe("Prolog + Literals", () => {
                     task1.dueDate = start;
                     await task1.save();
 
-                    await sleep(2000);
+                    // Small delay to ensure different timestamps
+                    await sleep(10);
 
-                    const mid = new Date().getTime();
+                    let mid = new Date().getTime();
+                    // Ensure mid > start even if system clock resolution is low
+                    if (mid <= start) {
+                        mid = start + 1;
+                    }
 
                     const task2 = new TaskDue(perspective!);
                     task2.title = "Medium priority task";
@@ -1301,9 +1303,14 @@ describe("Prolog + Literals", () => {
                     task3.dueDate = mid + 2;
                     await task3.save();
 
-                    await sleep(2000);
+                    // Small delay to ensure different timestamps
+                    await sleep(10);
 
-                    const end = new Date().getTime();
+                    let end = new Date().getTime();
+                    // Ensure end > mid even if system clock resolution is low
+                    if (end <= mid) {
+                        end = mid + 1;
+                    }
 
                     // Check all tasks are there
                     const allTasks = await TaskDue.findAll(perspective!);
@@ -1881,8 +1888,11 @@ describe("Prolog + Literals", () => {
                     notification1.read = false;
                     await notification1.save();
 
-                    // Wait for subscription to fire
-                    await sleep(1000);
+                    // Wait for subscription to fire with smart polling
+                    for (let i = 0; i < 20; i++) {
+                        if (updateCount >= 1) break;
+                        await sleep(50);
+                    }
                     expect(updateCount).to.equal(1);
                     expect(notifications.length).to.equal(1);
 
@@ -1893,7 +1903,10 @@ describe("Prolog + Literals", () => {
                     notification2.read = false;
                     await notification2.save();
 
-                    await sleep(1000);
+                    for (let i = 0; i < 20; i++) {
+                        if (updateCount >= 2) break;
+                        await sleep(50);
+                    }
                     expect(updateCount).to.equal(2);
                     expect(notifications.length).to.equal(2);
 
@@ -1904,7 +1917,7 @@ describe("Prolog + Literals", () => {
                     notification3.read = false;
                     await notification3.save();
 
-                    await sleep(1000);
+                    await sleep(200); // Give it time but don't wait the full second
                     // With SurrealDB we get 3 updates because we do comparison filtering in the client
                     // and not the query. So the raw query result actually is different, even though
                     // the ultimate result is the same.
@@ -1914,7 +1927,10 @@ describe("Prolog + Literals", () => {
                     // Mark notification1 as read - should trigger subscription to remove it
                     notification1.read = true;
                     await notification1.update();
-                    await sleep(1000);
+                    for (let i = 0; i < 20; i++) {
+                        if (notifications.length === 1) break;
+                        await sleep(50);
+                    }
                     expect(notifications.length).to.equal(1);
 
                     // Dispose the subscription to prevent cross-test interference
