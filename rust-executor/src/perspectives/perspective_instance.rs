@@ -1690,9 +1690,13 @@ impl PerspectiveInstance {
                     Ok(_) => break,
                     Err(e) => {
                         let msg = format!("{}", e);
-                        if msg.contains("Failed to commit transaction due to a read or write conflict") && attempts < max_attempts {
+                        if msg.contains(
+                            "Failed to commit transaction due to a read or write conflict",
+                        ) && attempts < max_attempts
+                        {
                             attempts += 1;
-                            tokio::time::sleep(std::time::Duration::from_millis(100 * attempts)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(100 * attempts))
+                                .await;
                             continue;
                         } else {
                             log::warn!(
