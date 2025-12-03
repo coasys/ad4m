@@ -1659,6 +1659,42 @@ impl PerspectiveInstance {
             })
     }
 
+    async fn retry_surreal_op<F, Fut>(
+        op: F,
+        uuid: &str,
+        link: &DecoratedLinkExpression,
+        op_name: &str,
+    ) where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<(), anyhow::Error>>,
+    {
+        let mut attempts = 0;
+        let max_attempts = 5;
+        loop {
+            match op().await {
+                Ok(_) => break,
+                Err(e) => {
+                    let msg = format!("{}", e);
+                    if msg.contains("Failed to commit transaction due to a read or write conflict")
+                        && attempts < max_attempts
+                    {
+                        attempts += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(100 * attempts)).await;
+                        continue;
+                    } else {
+                        log::warn!(
+                            "Failed to {} link in SurrealDB for perspective {}: {:?}",
+                            op_name,
+                            uuid,
+                            e
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     async fn update_surreal_cache(&self, diff: &DecoratedPerspectiveDiff) {
         // Get UUID
         let uuid = {
@@ -1673,42 +1709,26 @@ impl PerspectiveInstance {
         // Example: collection update removes [pasta, sauce, cheese], adds [pasta, sauce, cheese, garlic]
         // Wrong order: add 4 links, then remove 3 -> only garlic remains
         // Correct order: remove 3 old links, then add 4 new links -> all 4 remain
+
+        // Removals first
         for removal in &diff.removals {
-            if let Err(e) = self.surreal_service.remove_link(&uuid, removal).await {
-                log::warn!(
-                    "Failed to remove link from SurrealDB for perspective {}: {:?}",
-                    uuid,
-                    e
-                );
-            }
+            retry_surreal_op(
+                || self.surreal_service.remove_link(&uuid, removal),
+                &uuid,
+                removal,
+                "remove",
+            )
+            .await;
         }
+        // Additions after
         for addition in &diff.additions {
-            let mut attempts = 0;
-            let max_attempts = 5;
-            loop {
-                match self.surreal_service.add_link(&uuid, addition).await {
-                    Ok(_) => break,
-                    Err(e) => {
-                        let msg = format!("{}", e);
-                        if msg.contains(
-                            "Failed to commit transaction due to a read or write conflict",
-                        ) && attempts < max_attempts
-                        {
-                            attempts += 1;
-                            tokio::time::sleep(std::time::Duration::from_millis(100 * attempts))
-                                .await;
-                            continue;
-                        } else {
-                            log::warn!(
-                                "Failed to add link to SurrealDB for perspective {}: {:?}",
-                                uuid,
-                                e
-                            );
-                            break;
-                        }
-                    }
-                }
-            }
+            retry_surreal_op(
+                || self.surreal_service.add_link(&uuid, addition),
+                &uuid,
+                addition,
+                "add",
+            )
+            .await;
         }
     }
 
