@@ -1683,12 +1683,27 @@ impl PerspectiveInstance {
             }
         }
         for addition in &diff.additions {
-            if let Err(e) = self.surreal_service.add_link(&uuid, addition).await {
-                log::warn!(
-                    "Failed to add link to SurrealDB for perspective {}: {:?}",
-                    uuid,
-                    e
-                );
+            let mut attempts = 0;
+            let max_attempts = 5;
+            loop {
+                match self.surreal_service.add_link(&uuid, addition).await {
+                    Ok(_) => break,
+                    Err(e) => {
+                        let msg = format!("{}", e);
+                        if msg.contains("Failed to commit transaction due to a read or write conflict") && attempts < max_attempts {
+                            attempts += 1;
+                            tokio::time::sleep(std::time::Duration::from_millis(100 * attempts)).await;
+                            continue;
+                        } else {
+                            log::warn!(
+                                "Failed to add link to SurrealDB for perspective {}: {:?}",
+                                uuid,
+                                e
+                            );
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
