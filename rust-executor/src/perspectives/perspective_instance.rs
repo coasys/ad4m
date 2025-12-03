@@ -1712,7 +1712,7 @@ impl PerspectiveInstance {
 
         // Removals first
         for removal in &diff.removals {
-            retry_surreal_op(
+            Self::retry_surreal_op(
                 || self.surreal_service.remove_link(&uuid, removal),
                 &uuid,
                 removal,
@@ -1722,7 +1722,7 @@ impl PerspectiveInstance {
         }
         // Additions after
         for addition in &diff.additions {
-            retry_surreal_op(
+            Self::retry_surreal_op(
                 || self.surreal_service.add_link(&uuid, addition),
                 &uuid,
                 addition,
