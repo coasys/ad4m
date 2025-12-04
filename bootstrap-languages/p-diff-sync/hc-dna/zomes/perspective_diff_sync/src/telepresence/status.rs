@@ -6,6 +6,7 @@ use perspective_diff_sync_integrity::{
 
 use crate::errors::{SocialContextError, SocialContextResult};
 use crate::retriever::holochain::get_active_agents;
+use crate::utils::dedup;
 
 pub fn set_online_status(status: PerspectiveExpression) -> SocialContextResult<()> {
     let entry = EntryTypes::PrivateOnlineStatus(status);
@@ -174,6 +175,8 @@ pub fn get_others() -> SocialContextResult<Vec<String>> {
             others.push(did_key.unwrap());
         }
     }
+    // Deduplicate DIDs in case multiple agent keys map to the same DID
+    let others = dedup(&others);
     Ok(others)
 }
 
