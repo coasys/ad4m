@@ -134,11 +134,7 @@ pub fn add_active_agent_link<Retriever: PerspectiveDiffRetreiver>() -> SocialCon
     
     // Check if this agent already has an active link
     let link_exists = existing_links.iter().any(|link| {
-        if let Ok(entry_hash) = link.target.clone().try_into() {
-            AgentPubKey::from(entry_hash) == agent
-        } else {
-            false
-        }
+        link.target.clone().into_agent_pub_key() == Some(agent.clone())
     });
     
     if !link_exists {
