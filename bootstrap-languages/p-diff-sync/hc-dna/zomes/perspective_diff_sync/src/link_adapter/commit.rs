@@ -122,12 +122,33 @@ pub fn add_active_agent_link<Retriever: PerspectiveDiffRetreiver>() -> SocialCon
         Retriever::create_entry(EntryTypes::Anchor(agent_root_entry.clone()))?;
 
     let agent = agent_info()?.agent_initial_pubkey;
-    create_link(
-        hash_entry(agent_root_entry)?,
-        agent,
-        LinkTypes::Index,
-        LinkTag::new("active_agent"),
-    )?;
+    let agent_root_hash = hash_entry(agent_root_entry)?;
+    
+    // Check if the link already exists to avoid duplicates
+    let query = LinkQuery::try_new(
+        agent_root_hash.clone(),
+        LinkTypes::Index
+    )?
+    .tag_prefix(LinkTag::new("active_agent"));
+    let existing_links = get_links(query, GetStrategy::Local)?;
+    
+    // Check if this agent already has an active link
+    let link_exists = existing_links.iter().any(|link| {
+        link.target.clone().into_agent_pub_key() == Some(agent.clone())
+    });
+    
+    if !link_exists {
+        debug!("===PerspectiveDiffSync.add_active_agent_link(): Creating new active agent link");
+        create_link(
+            agent_root_hash,
+            agent,
+            LinkTypes::Index,
+            LinkTag::new("active_agent"),
+        )?;
+    } else {
+        debug!("===PerspectiveDiffSync.add_active_agent_link(): Link already exists, skipping");
+    }
+    
     let after_fn_end = get_now()?.time();
     debug!("===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took {} to complete whole add_active_agent_link()", (after_fn_end - now_fn_start).num_milliseconds());
     Ok(())

@@ -24,7 +24,7 @@ pub type Hash = HoloHash<holo_hash::hash_type::Action>;
 
 #[hdk_extern]
 fn init(_: ()) -> ExternResult<InitCallbackResult> {
-    let mut functions = BTreeSet::new();
+    let mut functions = HashSet::new();
     functions.insert((zome_info()?.name, "get_online_status".into()));
     //TODO; is this next function needed?
     functions.insert((zome_info()?.name, "recv_remote_signal".into()));

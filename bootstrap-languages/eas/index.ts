@@ -1,4 +1,4 @@
-import type { Address, Language, LanguageContext, Interaction, ExpressionUI } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import type { Address, Language, LanguageContext, Interaction, ExpressionUI } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
 import ExpressionAdapterImpl from "./adapter.ts";
 
 function iconFor(expression: Address): string {

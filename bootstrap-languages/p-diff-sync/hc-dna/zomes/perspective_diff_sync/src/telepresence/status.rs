@@ -6,6 +6,7 @@ use perspective_diff_sync_integrity::{
 
 use crate::errors::{SocialContextError, SocialContextResult};
 use crate::retriever::holochain::get_active_agents;
+use crate::utils::dedup;
 
 pub fn set_online_status(status: PerspectiveExpression) -> SocialContextResult<()> {
     let entry = EntryTypes::PrivateOnlineStatus(status);
@@ -70,11 +71,13 @@ pub fn create_did_pub_key_link(did: String) -> SocialContextResult<()> {
     let did_entry = EntryTypes::Anchor(Anchor(did.clone()));
     let did_entry_hash = hash_entry(&did_entry)?;
 
-    let input = GetLinksInputBuilder::try_new(did_entry_hash.clone(), LinkTypes::DidLink)
-        .unwrap()
-        .get_options(GetStrategy::Network)
-        .build();
-    let existing_links = get_links(input)?;
+    let existing_links = get_links(
+        LinkQuery::try_new(did_entry_hash.clone(), LinkTypes::DidLink)?,
+        GetStrategy::Local
+    )?;
+
+    debug!("PerspectiveDiffSync.create_did_pub_key_link() existing_links: {:?}", existing_links);
+
 
     // Only create the link if this specific DID doesn't already have one
     if existing_links.len() == 0 {
@@ -99,15 +102,12 @@ pub fn create_did_pub_key_link(did: String) -> SocialContextResult<()> {
 }
 
 pub fn get_my_did() -> SocialContextResult<Option<String>> {
-    let input = GetLinksInputBuilder::try_new(
+    let query = LinkQuery::try_new(
         // TODO: should be agent_latest_pubkey, but that was made unstable behind dpki feature flag
         agent_info()?.agent_initial_pubkey,
         LinkTypes::DidLink
-    )
-    .unwrap()
-    .get_options(GetStrategy::Network)
-    .build();
-    let mut did_links = get_links(input)?;
+    )?;
+    let mut did_links = get_links(query, GetStrategy::Local)?;
     if did_links.len() > 0 {
         let did = get(
             did_links
@@ -134,14 +134,11 @@ pub fn get_my_did() -> SocialContextResult<Option<String>> {
 pub fn get_dids_agent_key(did: String) -> SocialContextResult<Option<AgentPubKey>> {
     let did_entry = Anchor(did);
     let did_entry_hash = hash_entry(EntryTypes::Anchor(did_entry.clone()))?;
-    let input = GetLinksInputBuilder::try_new(
+    let query = LinkQuery::try_new(
         did_entry_hash,
         LinkTypes::DidLink
-    )
-    .unwrap()
-    .get_options(GetStrategy::Network)
-    .build();
-    let did_links = get_links(input)?;
+    )?;
+    let did_links = get_links(query, GetStrategy::Local)?;
     debug!("PerspectiveDiffSync.get_dids_agent_key() did_links: {:?}", did_links);
     if did_links.len() > 0 {
         let entry: EntryHash = did_links[0].target.clone().try_into().unwrap();
@@ -152,14 +149,11 @@ pub fn get_dids_agent_key(did: String) -> SocialContextResult<Option<AgentPubKey
 }
 
 pub fn get_agents_did_key(agent: AgentPubKey) -> SocialContextResult<Option<String>> {
-    let input = GetLinksInputBuilder::try_new(
+    let query = LinkQuery::try_new(
         agent,
         LinkTypes::DidLink
-    )
-    .unwrap()
-    .get_options(GetStrategy::Network)
-    .build();
-    let mut did_links = get_links(input)?;
+    )?;
+    let mut did_links = get_links(query, GetStrategy::Local)?;
     if did_links.len() > 0 {
         let did = get(
             did_links
@@ -186,14 +180,13 @@ pub fn get_agents_did_key(agent: AgentPubKey) -> SocialContextResult<Option<Stri
 /// Get ALL DIDs associated with an agent (for multi-user support)
 /// In multi-user scenarios, one Holochain agent can have multiple DIDs
 pub fn get_agents_did_keys(agent: AgentPubKey) -> SocialContextResult<Vec<String>> {
-    let input = GetLinksInputBuilder::try_new(
-        agent,
-        LinkTypes::DidLink
-    )
-    .unwrap()
-    .get_options(GetStrategy::Network)
-    .build();
-    let did_links = get_links(input)?;
+    let did_links = get_links(
+        LinkQuery::try_new(
+            agent,
+            LinkTypes::DidLink
+        )?,
+        GetStrategy::Local
+    )?;
 
     let mut dids = Vec::new();
     for link in did_links {
@@ -213,8 +206,10 @@ pub fn get_agents_did_keys(agent: AgentPubKey) -> SocialContextResult<Vec<String
             }
         }
     }
-
-    Ok(dids)
+    
+    // Deduplicate DIDs in case multiple agent keys map to the same DID
+    let deduped_dids = dedup(&dids);
+    Ok(deduped_dids)
 }
 
 pub fn get_others() -> SocialContextResult<Vec<String>> {

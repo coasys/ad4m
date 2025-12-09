@@ -890,5 +890,139 @@ export default function perspectiveTests(testContext: TestContext) {
             })
 
         })
+
+        describe('SurrealDB Queries', () => {
+            it('should execute basic SurrealQL SELECT query', async () => {
+                const ad4mClient = testContext.ad4mClient!
+                const perspective = await ad4mClient.perspective.add("test-surrealdb-basic")
+                
+                // Add sample links
+                const link1 = new Link({
+                    source: "test://source1",
+                    predicate: "test://follows",
+                    target: "test://target1"
+                })
+                const link2 = new Link({
+                    source: "test://source2",
+                    predicate: "test://likes",
+                    target: "test://target2"
+                })
+                
+                await perspective.addLinks([link1, link2])
+                
+                // Execute SurrealQL query
+                const result = await perspective.querySurrealDB('SELECT * FROM link')
+                
+                // Verify results
+                expect(result).to.be.an('array')
+                expect(result.length).to.be.greaterThanOrEqual(2)
+                
+                // Check that our links are present
+                const sources = result.map((r: any) => r.source)
+                expect(sources).to.include('test://source1')
+                expect(sources).to.include('test://source2')
+                
+                // Clean up
+                await ad4mClient.perspective.remove(perspective.uuid)
+            })
+
+            it('should handle SurrealQL query with WHERE clause', async () => {
+                const ad4mClient = testContext.ad4mClient!
+                const perspective = await ad4mClient.perspective.add("test-surrealdb-where")
+                
+                // Add links with different predicates
+                const followsLink = new Link({
+                    source: "test://alice",
+                    predicate: "test://follows",
+                    target: "test://bob"
+                })
+                const likesLink = new Link({
+                    source: "test://alice",
+                    predicate: "test://likes",
+                    target: "test://post123"
+                })
+                
+                await perspective.addLinks([followsLink, likesLink])
+                
+                // Query with WHERE clause
+                const result = await perspective.querySurrealDB(
+                    "SELECT * FROM link WHERE predicate = 'test://follows'"
+                )
+                
+                // Verify filtered results
+                expect(result).to.be.an('array')
+                expect(result.length).to.be.greaterThanOrEqual(1)
+                
+                // All results should have the 'follows' predicate
+                result.forEach((link: any) => {
+                    if (link.source === 'test://alice') {
+                        expect(link.predicate).to.equal('test://follows')
+                    }
+                })
+                
+                // Clean up
+                await ad4mClient.perspective.remove(perspective.uuid)
+            })
+
+            it('should return empty array for query with no matches', async () => {
+                const ad4mClient = testContext.ad4mClient!
+                const perspective = await ad4mClient.perspective.add("test-surrealdb-empty")
+                
+                // Add a link
+                await perspective.add(new Link({
+                    source: "test://source",
+                    predicate: "test://predicate",
+                    target: "test://target"
+                }))
+                
+                // Query for something that doesn't exist
+                const result = await perspective.querySurrealDB(
+                    "SELECT * FROM link WHERE predicate = 'test://nonexistent'"
+                )
+                
+                // Should return empty array
+                expect(result).to.be.an('array')
+                expect(result.length).to.equal(0)
+                
+                // Clean up
+                await ad4mClient.perspective.remove(perspective.uuid)
+            })
+
+            it('should integrate with link mutations', async () => {
+                const ad4mClient = testContext.ad4mClient!
+                const perspective = await ad4mClient.perspective.add("test-surrealdb-mutations")
+                
+                // Add a link
+                const link = new Link({
+                    source: "test://mutation-source",
+                    predicate: "test://mutation-predicate",
+                    target: "test://mutation-target"
+                })
+                
+                const addedLink = await perspective.add(link)
+                
+                // Query to verify it's there
+                let result = await perspective.querySurrealDB(
+                    "SELECT * FROM link WHERE source = 'test://mutation-source'"
+                )
+                
+                expect(result).to.be.an('array')
+                expect(result.length).to.be.greaterThanOrEqual(1)
+                
+                // Remove the link
+                await perspective.removeLinks([addedLink])
+                
+                // Query again and verify it's gone
+                result = await perspective.querySurrealDB(
+                    "SELECT * FROM link WHERE source = 'test://mutation-source'"
+                )
+                
+                expect(result).to.be.an('array')
+                expect(result.length).to.equal(0)
+                
+                // Clean up
+                await ad4mClient.perspective.remove(perspective.uuid)
+            })
+        })
     }
 }

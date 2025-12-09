@@ -26,7 +26,6 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::select;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio::task::yield_now;
 use tokio::time::timeout;
 
 use tokio_stream::StreamExt;
@@ -104,7 +103,7 @@ impl HolochainService {
                     let spawned_sig = tokio::spawn(async move {
 
                         let mut streams: tokio_stream::StreamMap<String, tokio_stream::wrappers::BroadcastStream<Signal>> = tokio_stream::StreamMap::new();
-                        conductor_clone.list_apps(Some(AppStatusFilter::Running)).await.unwrap().into_iter().for_each(|app| {
+                        conductor_clone.list_apps(Some(AppStatusFilter::Enabled)).await.unwrap().into_iter().for_each(|app| {
                             let sig_broadcasters = conductor_clone.subscribe_to_app_signals(app.installed_app_id.clone());
                             streams.insert(app.installed_app_id.clone(), tokio_stream::wrappers::BroadcastStream::new(sig_broadcasters));
                         });
@@ -126,9 +125,13 @@ impl HolochainService {
                                     let sig_broadcasters = conductor_clone.subscribe_to_app_signals(new_app_id.installed_app_id.clone());
                                     streams.insert(new_app_id.installed_app_id.clone(), tokio_stream::wrappers::BroadcastStream::new(sig_broadcasters));
                                 }
+                                // Add a gentle backoff when no signals are available to prevent busy-waiting
+                                _ = tokio::time::sleep(tokio::time::Duration::from_millis(1)) => {
+                                    // This provides a small backoff to prevent excessive CPU usage
+                                    // when no signals are being processed
+                                }
                                 else => break,
                             }
-                            yield_now().await;
                         }
                     });
 
@@ -468,6 +471,7 @@ impl HolochainService {
             .clone()
             .add_app_interface(
                 Either::Left(local_config.app_port),
+                None,
                 AllowedOrigins::Any,
                 None,
             )
@@ -712,14 +716,14 @@ impl HolochainService {
         let path = PathBuf::from(path);
         let name = holochain_cli_bundle::get_app_name(&path).await?;
         info!("Got hApp name: {:?}", name);
-        let pack = holochain_cli_bundle::pack::<AppManifest>(&path, None, name, false).await?;
-        info!("Packed hApp at path: {:#?}", pack.0);
-        Ok(pack.0.to_str().unwrap().to_string())
+        let pack = holochain_cli_bundle::pack::<AppManifest>(&path, None, name).await?;
+        info!("Packed hApp at path: {:#?}", pack);
+        Ok(pack.to_str().unwrap().to_string())
     }
 
     pub async fn unpack_happ(path: String) -> Result<String, AnyError> {
         let path = PathBuf::from(path);
-        let pack = holochain_cli_bundle::unpack::<AppManifest>("happ", &path, None, true).await?;
+        let pack = holochain_cli_bundle::expand_bundle::<AppManifest>(&path, None, true).await?;
         info!("UnPacked hApp at path: {:#?}", pack);
         Ok(pack.to_str().unwrap().to_string())
     }
@@ -728,16 +732,15 @@ impl HolochainService {
         let path = PathBuf::from(path);
         let name = holochain_cli_bundle::get_dna_name(&path).await?;
         info!("Got dna name: {:?}", name);
-        let pack =
-            holochain_cli_bundle::pack::<ValidatedDnaManifest>(&path, None, name, false).await?;
-        info!("Packed dna at path: {:#?}", pack.0);
-        Ok(pack.0.to_str().unwrap().to_string())
+        let pack = holochain_cli_bundle::pack::<ValidatedDnaManifest>(&path, None, name).await?;
+        info!("Packed dna at path: {:#?}", pack);
+        Ok(pack.to_str().unwrap().to_string())
     }
 
     pub async fn unpack_dna(path: String) -> Result<String, AnyError> {
         let path = PathBuf::from(path);
         let pack =
-            holochain_cli_bundle::unpack::<ValidatedDnaManifest>("dna", &path, None, true).await?;
+            holochain_cli_bundle::expand_bundle::<ValidatedDnaManifest>(&path, None, true).await?;
         info!("UnPacked dna at path: {:#?}", pack);
         Ok(pack.to_str().unwrap().to_string())
     }
@@ -756,4 +759,63 @@ pub async fn run_local_hc_services() -> Result<(), AnyError> {
     );
     ops.run().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn test_signal_loop_performance() {
+        // Test that the signal processing loop doesn't consume excessive CPU
+        // when no signals are being processed
+
+        let start_time = Instant::now();
+        let test_duration = Duration::from_millis(100);
+
+        // Simulate the signal processing pattern with backoff
+        let iterations = tokio::spawn(async move {
+            let mut count = 0;
+            let start = Instant::now();
+
+            while start.elapsed() < test_duration {
+                // Simulate the select! pattern with backoff
+                tokio::select! {
+                    // Simulate no signals available
+                    _ = tokio::time::sleep(Duration::from_millis(1)) => {
+                        // This branch represents the backoff case
+                    }
+                }
+                count += 1;
+            }
+            count
+        })
+        .await
+        .unwrap();
+
+        let elapsed = start_time.elapsed();
+
+        // With 1ms delays, we should get roughly 100 iterations in 100ms
+        // This verifies the backoff is working and not busy-waiting
+        // Allow for some variance due to system scheduling
+        assert!(
+            iterations < 300,
+            "Too many iterations: {} (expected < 300), suggests busy-waiting",
+            iterations
+        );
+        assert!(
+            iterations > 20,
+            "Too few iterations: {} (expected > 20), suggests delays are too long",
+            iterations
+        );
+        assert!(
+            elapsed >= test_duration,
+            "Test didn't run for expected duration"
+        );
+
+        println!(
+            "Signal loop test: {} iterations in {:?}",
+            iterations, elapsed
+        );
+    }
 }

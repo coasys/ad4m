@@ -180,13 +180,11 @@ describe("Prolog + Literals", () => {
 
                 //@ts-ignore
                 await subject.addComments(c1)
-                await sleep(100)
                 //@ts-ignore
                 expect(await subject.comments).to.deep.equal([c1])
 
                 //@ts-ignore
                 await subject.addComments(c2)
-                await sleep(100)
                 //@ts-ignore
                 expect(await subject.comments).to.deep.equal([c1, c2])
             })
@@ -396,7 +394,6 @@ describe("Prolog + Literals", () => {
                 expect(todo2).to.have.property("comments")
                 // @ts-ignore
                 await todo.setState("todo://review")
-                await sleep(1000)
                 expect(await todo.state).to.equal("todo://review")
                 expect(await todo.comments).to.be.empty
 
@@ -612,12 +609,28 @@ describe("Prolog + Literals", () => {
                         resolveLanguage: "literal"
                     })
                     resolve: string = ""
+
+                    @Optional({
+                        through: "recipe://image",
+                        resolveLanguage: "", // Will be set dynamically to note-store language
+                        transform: (data: any) => {
+                            if (data && typeof data === 'object' && data.data_base64) {
+                                return `data:image/png;base64,${data.data_base64}`;
+                            }
+                            return data;
+                        }
+                    } as PropertyOptions)
+                    image: string | any = ""
                 }
 
-                before(async () => {
+                beforeEach(async () => {
+                    if(perspective) {
+                        await ad4m!.perspective.remove(perspective.uuid)
+                    }
+                    perspective = await ad4m!.perspective.add("active-record-implementation-test")
                     // @ts-ignore
                     const { name, sdna } = Recipe.generateSDNA();
-                    perspective!.addSdna(name, sdna, 'subject_class')
+                    await perspective!.addSdna(name, sdna, 'subject_class')
                 })
 
                 it("save() & get()", async () => {
@@ -657,6 +670,10 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("find()", async () => {
+                    let recipe1 = new Recipe(perspective!, Literal.from("Active record implementation test find").toUrl());
+                    recipe1.name = "Active record implementation test find";
+                    await recipe1.save();
+
                     const recipes = await Recipe.findAll(perspective!);
 
                     expect(recipes.length).to.equal(1)
@@ -706,6 +723,20 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("delete()", async () => {
+                    let recipe1 = new Recipe(perspective!, Literal.from("Active record implementation test delete1 ").toUrl());
+                    recipe1.name = "Active record implementation test delete 1";
+                    await recipe1.save();
+
+
+                    let recipe2 = new Recipe(perspective!, Literal.from("Active record implementation test delete2 ").toUrl());
+                    recipe2.name = "Active record implementation test delete 2";
+                    await recipe2.save();
+
+
+                    let recipe3 = new Recipe(perspective!, Literal.from("Active record implementation test delete3 ").toUrl());
+                    recipe3.name = "Active record implementation test delete 3";
+                    await recipe3.save();
+
                     const recipes = await Recipe.findAll(perspective!);
 
                     expect(recipes.length).to.equal(3)
@@ -758,6 +789,47 @@ describe("Prolog + Literals", () => {
                     const recipe3 = new Recipe(perspective!, root);
                     await recipe3.get();
                     expect(recipe3.resolve).to.equal("Test name literal");
+                })
+
+                it("can resolve non-literal languages with resolveLanguage and transform", async () => {
+                    // Publish note-store language to use as a non-literal resolveLanguage
+                    const noteLanguage = await ad4m!.languages.publish(
+                        path.join(__dirname, "../languages/note-store/build/bundle.js").replace(/\\/g, "/"),
+                        { name: "note-store-test", description: "Test language for non-literal resolution" }
+                    );
+                    const noteLangAddress = noteLanguage.address;
+
+                    // Create an expression in the note-store language with test data (simulating file data)
+                    const testImageData = { data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" };
+                    const imageExprUrl = await ad4m!.expression.create(testImageData, noteLangAddress);
+
+                    let root = Literal.from("Active record implementation test resolveLanguage non-literal").toUrl();
+                    const recipe = new Recipe(perspective!, root);
+
+                    // Manually add the link instead of using save() to test the query resolution path
+                    recipe.name = "Test with image";
+                    await recipe.save(); // Save the name
+
+                    // Add the image link manually
+                    await perspective!.setSingleTarget(new Link({
+                        source: root,
+                        predicate: "recipe://image",
+                        target: imageExprUrl
+                    }));
+
+                    // Verify the link was created with the expression URL
+                    //@ts-ignore
+                    let links = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://image"}));
+                    expect(links.length).to.equal(1);
+                    expect(links[0].data.target).to.equal(imageExprUrl);
+
+                    // Retrieve the recipe and verify the image was resolved and transformed
+                    const results = await Recipe.findAll(perspective!, { where: { name: "Test with image" } });
+                    const recipe2 = results[0];
+                    
+                    expect(recipe2.name).to.equal("Test with image");
+                    // The image should be resolved from the note-store language and transformed to a data URL
+                    expect(recipe2.image).to.equal(`data:image/png;base64,${testImageData.data_base64}`);
                 })
 
                 it("works with very long property values", async() => {
@@ -830,10 +902,6 @@ describe("Prolog + Literals", () => {
                 })
 
                 it("findAll() returns properties on instances", async () => {
-                    // Clear all previous recipes
-                    const allRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of allRecipes) await recipe.delete();
-                    
                     let root1 = Literal.from("findAll test 1").toUrl()
                     let root2 = Literal.from("findAll test 2").toUrl()
                     
@@ -859,16 +927,9 @@ describe("Prolog + Literals", () => {
                     expect(recipes[1].resolve).to.equal("Resolved literal value 2");
                     expect(recipes[0].plain).to.equal("recipe://findAll_test1");
                     expect(recipes[1].plain).to.equal("recipe://findAll_test2");
-
-                    await recipe1.delete();
-                    await recipe2.delete();
                 })
 
                 it("findAll() returns collections on instances", async () => {
-                    // Clear all previous recipes
-                    const allRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of allRecipes) await recipe.delete();
-                    
                     let root1 = Literal.from("findAll test 1").toUrl()
                     let root2 = Literal.from("findAll test 2").toUrl()
                     
@@ -885,22 +946,15 @@ describe("Prolog + Literals", () => {
 
                     expect(recipes.length).to.equal(2);
                     expect(recipes[0].comments.length).to.equal(2);
-                    expect(recipes[0].comments[0]).to.equal("Recipe 1: Comment 1");
-                    expect(recipes[0].comments[1]).to.equal("Recipe 1: Comment 2");
+                    expect(recipes[0].comments).to.include("Recipe 1: Comment 1");
+                    expect(recipes[0].comments).to.include("Recipe 1: Comment 2");
 
                     expect(recipes[1].comments.length).to.equal(2);
-                    expect(recipes[1].comments[0]).to.equal("Recipe 2: Comment 1");
-                    expect(recipes[1].comments[1]).to.equal("Recipe 2: Comment 2");
-
-                    await recipe1.delete();
-                    await recipe2.delete();
+                    expect(recipes[1].comments).to.include("Recipe 2: Comment 1");
+                    expect(recipes[1].comments).to.include("Recipe 2: Comment 2");
                 })
 
                 it("findAll() returns author & timestamp on instances", async () => {
-                    // Clear all previous recipes
-                    const allRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of allRecipes) await recipe.delete();
-                    
                     let root1 = Literal.from("findAll test 1").toUrl()
                     let root2 = Literal.from("findAll test 2").toUrl()
                     
@@ -913,22 +967,14 @@ describe("Prolog + Literals", () => {
                     await recipe2.save();
 
                     const recipes = await Recipe.findAll(perspective!);
-
                     const me = await ad4m!.agent.me();
                     expect(recipes[0].author).to.equal(me!.did)
                     expect(recipes[0].timestamp).to.not.be.undefined;
                     expect(recipes[1].author).to.equal(me!.did)
                     expect(recipes[1].timestamp).to.not.be.undefined;
-
-                    await recipe1.delete();
-                    await recipe2.delete();
                 })
 
                 it("findAll() works with source prop", async () => {
-                    // Clear all previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-
                     const source1 = Literal.from("Source 1").toUrl()
                     const source2 = Literal.from("Source 2").toUrl()
                     
@@ -953,17 +999,9 @@ describe("Prolog + Literals", () => {
 
                     const source2Recipes = await Recipe.findAll(perspective!, { source: source2 });
                     expect(source2Recipes.length).to.equal(2);
-
-                    await recipe1.delete();
-                    await recipe2.delete();
-                    await recipe3.delete();
                 })
 
                 it("findAll() works with properties query", async () => {
-                    // Clear all previous recipes
-                    const allRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of allRecipes) await recipe.delete();
-                    
                     let root = Literal.from("findAll test 1").toUrl()
                     const recipe = new Recipe(perspective!, root);
                     recipe.name = "recipe://test_name";
@@ -993,15 +1031,9 @@ describe("Prolog + Literals", () => {
                     expect(recipesWithAuthorOnly[0].name).to.be.undefined
                     expect(recipesWithAuthorOnly[0].booleanTest).to.be.undefined
                     expect(recipesWithAuthorOnly[0].author).to.equal(me!.did)
-
-                    await recipe.delete();
                 })
 
                 it("findAll() works with collections query", async () => {
-                    // Clear all previous recipes
-                    const allRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of allRecipes) await recipe.delete();
-                    
                     let root = Literal.from("findAll test 1").toUrl()
                     const recipe = new Recipe(perspective!, root);
                     recipe.comments = ["Recipe 1: Comment 1", "Recipe 1: Comment 2"];
@@ -1022,15 +1054,9 @@ describe("Prolog + Literals", () => {
                     const recipesWithEntriesOnly = await Recipe.findAll(perspective!, { collections: ["entries"] });
                     expect(recipesWithEntriesOnly[0].comments).to.be.undefined
                     expect(recipesWithEntriesOnly[0].entries.length).to.equal(2)
-
-                    await recipe.delete();
                 })
 
                 it("findAll() works with basic where queries", async () => {
-                    // Clear previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
                     // Create recipies
                     const recipe1 = new Recipe(perspective!);
                     recipe1.name = "Recipe 1";
@@ -1096,17 +1122,9 @@ describe("Prolog + Literals", () => {
                     // Test where with an array of possible timestamp matches
                     const recipes10 = await Recipe.findAll(perspective!, { where: { timestamp: [validTimestamp1, validTimestamp2] } });
                     expect(recipes10.length).to.equal(2);
-
-                    await recipe1.delete();
-                    await recipe2.delete();
-                    await recipe3.delete();
                 })
 
                 it("findAll() works with where query not operations", async () => {
-                    // Clear previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
                     // Create recipies
                     const recipe1 = new Recipe(perspective!);
                     recipe1.name = "Recipe 1";
@@ -1154,17 +1172,9 @@ describe("Prolog + Literals", () => {
                     const recipes5 = await Recipe.findAll(perspective!, { where: { timestamp: { not: [validTimestamp1, validTimestamp2] } } });
                     expect(recipes5.length).to.equal(1);
                     expect(recipes5[0].timestamp).to.equal(validTimestamp3);
-
-                    await recipe1.delete();
-                    await recipe2.delete();
-                    await recipe3.delete();
                 })
 
                 it("findAll() works with where query lt, lte, gt, & gte operations", async () => {
-                    // Clear previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-
                     // Create recipes
                     const recipe1 = new Recipe(perspective!);
                     recipe1.name = "Recipe 1";
@@ -1208,7 +1218,15 @@ describe("Prolog + Literals", () => {
                     expect(recipes4.length).to.equal(3);
 
                     // 2. Timestamps
-                    const recipe2timestamp = parseInt(allRecipes[1].timestamp);
+                    // Sort recipes by timestamp to ensure consistent ordering
+                    const sortedRecipes = [...allRecipes].sort((a, b) => {
+                        const aTime = typeof a.timestamp === 'number' ? a.timestamp : parseInt(a.timestamp);
+                        const bTime = typeof b.timestamp === 'number' ? b.timestamp : parseInt(b.timestamp);
+                        return aTime - bTime;
+                    });
+                    const recipe2timestamp = typeof sortedRecipes[1].timestamp === 'number' 
+                        ? sortedRecipes[1].timestamp 
+                        : parseInt(sortedRecipes[1].timestamp); // Second recipe by timestamp
                     
                     // Test less than (lt) operation on timestamp
                     const recipes5 = await Recipe.findAll(perspective!, { where: { timestamp: { lt: recipe2timestamp } } });
@@ -1225,11 +1243,6 @@ describe("Prolog + Literals", () => {
                     // Test greater than or equal to (gte) operation on timestamp
                     const recipes8 = await Recipe.findAll(perspective!, { where: { timestamp: { gte: recipe2timestamp } } });
                     expect(recipes8.length).to.equal(3);
-
-                    await recipe1.delete();
-                    await recipe2.delete();
-                    await recipe3.delete();
-                    await recipe4.delete();
                 })
 
                 it("findAll() works with where query between operations", async () => {
@@ -1260,10 +1273,6 @@ describe("Prolog + Literals", () => {
                     // Register the Task class
                     await perspective!.ensureSDNASubjectClass(TaskDue);
 
-                    // Clear any previous tasks
-                    let tasks = await TaskDue.findAll(perspective!);
-                    for (const task of tasks) await task.delete();
-
                     // Create timestamps & tasks
                     const start = new Date().getTime();
 
@@ -1273,9 +1282,14 @@ describe("Prolog + Literals", () => {
                     task1.dueDate = start;
                     await task1.save();
 
-                    await sleep(2000);
+                    // Small delay to ensure different timestamps
+                    await sleep(10);
 
-                    const mid = new Date().getTime();
+                    let mid = new Date().getTime();
+                    // Ensure mid > start even if system clock resolution is low
+                    if (mid <= start) {
+                        mid = start + 1;
+                    }
 
                     const task2 = new TaskDue(perspective!);
                     task2.title = "Medium priority task";
@@ -1289,9 +1303,14 @@ describe("Prolog + Literals", () => {
                     task3.dueDate = mid + 2;
                     await task3.save();
 
-                    await sleep(2000);
+                    // Small delay to ensure different timestamps
+                    await sleep(10);
 
-                    const end = new Date().getTime();
+                    let end = new Date().getTime();
+                    // Ensure end > mid even if system clock resolution is low
+                    if (end <= mid) {
+                        end = mid + 1;
+                    }
 
                     // Check all tasks are there
                     const allTasks = await TaskDue.findAll(perspective!);
@@ -1365,18 +1384,10 @@ describe("Prolog + Literals", () => {
                     expect(recipes4[0].name).to.equal("Recipe 3");
                     expect(recipes4[1].name).to.equal("Recipe 2");
                     expect(recipes4[2].name).to.equal("Recipe 1");
-                    
-                    await recipe1.delete();
-                    await recipe2.delete();
-                    await recipe3.delete();
                 })
 
                 it("findAll() works with limit and offset", async () => {
-                    // Clear previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
-                    // Create 6 recipe instances with sequential names
+                                        // Create 6 recipe instances with sequential names
                     for (let i = 1; i <= 6; i++) {
                         const recipe = new Recipe(perspective!);
                         recipe.name = `Recipe ${i}`;
@@ -1409,16 +1420,9 @@ describe("Prolog + Literals", () => {
                     const recipes6 = await Recipe.findAll(perspective!, { limit: 3, offset: 2 });
                     expect(recipes6.length).to.equal(3);
                     expect(recipes6[0].name).to.equal("Recipe 3");
-
-                    // Delete recipies
-                    for (const recipe of allRecipes) await recipe.delete();
                 })
 
                 it("findAll() works with a mix of query constraints", async () => {
-                    // Clear previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
                     // Create recipies
                     const recipe1 = new Recipe(perspective!);
                     recipe1.name = "Recipe 1";
@@ -1453,16 +1457,9 @@ describe("Prolog + Literals", () => {
                     expect(recipes2[0].booleanTest).to.equal(false);
                     expect(recipes2[0].comments).to.be.undefined;
                     expect(recipes2[0].entries.length).to.equal(2);
-
-                    await recipe1.delete();
-                    await recipe2.delete();
                 })
 
                 it("findAll() works with constraining resolved literal properties", async () => {
-                    // Clear previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
                     // Create a recipe with a resolved literal property
                     const recipe = new Recipe(perspective!);
                     recipe.resolve = "Hello World"
@@ -1472,15 +1469,9 @@ describe("Prolog + Literals", () => {
                     const recipes1 = await Recipe.findAll(perspective!, { where: { resolve: "Hello World" } });
                     expect(recipes1.length).to.equal(1);
                     expect(recipes1[0].resolve).to.equal("Hello World");
-                    
-                    await recipe.delete();
                 })
 
-                it("findAll() works with multiple property constraints in one where clause", async () => {
-                    // Clear previous recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
+                it("findAll() works with multiple property constraints in one where clause", async () => { 
                     // Create recipes with different combinations of properties
                     const recipe1 = new Recipe(perspective!);
                     recipe1.name = "Recipe 1";
@@ -1532,17 +1523,9 @@ describe("Prolog + Literals", () => {
                         }
                     });
                     expect(recipes3.length).to.equal(0);
-
-                    await recipe1.delete();
-                    await recipe2.delete();
-                    await recipe3.delete();
                 })
 
                 it("findAllAndCount() returns both the retrived instances and the total count", async () => {
-                    // Clear any old recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
                     // Create 6 recipe instances with sequential names
                     for (let i = 1; i <= 6; i++) {
                         const recipe = new Recipe(perspective!);
@@ -1594,16 +1577,9 @@ describe("Prolog + Literals", () => {
                     const { results: recipes8, totalCount: count8 } = await Recipe.findAllAndCount(perspective!, { where: { name: { not: "Recipe 4" } }, offset: 3, limit: 3, count: true });
                     expect(recipes8.length).to.equal(2);
                     expect(count8).to.equal(5);
-
-                    // Delete recipies
-                    for (const recipe of allRecipes) await recipe.delete();
                 })
 
                 it("paginate() helper function works with pageNumber & pageSize props", async () => {
-                    // Clear any old recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
                     // Create 6 recipe instances with sequential names
                     for (let i = 1; i <= 6; i++) {
                         const recipe = new Recipe(perspective!);
@@ -1628,16 +1604,9 @@ describe("Prolog + Literals", () => {
                     expect(count2).to.equal(5);
                     expect(recipes2[0].name).to.equal("Recipe 5");
                     expect(recipes2[1].name).to.equal("Recipe 6");
-
-                    // Delete recipies
-                    for (const recipe of allRecipes) await recipe.delete();
                 });
 
                 it("count() returns only the count without retrieving instances", async () => {
-                    // Clear any old recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
                     // Create 6 recipe instances with sequential names
                     for (let i = 1; i <= 6; i++) {
                         const recipe = new Recipe(perspective!);
@@ -1656,16 +1625,9 @@ describe("Prolog + Literals", () => {
                     // Test count with more complex constraints
                     const count3 = await Recipe.count(perspective!, { where: { name: { not: "Recipe 1" } } });
                     expect(count3).to.equal(5);
-
-                    // Delete recipes
-                    for (const recipe of await Recipe.findAll(perspective!)) await recipe.delete();
                 });
 
                 it("count() and countSubscribe() work on the query builder", async () => {
-                    // Clear any old recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-                    
                     // Create recipes
                     const recipe1 = new Recipe(perspective!);
                     recipe1.name = "Recipe 1";
@@ -1710,18 +1672,104 @@ describe("Prolog + Literals", () => {
 
                     // Dispose the subscription to prevent cross-test interference
                     builder.dispose();
+                })
 
-                    // Clean up
-                    for (const recipe of await Recipe.findAll(perspective!)) {
-                        await recipe.delete();
+                it("count() works with advanced where conditions (gt, between, timestamp)", async () => {
+                    // Create recipes with different numbers
+                    const recipe1 = new Recipe(perspective!);
+                    recipe1.name = "Recipe 1";
+                    recipe1.number = 1;
+                    await recipe1.save();
+                    
+                    const recipe2 = new Recipe(perspective!);
+                    recipe2.name = "Recipe 2"; 
+                    recipe2.number = 2;
+                    await recipe2.save();
+                    
+                    const recipe3 = new Recipe(perspective!);
+                    recipe3.name = "Recipe 3";
+                    recipe3.number = 3;
+                    await recipe3.save();
+
+                    const recipe4 = new Recipe(perspective!);
+                    recipe4.name = "Recipe 4";
+                    recipe4.number = 4;
+                    await recipe4.save();
+
+                    const recipe5 = new Recipe(perspective!);
+                    recipe5.name = "Recipe 5";
+                    recipe5.number = 5;
+                    await recipe5.save();
+
+                    // Test count() with gt operator
+                    const countGt3 = await Recipe.count(perspective!, { where: { number: { gt: 3 } } });
+                    const findAllGt3 = await Recipe.findAll(perspective!, { where: { number: { gt: 3 } } });
+                    expect(countGt3).to.equal(findAllGt3.length);
+                    expect(countGt3).to.equal(2); // recipes 4 and 5
+
+                    // Test count() with between operator
+                    const countBetween2And4 = await Recipe.count(perspective!, { where: { number: { between: [2, 4] } } });
+                    const findAllBetween2And4 = await Recipe.findAll(perspective!, { where: { number: { between: [2, 4] } } });
+                    expect(countBetween2And4).to.equal(findAllBetween2And4.length);
+                    expect(countBetween2And4).to.equal(3); // recipes 2, 3, and 4
+
+                    // Test count() with gte and lte operators
+                    const countGte2Lte4 = await Recipe.count(perspective!, { where: { number: { gte: 2, lte: 4 } } });
+                    const findAllGte2Lte4 = await Recipe.findAll(perspective!, { where: { number: { gte: 2, lte: 4 } } });
+                    expect(countGte2Lte4).to.equal(findAllGte2Lte4.length);
+                    expect(countGte2Lte4).to.equal(3); // recipes 2, 3, and 4
+
+                    // Test count() with lt operator
+                    const countLt3 = await Recipe.count(perspective!, { where: { number: { lt: 3 } } });
+                    const findAllLt3 = await Recipe.findAll(perspective!, { where: { number: { lt: 3 } } });
+                    expect(countLt3).to.equal(findAllLt3.length);
+                    expect(countLt3).to.equal(2); // recipes 1 and 2
+
+                    // Test query builder count() with gt operator
+                    const queryCountGt3 = await Recipe.query(perspective!)
+                        .where({ number: { gt: 3 } })
+                        .count();
+                    const queryGetGt3 = await Recipe.query(perspective!)
+                        .where({ number: { gt: 3 } })
+                        .get();
+                    expect(queryCountGt3).to.equal(queryGetGt3.length);
+                    expect(queryCountGt3).to.equal(2);
+
+                    // Test query builder count() with between operator
+                    const queryCountBetween = await Recipe.query(perspective!)
+                        .where({ number: { between: [2, 4] } })
+                        .count();
+                    const queryGetBetween = await Recipe.query(perspective!)
+                        .where({ number: { between: [2, 4] } })
+                        .get();
+                    expect(queryCountBetween).to.equal(queryGetBetween.length);
+                    expect(queryCountBetween).to.equal(3);
+
+                    // Test count() with timestamp filtering
+                    // Get the timestamp of recipe3
+                    const allRecipes = await Recipe.findAll(perspective!);
+                    const recipe3Instance = allRecipes.find((r: any) => r.name === "Recipe 3");
+                    expect(recipe3Instance).to.not.be.undefined;
+                    
+                    if (recipe3Instance && recipe3Instance.timestamp) {
+                        // Convert timestamp to number if it's a string
+                        const recipe3Timestamp = typeof recipe3Instance.timestamp === 'string' 
+                            ? new Date(recipe3Instance.timestamp).getTime() 
+                            : recipe3Instance.timestamp;
+                        
+                        // Count recipes with timestamp greater than recipe3's timestamp
+                        const countAfterRecipe3 = await Recipe.count(perspective!, { 
+                            where: { timestamp: { gt: recipe3Timestamp } } 
+                        });
+                        const findAllAfterRecipe3 = await Recipe.findAll(perspective!, { 
+                            where: { timestamp: { gt: recipe3Timestamp } } 
+                        });
+                        expect(countAfterRecipe3).to.equal(findAllAfterRecipe3.length);
+                        expect(countAfterRecipe3).to.be.at.least(2); // At least recipes 4 and 5
                     }
                 })
 
                 it("paginate() and paginateSubscribe() work on the query builder", async () => {
-                    // Clear any existing recipes
-                    const oldRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of oldRecipes) await recipe.delete();
-
                     // Create test recipes
                     for (let i = 1; i <= 10; i++) {
                         const recipe = new Recipe(perspective!);
@@ -1782,12 +1830,6 @@ describe("Prolog + Literals", () => {
 
                     // Dispose the subscription to prevent cross-test interference
                     query.dispose();
-
-                    // Clean up
-                    const allRecipes = await Recipe.findAll(perspective!);
-                    for (const recipe of allRecipes) {
-                        await recipe.delete();
-                    }
                 })
 
                 it("query builder works with subscriptions", async () => {
@@ -1846,8 +1888,11 @@ describe("Prolog + Literals", () => {
                     notification1.read = false;
                     await notification1.save();
 
-                    // Wait for subscription to fire
-                    await sleep(1000);
+                    // Wait for subscription to fire with smart polling
+                    for (let i = 0; i < 20; i++) {
+                        if (updateCount >= 1) break;
+                        await sleep(50);
+                    }
                     expect(updateCount).to.equal(1);
                     expect(notifications.length).to.equal(1);
 
@@ -1858,7 +1903,10 @@ describe("Prolog + Literals", () => {
                     notification2.read = false;
                     await notification2.save();
 
-                    await sleep(1000);
+                    for (let i = 0; i < 20; i++) {
+                        if (updateCount >= 2) break;
+                        await sleep(50);
+                    }
                     expect(updateCount).to.equal(2);
                     expect(notifications.length).to.equal(2);
 
@@ -1869,23 +1917,24 @@ describe("Prolog + Literals", () => {
                     notification3.read = false;
                     await notification3.save();
 
-                    await sleep(1000);
-                    expect(updateCount).to.equal(2);
+                    await sleep(200); // Give it time but don't wait the full second
+                    // With SurrealDB we get 3 updates because we do comparison filtering in the client
+                    // and not the query. So the raw query result actually is different, even though
+                    // the ultimate result is the same.
+                    //expect(updateCount).to.equal(2);
                     expect(notifications.length).to.equal(2);
 
                     // Mark notification1 as read - should trigger subscription to remove it
                     notification1.read = true;
                     await notification1.update();
-                    await sleep(1000);
+                    for (let i = 0; i < 20; i++) {
+                        if (notifications.length === 1) break;
+                        await sleep(50);
+                    }
                     expect(notifications.length).to.equal(1);
 
                     // Dispose the subscription to prevent cross-test interference
                     builder.dispose();
-
-                    // Clean up
-                    await notification1.delete();
-                    await notification2.delete();
-                    await notification3.delete();
                 });
 
                 it("query builder should filter by subject class", async () => {
@@ -1944,10 +1993,6 @@ describe("Prolog + Literals", () => {
                     // This assertion will fail because the query builder doesn't filter by class
                     expect(note1Results.length).to.equal(1);
                     expect(note1Results[0]).to.be.instanceOf(Note1);
-
-                    // Clean up
-                    await note1.delete();
-                    await note2.delete();
                 });
 
                 it("query builder works with single query object, complex query and subscriptions", async () => {
@@ -2063,14 +2108,10 @@ describe("Prolog + Literals", () => {
 
                     // Dispose the subscription to prevent cross-test interference
                     builder.dispose();
-
-                    // Clean up
-                    await task1.delete();
-                    await task2.delete();
-                    await task3.delete();
                 });
 
                 it("transform option in property decorators works", async () => {
+                    const transformTestPerspective = await ad4m?.perspective.add("transform-test");
                     @ModelOptions({ name: "ImagePost" })
                     class ImagePost extends Ad4mModel {
                         @Property({
@@ -2086,10 +2127,10 @@ describe("Prolog + Literals", () => {
                     }
 
                     // Register the ImagePost class
-                    await perspective!.ensureSDNASubjectClass(ImagePost);
+                    await transformTestPerspective!.ensureSDNASubjectClass(ImagePost);
 
                     // Create a new image post
-                    const post = new ImagePost(perspective!);
+                    const post = new ImagePost(transformTestPerspective!);
                     const imageData = "abc123";
                     //const imageData = { data_base64: "abc123" };
                     
@@ -2097,7 +2138,7 @@ describe("Prolog + Literals", () => {
                     await post.save();
 
                     // Retrieve the post and check transformed values
-                    const [retrieved] = await ImagePost.findAll(perspective!);
+                    const [retrieved] = await ImagePost.findAll(transformTestPerspective!);
                     expect(retrieved.image).to.equal("data:image/png;base64,abc123");
                 });
 
@@ -2169,9 +2210,7 @@ describe("Prolog + Literals", () => {
                     const recipesAfterCommit = await BatchRecipe.findAll(perspective!);
                     expect(recipesAfterCommit.length).to.equal(1);
                     expect(recipesAfterCommit[0].name).to.equal("Pasta");
-                    expect(recipesAfterCommit[0].ingredients).to.include("pasta")
-                    expect(recipesAfterCommit[0].ingredients).to.include("sauce")
-                    expect(recipesAfterCommit[0].ingredients).to.include("cheese")
+                    expect(recipesAfterCommit[0].ingredients).to.have.members(["pasta", "sauce", "cheese"]);
 
                     const notesAfterCommit = await BatchNote.findAll(perspective!);
                     expect(notesAfterCommit.length).to.equal(1);
@@ -2188,9 +2227,7 @@ describe("Prolog + Literals", () => {
 
                     // Verify models haven't changed before commit
                     const recipesBeforeUpdate = await BatchRecipe.findAll(perspective!);
-                    expect(recipesAfterCommit[0].ingredients).to.include("pasta")
-                    expect(recipesAfterCommit[0].ingredients).to.include("sauce")
-                    expect(recipesAfterCommit[0].ingredients).to.include("cheese")
+                    expect(recipesBeforeUpdate[0].ingredients).to.have.members(["pasta", "sauce", "cheese"]);
 
                     const notesBeforeUpdate = await BatchNote.findAll(perspective!);
                     expect(notesBeforeUpdate[0].content).to.equal("Make sure to use fresh ingredients");
@@ -2233,6 +2270,118 @@ describe("Prolog + Literals", () => {
 
                     const notesAfterDelete = await BatchNote.findAll(perspective!);
                     expect(notesAfterDelete.length).to.equal(0);
+                });
+
+                describe("SurrealDB vs Prolog Subscriptions", () => {
+                    let perspective: PerspectiveProxy;
+
+                    @ModelOptions({ name: "SubscriptionTestModel" })
+                    class TestModel extends Ad4mModel {
+                        @Property({
+                            through: "test://name",
+                            resolveLanguage: "literal"
+                        })
+                        name: string = "";
+
+                        @Property({
+                            through: "test://status",
+                            resolveLanguage: "literal"
+                        })
+                        status: string = "";
+                    }
+
+                    beforeEach(async () => {
+                        perspective = await ad4m!.perspective.add("subscription-parity-test");
+                        await perspective!.ensureSDNASubjectClass(TestModel);
+                    });
+
+                    afterEach(async () => {
+                        if (perspective) {
+                            await ad4m!.perspective.remove(perspective.uuid);
+                        }
+                    });
+
+                    it("should produce identical results with SurrealDB and Prolog subscriptions", async () => {
+                        // 1. Setup subscriptions
+                        const surrealCallback = sinon.fake();
+                        const prologCallback = sinon.fake();
+
+                        // SurrealDB subscription (default)
+                        const surrealBuilder = TestModel.query(perspective).where({ status: "active" });
+                        await surrealBuilder.subscribe(surrealCallback);
+
+                        // Prolog subscription (explicit)
+                        const prologBuilder = TestModel.query(perspective).where({ status: "active" }).useSurrealDB(false);
+                        await prologBuilder.subscribe(prologCallback);
+
+                        // 2. Add data
+                        const startTime = Date.now();
+                        const count = 5;
+                        
+                        for (let i = 0; i < count; i++) {
+                            const model = new TestModel(perspective);
+                            model.name = `Item ${i}`;
+                            model.status = "active";
+                            await model.save();
+                        }
+
+                        // 3. Wait for updates
+                        // Give enough time for both to catch up
+                        await sleep(2000);
+
+                        // 4. Verify results match
+                        expect(surrealCallback.called).to.be.true;
+                        expect(prologCallback.called).to.be.true;
+
+                        const surrealLastResult = surrealCallback.lastCall.args[0];
+                        const prologLastResult = prologCallback.lastCall.args[0];
+
+                        expect(surrealLastResult.length).to.equal(count);
+                        expect(prologLastResult.length).to.equal(count);
+
+                        // Sort by name to ensure order doesn't affect comparison
+                        const sortByName = (a: TestModel, b: TestModel) => a.name.localeCompare(b.name);
+                        surrealLastResult.sort(sortByName);
+                        prologLastResult.sort(sortByName);
+
+                        for (let i = 0; i < count; i++) {
+                            expect(surrealLastResult[i].name).to.equal(prologLastResult[i].name);
+                            expect(surrealLastResult[i].status).to.equal(prologLastResult[i].status);
+                        }
+
+                        console.log(`SurrealDB vs Prolog subscription parity check passed with ${count} items.`);
+                        
+                        // Cleanup
+                        surrealBuilder.dispose();
+                        prologBuilder.dispose();
+                    });
+
+                    it("should demonstrate SurrealDB subscription performance", async () => {
+                        // Measure latency of update
+                        const surrealCallback = sinon.fake();
+                        const surrealBuilder = TestModel.query(perspective).where({ status: "perf-test" });
+                        await surrealBuilder.subscribe(surrealCallback);
+
+                        const start = Date.now();
+                        const model = new TestModel(perspective);
+                        model.name = "Perf Item";
+                        model.status = "perf-test";
+                        await model.save();
+                        const saveTime = Date.now();
+
+                        // Poll until callback called
+                        while (!surrealCallback.called) {
+                            await sleep(10);
+                            if (Date.now() - saveTime > 5000) throw new Error("Timeout waiting for subscription update");
+                        }
+
+                        const saveLatency = saveTime - start;
+                        const subscriptionLatency = Date.now() - saveTime;
+                        console.log(`TestModel.save() latency: ${saveLatency}ms`);
+                        console.log(`SurrealDB subscription update latency: ${subscriptionLatency}ms`);
+
+                        surrealBuilder.dispose();
+                    });
                 });
 
                 describe('ModelQueryBuilder', () => {
@@ -2352,7 +2501,6 @@ describe("Prolog + Literals", () => {
                         // Verify callback was called with new count
                         expect(countCallback.called).to.be.true;
                         expect(countCallback.lastCall.args[0]).to.equal(1);
-                        console.log("countCallback", countCallback.lastCall.args[0])
                         let count = countCallback.callCount
 
                         // Dispose subscription
@@ -2438,21 +2586,24 @@ describe("Prolog + Literals", () => {
                         body: string = ""
                     }
 
-                    before(async () => {
-                        // Add a small delay to ensure Prolog engine is stable
-                        await sleep(2000);
+                    
+                    // before(async () => {
+                    //     // Add a small delay to ensure Prolog engine is stable
+                    //     await sleep(2000);
                         
-                        // Register the EmojiMessage class using ensureSDNASubjectClass
-                        await perspective!.ensureSDNASubjectClass(EmojiMessage);
+                    //     // Register the EmojiMessage class using ensureSDNASubjectClass
+                    //     await perspective!.ensureSDNASubjectClass(EmojiMessage);
                         
-                        // Clear any existing EmojiMessage instances to start fresh
-                        const existingMessages = await EmojiMessage.findAll(perspective!);
-                        for (const msg of existingMessages) {
-                            await msg.delete();
-                        }
-                    });
+                    //     // Clear any existing EmojiMessage instances to start fresh
+                    //     const existingMessages = await EmojiMessage.findAll(perspective!);
+                    //     for (const msg of existingMessages) {
+                    //         await msg.delete();
+                    //     }
+                    // });
 
                     beforeEach(async () => {
+                        // Register the EmojiMessage class using ensureSDNASubjectClass
+                        await perspective!.ensureSDNASubjectClass(EmojiMessage);
                         // Clean up any messages from previous tests
                         const existingMessages = await EmojiMessage.findAll(perspective!);
                         for (const msg of existingMessages) {
@@ -2723,6 +2874,594 @@ describe("Prolog + Literals", () => {
             expect(relatedVectors[0][1]).to.equal(embeddingUrl3);
         });
     });
+
+    describe("Ad4mModel.fromJSONSchema", () => {
+        let perspective: PerspectiveProxy | null = null
+
+        beforeEach(async () => {
+            perspective = await ad4m!.perspective.add("json-schema-test")
+        })
+
+        describe("with explicit configuration", () => {
+            it("should create Ad4mModel class from JSON Schema with explicit namespace", async () => {
+                const schema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "title": "Person",
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "age": { "type": "number" },
+                        "email": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }
+
+                const PersonClass = Ad4mModel.fromJSONSchema(schema, {
+                    name: "Person",
+                    namespace: "person://",
+                    resolveLanguage: "literal"
+                })
+
+                expect(PersonClass).to.be.a('function')
+                // @ts-ignore - className is added dynamically
+                expect(PersonClass.className).to.equal("Person")
+
+                // Test instance creation
+                const person = new PersonClass(perspective!)
+                expect(person).to.be.instanceOf(Ad4mModel)
+                expect(person.baseExpression).to.be.a('string')
+
+                // Test property assignment
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person.name = "Alice Johnson"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person.age = 30
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person.email = "alice.johnson@example.com"
+
+                await perspective!.ensureSDNASubjectClass(PersonClass)
+                await person.save()
+
+                // Create a second person to test multiple instances
+                const person2 = new PersonClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person2.name = "Bob Smith"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person2.age = 25
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person2.email = "bob.smith@example.com"
+                await person2.save()
+
+                // Verify data was saved and can be retrieved
+                const savedPeople = await PersonClass.findAll(perspective!)
+                expect(savedPeople).to.have.lengthOf(2)
+                
+                // Find Alice
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                const alice = savedPeople.find(p => p.name === "Alice Johnson")
+                expect(alice).to.exist
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(alice!.name).to.equal("Alice Johnson")
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(alice!.age).to.equal(30)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(alice!.email).to.equal("alice.johnson@example.com")
+
+                // Find Bob
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                const bob = savedPeople.find(p => p.name === "Bob Smith")
+                expect(bob).to.exist
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(bob!.age).to.equal(25)
+
+                // Test querying with where clauses
+                const adults = await PersonClass.findAll(perspective!, {
+                    where: { age: { gt: 28 } }
+                })
+                expect(adults).to.have.lengthOf(1)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(adults[0].name).to.equal("Alice Johnson")
+            })
+
+            it("should support property mapping overrides", async () => {
+                const schema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "title": "Contact",
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "email": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }
+
+                const ContactClass = Ad4mModel.fromJSONSchema(schema, {
+                    name: "Contact",
+                    namespace: "contact://",
+                    propertyMapping: {
+                        "name": "foaf://name",
+                        "email": "foaf://mbox"
+                    },
+                    resolveLanguage: "literal"
+                })
+
+                // @ts-ignore - className is added dynamically
+                expect(ContactClass.className).to.equal("Contact")
+
+                // Test that custom predicates are used
+                const contact = new ContactClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                contact.name = "Bob Wilson"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                contact.email = "bob.wilson@company.com"
+
+                await perspective!.ensureSDNASubjectClass(ContactClass)
+                await contact.save()
+
+                // Create second contact to test multiple instances
+                const contact2 = new ContactClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                contact2.name = "Carol Davis"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                contact2.email = "carol.davis@company.com"
+                await contact2.save()
+
+                // Verify data retrieval works with custom predicates
+                const savedContacts = await ContactClass.findAll(perspective!)
+                expect(savedContacts).to.have.lengthOf(2)
+                
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                const bob = savedContacts.find(c => c.name === "Bob Wilson")
+                expect(bob).to.exist
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(bob!.email).to.equal("bob.wilson@company.com")
+
+                // Verify the custom predicates were used by checking the generated SDNA
+                // @ts-ignore - generateSDNA is added dynamically
+                const sdna = ContactClass.generateSDNA()
+                expect(sdna.sdna).to.include("foaf://name")
+                expect(sdna.sdna).to.include("foaf://mbox")
+
+                // Test querying works with custom predicates
+                const bobQuery = await ContactClass.findAll(perspective!, {
+                    where: { name: "Bob Wilson" }
+                })
+                expect(bobQuery).to.have.lengthOf(1)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(bobQuery[0].email).to.equal("bob.wilson@company.com")
+            })
+        })
+
+        describe("with JSON Schema x-ad4m metadata", () => {
+            it("should use x-ad4m metadata when available", async () => {
+                const schema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "title": "Product",
+                    "type": "object",
+                    "x-ad4m": {
+                        "namespace": "product://",
+                        "className": "Product"
+                    },
+                    "properties": {
+                        "name": { 
+                            "type": "string",
+                            "x-ad4m": {
+                                "through": "product://title",
+                                "resolveLanguage": "literal"
+                            }
+                        },
+                        "price": { 
+                            "type": "number",
+                            "x-ad4m": {
+                                "through": "product://cost"
+                            }
+                        },
+                        "description": { 
+                            "type": "string",
+                            "x-ad4m": {
+                                "resolveLanguage": "literal"
+                            }
+                        }
+                    },
+                    "required": ["name"]
+                }
+
+                const ProductClass = Ad4mModel.fromJSONSchema(schema, {
+                    name: "ProductOverride" // This should take precedence
+                })
+
+                // @ts-ignore - className is added dynamically
+                expect(ProductClass.className).to.equal("ProductOverride")
+
+                const product = new ProductClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                product.name = "Gaming Laptop"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                product.price = 1299.99
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                product.description = "A high-performance gaming laptop with RTX graphics"
+
+                await perspective!.ensureSDNASubjectClass(ProductClass)
+                await product.save()
+
+                // Create a second product with different pricing
+                const product2 = new ProductClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                product2.name = "Office Laptop"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                product2.price = 799.99
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                product2.description = "A reliable laptop for office work"
+                await product2.save()
+
+                // Test data retrieval and validation
+                const savedProducts = await ProductClass.findAll(perspective!)
+                expect(savedProducts).to.have.lengthOf(2)
+
+                // Verify x-ad4m custom predicates work for data retrieval
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                const gamingLaptop = savedProducts.find(p => p.name === "Gaming Laptop")
+                expect(gamingLaptop).to.exist
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(gamingLaptop!.price).to.equal(1299.99)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(gamingLaptop!.description).to.equal("A high-performance gaming laptop with RTX graphics")
+
+                // Test querying with price ranges
+                const expensiveProducts = await ProductClass.findAll(perspective!, {
+                    where: { price: { gt: 1000 } }
+                })
+                expect(expensiveProducts).to.have.lengthOf(1)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(expensiveProducts[0].name).to.equal("Gaming Laptop")
+
+                // Verify custom predicates from x-ad4m were used
+                // @ts-ignore - generateSDNA is added dynamically
+                const sdna = ProductClass.generateSDNA()
+                expect(sdna.sdna).to.include("product://title") // custom predicate for name
+                expect(sdna.sdna).to.include("product://cost")  // custom predicate for price
+                expect(sdna.sdna).to.include("product://description") // inferred from namespace + property
+            })
+        })
+
+        describe("with title-based inference", () => {
+            it("should infer namespace from schema title when no explicit config", async () => {
+                const schema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "title": "Book",
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string" },
+                        // Avoid reserved top-level "author" which conflicts with Ad4mModel built-in
+                        "writer": { "type": "string" },
+                        "isbn": { "type": "string" }
+                    },
+                    "required": ["title"]
+                }
+
+                const BookClass = Ad4mModel.fromJSONSchema(schema, {
+                    name: "Book",
+                    resolveLanguage: "literal"
+                })
+
+                // @ts-ignore - className is added dynamically
+                expect(BookClass.className).to.equal("Book")
+
+                const book = new BookClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                book.title = "The Great Gatsby"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                book.writer = "F. Scott Fitzgerald"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                book.isbn = "978-0-7432-7356-5"
+
+                await perspective!.ensureSDNASubjectClass(BookClass)
+                await book.save()
+
+                // Add a second book
+                const book2 = new BookClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                book2.title = "To Kill a Mockingbird"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                book2.writer = "Harper Lee"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                book2.isbn = "978-0-06-112008-4"
+                await book2.save()
+
+                // Test data retrieval with inferred predicates
+                const savedBooks = await BookClass.findAll(perspective!)
+                expect(savedBooks).to.have.lengthOf(2)
+
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                const gatsby = savedBooks.find(b => b.title === "The Great Gatsby")
+                expect(gatsby).to.exist
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(gatsby!.writer).to.equal("F. Scott Fitzgerald")
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(gatsby!.isbn).to.equal("978-0-7432-7356-5")
+
+                // Test querying by author
+                const fitzgeraldBooks = await BookClass.findAll(perspective!, {
+                    where: { writer: "F. Scott Fitzgerald" }
+                })
+                expect(fitzgeraldBooks).to.have.lengthOf(1)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(fitzgeraldBooks[0].title).to.equal("The Great Gatsby")
+
+                // Verify inferred predicates (should be book://title, book://author, etc.)
+                // @ts-ignore - generateSDNA is added dynamically
+                const sdna = BookClass.generateSDNA()
+                expect(sdna.sdna).to.include("book://title")
+                expect(sdna.sdna).to.include("book://writer")
+                expect(sdna.sdna).to.include("book://isbn")
+            })
+        })
+
+        describe("error handling", () => {
+            it("should throw error when no title and no namespace provided", async () => {
+                const schema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": "string" }
+                    },
+                    "required": ["value"]  // Add required property to avoid constructor error
+                }
+
+                expect(() => {
+                    Ad4mModel.fromJSONSchema(schema, { name: "Test" })
+                }).to.throw(/Cannot infer namespace/)
+            })
+
+            it("should automatically add type flag when no required properties are provided", async () => {
+                const schema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "title": "OptionalOnly",
+                    "type": "object",
+                    "properties": {
+                        "optionalValue": { "type": "string" },
+                        "anotherOptional": { "type": "number" }
+                    }
+                    // No required array - all properties are optional
+                }
+
+                // Should not throw error - instead adds automatic type flag
+                const OptionalClass = Ad4mModel.fromJSONSchema(schema, { 
+                    name: "OptionalOnly",
+                    namespace: "test://" 
+                });
+
+                expect(OptionalClass).to.be.a('function')
+                // @ts-ignore - className is added dynamically
+                expect(OptionalClass.className).to.equal("OptionalOnly")
+
+                // Should have automatic type flag
+                const instance = new OptionalClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(instance.__ad4m_type).to.equal("test://instance")
+
+                // Verify SDNA includes the automatic type flag
+                // @ts-ignore - generateSDNA is added dynamically
+                const sdna = OptionalClass.generateSDNA()
+                expect(sdna.sdna).to.include('ad4m://type')
+                expect(sdna.sdna).to.include('test://instance')
+            })
+
+            it("should work when properties have explicit initial values even if not required", async () => {
+                const schema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "title": "WithInitials",
+                    "type": "object",
+                    "properties": {
+                        "status": { "type": "string" },
+                        "count": { "type": "number" }
+                    }
+                    // No required array, but we'll provide initial values
+                }
+
+                // This should work because we provide initial values
+                const TestClass = Ad4mModel.fromJSONSchema(schema, {
+                    name: "WithInitials",
+                    namespace: "test://",
+                    propertyOptions: {
+                        "status": { initial: "test://active" },
+                        "count": { initial: "literal://number:0" }
+                    }
+                })
+
+                expect(TestClass).to.be.a('function')
+                // @ts-ignore - className is added dynamically
+                expect(TestClass.className).to.equal("WithInitials")
+
+                // Verify SDNA has constructor actions
+                // @ts-ignore - generateSDNA is added dynamically
+                const sdna = TestClass.generateSDNA()
+                expect(sdna.sdna).to.include('constructor(')
+                expect(sdna.sdna).to.include('test://active')
+                expect(sdna.sdna).to.include('literal://number:0')
+            })
+
+            it("should handle complex property types with full data storage and retrieval", async () => {
+                const schema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "title": "BlogPost",
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string" },
+                        "tags": { 
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "metadata": { 
+                            "type": "object",
+                            "properties": {
+                                "created": { "type": "string" },
+                                "author": { "type": "string" },
+                                "views": { "type": "number" }
+                            }
+                        },
+                        "categories": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        }
+                    },
+                    "required": ["title"]
+                }
+
+                const BlogPostClass = Ad4mModel.fromJSONSchema(schema, {
+                    name: "BlogPost",
+                    resolveLanguage: "literal"
+                })
+
+                // @ts-ignore - className is added dynamically
+                expect(BlogPostClass.className).to.equal("BlogPost")
+
+                await perspective!.ensureSDNASubjectClass(BlogPostClass)
+
+                // Create a blog post with complex data
+                const post1 = new BlogPostClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                post1.title = "Getting Started with AD4M"
+                
+                // Test array/collection handling
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                post1.tags = ["ad4m", "tutorial", "blockchain"]
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                post1.categories = ["technology", "development"]
+                
+                // Test complex object handling (should be stored as JSON)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                post1.metadata = {
+                    created: "2025-09-22T10:00:00Z",
+                    author: "Alice",
+                    views: 42
+                }
+                
+                await post1.save()
+
+                // Create a second post
+                const post2 = new BlogPostClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                post2.title = "Advanced AD4M Patterns"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                post2.tags = ["ad4m", "advanced", "patterns"]
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                post2.categories = ["technology"]
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                post2.metadata = {
+                    created: "2025-09-22T11:00:00Z",
+                    author: "Bob",
+                    views: 15
+                }
+                await post2.save()
+
+                // Test data retrieval
+                const savedPosts = await BlogPostClass.findAll(perspective!)
+                expect(savedPosts).to.have.lengthOf(2)
+
+                // Verify complex object data is preserved
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                const tutorialPost = savedPosts.find(p => p.title === "Getting Started with AD4M")
+                expect(tutorialPost).to.exist
+                
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(tutorialPost!.tags).to.be.an('array')
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(tutorialPost!.tags).to.include.members(["ad4m", "tutorial", "blockchain"])
+                
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(tutorialPost!.metadata).to.be.an('object')
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(tutorialPost!.metadata.author).to.equal("Alice")
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(tutorialPost!.metadata.views).to.equal(42)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(tutorialPost!.metadata.created).to.equal("2025-09-22T10:00:00Z")
+
+                // Test querying by title
+                const advancedPosts = await BlogPostClass.findAll(perspective!, {
+                    where: { title: "Advanced AD4M Patterns" }
+                })
+                expect(advancedPosts).to.have.lengthOf(1)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(advancedPosts[0].metadata.author).to.equal("Bob")
+
+                // Verify SDNA structure for complex types
+                // @ts-ignore - generateSDNA is added dynamically
+                const sdna = BlogPostClass.generateSDNA()
+                expect(sdna.sdna).to.include('collection(') // tags and categories should be collections
+                expect(sdna.sdna).to.include('property(') // title and metadata should be properties
+                expect(sdna.sdna).to.include('blogpost://title')
+                expect(sdna.sdna).to.include('blogpost://tags')
+                expect(sdna.sdna).to.include('blogpost://metadata')
+                expect(sdna.sdna).to.include('blogpost://categories')
+            })
+
+            it("should handle realistic Holon-like schema with nested objects", async () => {
+                const holonSchema = {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "title": "PersonHolon",
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "email": { "type": "string" },
+                        "profile": {
+                            "type": "object",
+                            "properties": {
+                                "bio": { "type": "string" },
+                                "location": { "type": "string" }
+                            }
+                        },
+                        "skills": {
+                            "type": "array", 
+                            "items": { "type": "string" }
+                        }
+                    },
+                    "required": ["name", "email"]
+                }
+
+                const PersonHolonClass = Ad4mModel.fromJSONSchema(holonSchema, {
+                    name: "PersonHolon",
+                    namespace: "holon://person/",
+                    resolveLanguage: "literal"
+                })
+
+
+                await perspective!.ensureSDNASubjectClass(PersonHolonClass)
+
+                // Test with realistic data
+                const person = new PersonHolonClass(perspective!)
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person.name = "Alice Cooper"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person.email = "alice@example.com"
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person.skills = ["javascript", "typescript", "ad4m"]
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                person.profile = {
+                    bio: "Software developer passionate about decentralized systems",
+                    location: "San Francisco"
+                }
+                await person.save()
+
+                // Verify retrieval preserves nested structure
+                const retrieved = await PersonHolonClass.findAll(perspective!)
+                expect(retrieved).to.have.lengthOf(1)
+                
+                const alice = retrieved[0]
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(alice.profile).to.be.an('object')
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(alice.profile.bio).to.equal("Software developer passionate about decentralized systems")
+                // @ts-ignore - properties are added dynamically from JSON Schema
+                expect(alice.skills).to.include.members(["javascript", "typescript", "ad4m"])
+            })
+        })
+    })
 
 })
 

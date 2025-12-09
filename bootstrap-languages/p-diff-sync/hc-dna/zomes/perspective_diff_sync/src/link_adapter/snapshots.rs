@@ -41,15 +41,12 @@ pub fn generate_snapshot(
             ))?;
         if diff.diffs_since_snapshot == 0 && search_position.hash != latest {
             let now = get_now()?.time();
-            let input = GetLinksInputBuilder::try_new(
+            let query = LinkQuery::try_new(
                 hash_entry(&diff)?,
                 LinkTypes::Snapshot
-            )
-            .unwrap()
-            .tag_prefix(LinkTag::new("snapshot"))
-            .get_options(GetStrategy::Network)
-            .build();
-            let mut snapshot_links = get_links(input)?;
+            )?
+            .tag_prefix(LinkTag::new("snapshot"));
+            let mut snapshot_links = get_links(query, GetStrategy::Local)?;
             let after = get_now()?.time();
             debug!("===PerspectiveDiffSync.generate_snapshot() - Profiling: Took {} to get the snapshot links", (after - now).num_milliseconds());
             if snapshot_links.len() == 0 {

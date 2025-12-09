@@ -497,6 +497,28 @@ impl Query {
         ))
     }
 
+    async fn perspective_query_surreal_db(
+        &self,
+        context: &RequestContext,
+        query: String,
+        uuid: String,
+    ) -> FieldResult<String> {
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
+
+        let result = get_perspective(&uuid)
+            .ok_or(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid
+            )))?
+            .surreal_query(query)
+            .await?;
+
+        Ok(serde_json::to_string(&result)?)
+    }
+
     async fn perspective_snapshot(
         &self,
         context: &RequestContext,

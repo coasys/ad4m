@@ -1,5 +1,5 @@
 ---
-manifest_version: "1"
+manifest_version: "0"
 name: "agent-store"
 
 integrity:
@@ -7,10 +7,10 @@ integrity:
   properties: ~
   zomes:
     - name: agent_store_integrity
-      bundled: ../target/wasm32-unknown-unknown/release/agent_store_integrity.wasm
+      path: ../target/wasm32-unknown-unknown/release/agent_store_integrity.wasm
 coordinator:
   zomes:
     - name: agent_store
-      bundled: ../target/wasm32-unknown-unknown/release/agent_store.wasm
+      path: ../target/wasm32-unknown-unknown/release/agent_store.wasm
       dependencies:
         - name: agent_store_integrity

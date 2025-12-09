@@ -14,7 +14,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@coasys/ad4m": "workspace:0.10.1-dev",
+    "@coasys/ad4m": "workspace:0.11.2-dev",
     "@coasys/ad4m-connect": "*",
     "@coasys/hooks-helpers": "*",
     "@types/react": "^18.2.55",
@@ -29,5 +29,5 @@
       "@coasys/ad4m": "*"
     }
   },
-  "version": "0.10.1-dev"
+  "version": "0.11.2-dev"
 }

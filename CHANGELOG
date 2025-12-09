@@ -6,10 +6,36 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Fixed
-  
+### Added
+### Changed
+
+## [0.11.1] - 02/12/2025
+
+### Fixed
+- Avoid delays in Ad4mModel.save() and batch.commit() [#639](https://github.com/coasys/ad4m/pull/639)
+- Set get strategy to local for all HC DNAs to avoid timeouts [#638](https://github.com/coasys/ad4m/pull/638)
+- Support non-literal resolveLanguage with transform in SurrealDB queries [#637](https://github.com/coasys/ad4m/pull/637)
+
 ### Added
 
 ### Changed
+- Refactor: Use Separate SurrealDB Database per Perspective [#636](https://github.com/coasys/ad4m/pull/636)
+
+## [0.11.0] - 28/11/2025
+
+### Fixed
+- Subscription fixes [#634](https://github.com/coasys/ad4m/pull/634)
+- Async Runtime Performance Optimization: Fix CPU Thrashing Issues [#626](https://github.com/coasys/ad4m/pull/626)
+
+### Added
+- SurrealDB Query Engine Integration for blazing fast Ad4mModel operations [#632](https://github.com/coasys/ad4m/pull/632)
+- Add `fromJSONSchema()` method to Ad4mModel for dynamic model generation [#628](https://github.com/coasys/ad4m/pull/628)
+- p-diff-sync: Add validation to ensure parent commits exist before accepting PerspectiveDiffEntryReference [#627](https://github.com/coasys/ad4m/pull/627)
+
+### Changed
+- Deno lockfile updates [#635](https://github.com/coasys/ad4m/pull/635)
+- Holochain bump to 0.6.0 [#633](https://github.com/coasys/ad4m/pull/633)
+- Update to Holochain 0.6.0-rc.0 [#630](https://github.com/coasys/ad4m/pull/630)
 
 
 ## [0.10.1] - 15/09/2025

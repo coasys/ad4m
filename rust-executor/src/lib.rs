@@ -9,6 +9,7 @@ pub mod holochain_service;
 pub mod js_core;
 mod prolog_service;
 pub mod runtime_service;
+mod surreal_service;
 pub mod utils;
 mod wallet;
 
@@ -36,7 +37,7 @@ use js_core::JsCore;
 use crate::{
     agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb,
     languages::LanguageController, prolog_service::init_prolog_service,
-    runtime_service::RuntimeService, utils::find_port,
+    runtime_service::RuntimeService, surreal_service::init_surreal_service, utils::find_port,
 };
 pub use config::Ad4mConfig;
 pub use holochain_service::run_local_hc_services;
@@ -140,6 +141,13 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     info!("Initializing Prolog service...");
     init_prolog_service().await;
+
+    info!("Initializing SurrealDB service...");
+    if let Err(e) = init_surreal_service().await {
+        error!("Failed to initialize SurrealDB service: {}", e);
+        // Don't panic - SurrealDB is optional for now
+        warn!("Continuing without SurrealDB support");
+    }
 
     find_and_set_port(&mut config.gql_port, 4000, "GraphQL");
     find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");
