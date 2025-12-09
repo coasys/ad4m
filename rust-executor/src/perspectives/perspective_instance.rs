@@ -2410,8 +2410,8 @@ impl PerspectiveInstance {
 
     pub async fn update_local_agents(&self, agents: Vec<String>) {
         log::debug!("Updating local agents for perspective: {:?}", agents);
-        let mut link_language_guard = self.link_language.lock().await;
-        if let Some(link_language) = link_language_guard.as_mut() {
+        let link_language_clone = self.link_language.read().await.clone();
+        if let Some(mut link_language) = link_language_clone {
             if let Err(e) = link_language.set_local_agents(agents).await {
                 log::error!("Failed to update local agents on link language: {:?}", e);
             }
