@@ -5,7 +5,7 @@
   "dependencies": {
     "@apollo/client": "3.7.10",
     "@coasys/ad4m": "link:../core",
-    "@coasys/ad4m-connect": "workspace:0.10.1-dev",
+    "@coasys/ad4m-connect": "workspace:0.11.2-dev",
     "@coasys/flux-ui": "^0.9.0",
     "@preact/preset-vite": "^2.4.0",
     "@spartan-hc/holo-hash": "0.7.0",
