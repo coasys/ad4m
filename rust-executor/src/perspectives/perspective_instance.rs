@@ -1878,7 +1878,7 @@ impl PerspectiveInstance {
     async fn retry_surreal_op<F, Fut>(
         op: F,
         uuid: &str,
-        link: &DecoratedLinkExpression,
+        _link: &DecoratedLinkExpression,
         op_name: &str,
     ) where
         F: Fn() -> Fut,
@@ -3683,6 +3683,7 @@ mod tests {
                 shared_url: None,
                 neighbourhood: None,
                 state: PerspectiveState::Private,
+                owners: None,
             },
             None,
             surreal_service,
@@ -4221,7 +4222,7 @@ mod tests {
         let target = link.target.clone();
 
         perspective
-            .add_link(link.clone(), LinkStatus::Shared, None)
+            .add_link(link.clone(), LinkStatus::Shared, None, &AgentContext::main_agent())
             .await
             .unwrap();
         println!("link added");
@@ -4252,7 +4253,7 @@ mod tests {
         // Add a link
         let link = create_link();
         let added_link = perspective
-            .add_link(link.clone(), LinkStatus::Shared, None)
+            .add_link(link.clone(), LinkStatus::Shared, None, &AgentContext::main_agent())
             .await
             .unwrap();
 
@@ -4288,7 +4289,7 @@ mod tests {
         for _ in 0..5 {
             let link = create_link();
             let added = perspective
-                .add_link(link.clone(), LinkStatus::Shared, None)
+                .add_link(link.clone(), LinkStatus::Shared, None, &AgentContext::main_agent())
                 .await
                 .unwrap();
             added_links.push(added);
@@ -4325,7 +4326,7 @@ mod tests {
         for _ in 0..3 {
             let link = create_link();
             perspective
-                .add_link(link.clone(), LinkStatus::Shared, None)
+                .add_link(link.clone(), LinkStatus::Shared, None, &AgentContext::main_agent())
                 .await
                 .unwrap();
         }
@@ -4344,7 +4345,7 @@ mod tests {
             predicate: Some("has_sdna".to_string()),
         };
         perspective
-            .add_link(sdna_link.clone(), LinkStatus::Shared, None)
+            .add_link(sdna_link.clone(), LinkStatus::Shared, None, &AgentContext::main_agent())
             .await
             .unwrap();
 
@@ -4406,14 +4407,14 @@ mod tests {
         // Add links to perspective 1
         let link1 = create_link();
         perspective1
-            .add_link(link1.clone(), LinkStatus::Shared, None)
+            .add_link(link1.clone(), LinkStatus::Shared, None, &AgentContext::main_agent())
             .await
             .unwrap();
 
         // Add different links to perspective 2
         let link2 = create_link();
         perspective2
-            .add_link(link2.clone(), LinkStatus::Shared, None)
+            .add_link(link2.clone(), LinkStatus::Shared, None, &AgentContext::main_agent())
             .await
             .unwrap();
 
@@ -4509,6 +4510,7 @@ property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predi
                 "Recipe".to_string(),
                 recipe_sdna.to_string(),
                 SdnaType::SubjectClass,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -4518,7 +4520,7 @@ property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predi
         assert_eq!(links.len(), 2, "Expected 2 links");
 
         let check = perspective
-            .prolog_query("subject_class(Name, _)".to_string())
+            .prolog_query_with_context("subject_class(Name, _)".to_string(), &AgentContext::main_agent())
             .await
             .unwrap();
         println!("Check: {:?}", check);
@@ -4537,6 +4539,7 @@ property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predi
                     "rating": "5"
                 })),
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -4553,6 +4556,7 @@ property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predi
                     "rating": "4"
                 })),
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -4586,6 +4590,7 @@ property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predi
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -4600,6 +4605,7 @@ property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predi
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -4831,6 +4837,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -4844,6 +4851,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -4857,6 +4865,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5048,7 +5057,7 @@ GROUP BY source
         // Add some test data
         let link = create_link();
         perspective
-            .add_link(link.clone(), LinkStatus::Shared, None)
+            .add_link(link.clone(), LinkStatus::Shared, None, &AgentContext::main_agent())
             .await
             .unwrap();
 
@@ -5136,6 +5145,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5149,6 +5159,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5183,6 +5194,7 @@ GROUP BY source
                     },
                     LinkStatus::Shared,
                     None,
+                    &AgentContext::main_agent(),
                 )
                 .await
                 .unwrap();
@@ -5198,6 +5210,7 @@ GROUP BY source
                     },
                     LinkStatus::Shared,
                     None,
+                    &AgentContext::main_agent(),
                 )
                 .await
                 .unwrap();
@@ -5262,6 +5275,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5275,6 +5289,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5335,6 +5350,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5348,6 +5364,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5385,6 +5402,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5398,6 +5416,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5435,6 +5454,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5449,6 +5469,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5485,6 +5506,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5498,6 +5520,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5512,6 +5535,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5526,6 +5550,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5563,6 +5588,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5577,6 +5603,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5617,6 +5644,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5631,6 +5659,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5645,6 +5674,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5659,6 +5689,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5695,6 +5726,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5709,6 +5741,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5722,6 +5755,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5762,6 +5796,7 @@ GROUP BY source
                     },
                     LinkStatus::Shared,
                     None,
+                    &AgentContext::main_agent(),
                 )
                 .await
                 .unwrap();
@@ -5776,6 +5811,7 @@ GROUP BY source
                     },
                     LinkStatus::Shared,
                     None,
+                    &AgentContext::main_agent(),
                 )
                 .await
                 .unwrap();
@@ -5817,6 +5853,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5830,6 +5867,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5844,6 +5882,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5857,6 +5896,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5899,6 +5939,7 @@ GROUP BY source
                         },
                         LinkStatus::Shared,
                         None,
+                        &AgentContext::main_agent(),
                     )
                     .await
                     .unwrap();
@@ -5972,6 +6013,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5985,6 +6027,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -5998,6 +6041,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -6029,7 +6073,7 @@ GROUP BY source
         for i in 0..5 {
             let mut link = create_link();
             link.target = format!("target://{}", i);
-            let mut signed_link = create_signed_expression(link).expect("Failed to create link");
+            let mut signed_link = create_signed_expression(link, &AgentContext::main_agent()).expect("Failed to create link");
             signed_link.timestamp = (now - chrono::Duration::minutes(i as i64)).to_rfc3339();
 
             perspective
@@ -6071,6 +6115,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -6084,6 +6129,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -6097,6 +6143,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -6125,7 +6172,7 @@ GROUP BY source
         let mut recent_link = create_link();
         recent_link.source = "user://alice".to_string();
         let mut recent_signed =
-            create_signed_expression(recent_link).expect("Failed to create link");
+            create_signed_expression(recent_link, &AgentContext::main_agent()).expect("Failed to create link");
         recent_signed.timestamp = (now - chrono::Duration::hours(1)).to_rfc3339();
 
         perspective
@@ -6140,7 +6187,7 @@ GROUP BY source
         // Add old link
         let mut old_link = create_link();
         old_link.source = "user://alice".to_string();
-        let mut old_signed = create_signed_expression(old_link).expect("Failed to create link");
+        let mut old_signed = create_signed_expression(old_link, &AgentContext::main_agent()).expect("Failed to create link");
         old_signed.timestamp = (now - chrono::Duration::days(365)).to_rfc3339();
 
         perspective
@@ -6179,6 +6226,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -6216,6 +6264,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -6267,6 +6316,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -6302,6 +6352,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
@@ -6315,6 +6366,7 @@ GROUP BY source
                 },
                 LinkStatus::Shared,
                 None,
+                &AgentContext::main_agent(),
             )
             .await
             .unwrap();
