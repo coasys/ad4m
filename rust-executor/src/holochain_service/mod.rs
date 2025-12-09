@@ -536,6 +536,7 @@ impl HolochainService {
         let app_info = self.conductor.get_app_info(&app_id).await?;
 
         if app_info.is_none() {
+            error!("App not installed with id: {:?}", app_id);
             return Err(anyhow!("App not installed with id: {:?}", app_id));
         }
 
@@ -544,6 +545,7 @@ impl HolochainService {
         let cell_entry = app_info.cell_info.get(&cell_name);
 
         if cell_entry.is_none() {
+            error!("Cell not installed with name: {:?} in app: {:?}", cell_name, app_id);
             return Err(anyhow!(
                 "Cell not installed with name: {:?} in app: {:?}",
                 cell_name,
@@ -552,6 +554,7 @@ impl HolochainService {
         }
 
         if cell_entry.unwrap().is_empty() {
+            error!("No cells for cell name: {:?} in app: {:?}", cell_name, app_id);
             return Err(anyhow!(
                 "No cells for cell name: {:?} in app: {:?}",
                 cell_name,
@@ -563,7 +566,10 @@ impl HolochainService {
         let cell_id = match cell_info {
             CellInfo::Provisioned(cell) => cell.cell_id,
             CellInfo::Cloned(cell) => cell.cell_id,
-            CellInfo::Stem(_cell) => return Err(anyhow!("Cell is not provisioned or cloned",)),
+            CellInfo::Stem(_cell) => {
+                error!("Cell is not provisioned or cloned");
+                return Err(anyhow!("Cell is not provisioned or cloned"));
+            }
         };
 
         let agent_pub_key = app_info.agent_pub_key;
@@ -600,9 +606,27 @@ impl HolochainService {
         //    .await
         //    .map_err(|err| anyhow!("Could not sign zome call: {:?}", err))?;
 
-        let result = self.conductor.call_zome(zome_call_params).await??;
+        let conductor_api_result = self.conductor.call_zome(zome_call_params).await;
+        match conductor_api_result {
+            Ok(result) => {
+                match result {
+                    Ok(result) => {
+                        Ok(result.into())
+                    }
+                    Err(err) => {
+                        error!("Error calling zome function: {:?}", err);
+                        Err(anyhow!("Error calling zome function: {:?}", err))
+                    }
+                }
+            }
+            Err(err) => {
+                error!("Conductor API error: {:?}", err);
+                Err(anyhow!("Conductor API error: {:?}", err))
+            }
+        }
 
-        Ok(result)
+        
+        
     }
 
     pub async fn remove_app(&self, app_id: String) -> Result<(), AnyError> {
