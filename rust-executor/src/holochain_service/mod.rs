@@ -68,6 +68,20 @@ pub struct LocalConductorConfig {
 }
 
 impl HolochainService {
+    /// Formats an error with proper stacktrace formatting for readability
+    fn format_error_with_stacktrace(err: &dyn std::fmt::Debug) -> String {
+        let err_str = format!("{:?}", err);
+        
+        // Check if the error contains a stacktrace pattern
+        if err_str.contains("RuntimeError:") && err_str.contains("\\n    at ") {
+            // Replace escaped newlines with actual newlines throughout the error string
+            // This will make the stacktrace readable line by line
+            return err_str.replace("\\n", "\n");
+        }
+        
+        err_str
+    }
+
     pub async fn init(local_config: LocalConductorConfig) -> Result<(), AnyError> {
         // Store the config for potential restarts
         {
@@ -614,13 +628,15 @@ impl HolochainService {
                         Ok(result.into())
                     }
                     Err(err) => {
-                        error!("Error calling zome function: {:?}", err);
+                        let formatted_err = Self::format_error_with_stacktrace(&err);
+                        error!("Error calling zome function:\n{}", formatted_err);
                         Err(anyhow!("Error calling zome function: {:?}", err))
                     }
                 }
             }
             Err(err) => {
-                error!("Conductor API error: {:?}", err);
+                let formatted_err = Self::format_error_with_stacktrace(&err);
+                error!("Conductor API error:\n{}", formatted_err);
                 Err(anyhow!("Conductor API error: {:?}", err))
             }
         }
