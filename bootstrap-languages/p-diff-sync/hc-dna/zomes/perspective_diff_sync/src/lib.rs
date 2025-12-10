@@ -6,7 +6,7 @@ use inputs::PullArguments;
 use lazy_static::lazy_static;
 
 use perspective_diff_sync_integrity::{
-    HashBroadcast, OnlineAgent, OnlineAgentAndAction, Perspective, PerspectiveDiff,
+    CommitInput, HashBroadcast, OnlineAgent, OnlineAgentAndAction, Perspective, PerspectiveDiff,
     PerspectiveExpression, PullResult, RoutedSignalPayload,
 };
 
@@ -45,9 +45,9 @@ fn init(_: ()) -> ExternResult<InitCallbackResult> {
 /// LinkLanguage implementation
 
 #[hdk_extern]
-pub fn commit(diff: PerspectiveDiff) -> ExternResult<Hash> {
+pub fn commit(input: CommitInput) -> ExternResult<Hash> {
     debug!("commit");
-    let commit_result = link_adapter::commit::commit::<retriever::HolochainRetreiver>(diff)
+    let commit_result = link_adapter::commit::commit::<retriever::HolochainRetreiver>(input.diff, input.my_did)
         .map_err(|error| utils::err(&format!("{}", error)));
     debug!("commit_result: {:?}", commit_result);
     commit_result
@@ -61,9 +61,9 @@ pub fn current_revision(_: ()) -> ExternResult<Option<Hash>> {
 }
 
 #[hdk_extern]
-pub fn sync(_: ()) -> ExternResult<Option<Hash>> {
+pub fn sync(my_did: String) -> ExternResult<Option<Hash>> {
     //info!("sync");
-    let broadcast_result = link_adapter::commit::broadcast_current::<retriever::HolochainRetreiver>()
+    let broadcast_result = link_adapter::commit::broadcast_current::<retriever::HolochainRetreiver>(&my_did)
         .map_err(|error| utils::err(&format!("{}", error)));
     //info!("broadcast_result: {:?}", broadcast_result);
     broadcast_result

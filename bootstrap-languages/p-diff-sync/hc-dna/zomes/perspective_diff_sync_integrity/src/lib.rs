@@ -32,6 +32,12 @@ pub struct PerspectiveDiff {
     pub removals: Vec<LinkExpression>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes)]
+pub struct CommitInput {
+    pub diff: PerspectiveDiff,
+    pub my_did: String,
+}
+
 ///The reference that is sent to other agents, denotes the position in the DAG as well as the data at that position
 #[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes)]
 pub struct HashBroadcast {

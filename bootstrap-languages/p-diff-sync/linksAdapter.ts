@@ -89,7 +89,7 @@ export class LinkAdapter implements LinkSyncAdapter {
     //console.log("PerspectiveDiffSync.sync(); Got lock");
     try {
       //@ts-ignore
-      let current_revision = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "sync", null);
+      let current_revision = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "sync", this.me);
       if (current_revision && current_revision instanceof Uint8Array) {
         this.myCurrentRevision = current_revision;
       }
@@ -243,7 +243,10 @@ export class LinkAdapter implements LinkSyncAdapter {
 
       while (attempts < maxAttempts) {
         try {
-          let res = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "commit", prep_diff);
+          let res = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "commit", {
+            diff: prep_diff,
+            my_did: this.me
+          });
           if(!res){
             throw new Error("Got undefined from Holochain commit zome function")
           }          

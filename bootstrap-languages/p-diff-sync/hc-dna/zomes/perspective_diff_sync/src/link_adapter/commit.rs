@@ -9,12 +9,12 @@ use crate::link_adapter::revisions::{current_revision, update_current_revision};
 use crate::link_adapter::snapshots::generate_snapshot;
 use crate::retriever::holochain::{get_active_agent_anchor, get_active_agents};
 use crate::retriever::PerspectiveDiffRetreiver;
-use crate::telepresence::status::get_my_did;
 use crate::utils::get_now;
 use crate::{Hash, ENABLE_SIGNALS, SNAPSHOT_INTERVAL};
 
 pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     diff: PerspectiveDiff,
+    my_did: String,
 ) -> SocialContextResult<HoloHash<holo_hash::hash_type::Action>> {
     debug!("===PerspectiveDiffSync.commit(): Function start");
     let now_fn_start = get_now()?.time();
@@ -98,7 +98,7 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
             //     reference_hash: diff_entry_reference.clone(),
             // };
             // send_revision_signal(signal_data)?;
-            broadcast_current::<Retriever>()?;
+            broadcast_current::<Retriever>(&my_did)?;
         };
     } else {
         // Concurrent update detected; decide how to handle it
@@ -154,7 +154,7 @@ pub fn add_active_agent_link<Retriever: PerspectiveDiffRetreiver>() -> SocialCon
     Ok(())
 }
 
-pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>() -> SocialContextResult<Option<Hash>>
+pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>(my_did: &str) -> SocialContextResult<Option<Hash>>
 {
     //debug!("Running broadcast_current");
     let current = current_revision::<Retriever>()?;
@@ -168,7 +168,7 @@ pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>() -> SocialContext
         let signal_data = HashBroadcast {
             reference: entry_ref,
             reference_hash: current_revision.hash.clone(),
-            broadcast_author: get_my_did()?.unwrap(),
+            broadcast_author: my_did.to_string(),
         };
 
         let recent_agents = get_active_agents()?;
