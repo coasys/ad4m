@@ -67,17 +67,10 @@ export default class AgentService {
     return AGENT.agent();
   }
 
-  // Return all local user DIDs by iterating local user emails
+  // Return all local user DIDs (including main agent)
   getAllLocalUserDIDs(): string[] {
-    // @ts-ignore - New functions from Rust
-    const emails: string[] = AGENT.listUserEmails();
-    const dids: string[] = [];
-    for (const email of emails) {
-      // @ts-ignore - New function from Rust
-      const did = AGENT.getUserDidByEmail(email);
-      dids.push(did);
-    }
-    return dids;
+    // @ts-ignore - Rust implementation includes main agent + managed users
+    return AGENT.getAllLocalUserDIDs();
   }
 
   async updateAgent(a: Agent) {
