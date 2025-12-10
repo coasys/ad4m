@@ -1063,13 +1063,14 @@ impl Mutation {
                 })?,
             )
         } else {
-            // Main agent mode: set owner to main agent DID if available
-            None // For now, don't assign ownership to main agent perspectives
+            // Main agent mode: set owner to main agent DID
+            Some(crate::agent::did())
         };
 
         let handle = if let Some(owner) = &owner_did {
             PerspectiveHandle::new_with_owner(name.clone(), owner.clone())
         } else {
+            // Fallback: create without owner (shouldn't happen now)
             PerspectiveHandle::new_from_name(name.clone())
         };
 

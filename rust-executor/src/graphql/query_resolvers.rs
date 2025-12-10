@@ -395,20 +395,18 @@ impl Query {
             uuid
         )))?;
 
-        let owners = perspective
-            .persisted
-            .lock()
-            .await
-            .owners
-            .clone()
-            .ok_or(FieldError::from("Perspective has no owners"))?;
-
-        if !owners.contains(&current_user_did) {
-            return Err(FieldError::from(format!(
-                "No perspective found with uuid {}",
-                uuid
-            )));
+        let handle = perspective.persisted.lock().await.clone();
+        
+        // Check ownership - either the perspective has no owners (legacy/unowned) 
+        // or the current user is in the owners list
+        if let Some(owners) = &handle.owners {
+            if !owners.contains(&current_user_did) {
+                return Err(FieldError::from(format!(
+                    "Access denied: You are not an owner of this neighbourhood perspective"
+                )));
+            }
         }
+        // If owners is None, allow access for backward compatibility with legacy perspectives
 
         // Get all DIDs from the link language
         let all_dids = perspective

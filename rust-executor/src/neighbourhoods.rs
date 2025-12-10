@@ -53,6 +53,15 @@ pub async fn neighbourhood_publish_from_perspective_with_context(
     perspective_handle.shared_url = Some(neighbourhood_url.clone());
     perspective_handle.neighbourhood = Some(neighbourhood_exp);
     perspective_handle.state = PerspectiveState::NeighbourhoodCreationInitiated;
+    
+    // Initialize owners list with the creator's DID if not already set
+    let creator_did = did_for_context(context)?;
+    if perspective_handle.owners.is_none() {
+        perspective_handle.owners = Some(vec![creator_did.clone()]);
+    } else if !perspective_handle.is_owned_by(&creator_did) {
+        perspective_handle.add_owner(&creator_did);
+    }
+    
     update_perspective(&perspective_handle)
         .await
         .map_err(|e| anyhow!(e))?;
