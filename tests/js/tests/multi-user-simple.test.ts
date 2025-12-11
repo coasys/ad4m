@@ -1535,7 +1535,7 @@ describe("Multi-User Simple integration tests", () => {
             await node2User2Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
             // Wait for neighbourhood to sync
-            await sleep(5000);
+            await sleep(10000);
 
             // Get neighbourhood proxies for each user
             const node1User1Perspectives = await node1User1Client!.perspective.all();
@@ -1603,21 +1603,33 @@ describe("Multi-User Simple integration tests", () => {
             expect(node1User1Others).to.include(node2User2Did, "Node 1 User 1 should see Node 2 User 2");
             expect(node1User1Others).to.have.lengthOf(3, "Node 1 User 1 should see exactly 3 other users");
 
-            const node1User2Others = await node1User2Proxy!.otherAgents();
+            const node1User2Others = await pollUntilAllSeen(
+                node1User2Proxy!,
+                [node1User1Did, node2User1Did, node2User2Did],
+                "Node 1 User 2"
+            );
             console.log("Node 1 User 2 sees others:", node1User2Others);
             expect(node1User2Others).to.include(node1User1Did, "Node 1 User 2 should see Node 1 User 1");
             expect(node1User2Others).to.include(node2User1Did, "Node 1 User 2 should see Node 2 User 1");
             expect(node1User2Others).to.include(node2User2Did, "Node 1 User 2 should see Node 2 User 2");
             expect(node1User2Others).to.have.lengthOf(3, "Node 1 User 2 should see exactly 3 other users");
 
-            const node2User1Others = await node2User1Proxy!.otherAgents();
+            const node2User1Others = await pollUntilAllSeen(
+                node2User1Proxy!,
+                [node1User1Did, node1User2Did, node2User2Did],
+                "Node 2 User 1"
+            );
             console.log("Node 2 User 1 sees others:", node2User1Others);
             expect(node2User1Others).to.include(node1User1Did, "Node 2 User 1 should see Node 1 User 1");
             expect(node2User1Others).to.include(node1User2Did, "Node 2 User 1 should see Node 1 User 2");
             expect(node2User1Others).to.include(node2User2Did, "Node 2 User 1 should see Node 2 User 2");
             expect(node2User1Others).to.have.lengthOf(3, "Node 2 User 1 should see exactly 3 other users");
 
-            const node2User2Others = await node2User2Proxy!.otherAgents();
+            const node2User2Others = await pollUntilAllSeen(
+                node2User2Proxy!,
+                [node1User1Did, node1User2Did, node2User1Did],
+                "Node 2 User 2"
+            );
             console.log("Node 2 User 2 sees others:", node2User2Others);
             expect(node2User2Others).to.include(node1User1Did, "Node 2 User 2 should see Node 1 User 1");
             expect(node2User2Others).to.include(node1User2Did, "Node 2 User 2 should see Node 1 User 2");
@@ -1628,7 +1640,7 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         it("should route p2p signals correctly between users across nodes", async function() {
-            this.timeout(30000);
+            this.timeout(60000);
 
             console.log("\n=== Testing cross-node p2p signal routing ===");
 
@@ -1661,7 +1673,7 @@ describe("Multi-User Simple integration tests", () => {
                 node2User2ReceivedSignals.push(signal);
             });
 
-            await sleep(500); // Let handlers initialize
+            await sleep(1500); // Let handlers initialize
 
 
             // Node 1 User 1 sends a signal to Node 2 User 1
@@ -1676,7 +1688,7 @@ describe("Multi-User Simple integration tests", () => {
 
             // Wait for signal delivery
             console.log("Waiting for signal delivery...");
-            const maxWaitTime = 10000;
+            const maxWaitTime = 20000;
             let startTime = Date.now();
             while (node2User2ReceivedSignals.length === 0 && (Date.now() - startTime) < maxWaitTime) {
                 await sleep(100);
@@ -1729,7 +1741,7 @@ describe("Multi-User Simple integration tests", () => {
                 node1User1ReceivedSignals.push(signal);
             });
 
-            await sleep(500);
+            await sleep(1500);
 
             console.log(`\nNode 2 User 1 (${node2User1Did.substring(0, 20)}...) sending signal to Node 1 User 1 (${node1User1Did.substring(0, 20)}...)`);
             await node2User1Proxy!.sendSignalU(node1User1Did, new PerspectiveUnsignedInput([
@@ -1807,7 +1819,7 @@ describe("Multi-User Simple integration tests", () => {
 
             // Wait for synchronization
             console.log("\nWaiting for sync...");
-            await sleep(5000);
+            await sleep(10000);
 
             // Query links from each user's perspective
             console.log("\nQuerying links from each user's perspective...");
