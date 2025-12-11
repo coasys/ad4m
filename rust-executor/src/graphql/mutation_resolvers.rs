@@ -1063,8 +1063,9 @@ impl Mutation {
                 })?,
             )
         } else {
-            // Main agent mode: set owner to main agent DID
-            Some(crate::agent::did())
+            // Main agent mode: don't set owner for regular perspectives
+            // Owner will be set when/if the perspective becomes a neighbourhood
+            None
         };
 
         let handle = if let Some(owner) = &owner_did {

@@ -896,7 +896,9 @@ impl PerspectiveInstance {
 
         // Publish link added events - one per owner for proper multi-user isolation
         let pubsub = get_global_pubsub().await;
-        if let Some(owners) = &handle.owners {
+        let owners_list = handle.owners.as_ref().filter(|o| !o.is_empty());
+        
+        if let Some(owners) = owners_list {
             for link in &decorated_diff.additions {
                 for owner in owners {
                     pubsub
@@ -928,6 +930,37 @@ impl PerspectiveInstance {
                         )
                         .await;
                 }
+            }
+        } else {
+            // For perspectives without explicit owners (main agent), publish with main agent DID
+            let main_agent_did = crate::agent::did();
+            
+            for link in &decorated_diff.additions {
+                pubsub
+                    .publish(
+                        &PERSPECTIVE_LINK_ADDED_TOPIC,
+                        &serde_json::to_string(&PerspectiveLinkWithOwner {
+                            perspective_uuid: handle.uuid.clone(),
+                            link: link.clone(),
+                            owner: main_agent_did.clone(),
+                        })
+                        .unwrap(),
+                    )
+                    .await;
+            }
+
+            for link in &decorated_diff.removals {
+                pubsub
+                    .publish(
+                        &PERSPECTIVE_LINK_REMOVED_TOPIC,
+                        &serde_json::to_string(&PerspectiveLinkWithOwner {
+                            perspective_uuid: handle.uuid.clone(),
+                            link: link.clone(),
+                            owner: main_agent_did.clone(),
+                        })
+                        .unwrap(),
+                    )
+                    .await;
             }
         }
     }
@@ -1144,7 +1177,9 @@ impl PerspectiveInstance {
 
             // Publish link updated events - one per owner for proper multi-user isolation
             let pubsub = get_global_pubsub().await;
-            if let Some(owners) = &handle.owners {
+            let owners_list = handle.owners.as_ref().filter(|o| !o.is_empty());
+            
+            if let Some(owners) = owners_list {
                 for owner in owners {
                     pubsub
                         .publish(
@@ -1159,6 +1194,21 @@ impl PerspectiveInstance {
                         )
                         .await;
                 }
+            } else {
+                // For perspectives without explicit owners (main agent), publish with main agent DID
+                let main_agent_did = crate::agent::did();
+                pubsub
+                    .publish(
+                        &PERSPECTIVE_LINK_UPDATED_TOPIC,
+                        &serde_json::to_string(&PerspectiveLinkUpdatedWithOwner {
+                            perspective_uuid: handle.uuid.clone(),
+                            old_link: decorated_old_link.clone(),
+                            new_link: decorated_new_link_expression.clone(),
+                            owner: main_agent_did,
+                        })
+                        .unwrap(),
+                    )
+                    .await;
             }
 
             if link_status == LinkStatus::Shared {

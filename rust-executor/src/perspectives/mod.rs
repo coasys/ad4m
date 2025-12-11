@@ -108,7 +108,9 @@ pub async fn add_perspective(
 
     // Publish one event per owner so each user gets their own notification
     let pubsub = get_global_pubsub().await;
-    if let Some(owners) = &handle.owners {
+    let owners_list = handle.owners.as_ref().filter(|o| !o.is_empty());
+    
+    if let Some(owners) = owners_list {
         for owner in owners {
             let perspective_with_owner = PerspectiveWithOwner {
                 perspective: handle.clone(),
@@ -121,6 +123,19 @@ pub async fn add_perspective(
                 )
                 .await;
         }
+    } else {
+        // For perspectives without explicit owners (main agent), publish with main agent DID
+        let main_agent_did = crate::agent::did();
+        let perspective_with_owner = PerspectiveWithOwner {
+            perspective: handle.clone(),
+            owner: main_agent_did,
+        };
+        pubsub
+            .publish(
+                &PERSPECTIVE_ADDED_TOPIC,
+                &serde_json::to_string(&perspective_with_owner).unwrap(),
+            )
+            .await;
     }
     Ok(())
 }
@@ -174,7 +189,9 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
 
     // Publish one event per owner so each user gets their own notification
     let pubsub = get_global_pubsub().await;
-    if let Some(owners) = &handle.owners {
+    let owners_list = handle.owners.as_ref().filter(|o| !o.is_empty());
+    
+    if let Some(owners) = owners_list {
         for owner in owners {
             let perspective_with_owner = PerspectiveWithOwner {
                 perspective: handle.clone(),
@@ -187,6 +204,19 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
                 )
                 .await;
         }
+    } else {
+        // For perspectives without explicit owners (main agent), publish with main agent DID
+        let main_agent_did = crate::agent::did();
+        let perspective_with_owner = PerspectiveWithOwner {
+            perspective: handle.clone(),
+            owner: main_agent_did,
+        };
+        pubsub
+            .publish(
+                &PERSPECTIVE_UPDATED_TOPIC,
+                &serde_json::to_string(&perspective_with_owner).unwrap(),
+            )
+            .await;
     }
     Ok(())
 }
