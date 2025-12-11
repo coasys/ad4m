@@ -109,7 +109,7 @@ pub async fn add_perspective(
     // Publish one event per owner so each user gets their own notification
     let pubsub = get_global_pubsub().await;
     let owners_list = handle.owners.as_ref().filter(|o| !o.is_empty());
-    
+
     if let Some(owners) = owners_list {
         for owner in owners {
             let perspective_with_owner = PerspectiveWithOwner {
@@ -190,7 +190,7 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
     // Publish one event per owner so each user gets their own notification
     let pubsub = get_global_pubsub().await;
     let owners_list = handle.owners.as_ref().filter(|o| !o.is_empty());
-    
+
     if let Some(owners) = owners_list {
         for owner in owners {
             let perspective_with_owner = PerspectiveWithOwner {

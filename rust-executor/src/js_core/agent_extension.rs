@@ -26,8 +26,7 @@ fn agent_signing_key_id() -> Result<String, AnyhowWrapperError> {
 #[op2]
 #[string]
 fn agent_did() -> Result<String, AnyhowWrapperError> {
-    did_for_context(&AgentContext::main_agent())
-        .map_err(AnyhowWrapperError::from)
+    did_for_context(&AgentContext::main_agent()).map_err(AnyhowWrapperError::from)
 }
 
 #[op2]

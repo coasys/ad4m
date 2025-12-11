@@ -71,14 +71,14 @@ impl HolochainService {
     /// Formats an error with proper stacktrace formatting for readability
     fn format_error_with_stacktrace(err: &dyn std::fmt::Debug) -> String {
         let err_str = format!("{:?}", err);
-        
+
         // Check if the error contains a stacktrace pattern
         if err_str.contains("RuntimeError:") && err_str.contains("\\n    at ") {
             // Replace escaped newlines with actual newlines throughout the error string
             // This will make the stacktrace readable line by line
             return err_str.replace("\\n", "\n");
         }
-        
+
         err_str
     }
 
@@ -559,7 +559,10 @@ impl HolochainService {
         let cell_entry = app_info.cell_info.get(&cell_name);
 
         if cell_entry.is_none() {
-            error!("Cell not installed with name: {:?} in app: {:?}", cell_name, app_id);
+            error!(
+                "Cell not installed with name: {:?} in app: {:?}",
+                cell_name, app_id
+            );
             return Err(anyhow!(
                 "Cell not installed with name: {:?} in app: {:?}",
                 cell_name,
@@ -568,7 +571,10 @@ impl HolochainService {
         }
 
         if cell_entry.unwrap().is_empty() {
-            error!("No cells for cell name: {:?} in app: {:?}", cell_name, app_id);
+            error!(
+                "No cells for cell name: {:?} in app: {:?}",
+                cell_name, app_id
+            );
             return Err(anyhow!(
                 "No cells for cell name: {:?} in app: {:?}",
                 cell_name,
@@ -622,27 +628,20 @@ impl HolochainService {
 
         let conductor_api_result = self.conductor.call_zome(zome_call_params).await;
         match conductor_api_result {
-            Ok(result) => {
-                match result {
-                    Ok(result) => {
-                        Ok(result.into())
-                    }
-                    Err(err) => {
-                        let formatted_err = Self::format_error_with_stacktrace(&err);
-                        error!("Error calling zome function:\n{}", formatted_err);
-                        Err(anyhow!("Error calling zome function: {:?}", err))
-                    }
+            Ok(result) => match result {
+                Ok(result) => Ok(result.into()),
+                Err(err) => {
+                    let formatted_err = Self::format_error_with_stacktrace(&err);
+                    error!("Error calling zome function:\n{}", formatted_err);
+                    Err(anyhow!("Error calling zome function: {:?}", err))
                 }
-            }
+            },
             Err(err) => {
                 let formatted_err = Self::format_error_with_stacktrace(&err);
                 error!("Conductor API error:\n{}", formatted_err);
                 Err(anyhow!("Conductor API error: {:?}", err))
             }
         }
-
-        
-        
     }
 
     pub async fn remove_app(&self, app_id: String) -> Result<(), AnyError> {

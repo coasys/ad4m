@@ -396,8 +396,8 @@ impl Query {
         )))?;
 
         let handle = perspective.persisted.lock().await.clone();
-        
-        // Check ownership - either the perspective has no owners (legacy/unowned) 
+
+        // Check ownership - either the perspective has no owners (legacy/unowned)
         // or the current user is in the owners list
         if let Some(owners) = &handle.owners {
             if !owners.contains(&current_user_did) {
