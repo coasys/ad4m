@@ -706,8 +706,7 @@ impl Ad4mDb {
             .query_map([uuid], |row| {
                 let owners_json: Option<String> = row.get(5)?;
                 let owners = owners_json
-                    .and_then(|json| serde_json::from_str(&json).ok())
-                    .or_else(|| Some(Vec::new()));
+                    .and_then(|json| serde_json::from_str(&json).ok());
 
                 Ok(PerspectiveHandle {
                     name: row.get(0)?,
@@ -736,8 +735,7 @@ impl Ad4mDb {
         let perspective_iter = stmt.query_map([], |row| {
             let owners_json: Option<String> = row.get(5)?;
             let owners = owners_json
-                .and_then(|json| serde_json::from_str(&json).ok())
-                .or_else(|| Some(Vec::new()));
+                .and_then(|json| serde_json::from_str(&json).ok());
 
             Ok(PerspectiveHandle {
                 name: row.get(0)?,
