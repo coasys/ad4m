@@ -1388,6 +1388,172 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("✅ Local signal routing working correctly - signals properly isolated between users");
         });
+
+        it("should receive neighbourhood signals between two managed users (Flux scenario)", async () => {
+            console.log("\n=== Replicating Flux Scenario: Fresh Agent with Managed Users ===");
+            
+            // Create two managed users (simulating Flux signup flow)
+            console.log("Creating first managed user...");
+            await adminAd4mClient!.agent.createUser("flux1@example.com", "password1");
+            const token1 = await adminAd4mClient!.agent.loginUser("flux1@example.com", "password1");
+            
+            console.log("Creating second managed user...");
+            await adminAd4mClient!.agent.createUser("flux2@example.com", "password2");
+            const token2 = await adminAd4mClient!.agent.loginUser("flux2@example.com", "password2");
+
+            // @ts-ignore
+            const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
+            // @ts-ignore  
+            const client2 = new Ad4mClient(apolloClient(gqlPort, token2), false);
+
+            // Get user DIDs
+            const user1Status = await client1.agent.me();
+            const user2Status = await client2.agent.me();
+            const user1Did = user1Status.did!;
+            const user2Did = user2Status.did!;
+
+            console.log("User 1 DID:", user1Did);
+            console.log("User 2 DID:", user2Did);
+
+            // FIRST managed user creates a perspective and neighbourhood
+            console.log("\nUser 1 (first managed user) creating neighbourhood...");
+            const perspective1 = await client1.perspective.add("Flux Test Neighbourhood");
+            
+            // Add a test link
+            await client1.perspective.addLink(perspective1.uuid, new Link({
+                source: "test://initial",
+                target: "test://data",
+                predicate: "test://created_by_user1"
+            }));
+
+            // Clone link language and publish neighbourhood (using Holochain p-diff-sync)
+            const linkLanguage = await client1.languages.applyTemplateAndPublish(
+                DIFF_SYNC_OFFICIAL, 
+                JSON.stringify({uid: uuidv4(), name: "Flux Test Neighbourhood"})
+            );
+            
+            console.log("Link language cloned:", linkLanguage.address);
+            
+            const neighbourhoodUrl = await client1.neighbourhood.publishFromPerspective(
+                perspective1.uuid,
+                linkLanguage.address,
+                new Perspective([])
+            );
+
+            console.log("User 1 published neighbourhood:", neighbourhoodUrl);
+
+            // Wait for neighbourhood to be published
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            // SECOND managed user joins the neighbourhood
+            console.log("\nUser 2 (second managed user) joining neighbourhood...");
+            const joinResult = await client2.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            console.log("User 2 join result:", joinResult.uuid);
+
+            const user2Perspectives = await client2.perspective.all();
+            const user2SharedPerspective = user2Perspectives.find(p => p.sharedUrl === neighbourhoodUrl);
+            expect(user2SharedPerspective).to.not.be.null;
+
+            console.log("User 2 joined neighbourhood");
+
+            // Wait for neighbourhood to sync
+            await new Promise(resolve => setTimeout(resolve, 3000));
+
+            // Get neighbourhood proxies
+            const user1Neighbourhood = await perspective1.getNeighbourhoodProxy();
+            const user2Neighbourhood = await user2SharedPerspective!.getNeighbourhoodProxy();
+            
+            expect(user1Neighbourhood).to.not.be.null;
+            expect(user2Neighbourhood).to.not.be.null;
+
+            console.log("\n=== Testing Signal Delivery ===");
+
+            // Set up signal listeners
+            const user1ReceivedSignals: any[] = [];
+            const user2ReceivedSignals: any[] = [];
+
+            const user1SignalHandler = user1Neighbourhood!.addSignalHandler((signal) => {
+                console.log("✉️ User 1 received signal:", JSON.stringify(signal, null, 2));
+                user1ReceivedSignals.push(signal);
+            });
+
+            const user2SignalHandler = user2Neighbourhood!.addSignalHandler((signal) => {
+                console.log("✉️ User 2 received signal:", JSON.stringify(signal, null, 2));
+                user2ReceivedSignals.push(signal);
+            });
+
+            console.log("Signal handlers set up for both users");
+
+            // Wait for subscriptions to be active
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            // Check if users can see each other in otherAgents
+            console.log("\n=== Checking otherAgents() ===");
+            const user1Others = await user1Neighbourhood!.otherAgents();
+            const user2Others = await user2Neighbourhood!.otherAgents();
+            
+            console.log("User 1 sees others:", user1Others);
+            console.log("User 2 sees others:", user2Others);
+
+            // User 1 sends a signal to User 2
+            console.log("\n=== User 1 sending signal to User 2 ===");
+            const signal1to2 = new PerspectiveUnsignedInput([
+                new Link({
+                    source: "test://signal",
+                    predicate: "test://user1_to_user2",
+                    target: user1Did
+                })
+            ]);
+
+            await user1Neighbourhood!.sendSignalU(user2Did, signal1to2);
+            console.log("Signal sent from User 1 to User 2");
+
+            // Wait for signal delivery
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            // User 2 sends a signal to User 1
+            console.log("\n=== User 2 sending signal to User 1 ===");
+            const signal2to1 = new PerspectiveUnsignedInput([
+                new Link({
+                    source: "test://signal",
+                    predicate: "test://user2_to_user1",
+                    target: user2Did
+                })
+            ]);
+
+            await user2Neighbourhood!.sendSignalU(user1Did, signal2to1);
+            console.log("Signal sent from User 2 to User 1");
+
+            // Wait for signal delivery
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            // Verify signals were received
+            console.log("\n=== Verification ===");
+            console.log("User 1 received signals count:", user1ReceivedSignals.length);
+            console.log("User 2 received signals count:", user2ReceivedSignals.length);
+
+            if (user2ReceivedSignals.length > 0) {
+                console.log("User 2 received signals:", JSON.stringify(user2ReceivedSignals, null, 2));
+            }
+            if (user1ReceivedSignals.length > 0) {
+                console.log("User 1 received signals:", JSON.stringify(user1ReceivedSignals, null, 2));
+            }
+
+            // Assertions
+            expect(user2ReceivedSignals.length).to.be.greaterThan(0, "User 2 should receive signal from User 1");
+            expect(user1ReceivedSignals.length).to.be.greaterThan(0, "User 1 should receive signal from User 2");
+
+            console.log("User 2 received signals:", JSON.stringify(user2ReceivedSignals, null, 2));
+            console.log("User 1 received signals:", JSON.stringify(user1ReceivedSignals, null, 2));
+            // Verify signal content
+            const user2Signal = user2ReceivedSignals[0];
+            expect(user2Signal.data.links[0].data.predicate).to.equal("test://user1_to_user2");
+
+            const user1Signal = user1ReceivedSignals[0];
+            expect(user1Signal.data.links[0].data.predicate).to.equal("test://user2_to_user1");
+
+            console.log("✅ Neighbourhood signals working between managed users (Flux scenario)");
+        });
     });
 
     describe("Multi-Node Multi-User Integration", () => {
