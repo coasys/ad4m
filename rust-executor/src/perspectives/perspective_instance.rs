@@ -1659,12 +1659,8 @@ impl PerspectiveInstance {
             })
     }
 
-    async fn retry_surreal_op<F, Fut>(
-        op: F,
-        uuid: &str,
-        link: &DecoratedLinkExpression,
-        op_name: &str,
-    ) where
+    async fn retry_surreal_op<F, Fut>(op: F, uuid: &str, op_name: &str)
+    where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<(), anyhow::Error>>,
     {
@@ -1715,7 +1711,6 @@ impl PerspectiveInstance {
             Self::retry_surreal_op(
                 || self.surreal_service.remove_link(&uuid, removal),
                 &uuid,
-                removal,
                 "remove",
             )
             .await;
@@ -1725,7 +1720,6 @@ impl PerspectiveInstance {
             Self::retry_surreal_op(
                 || self.surreal_service.add_link(&uuid, addition),
                 &uuid,
-                addition,
                 "add",
             )
             .await;
@@ -3296,7 +3290,7 @@ mod tests {
     use crate::graphql::graphql_types::PerspectiveState;
     use crate::perspectives::perspective_instance::PerspectiveHandle;
     use crate::prolog_service::init_prolog_service;
-    use crate::surreal_service::{init_surreal_service, SurrealDBService};
+    use crate::surreal_service::SurrealDBService;
     use crate::test_utils::setup_wallet;
     use fake::{Fake, Faker};
     use uuid::Uuid;
@@ -3308,9 +3302,6 @@ mod tests {
         // Initialize agent, prolog and surreal services for tests
         AgentService::init_global_test_instance();
         init_prolog_service().await;
-        init_surreal_service()
-            .await
-            .expect("Failed to init surreal service");
 
         let uuid = Uuid::new_v4().to_string();
         let surreal_service = SurrealDBService::new("ad4m", &uuid)
@@ -3980,10 +3971,6 @@ mod tests {
         setup_wallet();
         Ad4mDb::init_global_instance(":memory:").unwrap();
         AgentService::init_global_test_instance();
-        init_prolog_service().await;
-        init_surreal_service()
-            .await
-            .expect("Failed to init surreal service");
 
         // Create two separate perspectives without re-initializing globals
         let mut perspective1 = create_perspective().await;
@@ -4197,12 +4184,6 @@ property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predi
 
         println!("\n=== Step 4: Running structural SurrealQL query ===");
 
-        // Get perspective UUID for manual filtering
-        let uuid = {
-            let persisted_guard = perspective.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
-
         // Debug: First, check raw data in SurrealDB including IDs
         let raw_query = format!("SELECT id, source, predicate, target FROM link ",);
         let raw_results = perspective.surreal_query(raw_query).await.unwrap();
@@ -4375,12 +4356,6 @@ GROUP BY source
         let mut perspective = setup().await;
 
         println!("\n=== Testing fn::parse_literal() in SurrealDB ===");
-
-        // Get perspective UUID
-        let uuid = {
-            let persisted_guard = perspective.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
 
         // Helper function to URL encode for literal URLs
         fn url_encode(s: &str) -> String {
