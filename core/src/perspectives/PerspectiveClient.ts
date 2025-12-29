@@ -25,6 +25,7 @@ uuid
 name
 sharedUrl
 state
+owners
 neighbourhood {
     data {
         linkLanguage

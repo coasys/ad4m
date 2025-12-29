@@ -478,8 +478,6 @@ pub struct PerspectiveHandle {
     pub neighbourhood: Option<DecoratedNeighbourhoodExpression>,
     pub shared_url: Option<String>,
     pub state: PerspectiveState,
-    #[graphql(skip)]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub owners: Option<Vec<String>>, // List of owner DIDs - supports both single and multi-user ownership
 }
 

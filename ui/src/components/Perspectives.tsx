@@ -292,6 +292,19 @@ const Perspectives = (props: Props) => {
                 </>
               )}
 
+              {e?.owners && e.owners.length > 0 && (
+                <j-box pb="300">
+                  <j-text variant="label" size="300">
+                    Owners ({e.owners.length})
+                  </j-text>
+                  {e.owners.map((owner: string, idx: number) => (
+                    <j-text key={idx} size="200" style={{ display: 'block', wordBreak: 'break-all', fontSize: '10px' }}>
+                      {owner}
+                    </j-text>
+                  ))}
+                </j-box>
+              )}
+
               <div style={{ position: "absolute", top: 10, right: 10 }}>
                 <PerspectiveMenu uuid={e!.uuid} reload={fetchPerspective} />
               </div>

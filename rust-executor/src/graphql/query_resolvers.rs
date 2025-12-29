@@ -548,15 +548,35 @@ impl Query {
 
         // Extract user DID from token for multi-user filtering
         let user_email = user_email_from_token(context.auth_token.clone());
+        
+        // Check if this is an admin request (for launcher/debugging)
+        // Admin capability has wildcards in domain/pointers/can
+        let is_admin = match &context.capabilities {
+            Ok(caps) => caps.iter().any(|cap| 
+                cap.with.domain == "*" && cap.can.iter().any(|c| c == "*")
+            ),
+            Err(_) => false,
+        };
 
         for p in all_perspectives().iter() {
-            let handle = p.persisted.lock().await.clone();
+            let mut handle = p.persisted.lock().await.clone();
 
-            // Filter perspectives based on ownership
-            if can_access_perspective(&user_email, &handle) {
+            log::debug!("📋 perspectives(): perspective {} has owners: {:?}, is_admin: {}, user_email: {:?}", 
+                handle.uuid, handle.owners, is_admin, user_email);
+
+            if !is_admin {
+                handle.owners = None;
+            }
+
+            // Admin sees all perspectives (for launcher), otherwise filter by ownership
+            if is_admin || can_access_perspective(&user_email, &handle) {
+                log::debug!("📋 perspectives(): Including perspective {}", handle.uuid);
                 result.push(handle);
+            } else {
+                log::debug!("📋 perspectives(): Excluding perspective {} (no access)", handle.uuid);
             }
         }
+        
         Ok(result)
     }
 
