@@ -94,25 +94,30 @@ pub fn track_last_seen_from_token(token: String) {
     use crate::db::Ad4mDb;
 
     if let Some(user_email) = user_email_from_token(token) {
-        log::debug!("Tracking last_seen for user: {}", user_email);
-
         // Check if we should update (throttle to every 5 minutes)
         let should_update = Ad4mDb::with_global_instance(|db| {
             if let Ok(user) = db.get_user(&user_email) {
                 if let Some(last_seen) = user.last_seen {
                     let five_min_ago = (chrono::Utc::now().timestamp() - 300) as i32;
-                    last_seen < five_min_ago
+                    let should_update = last_seen < five_min_ago;
+                    log::trace!("last_seen tracking for {}: last_seen={}, five_min_ago={}, should_update={}", 
+                        user_email, last_seen, five_min_ago, should_update);
+                    should_update
                 } else {
+                    log::debug!("last_seen tracking for {}: never seen before, updating now", user_email);
                     true // Never updated, do it now
                 }
             } else {
+                log::warn!("last_seen tracking: user {} not found in database", user_email);
                 false // User not found
             }
         });
 
         if should_update {
             log::debug!("Updating last_seen for user: {}", user_email);
-            let _ = Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&user_email));
+            if let Err(e) = Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&user_email)) {
+                log::error!("Failed to update last_seen for user {}: {:?}", user_email, e);
+            }
         }
     }
 }

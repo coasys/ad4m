@@ -29,10 +29,12 @@ const Users = () => {
     }
   }, [client]);
 
-  const formatLastSeen = (timestamp: number | null) => {
-    if (!timestamp) return "Never";
+  const formatLastSeen = (lastSeen: string | null | undefined) => {
+    if (!lastSeen) return "Never";
 
-    const date = new Date(timestamp * 1000);
+    const date = new Date(lastSeen);
+    if (isNaN(date.getTime())) return "Invalid date";
+
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
     const diffMins = Math.floor(diffMs / 60000);
@@ -47,10 +49,13 @@ const Users = () => {
     return date.toLocaleDateString();
   };
 
-  const getStatusBadge = (lastSeen: number | null) => {
+  const getStatusBadge = (lastSeen: string | null | undefined) => {
     if (!lastSeen) return <j-badge variant="gray">Inactive</j-badge>;
 
-    const diffMs = Date.now() - (lastSeen * 1000);
+    const date = new Date(lastSeen);
+    if (isNaN(date.getTime())) return <j-badge variant="gray">Invalid</j-badge>;
+
+    const diffMs = Date.now() - date.getTime();
     const diffMins = Math.floor(diffMs / 60000);
 
     if (diffMins < 5) return <j-badge variant="success">Online</j-badge>;
@@ -111,8 +116,8 @@ const Users = () => {
                         </j-text>
                         {getStatusBadge(user.lastSeen)}
                       </j-flex>
-                      <j-text nomargin size="400" color="ui-500">
-                        DID: {user.did ? user.did.substring(0, 20) + '...' : 'Not set'}
+                      <j-text nomargin size="300" color="ui-500" style={{ wordBreak: 'break-all', fontFamily: 'monospace' }}>
+                        {user.did || 'DID not set'}
                       </j-text>
                     </j-flex>
                   </j-flex>
