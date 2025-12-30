@@ -295,11 +295,35 @@ impl PerspectiveInstance {
                 match LanguageController::language_by_address(nh.data.link_language.clone()).await {
                     Ok(Some(mut language)) => {
                         // Set local agents before storing the language
-                        if let Some(owners) = &self.persisted.lock().await.owners {
-                            log::debug!("Setting local agents for link language: {:?}", owners);
-                            if let Err(e) = language.set_local_agents(owners.clone()).await {
-                                log::error!("Failed to set local agents on link language: {:?}", e);
+                        let agents_to_register = {
+                            let handle = self.persisted.lock().await;
+                            log::debug!(
+                                "🔍 ensure_link_language: perspective {} has owners: {:?}",
+                                handle.uuid,
+                                handle.owners
+                            );
+                            if let Some(owners) = &handle.owners {
+                                if !owners.is_empty() {
+                                    log::debug!("🔍 Using owners list: {:?}", owners);
+                                    owners.clone()
+                                } else {
+                                    // Empty owners list - use main agent
+                                    log::debug!("🔍 Owners list is empty, using main agent");
+                                    vec![crate::agent::did()]
+                                }
+                            } else {
+                                // No owners set - use main agent
+                                log::debug!("🔍 No owners set, using main agent");
+                                vec![crate::agent::did()]
                             }
+                        };
+
+                        log::info!(
+                            "🔍 Setting local agents for link language: {:?}",
+                            agents_to_register
+                        );
+                        if let Err(e) = language.set_local_agents(agents_to_register).await {
+                            log::error!("Failed to set local agents on link language: {:?}", e);
                         }
 
                         {
