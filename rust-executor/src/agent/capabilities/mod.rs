@@ -104,19 +104,30 @@ pub fn track_last_seen_from_token(token: String) {
                         user_email, last_seen, five_min_ago, should_update);
                     should_update
                 } else {
-                    log::debug!("last_seen tracking for {}: never seen before, updating now", user_email);
+                    log::debug!(
+                        "last_seen tracking for {}: never seen before, updating now",
+                        user_email
+                    );
                     true // Never updated, do it now
                 }
             } else {
-                log::warn!("last_seen tracking: user {} not found in database", user_email);
+                log::warn!(
+                    "last_seen tracking: user {} not found in database",
+                    user_email
+                );
                 false // User not found
             }
         });
 
         if should_update {
             log::debug!("Updating last_seen for user: {}", user_email);
-            if let Err(e) = Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&user_email)) {
-                log::error!("Failed to update last_seen for user {}: {:?}", user_email, e);
+            if let Err(e) = Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&user_email))
+            {
+                log::error!(
+                    "Failed to update last_seen for user {}: {:?}",
+                    user_email,
+                    e
+                );
             }
         }
     }

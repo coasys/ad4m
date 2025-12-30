@@ -351,7 +351,10 @@ impl AgentService {
 
         // Debug: Show current wallet state
         let available_keys = wallet_ref.list_key_names();
-        log::debug!("🔧 ensure_user_key_exists() called for user: '{}'", user_email);
+        log::debug!(
+            "🔧 ensure_user_key_exists() called for user: '{}'",
+            user_email
+        );
         log::debug!("🔧 Available keys before check: {:?}", available_keys);
 
         if wallet_ref
@@ -362,8 +365,14 @@ impl AgentService {
             return Ok(());
         }
 
-        log::warn!("⚠️  Key NOT found for user '{}', generating new key", user_email);
-        log::warn!("⚠️  This will create a NEW DID! Available keys were: {:?}", available_keys);
+        log::warn!(
+            "⚠️  Key NOT found for user '{}', generating new key",
+            user_email
+        );
+        log::warn!(
+            "⚠️  This will create a NEW DID! Available keys were: {:?}",
+            available_keys
+        );
         wallet_ref.generate_keypair(user_email.to_string());
 
         Ok(())
@@ -383,7 +392,11 @@ impl AgentService {
         let did_document = wallet_ref
             .get_did_document(&user_email.to_string())
             .ok_or_else(|| {
-                log::error!("❌ No key found for user '{}'. Available keys: {:?}", user_email, available_keys);
+                log::error!(
+                    "❌ No key found for user '{}'. Available keys: {:?}",
+                    user_email,
+                    available_keys
+                );
                 anyhow!("No key found for user {}", user_email)
             })?;
 
@@ -1174,8 +1187,7 @@ mod tests {
         std::fs::create_dir_all(test_dir).expect("Failed to create test directory");
 
         // Create user key
-        AgentService::ensure_user_key_exists(test_user_email)
-            .expect("Failed to create user key");
+        AgentService::ensure_user_key_exists(test_user_email).expect("Failed to create user key");
 
         // Get the DID before save
         let did_before_save = AgentService::get_user_did_by_email(test_user_email)

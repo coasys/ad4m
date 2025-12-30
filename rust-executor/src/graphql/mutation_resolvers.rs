@@ -505,7 +505,9 @@ impl Mutation {
                 agent_service.save(passphrase.clone());
                 log::info!("Saved wallet after creating key for user: {}", email);
             } else {
-                log::warn!("Cannot save wallet - no passphrase stored. User DID may change on restart!");
+                log::warn!(
+                    "Cannot save wallet - no passphrase stored. User DID may change on restart!"
+                );
             }
         });
 
