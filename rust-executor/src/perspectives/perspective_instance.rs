@@ -2334,11 +2334,27 @@ impl PerspectiveInstance {
 
     pub async fn others(&self) -> Result<Vec<String>, AnyError> {
         let link_language_clone = self.link_language.read().await.clone();
-        if let Some(mut link_language) = link_language_clone {
-            link_language.others().await
+        let mut all_others = if let Some(mut link_language) = link_language_clone {
+            link_language.others().await?
         } else {
-            Err(self.no_link_language_error().await)
+            return Err(self.no_link_language_error().await);
+        };
+
+        // Add all perspective owners (which includes local managed users)
+        let handle = self.persisted.lock().await.clone();
+        if let Some(owners) = &handle.owners {
+            log::debug!("🔍 others() - Perspective owners: {:?}", owners);
+
+            for owner_did in owners {
+                if !all_others.contains(owner_did) {
+                    log::debug!("✅ others() - Adding owner to others list: {}", owner_did);
+                    all_others.push(owner_did.clone());
+                }
+            }
         }
+
+        log::debug!("🔍 others() - Final others list: {:?}", all_others);
+        Ok(all_others)
     }
 
     pub async fn has_telepresence_adapter(&self) -> bool {
