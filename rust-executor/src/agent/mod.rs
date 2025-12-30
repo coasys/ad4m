@@ -221,6 +221,8 @@ pub struct AgentService {
     file_profile: String,
     users_dir: String,
     pub agent: Option<Agent>,
+    #[serde(skip)]
+    pub passphrase: Option<String>,
 }
 
 lazy_static! {
@@ -244,6 +246,7 @@ impl AgentService {
             users_dir: "test".to_string(),
             agent: None,
             signing_key_id: None,
+            passphrase: None,
         });
 
         (*agent_instance).as_mut().unwrap().create_new_keys();
@@ -262,6 +265,7 @@ impl AgentService {
             users_dir: users_dir,
             agent: None,
             signing_key_id: None,
+            passphrase: None,
         }
     }
 
@@ -345,14 +349,21 @@ impl AgentService {
         let mut wallet = wallet_instance.lock().expect("wallet lock");
         let wallet_ref = wallet.as_mut().expect("wallet instance");
 
+        // Debug: Show current wallet state
+        let available_keys = wallet_ref.list_key_names();
+        log::debug!("🔧 ensure_user_key_exists() called for user: '{}'", user_email);
+        log::debug!("🔧 Available keys before check: {:?}", available_keys);
+
         if wallet_ref
             .get_did_document(&user_email.to_string())
             .is_some()
         {
+            log::debug!("✅ Key already exists for user: '{}'", user_email);
             return Ok(());
         }
 
-        log::info!("Generating new key for user: {}", user_email);
+        log::warn!("⚠️  Key NOT found for user '{}', generating new key", user_email);
+        log::warn!("⚠️  This will create a NEW DID! Available keys were: {:?}", available_keys);
         wallet_ref.generate_keypair(user_email.to_string());
 
         Ok(())
@@ -364,14 +375,25 @@ impl AgentService {
         let wallet = wallet_instance.lock().expect("wallet lock");
         let wallet_ref = wallet.as_ref().expect("wallet instance");
 
+        // Debug: Show what keys we have and what we're looking for
+        let available_keys = wallet_ref.list_key_names();
+        log::debug!("🔍 get_user_agent_data() called for user: '{}'", user_email);
+        log::debug!("🔍 Available keys in wallet: {:?}", available_keys);
+
         let did_document = wallet_ref
             .get_did_document(&user_email.to_string())
-            .ok_or(anyhow!("No key found for user {}", user_email))?;
+            .ok_or_else(|| {
+                log::error!("❌ No key found for user '{}'. Available keys: {:?}", user_email, available_keys);
+                anyhow!("No key found for user {}", user_email)
+            })?;
 
         let signing_key_id = did_document.verification_method[0].id.clone();
+        let did = did_document.id.clone();
+
+        log::debug!("✅ Found user key for '{}' with DID: {}", user_email, did);
 
         Ok(AgentData {
-            did: did_document.id.clone(),
+            did,
             did_document: serde_json::to_string(&did_document)?,
             signing_key_id,
             wallet_key_name: user_email.to_string(),
@@ -548,20 +570,36 @@ impl AgentService {
         self.signing_key_id = Some(signing_key_id());
     }
 
-    pub fn unlock(&self, password: String) -> Result<(), AnyError> {
+    pub fn unlock(&mut self, password: String) -> Result<(), AnyError> {
         let wallet_instance = Wallet::instance();
         let mut wallet = wallet_instance.lock().expect("wallet lock");
         let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
-        wallet_ref.unlock(password)
+        let result = wallet_ref.unlock(password.clone());
+        if result.is_ok() {
+            self.passphrase = Some(password);
+
+            // Debug: Show what keys are present after unlock
+            let key_names = wallet_ref.list_key_names();
+            log::debug!("🔑 Wallet unlocked. Keys present: {:?}", key_names);
+        }
+        result
     }
 
-    pub fn lock(&self, password: String) {
+    pub fn lock(&mut self, password: String) {
+        // Save wallet before locking to persist any changes
+        if self.passphrase.is_some() {
+            self.save(self.passphrase.clone().unwrap());
+        }
+
         let wallet_instance = Wallet::instance();
         {
             let mut wallet = wallet_instance.lock().expect("wallet lock");
             let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
             wallet_ref.lock(password);
         }
+
+        // Clear the stored passphrase after locking
+        self.passphrase = None;
     }
 
     pub fn save(&self, password: String) {
@@ -1123,5 +1161,53 @@ mod tests {
             sign_for_context(test_payload, &user2_context).expect("User 2 signing failed");
 
         assert_ne!(user1_signature, user2_signature);
+    }
+
+    #[test]
+    fn test_user_did_persistence_across_save_load() {
+        ensure_setup();
+        let test_user_email = "persistence.test@example.com";
+        let test_passphrase = "test_passphrase_123";
+
+        // Create test directory for agent files
+        let test_dir = "test_data/ad4m";
+        std::fs::create_dir_all(test_dir).expect("Failed to create test directory");
+
+        // Create user key
+        AgentService::ensure_user_key_exists(test_user_email)
+            .expect("Failed to create user key");
+
+        // Get the DID before save
+        let did_before_save = AgentService::get_user_did_by_email(test_user_email)
+            .expect("Failed to get DID before save");
+
+        // Simulate unlock by storing passphrase
+        AgentService::with_mutable_global_instance(|agent_service| {
+            agent_service.passphrase = Some(test_passphrase.to_string());
+        });
+
+        // Save the agent service (this should persist the wallet with the user key)
+        AgentService::with_global_instance(|agent_service| {
+            agent_service.save(test_passphrase.to_string());
+        });
+
+        // Simulate a restart by loading the agent service
+        AgentService::with_mutable_global_instance(|agent_service| {
+            agent_service.load();
+            agent_service
+                .unlock(test_passphrase.to_string())
+                .expect("Failed to unlock after load");
+        });
+
+        // Get the DID after reload
+        let did_after_reload = AgentService::get_user_did_by_email(test_user_email)
+            .expect("Failed to get DID after reload");
+
+        // Verify DIDs are the same
+        assert_eq!(
+            did_before_save, did_after_reload,
+            "User DID should persist across save/load cycles. Before: {}, After: {}",
+            did_before_save, did_after_reload
+        );
     }
 }

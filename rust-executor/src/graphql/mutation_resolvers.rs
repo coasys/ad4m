@@ -167,6 +167,9 @@ impl Mutation {
             agent_service.create_new_keys();
             agent_service.save(passphrase.clone());
 
+            // Store passphrase so future wallet modifications (e.g., adding user keys) can be saved
+            agent_service.passphrase = Some(passphrase.clone());
+
             agent_service.dump().clone()
         });
 
@@ -197,7 +200,7 @@ impl Mutation {
         _context: &RequestContext,
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
-        let agent = AgentService::with_global_instance(|agent_service| {
+        let agent = AgentService::with_mutable_global_instance(|agent_service| {
             agent_service.lock(passphrase.clone());
             agent_service.dump().clone()
         });
@@ -298,8 +301,8 @@ impl Mutation {
 
         let agent_instance = AgentService::global_instance();
         {
-            let agent_service = agent_instance.lock().expect("agent lock");
-            let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+            let mut agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &mut AgentService = agent_service.as_mut().expect("agent instance");
 
             agent_ref.unlock(passphrase.clone())?
         }
@@ -495,6 +498,16 @@ impl Mutation {
                 graphql_value!(null),
             )
         })?;
+
+        // Save the wallet to persist the new user key
+        AgentService::with_global_instance(|agent_service| {
+            if let Some(passphrase) = &agent_service.passphrase {
+                agent_service.save(passphrase.clone());
+                log::info!("Saved wallet after creating key for user: {}", email);
+            } else {
+                log::warn!("Cannot save wallet - no passphrase stored. User DID may change on restart!");
+            }
+        });
 
         // Check if user already exists
         let db = Ad4mDb::global_instance();

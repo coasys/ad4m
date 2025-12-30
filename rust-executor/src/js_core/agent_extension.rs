@@ -177,14 +177,14 @@ fn agent_load() -> Result<AgentStatus, AnyhowWrapperError> {
 #[op2(async)]
 #[serde]
 async fn agent_unlock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError> {
-    AgentService::with_global_instance(|agent_service| agent_service.unlock(passphrase))
+    AgentService::with_mutable_global_instance(|agent_service| agent_service.unlock(passphrase))
         .map_err(AnyhowWrapperError::from)
 }
 
 #[op2(async)]
 #[serde]
 async fn agent_lock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError> {
-    AgentService::with_global_instance(|agent_service| {
+    AgentService::with_mutable_global_instance(|agent_service| {
         agent_service.lock(passphrase);
         Ok(())
     })
