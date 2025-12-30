@@ -2479,6 +2479,10 @@ impl PerspectiveInstance {
         payload: PerspectiveExpression,
         loopback: bool,
     ) -> Result<(), AnyError> {
+        use crate::agent::AgentService;
+
+        let current_perspective_handle = self.persisted.lock().await.clone();
+
         if loopback {
             // send back to all clients through neighbourhood signal subscription
             let payload_clone = payload.clone();
@@ -2490,6 +2494,40 @@ impl PerspectiveInstance {
             });
         }
 
+        // Route signals to local managed users who are owners of this perspective
+        if current_perspective_handle.shared_url.is_some() {
+            if let Some(owners) = &current_perspective_handle.owners {
+                // Get all local user emails
+                if let Ok(user_emails) = AgentService::list_user_emails() {
+                    // Send signal to each local managed user who is an owner
+                    for user_email in user_emails {
+                        if let Ok(user_did) = AgentService::get_user_did_by_email(&user_email) {
+                            if owners.contains(&user_did) {
+                                let handle = self.persisted.lock().await.clone();
+                                let mut signal = payload.clone();
+                                signal.verify_signatures();
+
+                                let filter_data = NeighbourhoodSignalFilter {
+                                    perspective: handle.clone(),
+                                    signal: signal.clone(),
+                                    recipient: Some(user_did.clone()),
+                                };
+
+                                get_global_pubsub()
+                                    .await
+                                    .publish(
+                                        &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                                        &serde_json::to_string(&filter_data).unwrap(),
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also send through link language for remote users
         let link_language_clone = self.link_language.read().await.clone();
         if let Some(mut link_language) = link_language_clone {
             link_language.send_broadcast(payload).await
