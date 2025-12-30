@@ -25,8 +25,11 @@ pub fn can_access_perspective(
         Some(email) => {
             // User context: check if user is in owners list
             if let Ok(user_did) = AgentService::get_user_did_by_email(email) {
+                log::debug!("📋 can_access_perspective(): user {} perspective {} user_did {}", email, perspective.uuid, user_did);
+                log::debug!("📋 can_access_perspective(): perspective.owners {:?}", perspective.owners);
                 perspective.is_owned_by(&user_did)
             } else {
+                log::debug!("📋 can_access_perspective(): No DID for user {}", email);
                 false
             }
         }
@@ -551,12 +554,14 @@ impl Query {
         
         // Check if this is an admin request (for launcher/debugging)
         // Admin capability has wildcards in domain/pointers/can
-        let is_admin = match &context.capabilities {
+        let has_all_caps = match &context.capabilities {
             Ok(caps) => caps.iter().any(|cap| 
                 cap.with.domain == "*" && cap.can.iter().any(|c| c == "*")
             ),
             Err(_) => false,
         };
+
+        let is_admin = has_all_caps && user_email.is_none();
 
         for p in all_perspectives().iter() {
             let mut handle = p.persisted.lock().await.clone();
@@ -564,13 +569,14 @@ impl Query {
             log::debug!("📋 perspectives(): perspective {} has owners: {:?}, is_admin: {}, user_email: {:?}", 
                 handle.uuid, handle.owners, is_admin, user_email);
 
-            if !is_admin {
-                handle.owners = None;
-            }
+            
 
             // Admin sees all perspectives (for launcher), otherwise filter by ownership
-            if is_admin || can_access_perspective(&user_email, &handle) {
-                log::debug!("📋 perspectives(): Including perspective {}", handle.uuid);
+            if is_admin {
+                log::debug!("📋 perspectives(): is_admin: true, Including perspective {}", handle.uuid);
+                result.push(handle);
+            } else if can_access_perspective(&user_email, &handle) {
+                handle.owners = None;
                 result.push(handle);
             } else {
                 log::debug!("📋 perspectives(): Excluding perspective {} (no access)", handle.uuid);
