@@ -235,6 +235,10 @@ export default class Ad4mConnect {
       
       // Verify authentication
       await authenticatedClient.agent.status();
+      
+      // Store the authenticated client so it can be retrieved via getAd4mClient()
+      this.ad4mClient = authenticatedClient;
+      
       this.notifyAuthChange("authenticated");
       this.notifyConnectionChange("connected");
       
