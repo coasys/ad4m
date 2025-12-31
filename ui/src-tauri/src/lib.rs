@@ -67,7 +67,7 @@ pub struct ProxyService {
 }
 
 pub struct AppState {
-    graphql_port: u16,        // Local HTTP port (always for local access)
+    graphql_port: u16, // Local HTTP port (always for local access)
     req_credential: String,
     tls_enabled: bool,
 }

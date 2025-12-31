@@ -196,16 +196,13 @@ pub fn set_tls_config(config: TlsConfig) -> Result<(), String> {
             ));
         }
         if !std::path::Path::new(&config.key_file_path).exists() {
-            return Err(format!(
-                "Key file not found: {}",
-                config.key_file_path
-            ));
+            return Err(format!("Key file not found: {}", config.key_file_path));
         }
     }
 
     // Load current state
-    let mut state = LauncherState::load()
-        .map_err(|e| format!("Failed to load launcher state: {}", e))?;
+    let mut state =
+        LauncherState::load().map_err(|e| format!("Failed to load launcher state: {}", e))?;
 
     // Update TLS config
     state.tls_config = Some(config);

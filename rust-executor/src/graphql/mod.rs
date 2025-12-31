@@ -198,8 +198,14 @@ pub async fn start_server(
 
         let tls_port = tls_config.tls_port;
 
-        log::info!("Starting HTTP server on 127.0.0.1:{} (local access without TLS)", port);
-        log::info!("Starting HTTPS server on 0.0.0.0:{} (remote access with TLS)", tls_port);
+        log::info!(
+            "Starting HTTP server on 127.0.0.1:{} (local access without TLS)",
+            port
+        );
+        log::info!(
+            "Starting HTTPS server on 0.0.0.0:{} (remote access with TLS)",
+            tls_port
+        );
 
         let cert_path = tls_config.cert_file_path.clone();
         let key_path = tls_config.key_file_path.clone();
@@ -247,7 +253,9 @@ pub async fn start_server(
                                 }
                             };
 
-                            crate::agent::capabilities::track_last_seen_from_token(auth_header.clone());
+                            crate::agent::capabilities::track_last_seen_from_token(
+                                auth_header.clone(),
+                            );
 
                             let capabilities = capabilities_from_token(
                                 auth_header.clone(),
@@ -278,13 +286,9 @@ pub async fn start_server(
         .or(warp::post()
             .and(warp::path("graphql"))
             .and(qm_graphql_filter.clone()))
-        .or(
-            warp::get()
-                .and(warp::path("graphql"))
-                .map(|| {
-                    warp::reply::with_status("GraphQL GET request received", warp::http::StatusCode::OK)
-                }),
-        )
+        .or(warp::get().and(warp::path("graphql")).map(|| {
+            warp::reply::with_status("GraphQL GET request received", warp::http::StatusCode::OK)
+        }))
         .or(warp::get()
             .and(warp::path("playground"))
             .and(playground_filter("/graphql", Some("/subscriptions"))))
@@ -314,8 +318,10 @@ pub async fn start_server(
                     };
 
                 let response = with_header(reply, ACCESS_CONTROL_ALLOW_ORIGIN, allow_origin);
-                let response = with_header(response, "Cross-Origin-Embedder-Policy", embedder_policy);
-                let response = with_header(response, "Cross-Origin-Resource-Policy", resource_policy);
+                let response =
+                    with_header(response, "Cross-Origin-Embedder-Policy", embedder_policy);
+                let response =
+                    with_header(response, "Cross-Origin-Resource-Policy", resource_policy);
                 with_header(response, "Cross-Origin-Opener-Policy", opener_policy)
             });
 
@@ -330,9 +336,15 @@ pub async fn start_server(
             [0, 0, 0, 0]
         };
 
-        log::info!("Starting HTTP server on {}:{}",
-            if address == [127, 0, 0, 1] { "127.0.0.1" } else { "0.0.0.0" },
-            port);
+        log::info!(
+            "Starting HTTP server on {}:{}",
+            if address == [127, 0, 0, 1] {
+                "127.0.0.1"
+            } else {
+                "0.0.0.0"
+            },
+            port
+        );
 
         warp::serve(routes_with_cors).run((address, port)).await;
     }
