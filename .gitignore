@@ -62,3 +62,5 @@ temp
 
 rust-executor/CUSTOM_DENO_SNAPSHOT.bin
 rust-executor/test_data
+
+.npmrc
