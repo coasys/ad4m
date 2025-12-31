@@ -624,7 +624,12 @@ export class Ad4mConnectElement extends LitElement {
 
     if (storedToken) {
       // If we have a stored token, try to auto-connect
-      this._client.connect();
+      // In multi-user mode, connect to the backend URL; otherwise use default local
+      if (this.multiUser && this.backendUrl) {
+        this._client.connect(this.backendUrl);
+      } else {
+        this._client.connect();
+      }
     } else {
       // No stored token - show connection overview
       this.detectLocal();
