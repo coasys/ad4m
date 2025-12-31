@@ -67,8 +67,7 @@ pub struct ProxyService {
 }
 
 pub struct AppState {
-    graphql_port: u16,        // Main port (TLS if enabled, or HTTP)
-    local_port: u16,          // Local-only HTTP port (when TLS enabled, this is port+1)
+    graphql_port: u16,        // Local HTTP port (always for local access)
     req_credential: String,
     tls_enabled: bool,
 }
@@ -213,16 +212,8 @@ pub fn run() {
         .map(|config| config.enabled)
         .unwrap_or(false);
 
-    // When TLS is enabled, local HTTP server runs on port+1
-    let local_port = if tls_enabled {
-        free_port + 1
-    } else {
-        free_port
-    };
-
     let app_state = AppState {
-        graphql_port: free_port,
-        local_port,
+        graphql_port: free_port, // Always the local HTTP port
         req_credential: req_credential.clone(),
         tls_enabled,
     };
@@ -284,9 +275,12 @@ pub fn run() {
             let launcher_state = LauncherState::load().unwrap();
             let tls_config = launcher_state.tls_config.as_ref().and_then(|config| {
                 if config.enabled {
+                    // Use configured TLS port, or default to main port + 1
+                    let tls_port = config.tls_port.unwrap_or(free_port + 1);
                     Some(ExecutorTlsConfig {
                         cert_file_path: config.cert_file_path.clone(),
                         key_file_path: config.key_file_path.clone(),
+                        tls_port,
                     })
                 } else {
                     None

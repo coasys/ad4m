@@ -106,6 +106,7 @@ const Profile = (props: Props) => {
     enabled: boolean;
     cert_file_path: string;
     key_file_path: string;
+    tls_port: number | null;
   } | null>(null);
   const [tlsChanged, setTlsChanged] = useState(false);
   const [certPathError, setCertPathError] = useState<string>("");
@@ -133,6 +134,7 @@ const Profile = (props: Props) => {
           enabled: false,
           cert_file_path: "",
           key_file_path: "",
+          tls_port: 12001, // Default TLS port
         });
       } catch (error) {
         console.error("Failed to load TLS config:", error);
@@ -664,6 +666,30 @@ const Profile = (props: Props) => {
                 )}
               </j-box>
 
+              {/* TLS Port Input */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">TLS Port (HTTPS/WSS)</j-text>
+                </j-box>
+                <j-input
+                  type="number"
+                  value={tlsConfig.tls_port?.toString() || "12001"}
+                  onChange={(e) => {
+                    const port = parseInt((e.target as HTMLInputElement).value);
+                    setTlsConfig({
+                      ...tlsConfig,
+                      tls_port: isNaN(port) ? null : port
+                    });
+                  }}
+                  placeholder="12001"
+                />
+                <j-box mt="200">
+                  <j-text size="300" color="ui-500">
+                    Port for remote HTTPS/WSS access. Local HTTP will use port 12000.
+                  </j-text>
+                </j-box>
+              </j-box>
+
               {/* Save Button */}
               <j-box px="500" my="500">
                 <j-button onClick={() => handleTlsConfigChange(tlsConfig)} variant="primary" full>
@@ -698,11 +724,11 @@ const Profile = (props: Props) => {
                 }}>
                   <j-text size="400">
                     <strong>Note:</strong> When TLS is enabled, AD4M will run two GraphQL servers:
-                    <br/>• <strong>HTTPS on 0.0.0.0:port</strong> - for remote access with TLS encryption
-                    <br/>• <strong>HTTP on 127.0.0.1:(port+1)</strong> - for local apps without certificate issues
+                    <br/>• <strong>HTTP on 127.0.0.1:12000</strong> - for local apps (Flux, launcher, ad4m-connect)
+                    <br/>• <strong>HTTPS on 0.0.0.0:[TLS port]</strong> - for remote access with TLS encryption
                     <br/><br/>
-                    Local apps (Flux, launcher) will use the plain HTTP connection on port+1, while remote
-                    users will use the secure HTTPS connection on the main port.
+                    Local apps will continue using port 12000 for compatibility. Remote users connect
+                    via your domain on the configured TLS port.
                   </j-text>
                 </j-box>
               </j-box>

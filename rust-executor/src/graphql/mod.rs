@@ -192,14 +192,14 @@ pub async fn start_server(
 
     if let Some(tls_config) = config.tls {
         // When TLS is enabled, run BOTH:
-        // 1. HTTPS/WSS on 0.0.0.0:port for remote access with TLS
-        // 2. HTTP/WS on 127.0.0.1:(port+1) for local access without cert issues
+        // 1. HTTP/WS on 127.0.0.1:port for local access (keeps compatibility with ad4m-connect)
+        // 2. HTTPS/WSS on 0.0.0.0:tls_port for remote access with TLS
         // Note: We use different ports because you can't bind to both 0.0.0.0 and 127.0.0.1 on the same port
 
-        let local_port = port + 1;
+        let tls_port = tls_config.tls_port;
 
-        log::info!("Starting HTTPS server on 0.0.0.0:{} (remote access with TLS)", port);
-        log::info!("Starting HTTP server on 127.0.0.1:{} (local access without TLS)", local_port);
+        log::info!("Starting HTTP server on 127.0.0.1:{} (local access without TLS)", port);
+        log::info!("Starting HTTPS server on 0.0.0.0:{} (remote access with TLS)", tls_port);
 
         let cert_path = tls_config.cert_file_path.clone();
         let key_path = tls_config.key_file_path.clone();
@@ -213,7 +213,7 @@ pub async fn start_server(
                 .tls()
                 .cert_path(cert_path)
                 .key_path(key_path)
-                .run(([0, 0, 0, 0], port))
+                .run(([0, 0, 0, 0], tls_port))
                 .await;
         });
 
@@ -320,7 +320,7 @@ pub async fn start_server(
             });
 
         warp::serve(routes2_with_cors)
-            .run(([127, 0, 0, 1], local_port))
+            .run(([127, 0, 0, 1], port))
             .await;
     } else {
         // No TLS: use localhost setting

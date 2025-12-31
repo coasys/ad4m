@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub struct TlsConfig {
     pub cert_file_path: String,
     pub key_file_path: String,
+    pub tls_port: u16, // Port for the HTTPS/WSS server
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
