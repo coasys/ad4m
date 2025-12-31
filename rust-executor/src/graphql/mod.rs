@@ -85,8 +85,13 @@ pub async fn start_server(
     let qm_graphql_filter = coasys_juniper_warp::make_graphql_filter(qm_schema, qm_state.boxed());
 
     let root_node = Arc::new(schema());
+    let root_node2 = root_node.clone(); // Clone for second server
 
     let admin_credential_arc = Arc::new(config.admin_credential.clone());
+    let admin_credential_arc2 = admin_credential_arc.clone(); // Clone for second server
+
+    let js_core_handle2 = js_core_handle.clone(); // Clone for second server
+
     let routes = (warp::path("graphql")
         .and(warp::ws())
         .map(move |ws: warp::ws::Ws| {
@@ -185,20 +190,150 @@ pub async fn start_server(
             with_header(response, "Cross-Origin-Opener-Policy", opener_policy)
         });
 
-    let address = if config.localhost.unwrap() {
-        [127, 0, 0, 1]
-    } else {
-        [0, 0, 0, 0]
-    };
-
     if let Some(tls_config) = config.tls {
-        warp::serve(routes_with_cors)
-            .tls()
-            .cert_path(tls_config.cert_file_path)
-            .key_path(tls_config.key_file_path)
-            .run((address, port))
+        // When TLS is enabled, run BOTH:
+        // 1. HTTPS/WSS on 0.0.0.0:port for remote access with TLS
+        // 2. HTTP/WS on 127.0.0.1:(port+1) for local access without cert issues
+        // Note: We use different ports because you can't bind to both 0.0.0.0 and 127.0.0.1 on the same port
+
+        let local_port = port + 1;
+
+        log::info!("Starting HTTPS server on 0.0.0.0:{} (remote access with TLS)", port);
+        log::info!("Starting HTTP server on 127.0.0.1:{} (local access without TLS)", local_port);
+
+        let cert_path = tls_config.cert_file_path.clone();
+        let key_path = tls_config.key_file_path.clone();
+
+        // Box the routes to make them Send + 'static
+        let routes_boxed = routes_with_cors.boxed();
+
+        // Spawn TLS listener on 0.0.0.0 in background
+        tokio::spawn(async move {
+            warp::serve(routes_boxed)
+                .tls()
+                .cert_path(cert_path)
+                .key_path(key_path)
+                .run(([0, 0, 0, 0], port))
+                .await;
+        });
+
+        // Give the TLS server a moment to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Run plain HTTP listener on localhost - this one will handle local connections
+        // We need to rebuild the same routes for the second server
+        // since warp filters can only be used once
+        let routes2 = (warp::path("graphql")
+            .and(warp::ws())
+            .map(move |ws: warp::ws::Ws| {
+                let root_node = root_node2.clone();
+                let js_core_handle = js_core_handle2.clone();
+                let admin_credential_arc = admin_credential_arc2.clone();
+                let auto_permit_cap_requests2 = config.auto_permit_cap_requests.unwrap_or(false);
+                ws.on_upgrade(move |websocket| async move {
+                    serve_graphql_transport_ws(
+                        websocket,
+                        root_node,
+                        move |val: HashMap<String, InputValue>| async move {
+                            let mut auth_header = String::from("");
+
+                            if let Some(headers) = val.get("headers") {
+                                let headers = headers.to_object_value().unwrap();
+                                if let Some(auth) = headers.get("authorization") {
+                                    auth_header = match auth.as_string_value() {
+                                        Some(s) => s.to_string(),
+                                        None => String::from(""),
+                                    };
+                                }
+                            };
+
+                            crate::agent::capabilities::track_last_seen_from_token(auth_header.clone());
+
+                            let capabilities = capabilities_from_token(
+                                auth_header.clone(),
+                                admin_credential_arc.as_ref().clone(),
+                            );
+
+                            let context = RequestContext {
+                                capabilities,
+                                js_handle: js_core_handle.clone(),
+                                auto_permit_cap_requests: auto_permit_cap_requests2,
+                                auth_token: auth_header,
+                            };
+                            Ok(ConnectionConfig::new(context))
+                                as Result<ConnectionConfig<_>, Infallible>
+                        },
+                    )
+                    .map(|r| {
+                        if let Err(e) = r {
+                            log::error!("Websocket error: {e}");
+                        }
+                    })
+                    .await
+                })
+            }))
+        .map(|reply| {
+            warp::reply::with_header(reply, "Sec-WebSocket-Protocol", "graphql-transport-ws")
+        })
+        .or(warp::post()
+            .and(warp::path("graphql"))
+            .and(qm_graphql_filter.clone()))
+        .or(
+            warp::get()
+                .and(warp::path("graphql"))
+                .map(|| {
+                    warp::reply::with_status("GraphQL GET request received", warp::http::StatusCode::OK)
+                }),
+        )
+        .or(warp::get()
+            .and(warp::path("playground"))
+            .and(playground_filter("/graphql", Some("/subscriptions"))))
+        .or(homepage)
+        .with(log);
+
+        let routes2_with_cors = warp::any()
+            .and(warp::header::optional::<String>("origin"))
+            .and(routes2)
+            .map(|origin: Option<String>, reply| {
+                let origin = origin.unwrap_or_else(|| String::from("*"));
+                let (allow_origin, embedder_policy, resource_policy, opener_policy) =
+                    if origin.contains("fluxsocial.io") {
+                        (
+                            origin,
+                            "require-corp".to_string(),
+                            "cross-origin".to_string(),
+                            "same-origin".to_string(),
+                        )
+                    } else {
+                        (
+                            "*".to_string(),
+                            "unsafe-none".to_string(),
+                            "cross-origin".to_string(),
+                            "unsafe-none".to_string(),
+                        )
+                    };
+
+                let response = with_header(reply, ACCESS_CONTROL_ALLOW_ORIGIN, allow_origin);
+                let response = with_header(response, "Cross-Origin-Embedder-Policy", embedder_policy);
+                let response = with_header(response, "Cross-Origin-Resource-Policy", resource_policy);
+                with_header(response, "Cross-Origin-Opener-Policy", opener_policy)
+            });
+
+        warp::serve(routes2_with_cors)
+            .run(([127, 0, 0, 1], local_port))
             .await;
     } else {
+        // No TLS: use localhost setting
+        let address = if config.localhost.unwrap() {
+            [127, 0, 0, 1]
+        } else {
+            [0, 0, 0, 0]
+        };
+
+        log::info!("Starting HTTP server on {}:{}",
+            if address == [127, 0, 0, 1] { "127.0.0.1" } else { "0.0.0.0" },
+            port);
+
         warp::serve(routes_with_cors).run((address, port)).await;
     }
 

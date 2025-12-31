@@ -250,9 +250,11 @@ export function Ad4minProvider({ children }: any) {
         connect(localStorageURL);
       }
     } else {
-      invoke("get_port").then((message) => {
-        if (message) {
-          const url = `ws://localhost:${message}/graphql`;
+      invoke<{ port: number; tls_enabled: boolean }>("get_port").then((portInfo) => {
+        if (portInfo) {
+          // Always use ws://localhost since we run a plain HTTP server
+          // on localhost even when TLS is enabled (TLS runs on 0.0.0.0)
+          const url = `ws://localhost:${portInfo.port}/graphql`;
           connect(url);
         }
       });
@@ -261,9 +263,11 @@ export function Ad4minProvider({ children }: any) {
 
   useEffect(() => {
     appWindow.listen("ready", async () => {
-      const message = await invoke("get_port");
-      if (message) {
-        const url = `ws://localhost:${message}/graphql`;
+      const portInfo = await invoke<{ port: number; tls_enabled: boolean }>("get_port");
+      if (portInfo) {
+        // Always use ws://localhost since we run a plain HTTP server
+        // on localhost even when TLS is enabled (TLS runs on 0.0.0.0)
+        const url = `ws://localhost:${portInfo.port}/graphql`;
         connect(url);
       }
     });
