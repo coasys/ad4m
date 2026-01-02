@@ -1,6 +1,5 @@
 use crate::types::DecoratedLinkExpression;
 use deno_core::anyhow::Error;
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -9,7 +8,6 @@ use surrealdb::{
     opt::{capabilities::Capabilities, Config},
     Surreal, Value as SurrealValue,
 };
-use tokio::sync::RwLock;
 
 /// Helper function to unwrap SurrealDB's enum-wrapped JSON structure
 /// SurrealDB values serialize with variant names as keys (e.g., {"Strand": "value"})
@@ -531,25 +529,6 @@ impl SurrealDBService {
 
         Ok(())
     }
-}
-
-lazy_static! {
-    static ref SURREAL_SERVICE: Arc<RwLock<Option<SurrealDBService>>> = Arc::new(RwLock::new(None));
-}
-
-pub async fn init_surreal_service() -> Result<(), Error> {
-    // Create a default global service instance for backward compatibility
-    // Note: This is legacy - new code should create per-perspective instances
-    let service = SurrealDBService::new("ad4m", "default").await?;
-    let mut lock = SURREAL_SERVICE.write().await;
-    *lock = Some(service);
-    Ok(())
-}
-
-pub async fn get_surreal_service() -> SurrealDBService {
-    let lock = SURREAL_SERVICE.read().await;
-    lock.clone()
-        .expect("SurrealDBService not initialized. Call init_surreal_service() first.")
 }
 
 #[cfg(test)]
