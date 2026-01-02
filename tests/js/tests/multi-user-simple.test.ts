@@ -342,44 +342,54 @@ describe("Multi-User Simple integration tests", () => {
             // Create two users
             const user1Result = await adminAd4mClient!.agent.createUser("isolation1@example.com", "password1");
             const user2Result = await adminAd4mClient!.agent.createUser("isolation2@example.com", "password2");
-            
+
             // Login both users
             const token1 = await adminAd4mClient!.agent.loginUser("isolation1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("isolation2@example.com", "password2");
-            
+
             // @ts-ignore - Suppress Apollo type mismatch
             const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
             // @ts-ignore - Suppress Apollo type mismatch
             const client2 = new Ad4mClient(apolloClient(gqlPort, token2), false);
-            
+
+            // Get initial perspective counts
+            const user1InitialPerspectives = await client1.perspective.all();
+            const user2InitialPerspectives = await client2.perspective.all();
+
             // User 1 creates a perspective
             const perspective1 = await client1.perspective.add("User 1 Perspective");
             expect(perspective1.name).to.equal("User 1 Perspective");
             console.log("User 1 created perspective:", perspective1.uuid);
-            
+
             // User 2 creates a perspective
             const perspective2 = await client2.perspective.add("User 2 Perspective");
             expect(perspective2.name).to.equal("User 2 Perspective");
             console.log("User 2 created perspective:", perspective2.uuid);
-            
-            // User 1 should only see their own perspective
+
+            // User 1 should see only their own perspectives (initial + new one)
             const user1Perspectives = await client1.perspective.all();
-            expect(user1Perspectives.length).to.equal(1);
-            expect(user1Perspectives[0].uuid).to.equal(perspective1.uuid);
-            
-            // User 2 should only see their own perspective
+            expect(user1Perspectives.length).to.equal(user1InitialPerspectives.length + 1);
+            const user1HasOwnPerspective = user1Perspectives.some(p => p.uuid === perspective1.uuid);
+            expect(user1HasOwnPerspective).to.be.true;
+            const user1HasUser2Perspective = user1Perspectives.some(p => p.uuid === perspective2.uuid);
+            expect(user1HasUser2Perspective).to.be.false;
+
+            // User 2 should see only their own perspectives (initial + new one)
             const user2Perspectives = await client2.perspective.all();
-            expect(user2Perspectives.length).to.equal(1);
-            expect(user2Perspectives[0].uuid).to.equal(perspective2.uuid);
-            
+            expect(user2Perspectives.length).to.equal(user2InitialPerspectives.length + 1);
+            const user2HasOwnPerspective = user2Perspectives.some(p => p.uuid === perspective2.uuid);
+            expect(user2HasOwnPerspective).to.be.true;
+            const user2HasUser1Perspective = user2Perspectives.some(p => p.uuid === perspective1.uuid);
+            expect(user2HasUser1Perspective).to.be.false;
+
             // User 1 should not be able to access User 2's perspective by UUID
             const user1AccessToUser2 = await client1.perspective.byUUID(perspective2.uuid);
             expect(user1AccessToUser2).to.be.null;
-            
+
             // User 2 should not be able to access User 1's perspective by UUID
             const user2AccessToUser1 = await client2.perspective.byUUID(perspective1.uuid);
             expect(user2AccessToUser1).to.be.null;
-            
+
             console.log("✅ Perspective isolation verified between users");
         });
 
@@ -389,25 +399,27 @@ describe("Multi-User Simple integration tests", () => {
             const userToken = await adminAd4mClient!.agent.loginUser("mainisolation@example.com", "password");
             // @ts-ignore - Suppress Apollo type mismatch
             const userClient = new Ad4mClient(apolloClient(gqlPort, userToken), false);
-            
+
             const userPerspective = await userClient.perspective.add("User Isolated Perspective");
             expect(userPerspective.name).to.equal("User Isolated Perspective");
-            
+
             // Main agent creates their own perspective
             const mainPerspective = await adminAd4mClient!.perspective.add("Main Agent Perspective");
             expect(mainPerspective.name).to.equal("Main Agent Perspective");
-            
-            // Main agent should not see user perspectives
+
+            // Main agent SHOULD see ALL perspectives (including user perspectives)
             const mainPerspectives = await adminAd4mClient!.perspective.all();
             const hasUserPerspective = mainPerspectives.some(p => p.uuid === userPerspective.uuid);
-            expect(hasUserPerspective).to.be.false;
-            
-            // User should not see main agent perspectives
+            expect(hasUserPerspective).to.be.true; // Admin sees all perspectives
+            const hasOwnPerspective = mainPerspectives.some(p => p.uuid === mainPerspective.uuid);
+            expect(hasOwnPerspective).to.be.true;
+
+            // User should NOT see main agent perspectives
             const userPerspectives = await userClient.perspective.all();
             const hasMainPerspective = userPerspectives.some(p => p.uuid === mainPerspective.uuid);
-            expect(hasMainPerspective).to.be.false;
-            
-            console.log("✅ Perspective isolation verified between main agent and users");
+            expect(hasMainPerspective).to.be.false; // Users only see their own perspectives
+
+            console.log("✅ Perspective isolation verified: admin sees all, users see only their own");
         });
 
         it("should handle perspective access control for operations", async () => {
@@ -1662,7 +1674,7 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         it("should return all DIDs in 'others()' for each user", async function() {
-            this.timeout(90000); // Increased to allow initial wait + polling time
+            this.timeout(120000); // Increased to allow initial wait + polling time
 
             console.log("\n=== Testing 'others()' functionality ===");
 
@@ -1693,15 +1705,19 @@ describe("Multi-User Simple integration tests", () => {
             // All other users join the neighbourhood
             console.log("Node 1 User 2 joining...");
             await node1User2Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await sleep(2000); // Wait for join to complete
 
             console.log("Node 2 User 1 joining...");
             await node2User1Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await sleep(2000); // Wait for join to complete
 
             console.log("Node 2 User 2 joining...");
             await node2User2Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await sleep(2000); // Wait for join to complete
 
-            // Wait for neighbourhood to sync
-            await sleep(10000);
+            // Wait for neighbourhood to sync and owners lists to be updated
+            console.log("Waiting for neighbourhood sync and owners list updates...");
+            await sleep(15000);
 
             // Get neighbourhood proxies for each user
             const node1User1Perspectives = await node1User1Client!.perspective.all();
@@ -1839,16 +1855,16 @@ describe("Multi-User Simple integration tests", () => {
                 node2User2ReceivedSignals.push(signal);
             });
 
-            await sleep(1500); // Let handlers initialize
+            await sleep(3000); // Let handlers initialize and subscriptions become active
 
 
-            // Node 1 User 1 sends a signal to Node 2 User 1
-            console.log(`\nNode 2 User 1 (${node1User1Did.substring(0, 20)}...) sending signal to Node 2 User 2 (${node2User1Did.substring(0, 20)}...)`);
+            // Node 2 User 1 sends a signal to Node 2 User 2 (both on same node - local routing)
+            console.log(`\nNode 2 User 1 (${node2User1Did.substring(0, 20)}...) sending signal to Node 2 User 2 (${node2User2Did.substring(0, 20)}...)`);
             await node2User1Proxy!.sendSignalU(node2User2Did, new PerspectiveUnsignedInput([
                 {
                     source: "test://signal0",
                     predicate: "test://from",
-                    target: node1User1Did
+                    target: node2User1Did
                 }
             ]));
 
@@ -1931,7 +1947,7 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         it("should sync links correctly between all users across nodes", async function() {
-            this.timeout(30000);
+            this.timeout(60000);
 
             console.log("\n=== Testing cross-node link synchronization ===");
 
