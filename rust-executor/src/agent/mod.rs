@@ -156,6 +156,7 @@ pub fn check_keys_and_create(did: String) -> did_key::Document {
     if wallet_ref.get_did_document(&name).is_none() {
         wallet_ref.initialize_keys(name, did).unwrap()
     } else {
+        drop(wallet);
         did_document()
     }
 }
