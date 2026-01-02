@@ -4783,12 +4783,6 @@ property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predi
 
         println!("\n=== Step 4: Running structural SurrealQL query ===");
 
-        // Get perspective UUID for manual filtering
-        let uuid = {
-            let persisted_guard = perspective.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
-
         // Debug: First, check raw data in SurrealDB including IDs
         let raw_query = format!("SELECT id, source, predicate, target FROM link ",);
         let raw_results = perspective.surreal_query(raw_query).await.unwrap();
@@ -4961,12 +4955,6 @@ GROUP BY source
         let mut perspective = setup().await;
 
         println!("\n=== Testing fn::parse_literal() in SurrealDB ===");
-
-        // Get perspective UUID
-        let uuid = {
-            let persisted_guard = perspective.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
 
         // Helper function to URL encode for literal URLs
         fn url_encode(s: &str) -> String {
