@@ -58,7 +58,7 @@ pub fn build_system_tray(app: &AppHandle) -> Result<()> {
             }
             _ => log::error!("Event is not defined."),
         })
-        .menu_on_left_click(false)
+        .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
