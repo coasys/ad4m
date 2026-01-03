@@ -527,19 +527,11 @@ impl Mutation {
             });
         }
 
-        // Create new user
-        let user = User {
-            username: email.clone(),
-            did: did.clone(),
-            password: password, // Store password for now (will improve with CAL-compliant key derivation later)
-            last_seen: None,
-        };
-
-        // Add user to database
+        // Add user to database with hashed password
         {
             let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
             let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-            db_ref.add_user(&user).map_err(|e| {
+            db_ref.add_user(&email, &did, &password).map_err(|e| {
                 FieldError::new(format!("Failed to add user: {}", e), graphql_value!(null))
             })?;
         }
@@ -602,18 +594,15 @@ impl Mutation {
             ));
         }
 
-        // Get user from database
+        // Verify user credentials
         let db = Ad4mDb::global_instance();
-        let user = {
+        let password_valid = {
             let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
             let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-            db_ref.get_user(&email).map_err(|e| {
-                FieldError::new(format!("User not found: {}", e), graphql_value!(null))
-            })?
+            db_ref.verify_user_password(&email, &password).unwrap_or(false)
         };
 
-        // Verify password (simple comparison for now)
-        if user.password != password {
+        if !password_valid {
             return Err(FieldError::new("Invalid credentials", graphql_value!(null)));
         }
 
@@ -634,14 +623,14 @@ impl Mutation {
                 app_url: Some("https://multi-user.app".to_string()),
                 app_icon_path: None,
                 capabilities: Some(vec![ALL_CAPABILITY.clone()]),
-                user_email: Some(user.username.clone()),
+                user_email: Some(email.clone()),
             }
         } else {
             // App context - preserve the original app info and add user supposed to be the same as the caller
             match decode_jwt(context.auth_token.clone()) {
                 Ok(current_claims) => {
                     let mut auth_info = current_claims.capabilities;
-                    auth_info.user_email = Some(user.username.clone());
+                    auth_info.user_email = Some(email.clone());
                     auth_info
                 }
                 Err(_) => {
@@ -653,7 +642,7 @@ impl Mutation {
                         app_url: Some("https://multi-user.app".to_string()),
                         app_icon_path: None,
                         capabilities: Some(vec![ALL_CAPABILITY.clone()]),
-                        user_email: Some(user.username.clone()),
+                        user_email: Some(email.clone()),
                     }
                 }
             }

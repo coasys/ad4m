@@ -3,6 +3,10 @@ use crate::graphql::graphql_types::{
     NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage,
     User,
 };
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
 use crate::types::{
     AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
     ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff, TokenizerSource,
@@ -237,7 +241,7 @@ impl Ad4mDb {
             "CREATE TABLE IF NOT EXISTS users (
                 username TEXT PRIMARY KEY,
                 did TEXT NOT NULL,
-                password TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
                 last_seen INTEGER
              )",
             [],
@@ -268,6 +272,36 @@ impl Ad4mDb {
             "UPDATE perspective_handle SET owners = json_array(owner_did) WHERE owner_did IS NOT NULL AND owners = '[]'",
             [],
         );
+
+        // SECURITY MIGRATION: Drop and recreate users table to migrate from plaintext passwords to hashed passwords
+        // Check if users table has old 'password' column instead of 'password_hash'
+        let has_old_password_column: bool = conn
+            .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'")
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_row([], |row| {
+                    let sql: String = row.get(0)?;
+                    Ok(sql.contains("password TEXT") && !sql.contains("password_hash"))
+                })
+                .ok()
+            })
+            .unwrap_or(false);
+
+        if has_old_password_column {
+            log::warn!("⚠️  SECURITY MIGRATION: Dropping users table to migrate from plaintext passwords to hashed passwords");
+            log::warn!("⚠️  All existing users will need to be recreated with new passwords");
+            let _ = conn.execute("DROP TABLE users", []);
+            // Recreate the users table with password_hash column
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS users (
+                    username TEXT PRIMARY KEY,
+                    did TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    last_seen INTEGER
+                 )",
+                [],
+            )?;
+        }
 
         Ok(Self { conn })
     }
@@ -2186,11 +2220,41 @@ impl Ad4mDb {
         Ok(result)
     }
 
+    // Password hashing and verification helpers
+    fn hash_password(password: &str) -> Ad4mDbResult<String> {
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2
+            .hash_password(password.as_bytes(), &salt)
+            .map_err(|e| {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to hash password: {}", e),
+                )))
+            })?
+            .to_string();
+        Ok(password_hash)
+    }
+
+    fn verify_password(password: &str, password_hash: &str) -> Ad4mDbResult<bool> {
+        let parsed_hash = PasswordHash::new(password_hash).map_err(|e| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to parse password hash: {}", e),
+            )))
+        })?;
+        let argon2 = Argon2::default();
+        Ok(argon2
+            .verify_password(password.as_bytes(), &parsed_hash)
+            .is_ok())
+    }
+
     // User management functions
-    pub fn add_user(&self, user: &User) -> Ad4mDbResult<()> {
+    pub fn add_user(&self, username: &str, did: &str, password: &str) -> Ad4mDbResult<()> {
+        let password_hash = Self::hash_password(password)?;
         self.conn.execute(
-            "INSERT INTO users (username, did, password) VALUES (?1, ?2, ?3)",
-            params![user.username, user.did, user.password],
+            "INSERT INTO users (username, did, password_hash) VALUES (?1, ?2, ?3)",
+            params![username, did, password_hash],
         )?;
         Ok(())
     }
@@ -2198,12 +2262,12 @@ impl Ad4mDb {
     pub fn get_user(&self, username: &str) -> Ad4mDbResult<User> {
         let mut stmt = self
             .conn
-            .prepare("SELECT username, did, password, last_seen FROM users WHERE username = ?1")?;
+            .prepare("SELECT username, did, password_hash, last_seen FROM users WHERE username = ?1")?;
         let user = stmt.query_row([username], |row| {
             Ok(User {
                 username: row.get(0)?,
                 did: row.get(1)?,
-                password: row.get(2)?,
+                password_hash: row.get(2)?,
                 last_seen: row.get(3).ok(),
             })
         })?;
@@ -2221,7 +2285,7 @@ impl Ad4mDb {
 
     pub fn list_users(&self) -> Ad4mDbResult<Vec<User>> {
         let mut stmt = self.conn.prepare(
-            "SELECT username, did, password, last_seen FROM users ORDER BY last_seen DESC NULLS LAST"
+            "SELECT username, did, password_hash, last_seen FROM users ORDER BY last_seen DESC NULLS LAST"
         )?;
 
         let users = stmt
@@ -2229,13 +2293,19 @@ impl Ad4mDb {
                 Ok(User {
                     username: row.get(0)?,
                     did: row.get(1)?,
-                    password: row.get(2)?,
+                    password_hash: row.get(2)?,
                     last_seen: row.get(3).ok(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(users)
+    }
+
+    // Verify user password against stored hash
+    pub fn verify_user_password(&self, username: &str, password: &str) -> Ad4mDbResult<bool> {
+        let user = self.get_user(username)?;
+        Self::verify_password(password, &user.password_hash)
     }
 
     // Settings management functions
@@ -3221,35 +3291,36 @@ mod tests {
 
     #[test]
     fn test_user_management() {
-        use crate::graphql::graphql_types::User;
-
         // Initialize test database
         let db = Ad4mDb::new(":memory:").unwrap();
 
         // Test user creation
-        let test_user = User {
-            username: "test@example.com".to_string(),
-            did: "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp".to_string(),
-            password: "testpassword123".to_string(),
-            last_seen: None,
-        };
+        let test_username = "test@example.com";
+        let test_did = "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp";
+        let test_password = "testpassword123";
 
         // Add user should succeed
-        let add_result = db.add_user(&test_user);
+        let add_result = db.add_user(test_username, test_did, test_password);
         assert!(
             add_result.is_ok(),
             "Failed to add user: {:?}",
             add_result.err()
         );
 
-        // Get user should return the same user
-        let retrieved_user = db.get_user(&test_user.username).unwrap();
-        assert_eq!(retrieved_user.username, test_user.username);
-        assert_eq!(retrieved_user.did, test_user.did);
-        assert_eq!(retrieved_user.password, test_user.password);
+        // Get user should return the same user (but with hashed password)
+        let retrieved_user = db.get_user(test_username).unwrap();
+        assert_eq!(retrieved_user.username, test_username);
+        assert_eq!(retrieved_user.did, test_did);
+        // Password should be hashed, not plaintext
+        assert_ne!(retrieved_user.password_hash, test_password);
+        assert!(retrieved_user.password_hash.starts_with("$argon2"));
+
+        // Verify password should work
+        assert!(db.verify_user_password(test_username, test_password).unwrap());
+        assert!(!db.verify_user_password(test_username, "wrongpassword").unwrap());
 
         // Test duplicate user creation should fail
-        let duplicate_result = db.add_user(&test_user);
+        let duplicate_result = db.add_user(test_username, test_did, test_password);
         assert!(
             duplicate_result.is_err(),
             "Duplicate user creation should fail"
@@ -3267,41 +3338,35 @@ mod tests {
 
     #[test]
     fn test_multiple_users() {
-        use crate::graphql::graphql_types::User;
-
         // Initialize test database
         let db = Ad4mDb::new(":memory:").unwrap();
 
         // Create multiple test users
-        let user1 = User {
-            username: "user1@example.com".to_string(),
-            did: "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp".to_string(),
-            password: "password1".to_string(),
-            last_seen: None,
-        };
+        let user1_username = "user1@example.com";
+        let user1_did = "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp";
+        let user1_password = "password1";
 
-        let user2 = User {
-            username: "user2@example.com".to_string(),
-            did: "did:key:z6MkjRagNiMu4CWTaH5SBDeKHyYoPP2ooXqPoy3GmASHLtF6".to_string(),
-            password: "password2".to_string(),
-            last_seen: None,
-        };
+        let user2_username = "user2@example.com";
+        let user2_did = "did:key:z6MkjRagNiMu4CWTaH5SBDeKHyYoPP2ooXqPoy3GmASHLtF6";
+        let user2_password = "password2";
 
         // Add both users
-        db.add_user(&user1).unwrap();
-        db.add_user(&user2).unwrap();
+        db.add_user(user1_username, user1_did, user1_password).unwrap();
+        db.add_user(user2_username, user2_did, user2_password).unwrap();
 
         // Verify both users can be retrieved independently
-        let retrieved_user1 = db.get_user(&user1.username).unwrap();
-        let retrieved_user2 = db.get_user(&user2.username).unwrap();
+        let retrieved_user1 = db.get_user(user1_username).unwrap();
+        let retrieved_user2 = db.get_user(user2_username).unwrap();
 
-        assert_eq!(retrieved_user1.username, user1.username);
-        assert_eq!(retrieved_user1.did, user1.did);
-        assert_eq!(retrieved_user1.password, user1.password);
+        assert_eq!(retrieved_user1.username, user1_username);
+        assert_eq!(retrieved_user1.did, user1_did);
+        // Verify password hashing works
+        assert!(db.verify_user_password(user1_username, user1_password).unwrap());
 
-        assert_eq!(retrieved_user2.username, user2.username);
-        assert_eq!(retrieved_user2.did, user2.did);
-        assert_eq!(retrieved_user2.password, user2.password);
+        assert_eq!(retrieved_user2.username, user2_username);
+        assert_eq!(retrieved_user2.did, user2_did);
+        // Verify password hashing works
+        assert!(db.verify_user_password(user2_username, user2_password).unwrap());
 
         // Verify users have different DIDs
         assert_ne!(retrieved_user1.did, retrieved_user2.did);
@@ -3343,52 +3408,37 @@ mod tests {
 
     #[test]
     fn test_user_password_handling() {
-        use crate::graphql::graphql_types::User;
-
         // Initialize test database
         let db = Ad4mDb::new(":memory:").unwrap();
 
         // Test user with various password formats
         let users = vec![
-            User {
-                username: "user_simple@example.com".to_string(),
-                did: "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp".to_string(),
-                password: "simple".to_string(),
-                last_seen: None,
-            },
-            User {
-                username: "user_complex@example.com".to_string(),
-                did: "did:key:z6MkjRagNiMu4CWTaH5SBDeKHyYoPP2ooXqPoy3GmASHLtF6".to_string(),
-                password: "Complex!Password123@#$".to_string(),
-                last_seen: None,
-            },
-            User {
-                username: "user_unicode@example.com".to_string(),
-                did: "did:key:z6MkrJVnaZjsXc2WrVjsXc2WrVjsXc2WrVjsXc2WrVjsXc2W".to_string(),
-                password: "пароль🔐密码".to_string(),
-                last_seen: None,
-            },
+            ("user_simple@example.com", "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp", "simple"),
+            ("user_complex@example.com", "did:key:z6MkjRagNiMu4CWTaH5SBDeKHyYoPP2ooXqPoy3GmASHLtF6", "Complex!Password123@#$"),
+            ("user_unicode@example.com", "did:key:z6MkrJVnaZjsXc2WrVjsXc2WrVjsXc2WrVjsXc2WrVjsXc2W", "пароль🔐密码"),
         ];
 
         // Add all users
-        for user in &users {
-            let result = db.add_user(user);
+        for (username, did, password) in &users {
+            let result = db.add_user(username, did, password);
             assert!(
                 result.is_ok(),
                 "Failed to add user {}: {:?}",
-                user.username,
+                username,
                 result.err()
             );
         }
 
-        // Verify all users can be retrieved with correct passwords
-        for user in &users {
-            let retrieved = db.get_user(&user.username).unwrap();
-            assert_eq!(
-                retrieved.password, user.password,
-                "Password should be stored and retrieved correctly for {}",
-                user.username
-            );
+        // Verify all users can be retrieved and passwords can be verified
+        for (username, _did, password) in &users {
+            let retrieved = db.get_user(username).unwrap();
+            // Password should be hashed
+            assert!(retrieved.password_hash.starts_with("$argon2"), "Password should be hashed with Argon2 for {}", username);
+            assert_ne!(retrieved.password_hash, *password, "Password should not be stored in plaintext for {}", username);
+
+            // But verification should work
+            assert!(db.verify_user_password(username, password).unwrap(), "Password verification should succeed for {}", username);
+            assert!(!db.verify_user_password(username, "wrongpassword").unwrap(), "Wrong password should fail for {}", username);
         }
 
         println!("✅ User password handling tests passed");
@@ -3448,19 +3498,11 @@ mod tests {
 
     #[test]
     fn test_user_last_seen_tracking() {
-        use crate::graphql::graphql_types::User;
-
         // Initialize test database
         let db = Ad4mDb::new(":memory:").unwrap();
 
         // Create test user
-        let test_user = User {
-            username: "test@example.com".to_string(),
-            did: "did:key:test123".to_string(),
-            password: "hashed_password".to_string(),
-            last_seen: None,
-        };
-        db.add_user(&test_user).unwrap();
+        db.add_user("test@example.com", "did:key:test123", "testpassword").unwrap();
 
         // Verify initial last_seen is None
         let user = db.get_user("test@example.com").unwrap();
@@ -3498,36 +3540,13 @@ mod tests {
 
     #[test]
     fn test_list_users_ordering() {
-        use crate::graphql::graphql_types::User;
-
         // Initialize test database
         let db = Ad4mDb::new(":memory:").unwrap();
 
         // Create users with different last_seen times
-        let user1 = User {
-            username: "user1@example.com".to_string(),
-            did: "did:key:user1".to_string(),
-            password: "pass1".to_string(),
-            last_seen: None,
-        };
-
-        let user2 = User {
-            username: "user2@example.com".to_string(),
-            did: "did:key:user2".to_string(),
-            password: "pass2".to_string(),
-            last_seen: None,
-        };
-
-        let user3 = User {
-            username: "user3@example.com".to_string(),
-            did: "did:key:user3".to_string(),
-            password: "pass3".to_string(),
-            last_seen: None,
-        };
-
-        db.add_user(&user1).unwrap();
-        db.add_user(&user2).unwrap();
-        db.add_user(&user3).unwrap();
+        db.add_user("user1@example.com", "did:key:user1", "pass1").unwrap();
+        db.add_user("user2@example.com", "did:key:user2", "pass2").unwrap();
+        db.add_user("user3@example.com", "did:key:user3", "pass3").unwrap();
 
         // Update last_seen for users in specific order
         db.update_user_last_seen("user2@example.com").unwrap();

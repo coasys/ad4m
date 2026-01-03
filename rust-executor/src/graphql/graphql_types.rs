@@ -619,13 +619,35 @@ pub struct SentMessage {
     pub recipient: String,
 }
 
-#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+// Internal User struct - NOT exposed via GraphQL
+// Contains sensitive data like password_hash that should never be returned to clients
+#[derive(Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct User {
     pub username: String,
     pub did: String,
-    pub password: String,
+    #[serde(skip_serializing)]
+    pub password_hash: String,  // Argon2id hash - never serialize or expose
     pub last_seen: Option<i32>,
+}
+
+// Public UserInfo struct for GraphQL - only contains non-sensitive fields
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInfo {
+    pub username: String,
+    pub did: String,
+    pub last_seen: Option<i32>,
+}
+
+impl From<User> for UserInfo {
+    fn from(user: User) -> Self {
+        UserInfo {
+            username: user.username,
+            did: user.did,
+            last_seen: user.last_seen,
+        }
+    }
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
