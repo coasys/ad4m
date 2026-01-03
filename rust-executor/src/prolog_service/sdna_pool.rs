@@ -424,9 +424,14 @@ mod tests {
 
         // Set up test data in the complete pool first
         complete_pool
-            .update_all_engines_with_links("facts".to_string(), test_links, None, None)
+            .update_all_engines_with_links("facts".to_string(), test_links, None, Some("test_owner".to_string()))
             .await
             .unwrap();
+
+        // Verify that current_owner_did was stored in pool state
+        let state = complete_pool.engine_state().read().await;
+        assert_eq!(state.current_owner_did, Some("test_owner".to_string()));
+        drop(state);
 
         // Populate with test data - should only include infrastructure + SDNA
         let result = sdna_pool.populate_from_complete_data().await;
