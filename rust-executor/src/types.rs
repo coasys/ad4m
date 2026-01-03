@@ -519,3 +519,15 @@ pub struct Model {
     #[serde(rename = "type")]
     pub model_type: ModelType,
 }
+
+// Internal User struct - NOT exposed via GraphQL
+// Contains sensitive data like password_hash that should never be returned to clients
+#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct User {
+    pub username: String,
+    pub did: String,
+    #[serde(skip_serializing)]
+    pub password_hash: String,  // Argon2id hash - never serialize or expose
+    pub last_seen: Option<i32>,
+}

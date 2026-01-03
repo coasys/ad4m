@@ -1,7 +1,6 @@
 use crate::graphql::graphql_types::{
     AIModelLoadingStatus, EntanglementProof, ImportResult, LinkStatus, ModelInput,
     NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage,
-    User,
 };
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -9,7 +8,7 @@ use argon2::{
 };
 use crate::types::{
     AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
-    ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff, TokenizerSource,
+    ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff, TokenizerSource, User,
 };
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
