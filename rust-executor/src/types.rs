@@ -529,5 +529,5 @@ pub struct User {
     pub did: String,
     #[serde(skip_serializing)]
     pub password_hash: String,  // Argon2id hash - never serialize or expose
-    pub last_seen: Option<i32>,
+    pub last_seen: Option<i64>,
 }

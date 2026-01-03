@@ -98,8 +98,21 @@ pub fn track_last_seen_from_token(token: String) {
         let should_update = Ad4mDb::with_global_instance(|db| {
             if let Ok(user) = db.get_user(&user_email) {
                 if let Some(last_seen) = user.last_seen {
-                    let five_min_ago = (chrono::Utc::now().timestamp() - 300) as i32;
-                    let should_update = last_seen < five_min_ago;
+                    let now = chrono::Utc::now().timestamp();
+                    let five_min_ago = now.saturating_sub(300);
+                    
+                    // Handle unrealistic future timestamps by treating them as stale
+                    // (allow some clock skew tolerance of 1 minute)
+                    let should_update = if last_seen > now + 60 {
+                        log::warn!(
+                            "last_seen tracking for {}: unrealistic future timestamp {}, treating as stale",
+                            user_email, last_seen
+                        );
+                        true
+                    } else {
+                        last_seen < five_min_ago
+                    };
+                    
                     log::trace!("last_seen tracking for {}: last_seen={}, five_min_ago={}, should_update={}", 
                         user_email, last_seen, five_min_ago, should_update);
                     should_update

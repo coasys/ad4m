@@ -2274,7 +2274,7 @@ impl Ad4mDb {
     }
 
     pub fn update_user_last_seen(&self, email: &str) -> Ad4mDbResult<()> {
-        let timestamp = chrono::Utc::now().timestamp() as i32;
+        let timestamp = chrono::Utc::now().timestamp();
         self.conn.execute(
             "UPDATE users SET last_seen = ?1 WHERE username = ?2",
             params![timestamp, email],
@@ -3518,7 +3518,7 @@ mod tests {
         );
 
         let last_seen_timestamp = user.last_seen.unwrap();
-        let now = chrono::Utc::now().timestamp() as i32;
+        let now = chrono::Utc::now().timestamp();
         assert!(
             (now - last_seen_timestamp).abs() < 2,
             "last_seen should be within 2 seconds of now"

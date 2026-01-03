@@ -620,12 +620,14 @@ pub struct SentMessage {
 }
 
 // Public UserInfo struct for GraphQL - only contains non-sensitive fields
+// Note: last_seen uses f64 for GraphQL compatibility (GraphQL Int is limited to i32)
+// f64 can safely represent integer timestamps up to 2^53 without precision loss
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInfo {
     pub username: String,
     pub did: String,
-    pub last_seen: Option<i32>,
+    pub last_seen: Option<f64>,
 }
 
 impl From<crate::types::User> for UserInfo {
@@ -633,7 +635,7 @@ impl From<crate::types::User> for UserInfo {
         UserInfo {
             username: user.username,
             did: user.did,
-            last_seen: user.last_seen,
+            last_seen: user.last_seen.map(|ts| ts as f64),
         }
     }
 }
