@@ -34,7 +34,7 @@ use base64::prelude::*;
 use super::query_resolvers::can_access_perspective;
 
 // Helper function to get perspective with access control
-fn get_perspective_with_access_control(
+async fn get_perspective_with_access_control(
     uuid: &str,
     context: &RequestContext,
 ) -> FieldResult<PerspectiveInstance> {
@@ -42,7 +42,7 @@ fn get_perspective_with_access_control(
     let user_email = user_email_from_token(context.auth_token.clone());
 
     // Check access to the perspective
-    let handle = futures::executor::block_on(perspective.persisted.lock()).clone();
+    let handle = perspective.persisted.lock().await.clone();
     if !can_access_perspective(&user_email, &handle) {
         return Err(FieldError::new(
             "Access denied: You don't have permission to access this perspective",
@@ -1096,7 +1096,7 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
             .add_link(
@@ -1120,7 +1120,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let link = crate::types::LinkExpression::try_from(link)?;
         Ok(perspective
             .add_link_expression(link, link_status_from_input(status)?, batch_id)
@@ -1139,7 +1139,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
             .add_links(
@@ -1162,7 +1162,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
             .link_mutations(mutations, link_status_from_input(status)?, &agent_context)
@@ -1204,7 +1204,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let link = crate::types::LinkExpression::try_from(link)?;
         perspective.remove_link(link, batch_id).await?;
         Ok(true)
@@ -1221,7 +1221,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let links = links
             .into_iter()
             .map(LinkExpression::try_from)
@@ -1240,7 +1240,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let perspective = get_perspective_with_access_control(&uuid, context)?;
+        let perspective = get_perspective_with_access_control(&uuid, context).await?;
         let mut handle = perspective.persisted.lock().await.clone();
         handle.name = Some(name);
         update_perspective(&handle).await?;
@@ -1259,7 +1259,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
             .update_link(
@@ -1283,7 +1283,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let sdna_type = SdnaType::from_string(&sdna_type)
             .map_err(|e| FieldError::new(e, graphql_value!({ "invalid_sdna_type": sdna_type })))?;
@@ -1307,7 +1307,7 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
         let commands: Vec<Command> = serde_json::from_str(&commands)?;
@@ -1338,7 +1338,7 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
         let subject_class: SubjectClassOption = serde_json::from_str(&subject_class)?;
@@ -1381,7 +1381,7 @@ impl Mutation {
                 )
             })?;
 
-        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
         let result = perspective
@@ -1401,7 +1401,7 @@ impl Mutation {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        let perspective = get_perspective_with_access_control(&uuid, context)?;
+        let perspective = get_perspective_with_access_control(&uuid, context).await?;
         let (subscription_id, result_string) = perspective.subscribe_and_query(query).await?;
 
         Ok(QuerySubscription {
@@ -1442,7 +1442,7 @@ impl Mutation {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        let perspective = get_perspective_with_access_control(&uuid, context)?;
+        let perspective = get_perspective_with_access_control(&uuid, context).await?;
         perspective.keepalive_query(subscription_id).await?;
         Ok(true)
     }
@@ -1474,7 +1474,7 @@ impl Mutation {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        let perspective = get_perspective_with_access_control(&uuid, context)?;
+        let perspective = get_perspective_with_access_control(&uuid, context).await?;
         Ok(perspective
             .dispose_query_subscription(subscription_id)
             .await?)
@@ -2098,7 +2098,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let perspective = get_perspective_with_access_control(&uuid, context)?;
+        let perspective = get_perspective_with_access_control(&uuid, context).await?;
         Ok(perspective.create_batch().await)
     }
 
@@ -2112,7 +2112,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_access_control(&uuid, context)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective.commit_batch(batch_id, &agent_context).await?)
     }
