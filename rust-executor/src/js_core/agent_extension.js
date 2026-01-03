@@ -64,22 +64,69 @@ import {
             return save_agent_profile(profile);
         },
         createSignedExpressionForUser: (userEmail, data) => {
-            return agent_create_signed_expression_for_user(userEmail, data);
+            if (typeof userEmail !== 'string' || userEmail.trim() === '') {
+                throw new TypeError('userEmail must be a non-empty string');
+            }
+            try {
+                return agent_create_signed_expression_for_user(userEmail, data);
+            } catch (error) {
+                console.error("Error calling agent_create_signed_expression_for_user:", error);
+                console.error("userEmail was:", userEmail);
+                console.error("Data was:", data);
+                throw error;
+            }
         },
         didForUser: (userEmail) => {
-            return agent_did_for_user(userEmail);
+            if (typeof userEmail !== 'string' || userEmail.trim() === '') {
+                throw new TypeError('userEmail must be a non-empty string');
+            }
+            try {
+                return agent_did_for_user(userEmail);
+            } catch (error) {
+                console.error("Error calling agent_did_for_user:", error);
+                console.error("userEmail was:", userEmail);
+                throw error;
+            }
         },
         agentForUser: (userEmail) => {
-            return agent_agent_for_user(userEmail);
+            if (typeof userEmail !== 'string' || userEmail.trim() === '') {
+                throw new TypeError('userEmail must be a non-empty string');
+            }
+            try {
+                return agent_agent_for_user(userEmail);
+            } catch (error) {
+                console.error("Error calling agent_agent_for_user:", error);
+                console.error("userEmail was:", userEmail);
+                throw error;
+            }
         },
         listUserEmails: () => {
-            return agent_list_user_emails();
+            try {
+                return agent_list_user_emails();
+            } catch (error) {
+                console.error("Error calling agent_list_user_emails:", error);
+                throw error;
+            }
         },
         getUserDidByEmail: (userEmail) => {
-            return agent_get_user_did_by_email(userEmail);
+            if (typeof userEmail !== 'string' || userEmail.trim() === '') {
+                throw new TypeError('userEmail must be a non-empty string');
+            }
+            try {
+                return agent_get_user_did_by_email(userEmail);
+            } catch (error) {
+                console.error("Error calling agent_get_user_did_by_email:", error);
+                console.error("userEmail was:", userEmail);
+                throw error;
+            }
         },
         getAllLocalUserDIDs: () => {
-            return agent_get_all_local_user_dids();
+            try {
+                return agent_get_all_local_user_dids();
+            } catch (error) {
+                console.error("Error calling agent_get_all_local_user_dids:", error);
+                throw error;
+            }
         }
     };
 })(globalThis);

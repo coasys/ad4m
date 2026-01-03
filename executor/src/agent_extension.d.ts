@@ -59,6 +59,12 @@ declare global {
         unlock: (password: string) => boolean;
         lock: () => void;
         save_agent_profile: (agent: Agent) => void;
+        createSignedExpressionForUser: (userEmail: string, data: unknown) => Promise<string>;
+        didForUser: (userEmail: string) => Promise<string>;
+        agentForUser: (userEmail: string) => Promise<any>;
+        listUserEmails: () => Promise<string[]>;
+        getUserDidByEmail: (userEmail: string) => Promise<string | null>;
+        getAllLocalUserDIDs: () => Promise<string[]>;
     }
 
     const AGENT: RustAgent;
