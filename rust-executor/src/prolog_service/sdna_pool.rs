@@ -424,7 +424,12 @@ mod tests {
 
         // Set up test data in the complete pool first
         complete_pool
-            .update_all_engines_with_links("facts".to_string(), test_links, None, Some("test_owner".to_string()))
+            .update_all_engines_with_links(
+                "facts".to_string(),
+                test_links,
+                None,
+                Some("test_owner".to_string()),
+            )
             .await
             .unwrap();
 

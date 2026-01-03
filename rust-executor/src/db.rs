@@ -2,13 +2,13 @@ use crate::graphql::graphql_types::{
     AIModelLoadingStatus, EntanglementProof, ImportResult, LinkStatus, ModelInput,
     NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage,
 };
-use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
-};
 use crate::types::{
     AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
     ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff, TokenizerSource, User,
+};
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
 };
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -2259,9 +2259,9 @@ impl Ad4mDb {
     }
 
     pub fn get_user(&self, username: &str) -> Ad4mDbResult<User> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT username, did, password_hash, last_seen FROM users WHERE username = ?1")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT username, did, password_hash, last_seen FROM users WHERE username = ?1",
+        )?;
         let user = stmt.query_row([username], |row| {
             Ok(User {
                 username: row.get(0)?,
@@ -3315,8 +3315,12 @@ mod tests {
         assert!(retrieved_user.password_hash.starts_with("$argon2"));
 
         // Verify password should work
-        assert!(db.verify_user_password(test_username, test_password).unwrap());
-        assert!(!db.verify_user_password(test_username, "wrongpassword").unwrap());
+        assert!(db
+            .verify_user_password(test_username, test_password)
+            .unwrap());
+        assert!(!db
+            .verify_user_password(test_username, "wrongpassword")
+            .unwrap());
 
         // Test duplicate user creation should fail
         let duplicate_result = db.add_user(test_username, test_did, test_password);
@@ -3350,8 +3354,10 @@ mod tests {
         let user2_password = "password2";
 
         // Add both users
-        db.add_user(user1_username, user1_did, user1_password).unwrap();
-        db.add_user(user2_username, user2_did, user2_password).unwrap();
+        db.add_user(user1_username, user1_did, user1_password)
+            .unwrap();
+        db.add_user(user2_username, user2_did, user2_password)
+            .unwrap();
 
         // Verify both users can be retrieved independently
         let retrieved_user1 = db.get_user(user1_username).unwrap();
@@ -3360,12 +3366,16 @@ mod tests {
         assert_eq!(retrieved_user1.username, user1_username);
         assert_eq!(retrieved_user1.did, user1_did);
         // Verify password hashing works
-        assert!(db.verify_user_password(user1_username, user1_password).unwrap());
+        assert!(db
+            .verify_user_password(user1_username, user1_password)
+            .unwrap());
 
         assert_eq!(retrieved_user2.username, user2_username);
         assert_eq!(retrieved_user2.did, user2_did);
         // Verify password hashing works
-        assert!(db.verify_user_password(user2_username, user2_password).unwrap());
+        assert!(db
+            .verify_user_password(user2_username, user2_password)
+            .unwrap());
 
         // Verify users have different DIDs
         assert_ne!(retrieved_user1.did, retrieved_user2.did);
@@ -3412,9 +3422,21 @@ mod tests {
 
         // Test user with various password formats
         let users = vec![
-            ("user_simple@example.com", "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp", "simple"),
-            ("user_complex@example.com", "did:key:z6MkjRagNiMu4CWTaH5SBDeKHyYoPP2ooXqPoy3GmASHLtF6", "Complex!Password123@#$"),
-            ("user_unicode@example.com", "did:key:z6MkrJVnaZjsXc2WrVjsXc2WrVjsXc2WrVjsXc2WrVjsXc2W", "пароль🔐密码"),
+            (
+                "user_simple@example.com",
+                "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp",
+                "simple",
+            ),
+            (
+                "user_complex@example.com",
+                "did:key:z6MkjRagNiMu4CWTaH5SBDeKHyYoPP2ooXqPoy3GmASHLtF6",
+                "Complex!Password123@#$",
+            ),
+            (
+                "user_unicode@example.com",
+                "did:key:z6MkrJVnaZjsXc2WrVjsXc2WrVjsXc2WrVjsXc2WrVjsXc2W",
+                "пароль🔐密码",
+            ),
         ];
 
         // Add all users
@@ -3432,12 +3454,28 @@ mod tests {
         for (username, _did, password) in &users {
             let retrieved = db.get_user(username).unwrap();
             // Password should be hashed
-            assert!(retrieved.password_hash.starts_with("$argon2"), "Password should be hashed with Argon2 for {}", username);
-            assert_ne!(retrieved.password_hash, *password, "Password should not be stored in plaintext for {}", username);
+            assert!(
+                retrieved.password_hash.starts_with("$argon2"),
+                "Password should be hashed with Argon2 for {}",
+                username
+            );
+            assert_ne!(
+                retrieved.password_hash, *password,
+                "Password should not be stored in plaintext for {}",
+                username
+            );
 
             // But verification should work
-            assert!(db.verify_user_password(username, password).unwrap(), "Password verification should succeed for {}", username);
-            assert!(!db.verify_user_password(username, "wrongpassword").unwrap(), "Wrong password should fail for {}", username);
+            assert!(
+                db.verify_user_password(username, password).unwrap(),
+                "Password verification should succeed for {}",
+                username
+            );
+            assert!(
+                !db.verify_user_password(username, "wrongpassword").unwrap(),
+                "Wrong password should fail for {}",
+                username
+            );
         }
 
         println!("✅ User password handling tests passed");
@@ -3501,7 +3539,8 @@ mod tests {
         let db = Ad4mDb::new(":memory:").unwrap();
 
         // Create test user
-        db.add_user("test@example.com", "did:key:test123", "testpassword").unwrap();
+        db.add_user("test@example.com", "did:key:test123", "testpassword")
+            .unwrap();
 
         // Verify initial last_seen is None
         let user = db.get_user("test@example.com").unwrap();
@@ -3543,9 +3582,12 @@ mod tests {
         let db = Ad4mDb::new(":memory:").unwrap();
 
         // Create users with different last_seen times
-        db.add_user("user1@example.com", "did:key:user1", "pass1").unwrap();
-        db.add_user("user2@example.com", "did:key:user2", "pass2").unwrap();
-        db.add_user("user3@example.com", "did:key:user3", "pass3").unwrap();
+        db.add_user("user1@example.com", "did:key:user1", "pass1")
+            .unwrap();
+        db.add_user("user2@example.com", "did:key:user2", "pass2")
+            .unwrap();
+        db.add_user("user3@example.com", "did:key:user3", "pass3")
+            .unwrap();
 
         // Update last_seen for users in specific order
         db.update_user_last_seen("user2@example.com").unwrap();

@@ -599,7 +599,9 @@ impl Mutation {
         let password_valid = {
             let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
             let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-            db_ref.verify_user_password(&email, &password).unwrap_or(false)
+            db_ref
+                .verify_user_password(&email, &password)
+                .unwrap_or(false)
         };
 
         if !password_valid {

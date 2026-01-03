@@ -528,6 +528,6 @@ pub struct User {
     pub username: String,
     pub did: String,
     #[serde(skip_serializing)]
-    pub password_hash: String,  // Argon2id hash - never serialize or expose
+    pub password_hash: String, // Argon2id hash - never serialize or expose
     pub last_seen: Option<i64>,
 }
