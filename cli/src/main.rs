@@ -160,8 +160,6 @@ enum Domain {
         #[arg(long, action)]
         enable_multi_user: bool
     },
-        enable_multi_user: bool
-    },
     RunLocalHcServices {},
     Eve {
         #[command(subcommand)]
