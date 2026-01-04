@@ -2,7 +2,7 @@ import {
     agent_did_document, agent_signing_key_id, agent_did, agent_create_signed_expression, agent_sign,
     agent_sign_string_hex, agent_load, agent, agent_is_initialized, agent_is_unlocked, agent_unlock,
     agent_lock, agent_create_signed_expression_stringified, agent_create_signed_expression_for_user,
-    agent_did_for_user, agent_list_user_emails, agent_get_user_did_by_email, agent_get_all_local_user_dids, agent_agent_for_user, save_agent_profile
+    agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user, save_agent_profile
 } from 'ext:core/ops';
 
 ((globalThis) => {
@@ -105,18 +105,6 @@ import {
                 return agent_list_user_emails();
             } catch (error) {
                 console.error("Error calling agent_list_user_emails:", error);
-                throw error;
-            }
-        },
-        getUserDidByEmail: (userEmail) => {
-            if (typeof userEmail !== 'string' || userEmail.trim() === '') {
-                throw new TypeError('userEmail must be a non-empty string');
-            }
-            try {
-                return agent_get_user_did_by_email(userEmail);
-            } catch (error) {
-                console.error("Error calling agent_get_user_did_by_email:", error);
-                console.error("userEmail was:", userEmail);
                 throw error;
             }
         },

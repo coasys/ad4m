@@ -80,12 +80,6 @@ fn agent_list_user_emails() -> Result<Vec<String>, AnyhowWrapperError> {
 }
 
 #[op2]
-#[string]
-fn agent_get_user_did_by_email(#[string] user_email: String) -> Result<String, AnyhowWrapperError> {
-    AgentService::get_user_did_by_email(&user_email).map_err(AnyhowWrapperError::from)
-}
-
-#[op2]
 #[serde]
 fn agent_get_all_local_user_dids() -> Result<Vec<String>, AnyhowWrapperError> {
     let mut dids = Vec::new();
@@ -96,8 +90,8 @@ fn agent_get_all_local_user_dids() -> Result<Vec<String>, AnyhowWrapperError> {
     // Add all managed user DIDs
     let user_emails = AgentService::list_user_emails().map_err(AnyhowWrapperError::from)?;
     for email in user_emails {
-        let user_did =
-            AgentService::get_user_did_by_email(&email).map_err(AnyhowWrapperError::from)?;
+        let context = AgentContext::for_user_email(email);
+        let user_did = did_for_context(&context).map_err(AnyhowWrapperError::from)?;
         dids.push(user_did);
     }
 
@@ -201,7 +195,7 @@ fn save_agent_profile(#[serde] agent: Agent) -> Result<(), AnyhowWrapperError> {
 
 deno_core::extension!(
     agent_service,
-    ops = [agent_did_document, agent_signing_key_id, agent_did, agent_create_signed_expression, agent_create_signed_expression_stringified, agent_create_signed_expression_for_user, agent_did_for_user, agent_list_user_emails, agent_get_user_did_by_email, agent_get_all_local_user_dids, agent_agent_for_user, agent_sign, agent_sign_string_hex, agent_is_initialized, agent_is_unlocked, agent, agent_load, agent_unlock, agent_lock, save_agent_profile],
+    ops = [agent_did_document, agent_signing_key_id, agent_did, agent_create_signed_expression, agent_create_signed_expression_stringified, agent_create_signed_expression_for_user, agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user, agent_sign, agent_sign_string_hex, agent_is_initialized, agent_is_unlocked, agent, agent_load, agent_unlock, agent_lock, save_agent_profile],
     esm_entry_point = "ext:agent_service/agent_extension.js",
     esm = [dir "src/js_core", "agent_extension.js"]
 );
