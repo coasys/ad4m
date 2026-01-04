@@ -128,6 +128,8 @@ enum Domain {
         tls_port: Option<u16>,
         #[arg(long, action)]
         log_holochain_metrics: Option<bool>,
+        #[arg(long, action)]
+        enable_multi_user: Option<bool>,
     },
     RunLocalHcServices {},
 }
@@ -177,6 +179,7 @@ async fn main() -> Result<()> {
         tls_key_file,
         tls_port,
         log_holochain_metrics,
+        enable_multi_user,
     } = args.domain
     {
         let tls = if tls_cert_file.is_some() && tls_key_file.is_some() {
@@ -212,6 +215,7 @@ async fn main() -> Result<()> {
                 auto_permit_cap_requests: Some(true),
                 tls,
                 log_holochain_metrics,
+                enable_multi_user,
             })
             .await;
         })

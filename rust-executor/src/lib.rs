@@ -100,6 +100,17 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     )
     .expect("Failed to initialize Ad4mDb");
 
+    // Set multi-user mode before starting services to avoid race condition
+    if let Some(enable_multi_user) = config.enable_multi_user {
+        if enable_multi_user {
+            info!("Enabling multi-user mode...");
+            Ad4mDb::with_global_instance(|db| {
+                db.set_multi_user_enabled(true)
+            })
+            .expect("Failed to enable multi-user mode");
+        }
+    }
+
     info!("Initializing AI service...");
     AIService::init_global_instance()
         .await

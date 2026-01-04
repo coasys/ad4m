@@ -239,9 +239,8 @@ async fn main() -> Result<()> {
         enable_multi_user
     } = args.domain
     {
-        let enable_multi_user_flag = enable_multi_user;
         let _ = tokio::spawn(async move {
-            let handle = rust_executor::run(Ad4mConfig {
+            rust_executor::run(Ad4mConfig {
                 app_data_path,
                 network_bootstrap_seed,
                 language_language_only,
@@ -256,20 +255,13 @@ async fn main() -> Result<()> {
                 hc_proxy_url,
                 hc_bootstrap_url,
                 connect_holochain,
-                admin_credential
-            }).await;
-
-            // If multi-user flag is set, enable it in the database
-            if enable_multi_user_flag {
-                use rust_executor::db::Ad4mDb;
-                if let Err(e) = Ad4mDb::with_global_instance(|db| {
-                    db.set_multi_user_enabled(true)
-                }) {
-                    eprintln!("Failed to enable multi-user mode: {}", e);
-                }
-            }
-
-            handle
+                admin_credential,
+                enable_multi_user,
+                localhost: None,
+                auto_permit_cap_requests: None,
+                tls: None,
+                log_holochain_metrics: None,
+            }).await
         }).await;
         
         let _ = ctrlc::set_handler(move || {
