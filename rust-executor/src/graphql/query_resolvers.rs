@@ -754,7 +754,7 @@ impl Query {
     async fn runtime_multi_user_enabled(&self, context: &RequestContext) -> FieldResult<bool> {
         check_capability(
             &context.capabilities,
-            &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
+            &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY,
         )?;
         Ad4mDb::with_global_instance(|db| {
             db.get_multi_user_enabled()

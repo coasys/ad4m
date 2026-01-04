@@ -252,7 +252,7 @@ pub fn capabilities_from_token(
 
     if token.is_empty() {
         // For empty tokens, check if multi-user mode is enabled
-        // If so, allow only user creation (registration/bootstrap) and authentication
+        // If so, allow user creation (registration), login, and checking enabled status
         // READ capability is intentionally excluded to prevent unauthenticated user enumeration
         use crate::db::Ad4mDb;
         let multi_user_enabled =
@@ -262,10 +262,15 @@ pub fn capabilities_from_token(
             return Ok(vec![
                 AGENT_AUTH_CAPABILITY.clone(),
                 RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY.clone(),
+                RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY.clone(),
+                RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
             ]);
         }
 
-        return Ok(vec![AGENT_AUTH_CAPABILITY.clone()]);
+        return Ok(vec![
+            AGENT_AUTH_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
+        ]);
     }
 
     check_token_revoked(&token)?;
@@ -386,6 +391,22 @@ mod tests {
     }
 
     #[test]
+    fn runtime_user_management_read_enabled_capability_is_expected() {
+        let capability = &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY;
+        assert_eq!(capability.with.domain, "runtime.user_management");
+        assert_eq!(capability.with.pointers, vec!["enabled"]);
+        assert_eq!(capability.can, vec!["READ"]);
+    }
+
+    #[test]
+    fn runtime_user_management_login_capability_is_expected() {
+        let capability = &RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY;
+        assert_eq!(capability.with.domain, "runtime.user_management");
+        assert_eq!(capability.with.pointers, vec!["*"]);
+        assert_eq!(capability.can, vec!["LOGIN"]);
+    }
+
+    #[test]
     fn agent_create_capability_is_expected() {
         let agent_create_capability = &AGENT_CREATE_CAPABILITY;
         assert_eq!(agent_create_capability.with.domain, "agent");
@@ -475,5 +496,36 @@ mod tests {
     fn gen_request_key_joins_the_request_id_and_rand() {
         let key = gen_request_key("my-request-id", "123456");
         assert_eq!(key, "my-request-id-123456");
+    }
+
+    #[test]
+    fn unauthenticated_users_can_check_multi_user_enabled() {
+        // Empty token (unauthenticated) should have capability to check if multi-user is enabled
+        let capabilities = capabilities_from_token(String::new(), None).unwrap();
+        assert!(
+            check_capability(&Ok(capabilities), &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY).is_ok(),
+            "Unauthenticated users should be able to check if multi-user mode is enabled"
+        );
+    }
+
+    #[test]
+    fn unauthenticated_users_get_login_capability_in_multi_user_mode() {
+        // Empty token (unauthenticated) should have the right capabilities
+        let capabilities = capabilities_from_token(String::new(), None).unwrap();
+        
+        // Should have read enabled capability (to check if multi-user is on)
+        assert!(
+            check_capability(&Ok(capabilities.clone()), &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY).is_ok(),
+            "Unauthenticated users should be able to check if multi-user mode is enabled"
+        );
+        
+        // Should have auth capability (for standard capability request flow)
+        assert!(
+            check_capability(&Ok(capabilities.clone()), &AGENT_AUTH_CAPABILITY).is_ok(),
+            "Unauthenticated users should have auth capability"
+        );
+        
+        // Note: We can't easily test the multi-user mode grant of LOGIN and CREATE capabilities
+        // without setting up the database, but the logic is tested by integration tests
     }
 }

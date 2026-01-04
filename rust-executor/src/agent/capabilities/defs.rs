@@ -432,6 +432,27 @@ lazy_static! {
     };
 
     // User management capabilities for multi-user mode
+
+    // Allows reading whether multi-user mode is enabled - given to unauthenticated users
+    // This allows ad4m-connect to detect multi-user mode before authentication
+    // without exposing user enumeration
+    pub static ref RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: RUNTIME_USER_MANAGEMENT.to_string(),
+            pointers: vec!["enabled".to_string()],
+        },
+        can: vec![READ.to_string()],
+    };
+
+    // Allows user login - given to unauthenticated users in multi-user mode
+    pub static ref RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: RUNTIME_USER_MANAGEMENT.to_string(),
+            pointers: vec![WILD_CARD.to_string()],
+        },
+        can: vec!["LOGIN".to_string()],
+    };
+
     pub static ref RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY: Capability = Capability {
         with: Resource {
             domain: RUNTIME_USER_MANAGEMENT.to_string(),

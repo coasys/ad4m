@@ -577,10 +577,10 @@ impl Mutation {
         email: String,
         password: String,
     ) -> FieldResult<String> {
-        // Check capability (empty tokens get user management caps in multi-user mode)
+        // Check capability (empty tokens get login capability in multi-user mode)
         check_capability(
             &context.capabilities,
-            &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
+            &RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY,
         )?;
 
         // Check if multi-user mode is enabled
