@@ -637,10 +637,7 @@ impl Mutation {
                 }
                 Err(_) => {
                     // Invalid token - reject the request
-                    return Err(FieldError::new(
-                        "Invalid auth token",
-                        graphql_value!(null),
-                    ));
+                    return Err(FieldError::new("Invalid auth token", graphql_value!(null)));
                 }
             }
         };

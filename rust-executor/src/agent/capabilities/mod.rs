@@ -22,12 +22,12 @@ pub const DEFAULT_TOKEN_VALID_PERIOD: u64 = 180 * 24 * 60 * 60; // 180 days in s
 // Maps user_email -> (last_checked_timestamp, last_seen_value)
 #[derive(Clone)]
 struct LastSeenCacheEntry {
-    last_checked: i64,      // When we last checked the database
-    last_seen_value: i64,   // The last_seen value we got from DB
+    last_checked: i64,    // When we last checked the database
+    last_seen_value: i64, // The last_seen value we got from DB
 }
 
 lazy_static! {
-    static ref LAST_SEEN_CACHE: Arc<RwLock<HashMap<String, LastSeenCacheEntry>>> = 
+    static ref LAST_SEEN_CACHE: Arc<RwLock<HashMap<String, LastSeenCacheEntry>>> =
         Arc::new(RwLock::new(HashMap::new()));
 }
 
@@ -115,7 +115,7 @@ pub async fn track_last_seen_from_token(token: String) {
 
     if let Some(user_email) = user_email_from_token(token) {
         let now = chrono::Utc::now().timestamp();
-        
+
         // Check cache first (non-blocking read)
         {
             let cache = LAST_SEEN_CACHE.read().await;
@@ -181,7 +181,10 @@ pub async fn track_last_seen_from_token(token: String) {
         let (should_update, last_seen_value) = match should_update {
             Ok((update, value)) => (update, value),
             Err(e) => {
-                log::error!("Failed to check last_seen status (spawn_blocking join error): {:?}", e);
+                log::error!(
+                    "Failed to check last_seen status (spawn_blocking join error): {:?}",
+                    e
+                );
                 return;
             }
         };
@@ -189,15 +192,18 @@ pub async fn track_last_seen_from_token(token: String) {
         // Update cache with the value we got from DB
         if let Some(last_seen_val) = last_seen_value {
             let mut cache = LAST_SEEN_CACHE.write().await;
-            cache.insert(user_email.clone(), LastSeenCacheEntry {
-                last_checked: now,
-                last_seen_value: last_seen_val,
-            });
+            cache.insert(
+                user_email.clone(),
+                LastSeenCacheEntry {
+                    last_checked: now,
+                    last_seen_value: last_seen_val,
+                },
+            );
         }
 
         if should_update {
             log::debug!("Updating last_seen for user: {}", user_email);
-            
+
             // Perform the update in spawn_blocking
             let user_email_for_update = user_email.clone();
             let update_result = tokio::task::spawn_blocking(move || {
@@ -209,10 +215,13 @@ pub async fn track_last_seen_from_token(token: String) {
                 Ok(Ok(())) => {
                     // Update succeeded, refresh cache with new timestamp
                     let mut cache = LAST_SEEN_CACHE.write().await;
-                    cache.insert(user_email, LastSeenCacheEntry {
-                        last_checked: now,
-                        last_seen_value: now,
-                    });
+                    cache.insert(
+                        user_email,
+                        LastSeenCacheEntry {
+                            last_checked: now,
+                            last_seen_value: now,
+                        },
+                    );
                 }
                 Ok(Err(e)) => {
                     log::error!(
@@ -503,7 +512,11 @@ mod tests {
         // Empty token (unauthenticated) should have capability to check if multi-user is enabled
         let capabilities = capabilities_from_token(String::new(), None).unwrap();
         assert!(
-            check_capability(&Ok(capabilities), &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY).is_ok(),
+            check_capability(
+                &Ok(capabilities),
+                &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY
+            )
+            .is_ok(),
             "Unauthenticated users should be able to check if multi-user mode is enabled"
         );
     }
@@ -512,19 +525,23 @@ mod tests {
     fn unauthenticated_users_get_login_capability_in_multi_user_mode() {
         // Empty token (unauthenticated) should have the right capabilities
         let capabilities = capabilities_from_token(String::new(), None).unwrap();
-        
+
         // Should have read enabled capability (to check if multi-user is on)
         assert!(
-            check_capability(&Ok(capabilities.clone()), &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY).is_ok(),
+            check_capability(
+                &Ok(capabilities.clone()),
+                &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY
+            )
+            .is_ok(),
             "Unauthenticated users should be able to check if multi-user mode is enabled"
         );
-        
+
         // Should have auth capability (for standard capability request flow)
         assert!(
             check_capability(&Ok(capabilities.clone()), &AGENT_AUTH_CAPABILITY).is_ok(),
             "Unauthenticated users should have auth capability"
         );
-        
+
         // Note: We can't easily test the multi-user mode grant of LOGIN and CREATE capabilities
         // without setting up the database, but the logic is tested by integration tests
     }

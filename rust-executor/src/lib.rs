@@ -104,10 +104,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     if let Some(enable_multi_user) = config.enable_multi_user {
         if enable_multi_user {
             info!("Enabling multi-user mode...");
-            Ad4mDb::with_global_instance(|db| {
-                db.set_multi_user_enabled(true)
-            })
-            .expect("Failed to enable multi-user mode");
+            Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(true))
+                .expect("Failed to enable multi-user mode");
         }
     }
 
