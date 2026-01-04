@@ -12,7 +12,26 @@ pub use types::*;
 use crate::graphql::graphql_types::*;
 use crate::pubsub::{get_global_pubsub, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC};
 
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
 pub const DEFAULT_TOKEN_VALID_PERIOD: u64 = 180 * 24 * 60 * 60; // 180 days in seconds
+
+// Cache for last_seen timestamps to avoid repeated database lookups
+// Maps user_email -> (last_checked_timestamp, last_seen_value)
+#[derive(Clone)]
+struct LastSeenCacheEntry {
+    last_checked: i64,      // When we last checked the database
+    last_seen_value: i64,   // The last_seen value we got from DB
+}
+
+lazy_static! {
+    static ref LAST_SEEN_CACHE: Arc<RwLock<HashMap<String, LastSeenCacheEntry>>> = 
+        Arc::new(RwLock::new(HashMap::new()));
+}
+
+const CACHE_TTL_SECONDS: i64 = 300; // 5 minutes cache TTL
 
 pub fn check_capability(
     capabilities: &Result<Vec<Capability>, String>,
@@ -90,57 +109,125 @@ pub fn user_email_from_token(token: String) -> Option<String> {
 
 /// Update last_seen timestamp for the user from the auth token
 /// This is throttled to only update once every 5 minutes to reduce database writes
-pub fn track_last_seen_from_token(token: String) {
+/// Uses an in-memory cache to avoid blocking the async runtime with repeated DB lookups
+pub async fn track_last_seen_from_token(token: String) {
     use crate::db::Ad4mDb;
 
     if let Some(user_email) = user_email_from_token(token) {
-        // Check if we should update (throttle to every 5 minutes)
-        let should_update = Ad4mDb::with_global_instance(|db| {
-            if let Ok(user) = db.get_user(&user_email) {
-                if let Some(last_seen) = user.last_seen {
-                    let now = chrono::Utc::now().timestamp();
-                    let five_min_ago = now.saturating_sub(300);
-
-                    // Handle unrealistic future timestamps by treating them as stale
-                    // (allow some clock skew tolerance of 1 minute)
-                    let should_update = if last_seen > now + 60 {
-                        log::warn!(
-                            "last_seen tracking for {}: unrealistic future timestamp {}, treating as stale",
-                            user_email, last_seen
+        let now = chrono::Utc::now().timestamp();
+        
+        // Check cache first (non-blocking read)
+        {
+            let cache = LAST_SEEN_CACHE.read().await;
+            if let Some(entry) = cache.get(&user_email) {
+                let cache_age = now - entry.last_checked;
+                if cache_age < CACHE_TTL_SECONDS {
+                    // Cache is fresh, check if update is needed based on cached value
+                    let time_since_last_seen = now - entry.last_seen_value;
+                    if time_since_last_seen < 300 {
+                        // Last seen was less than 5 minutes ago, no need to update
+                        log::trace!(
+                            "last_seen tracking for {}: cache hit, no update needed (last_seen={}, age={}s)",
+                            user_email, entry.last_seen_value, time_since_last_seen
                         );
-                        true
-                    } else {
-                        last_seen < five_min_ago
-                    };
-
-                    log::trace!("last_seen tracking for {}: last_seen={}, five_min_ago={}, should_update={}", 
-                        user_email, last_seen, five_min_ago, should_update);
-                    should_update
-                } else {
-                    log::debug!(
-                        "last_seen tracking for {}: never seen before, updating now",
-                        user_email
-                    );
-                    true // Never updated, do it now
+                        return;
+                    }
                 }
-            } else {
-                log::warn!(
-                    "last_seen tracking: user {} not found in database",
-                    user_email
-                );
-                false // User not found
             }
-        });
+        }
+
+        // Cache miss or stale - need to check database
+        // Use spawn_blocking to avoid blocking the async runtime
+        let user_email_clone = user_email.clone();
+        let should_update = tokio::task::spawn_blocking(move || {
+            Ad4mDb::with_global_instance(|db| {
+                if let Ok(user) = db.get_user(&user_email_clone) {
+                    if let Some(last_seen) = user.last_seen {
+                        let five_min_ago = now.saturating_sub(300);
+
+                        // Handle unrealistic future timestamps by treating them as stale
+                        // (allow some clock skew tolerance of 1 minute)
+                        let should_update = if last_seen > now + 60 {
+                            log::warn!(
+                                "last_seen tracking for {}: unrealistic future timestamp {}, treating as stale",
+                                user_email_clone, last_seen
+                            );
+                            true
+                        } else {
+                            last_seen < five_min_ago
+                        };
+
+                        log::trace!("last_seen tracking for {}: last_seen={}, five_min_ago={}, should_update={}", 
+                            user_email_clone, last_seen, five_min_ago, should_update);
+                        (should_update, Some(last_seen))
+                    } else {
+                        log::debug!(
+                            "last_seen tracking for {}: never seen before, updating now",
+                            user_email_clone
+                        );
+                        (true, None) // Never updated, do it now
+                    }
+                } else {
+                    log::warn!(
+                        "last_seen tracking: user {} not found in database",
+                        user_email_clone
+                    );
+                    (false, None) // User not found
+                }
+            })
+        })
+        .await;
+
+        let (should_update, last_seen_value) = match should_update {
+            Ok((update, value)) => (update, value),
+            Err(e) => {
+                log::error!("Failed to check last_seen status (spawn_blocking join error): {:?}", e);
+                return;
+            }
+        };
+
+        // Update cache with the value we got from DB
+        if let Some(last_seen_val) = last_seen_value {
+            let mut cache = LAST_SEEN_CACHE.write().await;
+            cache.insert(user_email.clone(), LastSeenCacheEntry {
+                last_checked: now,
+                last_seen_value: last_seen_val,
+            });
+        }
 
         if should_update {
             log::debug!("Updating last_seen for user: {}", user_email);
-            if let Err(e) = Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&user_email))
-            {
-                log::error!(
-                    "Failed to update last_seen for user {}: {:?}",
-                    user_email,
-                    e
-                );
+            
+            // Perform the update in spawn_blocking
+            let user_email_for_update = user_email.clone();
+            let update_result = tokio::task::spawn_blocking(move || {
+                Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&user_email_for_update))
+            })
+            .await;
+
+            match update_result {
+                Ok(Ok(())) => {
+                    // Update succeeded, refresh cache with new timestamp
+                    let mut cache = LAST_SEEN_CACHE.write().await;
+                    cache.insert(user_email, LastSeenCacheEntry {
+                        last_checked: now,
+                        last_seen_value: now,
+                    });
+                }
+                Ok(Err(e)) => {
+                    log::error!(
+                        "Failed to update last_seen for user {}: {:?}",
+                        user_email,
+                        e
+                    );
+                }
+                Err(e) => {
+                    log::error!(
+                        "Failed to update last_seen for user {} (spawn_blocking join error): {:?}",
+                        user_email,
+                        e
+                    );
+                }
             }
         }
     }
