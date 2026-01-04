@@ -636,16 +636,11 @@ impl Mutation {
                     auth_info
                 }
                 Err(_) => {
-                    // Fallback if token decode fails
-                    AuthInfo {
-                        app_name: "multi-user-app".to_string(),
-                        app_desc: "Multi-user application".to_string(),
-                        app_domain: Some("multi-user".to_string()),
-                        app_url: Some("https://multi-user.app".to_string()),
-                        app_icon_path: None,
-                        capabilities: Some(vec![ALL_CAPABILITY.clone()]),
-                        user_email: Some(email.clone()),
-                    }
+                    // Invalid token - reject the request
+                    return Err(FieldError::new(
+                        "Invalid auth token",
+                        graphql_value!(null),
+                    ));
                 }
             }
         };
