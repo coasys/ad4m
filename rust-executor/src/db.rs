@@ -12,6 +12,9 @@ use argon2::{
 };
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
+use rand::Rng;
+use sha2::{Digest, Sha256};
+use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -250,6 +253,38 @@ impl Ad4mDb {
             "CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+             )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS email_verifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                code_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                verified BOOLEAN DEFAULT 0,
+                verification_type TEXT NOT NULL,
+                UNIQUE(email, verification_type)
+             )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_email_verifications_email ON email_verifications(email)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_email_verifications_expires ON email_verifications(expires_at)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS email_rate_limits (
+                email TEXT PRIMARY KEY,
+                last_sent_at INTEGER NOT NULL
              )",
             [],
         )?;
@@ -2336,6 +2371,158 @@ impl Ad4mDb {
 
     pub fn set_multi_user_enabled(&self, enabled: bool) -> Ad4mDbResult<()> {
         self.set_setting("multi_user_enabled", if enabled { "true" } else { "false" })
+    }
+
+    // Email verification functions
+
+    /// Generates a 6-digit verification code, stores its SHA-256 hash, and returns the plaintext code
+    pub fn create_verification_code(
+        &self,
+        email: &str,
+        verification_type: &str,
+    ) -> Ad4mDbResult<String> {
+        // Generate random 6-digit code
+        let code = rand::thread_rng().gen_range(100000..1000000).to_string();
+
+        // Hash the code
+        let mut hasher = Sha256::new();
+        hasher.update(code.as_bytes());
+        let code_hash = format!("{:x}", hasher.finalize());
+
+        // Get current timestamp
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let expires_at = now + (15 * 60); // 15 minutes
+
+        // Delete any existing verification for this email+type combination
+        self.conn.execute(
+            "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+            params![email, verification_type],
+        )?;
+
+        // Insert new verification
+        self.conn.execute(
+            "INSERT INTO email_verifications (email, code_hash, created_at, expires_at, verified, verification_type)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+            params![email, code_hash, now, expires_at, verification_type],
+        )?;
+
+        Ok(code)
+    }
+
+    /// Verifies a code against the stored hash for a given email and verification type
+    pub fn verify_code(
+        &self,
+        email: &str,
+        code: &str,
+        verification_type: &str,
+    ) -> Ad4mDbResult<bool> {
+        // Hash the provided code
+        let mut hasher = Sha256::new();
+        hasher.update(code.as_bytes());
+        let code_hash = format!("{:x}", hasher.finalize());
+
+        // Get current timestamp
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Query for matching verification that hasn't expired
+        let result: Result<(String, i64), _> = self.conn.query_row(
+            "SELECT code_hash, expires_at FROM email_verifications
+             WHERE email = ?1 AND verification_type = ?2 AND verified = 0",
+            params![email, verification_type],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        );
+
+        match result {
+            Ok((stored_hash, expires_at)) => {
+                // Check if expired
+                if now > expires_at {
+                    // Clean up expired code
+                    self.conn.execute(
+                        "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+                        params![email, verification_type],
+                    )?;
+                    return Ok(false);
+                }
+
+                // Constant-time comparison
+                if stored_hash == code_hash {
+                    // Mark as verified and delete
+                    self.conn.execute(
+                        "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+                        params![email, verification_type],
+                    )?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Removes all expired verification codes
+    pub fn cleanup_expired_codes(&self) -> Ad4mDbResult<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        self.conn.execute(
+            "DELETE FROM email_verifications WHERE expires_at < ?1",
+            params![now],
+        )?;
+
+        Ok(())
+    }
+
+    /// Checks if an email is rate-limited (returns error if rate-limited)
+    pub fn check_rate_limit(&self, email: &str) -> Ad4mDbResult<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let result: Result<i64, _> = self.conn.query_row(
+            "SELECT last_sent_at FROM email_rate_limits WHERE email = ?1",
+            params![email],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(last_sent_at) => {
+                let seconds_since_last = now - last_sent_at;
+                if seconds_since_last < 60 {
+                    return Err(anyhow!(
+                        "Please wait {} seconds before requesting another verification code",
+                        60 - seconds_since_last
+                    ));
+                }
+                Ok(())
+            }
+            Err(_) => Ok(()), // No rate limit entry exists yet
+        }
+    }
+
+    /// Updates the rate limit timestamp for an email
+    pub fn update_rate_limit(&self, email: &str) -> Ad4mDbResult<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        self.conn.execute(
+            "INSERT INTO email_rate_limits (email, last_sent_at) VALUES (?1, ?2)
+             ON CONFLICT(email) DO UPDATE SET last_sent_at = excluded.last_sent_at",
+            params![email, now],
+        )?;
+
+        Ok(())
     }
 }
 

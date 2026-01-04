@@ -2,6 +2,7 @@
 extern crate lazy_static;
 
 pub mod config;
+pub mod email_service;
 pub mod entanglement_service;
 mod globals;
 pub mod graphql;

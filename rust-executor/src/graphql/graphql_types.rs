@@ -657,6 +657,14 @@ pub struct UserStatistics {
     pub perspective_count: i32,
 }
 
+#[derive(GraphQLObject, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationRequestResult {
+    pub success: bool,
+    pub message: String,
+    pub requires_password: bool,
+}
+
 #[derive(Default, Debug, Deserialize, Serialize)]
 pub struct NeighbourhoodSignalFilter {
     pub perspective: PerspectiveHandle,

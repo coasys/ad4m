@@ -11,6 +11,16 @@ pub struct TlsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SmtpConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub from_address: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Ad4mConfig {
     pub app_data_path: Option<String>,
     pub network_bootstrap_seed: Option<String>,
@@ -34,6 +44,7 @@ pub struct Ad4mConfig {
     pub tls: Option<TlsConfig>,
     pub log_holochain_metrics: Option<bool>,
     pub enable_multi_user: Option<bool>,
+    pub smtp_config: Option<SmtpConfig>,
 }
 
 impl Ad4mConfig {
@@ -119,6 +130,7 @@ impl Default for Ad4mConfig {
             tls: None,
             log_holochain_metrics: None,
             enable_multi_user: None,
+            smtp_config: None,
         };
         config.prepare();
         config
