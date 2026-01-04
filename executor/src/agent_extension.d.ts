@@ -1,4 +1,4 @@
-import { AgentStatus } from "@coasys/ad4m";
+import { Agent, AgentStatus } from "@coasys/ad4m";
 
 export interface VerificationMethod {
     id: string;
@@ -84,7 +84,7 @@ declare global {
          */
         didForUser: (userEmail: string) => Promise<string>;
         
-        agentForUser: (userEmail: string) => Promise<any>;
+        agentForUser: (userEmail: string) => Promise<Agent>;
         listUserEmails: () => Promise<string[]>;
         getAllLocalUserDIDs: () => Promise<string[]>;
     }
