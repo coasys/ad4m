@@ -531,3 +531,13 @@ pub struct User {
     pub password_hash: String, // Argon2id hash - never serialize or expose
     pub last_seen: Option<i64>,
 }
+
+// Public UserInfo struct - safe to return from public APIs
+// Does NOT contain password_hash
+#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInfo {
+    pub username: String,
+    pub did: String,
+    pub last_seen: Option<i64>,
+}
