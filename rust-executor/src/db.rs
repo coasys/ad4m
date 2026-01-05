@@ -5,6 +5,7 @@ use crate::graphql::graphql_types::{
 use crate::types::{
     AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
     ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff, TokenizerSource, User,
+    UserInfo,
 };
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -306,36 +307,6 @@ impl Ad4mDb {
             "UPDATE perspective_handle SET owners = json_array(owner_did) WHERE owner_did IS NOT NULL AND owners = '[]'",
             [],
         );
-
-        // SECURITY MIGRATION: Drop and recreate users table to migrate from plaintext passwords to hashed passwords
-        // Check if users table has old 'password' column instead of 'password_hash'
-        let has_old_password_column: bool = conn
-            .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'")
-            .ok()
-            .and_then(|mut stmt| {
-                stmt.query_row([], |row| {
-                    let sql: String = row.get(0)?;
-                    Ok(sql.contains("password TEXT") && !sql.contains("password_hash"))
-                })
-                .ok()
-            })
-            .unwrap_or(false);
-
-        if has_old_password_column {
-            log::warn!("⚠️  SECURITY MIGRATION: Dropping users table to migrate from plaintext passwords to hashed passwords");
-            log::warn!("⚠️  All existing users will need to be recreated with new passwords");
-            let _ = conn.execute("DROP TABLE users", []);
-            // Recreate the users table with password_hash column
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS users (
-                    username TEXT PRIMARY KEY,
-                    did TEXT NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    last_seen INTEGER
-                 )",
-                [],
-            )?;
-        }
 
         Ok(Self { conn })
     }
@@ -846,15 +817,43 @@ impl Ad4mDb {
         neighbourhood_url: &str,
         user_did: &str,
     ) -> Ad4mDbResult<()> {
-        // Get current owners
+        // First verify the perspective exists
+        let perspective_exists: bool = self
+            .conn
+            .prepare("SELECT EXISTS(SELECT 1 FROM perspective_handle WHERE shared_url = ?1)")?
+            .query_row([neighbourhood_url], |row| row.get(0))
+            .map_err(|e| anyhow!("Failed to check if perspective exists: {}", e))?;
+
+        if !perspective_exists {
+            return Err(anyhow!(
+                "Perspective with shared_url '{}' not found",
+                neighbourhood_url
+            ));
+        }
+
+        // Get current owners - propagate query errors instead of using unwrap_or_default
         let current_owners: Vec<String> = self
             .conn
             .prepare("SELECT owners FROM perspective_handle WHERE shared_url = ?1")?
             .query_row([neighbourhood_url], |row| {
                 let owners_json: String = row.get(0)?;
-                Ok(serde_json::from_str(&owners_json).unwrap_or_default())
+                serde_json::from_str(&owners_json).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })
             })
-            .unwrap_or_default();
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    anyhow!(
+                        "Perspective with shared_url '{}' not found",
+                        neighbourhood_url
+                    )
+                }
+                e => anyhow!("Failed to fetch owners: {}", e),
+            })?;
 
         // Add new owner if not already present
         let mut updated_owners = current_owners;
@@ -862,12 +861,19 @@ impl Ad4mDb {
             updated_owners.push(user_did.to_string());
         }
 
-        // Update database
+        // Update database and check affected row count
         let owners_json = serde_json::to_string(&updated_owners)?;
-        self.conn.execute(
+        let affected_rows = self.conn.execute(
             "UPDATE perspective_handle SET owners = ?1 WHERE shared_url = ?2",
             params![owners_json, neighbourhood_url],
         )?;
+
+        if affected_rows == 0 {
+            return Err(anyhow!(
+                "Failed to add owner: perspective with shared_url '{}' not found or could not be updated",
+                neighbourhood_url
+            ));
+        }
 
         Ok(())
     }
@@ -1534,14 +1540,19 @@ impl Ad4mDb {
         // Export perspectives
         let perspectives: Vec<serde_json::Value> = self
             .conn
-            .prepare("SELECT uuid, name, neighbourhood, shared_url, state FROM perspective_handle")?
+            .prepare("SELECT uuid, name, neighbourhood, shared_url, state, owners FROM perspective_handle")?
             .query_map([], |row| {
+                let owners_json: Option<String> = row.get(5)?;
+                let owners: Vec<String> = owners_json
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .unwrap_or_default();
                 Ok(serde_json::json!({
                     "uuid": row.get::<_, String>(0)?,
                     "name": row.get::<_, Option<String>>(1)?,
                     "neighbourhood": row.get::<_, Option<String>>(2)?,
                     "shared_url": row.get::<_, Option<String>>(3)?,
-                    "state": row.get::<_, String>(4)?
+                    "state": row.get::<_, String>(4)?,
+                    "owners": owners
                 }))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1765,6 +1776,19 @@ impl Ad4mDb {
                             }
                             .expect("to serialize PerspectiveState");
 
+                            let owners_json =
+                                match perspective.get("owners").and_then(|o| o.as_array()) {
+                                    Some(arr) => {
+                                        let owners: Vec<String> = arr
+                                            .iter()
+                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                            .collect();
+                                        serde_json::to_string(&owners)
+                                            .unwrap_or_else(|_| "[]".to_string())
+                                    }
+                                    None => "[]".to_string(),
+                                };
+
                             self.conn.execute(
                                 "INSERT INTO perspective_handle (uuid, name, neighbourhood, shared_url, state, owners) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                                 params![
@@ -1773,7 +1797,7 @@ impl Ad4mDb {
                                     perspective.get("neighbourhood").and_then(|n| n.as_str()),
                                     perspective["shared_url"].as_str(),
                                     perspective["state"].as_str().unwrap_or(state.as_str()),
-                                    serde_json::to_string(&Vec::<String>::new()).unwrap_or_else(|_| "[]".to_string())
+                                    owners_json
                                 ],
                             )
                         };
@@ -2260,23 +2284,14 @@ impl Ad4mDb {
         let argon2 = Argon2::default();
         let password_hash = argon2
             .hash_password(password.as_bytes(), &salt)
-            .map_err(|e| {
-                rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to hash password: {}", e),
-                )))
-            })?
+            .map_err(|e| anyhow!("Failed to hash password: {}", e))?
             .to_string();
         Ok(password_hash)
     }
 
     fn verify_password(password: &str, password_hash: &str) -> Ad4mDbResult<bool> {
-        let parsed_hash = PasswordHash::new(password_hash).map_err(|e| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to parse password hash: {}", e),
-            )))
-        })?;
+        let parsed_hash = PasswordHash::new(password_hash)
+            .map_err(|e| anyhow!("Failed to parse password hash: {}", e))?;
         let argon2 = Argon2::default();
         Ok(argon2
             .verify_password(password.as_bytes(), &parsed_hash)
@@ -2293,7 +2308,8 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn get_user(&self, username: &str) -> Ad4mDbResult<User> {
+    // Internal function to get user with password_hash - only for internal use
+    fn get_user_internal(&self, username: &str) -> Ad4mDbResult<User> {
         let mut stmt = self.conn.prepare(
             "SELECT username, did, password_hash, last_seen FROM users WHERE username = ?1",
         )?;
@@ -2308,6 +2324,21 @@ impl Ad4mDb {
         Ok(user)
     }
 
+    // Public function to get user without password_hash
+    pub fn get_user(&self, username: &str) -> Ad4mDbResult<UserInfo> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT username, did, last_seen FROM users WHERE username = ?1")?;
+        let user = stmt.query_row([username], |row| {
+            Ok(UserInfo {
+                username: row.get(0)?,
+                did: row.get(1)?,
+                last_seen: row.get(2).ok(),
+            })
+        })?;
+        Ok(user)
+    }
+
     pub fn update_user_last_seen(&self, email: &str) -> Ad4mDbResult<()> {
         let timestamp = chrono::Utc::now().timestamp();
         self.conn.execute(
@@ -2317,18 +2348,17 @@ impl Ad4mDb {
         Ok(())
     }
 
-    pub fn list_users(&self) -> Ad4mDbResult<Vec<User>> {
+    pub fn list_users(&self) -> Ad4mDbResult<Vec<UserInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT username, did, password_hash, last_seen FROM users ORDER BY last_seen DESC NULLS LAST"
+            "SELECT username, did, last_seen FROM users ORDER BY last_seen DESC NULLS LAST",
         )?;
 
         let users = stmt
             .query_map([], |row| {
-                Ok(User {
+                Ok(UserInfo {
                     username: row.get(0)?,
                     did: row.get(1)?,
-                    password_hash: row.get(2)?,
-                    last_seen: row.get(3).ok(),
+                    last_seen: row.get(2).ok(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -2337,8 +2367,9 @@ impl Ad4mDb {
     }
 
     // Verify user password against stored hash
+    // Uses internal function to access password_hash
     pub fn verify_user_password(&self, username: &str, password: &str) -> Ad4mDbResult<bool> {
-        let user = self.get_user(username)?;
+        let user = self.get_user_internal(username)?;
         Self::verify_password(password, &user.password_hash)
     }
 
@@ -3493,13 +3524,11 @@ mod tests {
             add_result.err()
         );
 
-        // Get user should return the same user (but with hashed password)
+        // Get user should return the same user (without password_hash)
         let retrieved_user = db.get_user(test_username).unwrap();
         assert_eq!(retrieved_user.username, test_username);
         assert_eq!(retrieved_user.did, test_did);
-        // Password should be hashed, not plaintext
-        assert_ne!(retrieved_user.password_hash, test_password);
-        assert!(retrieved_user.password_hash.starts_with("$argon2"));
+        // Password verification should work (tests that password is properly hashed)
 
         // Verify password should work
         assert!(db
@@ -3640,19 +3669,14 @@ mod tests {
         // Verify all users can be retrieved and passwords can be verified
         for (username, _did, password) in &users {
             let retrieved = db.get_user(username).unwrap();
-            // Password should be hashed
-            assert!(
-                retrieved.password_hash.starts_with("$argon2"),
-                "Password should be hashed with Argon2 for {}",
-                username
-            );
-            assert_ne!(
-                retrieved.password_hash, *password,
-                "Password should not be stored in plaintext for {}",
+            // Verify user info is correct
+            assert_eq!(
+                retrieved.username, *username,
+                "Username should match for {}",
                 username
             );
 
-            // But verification should work
+            // Password verification should work (tests that password is properly hashed)
             assert!(
                 db.verify_user_password(username, password).unwrap(),
                 "Password verification should succeed for {}",

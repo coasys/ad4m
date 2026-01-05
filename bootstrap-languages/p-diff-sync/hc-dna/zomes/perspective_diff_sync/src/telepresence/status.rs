@@ -230,7 +230,11 @@ pub fn get_others() -> SocialContextResult<Vec<String>> {
     let my_agent_dids = get_agents_did_keys(my_agent)?;
     all_dids.extend(my_agent_dids);
 
-    Ok(all_dids)
+    // Deduplicate the final list - same DID could appear multiple times if:
+    // 1. The same DID is associated with multiple agents
+    // 2. my_agent is also in active_agents
+    let deduped_dids = dedup(&all_dids);
+    Ok(deduped_dids)
 }
 
 pub fn get_online_agents() -> SocialContextResult<Vec<OnlineAgent>> {

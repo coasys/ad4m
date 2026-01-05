@@ -640,6 +640,16 @@ impl From<crate::types::User> for UserInfo {
     }
 }
 
+impl From<crate::types::UserInfo> for UserInfo {
+    fn from(user: crate::types::UserInfo) -> Self {
+        UserInfo {
+            username: user.username,
+            did: user.did,
+            last_seen: user.last_seen.map(|ts| ts as f64),
+        }
+    }
+}
+
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct UserCreationResult {

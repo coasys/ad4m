@@ -522,12 +522,34 @@ pub struct Model {
 
 // Internal User struct - NOT exposed via GraphQL
 // Contains sensitive data like password_hash that should never be returned to clients
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct User {
     pub username: String,
     pub did: String,
     #[serde(skip_serializing)]
     pub password_hash: String, // Argon2id hash - never serialize or expose
+    pub last_seen: Option<i64>,
+}
+
+// Custom Debug implementation that redacts password_hash
+impl std::fmt::Debug for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("User")
+            .field("username", &self.username)
+            .field("did", &self.did)
+            .field("password_hash", &"***redacted***")
+            .field("last_seen", &self.last_seen)
+            .finish()
+    }
+}
+
+// Public UserInfo struct - safe to return from public APIs
+// Does NOT contain password_hash
+#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInfo {
+    pub username: String,
+    pub did: String,
     pub last_seen: Option<i64>,
 }
