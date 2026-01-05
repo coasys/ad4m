@@ -532,17 +532,17 @@ export class AgentClient {
   }
 
   // Multi-user methods
-  async createUser(email: string, password: string): Promise<UserCreationResult> {
+  async createUser(email: string, password: string, appInfo?: AuthInfoInput): Promise<UserCreationResult> {
     const { runtimeCreateUser } = unwrapApolloResult(
       await this.#apolloClient.mutate({
-        mutation: gql`mutation runtimeCreateUser($email: String!, $password: String!) {
-          runtimeCreateUser(email: $email, password: $password) {
+        mutation: gql`mutation runtimeCreateUser($email: String!, $password: String!, $appInfo: AuthInfoInput) {
+          runtimeCreateUser(email: $email, password: $password, appInfo: $appInfo) {
             did
             success
             error
           }
         }`,
-        variables: { email, password },
+        variables: { email, password, appInfo },
       })
     );
     return runtimeCreateUser;
@@ -560,17 +560,17 @@ export class AgentClient {
     return runtimeLoginUser;
   }
 
-  async requestLoginVerification(email: string): Promise<VerificationRequestResult> {
+  async requestLoginVerification(email: string, appInfo?: AuthInfoInput): Promise<VerificationRequestResult> {
     const { runtimeRequestLoginVerification } = unwrapApolloResult(
       await this.#apolloClient.mutate({
-        mutation: gql`mutation runtimeRequestLoginVerification($email: String!) {
-          runtimeRequestLoginVerification(email: $email) {
+        mutation: gql`mutation runtimeRequestLoginVerification($email: String!, $appInfo: AuthInfoInput) {
+          runtimeRequestLoginVerification(email: $email, appInfo: $appInfo) {
             success
             message
             requiresPassword
           }
         }`,
-        variables: { email },
+        variables: { email, appInfo },
       })
     );
     return runtimeRequestLoginVerification;

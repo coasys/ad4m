@@ -665,7 +665,17 @@ export class Ad4mConnectElement extends LitElement {
 
       // Build temporary client to call requestLoginVerification
       const tempClient = this._client.buildTempClient(this.backendUrl);
-      const result = await tempClient.agent.requestLoginVerification(this._multiUserEmail);
+
+      // Build AuthInfo object from app properties
+      const appInfo = {
+        appName: this.appName,
+        appDesc: this.appDesc,
+        appDomain: this.appDomain,
+        appUrl: window.location.origin,
+        appIconPath: this.appIconPath,
+      };
+
+      const result = await tempClient.agent.requestLoginVerification(this._multiUserEmail, appInfo);
 
       if (result.success && !result.requiresPassword) {
         // User exists, verification email sent
@@ -692,7 +702,17 @@ export class Ad4mConnectElement extends LitElement {
 
       // Build temporary client to call createUser
       const tempClient = this._client.buildTempClient(this.backendUrl);
-      const result = await tempClient.agent.createUser(this._multiUserEmail, this._multiUserPassword);
+
+      // Build AuthInfo object from app properties
+      const appInfo = {
+        appName: this.appName,
+        appDesc: this.appDesc,
+        appDomain: this.appDomain,
+        appUrl: window.location.origin,
+        appIconPath: this.appIconPath,
+      };
+
+      const result = await tempClient.agent.createUser(this._multiUserEmail, this._multiUserPassword, appInfo);
 
       if (result.success) {
         // User created, verification email sent

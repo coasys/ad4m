@@ -4,7 +4,7 @@ import { ExpressionProof } from "../expression/Expression";
 import { LinkExpression } from "../links/Links";
 import { ExceptionType } from "../Exception";
 import { RUNTIME_MESSAGED_RECEIVED_TOPIC, EXCEPTION_OCCURRED_TOPIC, RUNTIME_NOTIFICATION_REQUESTED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC } from '../PubSub';
-import { UserCreationResult } from "../agent/Agent";
+import { UserCreationResult, AuthInfoInput } from "../agent/Agent";
 
 const testLink = new LinkExpression()
 testLink.author = "did:ad4m:test"
@@ -476,7 +476,10 @@ export default class RuntimeResolver {
     }
 
     @Mutation(returns => VerificationRequestResult)
-    runtimeRequestLoginVerification(@Arg("email") email: string): VerificationRequestResult {
+    runtimeRequestLoginVerification(
+        @Arg("email") email: string,
+        @Arg("appInfo", { nullable: true }) appInfo?: AuthInfoInput
+    ): VerificationRequestResult {
         // For testing: simulate existing user
         return {
             success: true,
@@ -504,7 +507,8 @@ export default class RuntimeResolver {
     @Mutation(returns => UserCreationResult)
     runtimeCreateUser(
         @Arg("email") email: string,
-        @Arg("password") password: string
+        @Arg("password") password: string,
+        @Arg("appInfo", { nullable: true }) appInfo?: AuthInfoInput
     ): UserCreationResult {
         // For testing: simulate successful user creation (email verification flow)
         return new UserCreationResult("did:key:test123", true)

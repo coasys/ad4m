@@ -59,6 +59,8 @@ impl EmailService {
         email: &str,
         code: &str,
         verification_type: &str,
+        app_name: Option<&str>,
+        app_icon: Option<&str>,
     ) -> Result<(), AnyError> {
         // Check if we're in test mode
         let test_mode = EMAIL_TEST_MODE.lock().ok()
@@ -75,7 +77,7 @@ impl EmailService {
         }
 
         // Normal mode: actually send the email
-        let (html_body, text_body) = self.render_verification_email(code, verification_type);
+        let (html_body, text_body) = self.render_verification_email(code, verification_type, app_name, app_icon);
 
         let subject = match verification_type {
             "signup" => "Complete Your AD4M Account Registration",
@@ -126,11 +128,33 @@ impl EmailService {
     }
 
     /// Renders the HTML and plain text versions of a verification email
-    fn render_verification_email(&self, code: &str, verification_type: &str) -> (String, String) {
+    fn render_verification_email(&self, code: &str, verification_type: &str, app_name: Option<&str>, app_icon: Option<&str>) -> (String, String) {
         let action = match verification_type {
             "signup" => "complete your account registration",
             "login" => "log in to your account",
             _ => "verify your email",
+        };
+
+        // Build app context with optional icon
+        let app_context = if let Some(name) = app_name {
+            if let Some(icon_url) = app_icon {
+                // Check if it's a URL or data URI (not a local file path)
+                if icon_url.starts_with("http://") || icon_url.starts_with("https://") || icon_url.starts_with("data:") {
+                    format!(r#" for <span style="display: inline-flex; align-items: center; gap: 8px;"><img src="{}" alt="{}" style="width: 24px; height: 24px; border-radius: 4px; vertical-align: middle;" /><strong>{}</strong></span>"#, icon_url, name, name)
+                } else {
+                    format!(" for <strong>{}</strong>", name)
+                }
+            } else {
+                format!(" for <strong>{}</strong>", name)
+            }
+        } else {
+            String::new()
+        };
+
+        let app_context_plain = if let Some(name) = app_name {
+            format!(" for {}", name)
+        } else {
+            String::new()
         };
 
         let html_body = format!(
@@ -233,7 +257,7 @@ impl EmailService {
         </div>
         <div class="content">
             <h2 style="margin-top: 0; color: #111827;">Email Verification Required</h2>
-            <p>Enter this verification code in your application to {action}:</p>
+            <p>Enter this verification code{app_context} to {action}:</p>
 
             <div class="code-container">
                 <div class="code-label">Your Verification Code</div>
@@ -264,7 +288,8 @@ impl EmailService {
 </html>
             "#,
             action = action,
-            code = code
+            code = code,
+            app_context = app_context
         );
 
         let text_body = format!(
@@ -272,7 +297,7 @@ impl EmailService {
 AD4M EMAIL VERIFICATION
 ========================
 
-Enter this verification code in your application to {action}:
+Enter this verification code{app_context} to {action}:
 
     {code}
 
@@ -291,7 +316,8 @@ This is an automated message from your AD4M instance.
 Please do not reply to this email.
             "#,
             action = action,
-            code = code
+            code = code,
+            app_context = app_context_plain
         );
 
         (html_body, text_body)

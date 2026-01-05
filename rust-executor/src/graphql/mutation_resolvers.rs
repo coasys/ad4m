@@ -464,6 +464,7 @@ impl Mutation {
         context: &RequestContext,
         email: String,
         password: String,
+        app_info: Option<AuthInfoInput>,
     ) -> FieldResult<UserCreationResult> {
         // Check capability (empty tokens get user management caps in multi-user mode)
         check_capability(
@@ -578,6 +579,10 @@ impl Mutation {
                 })?
         };
 
+        // Get app name and icon from provided app_info for email context
+        let app_name = app_info.as_ref().map(|info| info.app_name.clone());
+        let app_icon = app_info.as_ref().and_then(|info| info.app_icon_path.clone());
+
         // Check if test mode is enabled
         let test_mode = crate::email_service::EMAIL_TEST_MODE.lock().ok().map(|mode| *mode).unwrap_or(false);
 
@@ -600,7 +605,7 @@ impl Mutation {
 
             let email_service = crate::email_service::EmailService::new(smtp_config);
             if let Err(e) = email_service
-                .send_verification_email(&email, &code, "signup")
+                .send_verification_email(&email, &code, "signup", app_name.as_deref(), app_icon.as_deref())
                 .await
             {
                 log::warn!("Failed to send verification email to {}: {}", email, e);
@@ -718,6 +723,7 @@ impl Mutation {
         &self,
         context: &RequestContext,
         email: String,
+        app_info: Option<AuthInfoInput>,
     ) -> FieldResult<VerificationRequestResult> {
         use crate::graphql::graphql_types::VerificationRequestResult;
 
@@ -783,6 +789,10 @@ impl Mutation {
                 })?
         };
 
+        // Get app name and icon from provided app_info for email context
+        let app_name = app_info.as_ref().map(|info| info.app_name.clone());
+        let app_icon = app_info.as_ref().and_then(|info| info.app_icon_path.clone());
+
         // Check if test mode is enabled
         let test_mode = crate::email_service::EMAIL_TEST_MODE.lock().ok().map(|mode| *mode).unwrap_or(false);
 
@@ -813,7 +823,7 @@ impl Mutation {
         // Send verification email
         let email_service = crate::email_service::EmailService::new(smtp_config);
         email_service
-            .send_verification_email(&email, &code, "login")
+            .send_verification_email(&email, &code, "login", app_name.as_deref(), app_icon.as_deref())
             .await
             .map_err(|e| {
                 FieldError::new(
