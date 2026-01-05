@@ -391,12 +391,24 @@ Please do not reply to this email.
                 .tls(Tls::Wrapper(tls_params))
                 .build()
         } else if self.smtp_config.port == 25 {
-            // Port 25 usually plain text or opportunistic TLS
-            use lettre::transport::smtp::client::Tls;
+            // Port 25: Use opportunistic TLS (STARTTLS) to attempt encryption when available
+            // WARNING: If the server doesn't support STARTTLS, credentials will be sent in plaintext
+            log::warn!(
+                "⚠️  SECURITY WARNING: Using SMTP port 25 with opportunistic TLS. \
+                Credentials may be sent in plaintext if the server ({}) does not support STARTTLS. \
+                Consider using port 587 (STARTTLS) or 465 (TLS wrapper) for better security.",
+                self.smtp_config.host
+            );
+            use lettre::transport::smtp::client::{Tls, TlsParameters};
+
+            let tls_params = TlsParameters::builder(self.smtp_config.host.clone())
+                .dangerous_accept_invalid_certs(false)
+                .build()?;
+
             SmtpTransport::builder_dangerous(&self.smtp_config.host)
                 .port(self.smtp_config.port)
                 .credentials(creds)
-                .tls(Tls::None)
+                .tls(Tls::Opportunistic(tls_params))
                 .build()
         } else {
             // Port 587, 2525, etc. use STARTTLS
