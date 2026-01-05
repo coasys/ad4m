@@ -579,7 +579,7 @@ impl Mutation {
         };
 
         // Get SMTP config if available
-        if let Some(smtp_config) = context.js_handle.config.smtp_config.clone() {
+        if let Some(smtp_config) = crate::config::SMTP_CONFIG.lock().ok().and_then(|cfg| cfg.clone()) {
             let email_service = crate::email_service::EmailService::new(smtp_config);
             if let Err(e) = email_service
                 .send_verification_email(&email, &code, "signup")
@@ -768,12 +768,11 @@ impl Mutation {
                 })?
         };
 
-        // Get SMTP config from context
-        let smtp_config = context
-            .js_handle
-            .config
-            .smtp_config
-            .clone()
+        // Get SMTP config from global instance
+        let smtp_config = crate::config::SMTP_CONFIG
+            .lock()
+            .ok()
+            .and_then(|cfg| cfg.clone())
             .ok_or_else(|| {
                 FieldError::new(
                     "SMTP is not configured. Please configure email settings in the launcher.",
@@ -909,12 +908,11 @@ impl Mutation {
         // Check capability - admin only
         check_capability(&context.capabilities, &ALL_CAPABILITY)?;
 
-        // Get SMTP config
-        let smtp_config = context
-            .js_handle
-            .config
-            .smtp_config
-            .clone()
+        // Get SMTP config from global instance
+        let smtp_config = crate::config::SMTP_CONFIG
+            .lock()
+            .ok()
+            .and_then(|cfg| cfg.clone())
             .ok_or_else(|| {
                 FieldError::new(
                     "SMTP is not configured. Please configure email settings in the launcher.",

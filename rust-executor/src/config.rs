@@ -1,6 +1,19 @@
 use crate::utils;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+lazy_static::lazy_static! {
+    /// Global SMTP configuration for sending emails
+    pub static ref SMTP_CONFIG: Arc<Mutex<Option<SmtpConfig>>> = Arc::new(Mutex::new(None));
+}
+
+/// Set the global SMTP config (called during server initialization)
+pub fn set_smtp_config(config: Option<SmtpConfig>) {
+    if let Ok(mut smtp_config) = SMTP_CONFIG.lock() {
+        *smtp_config = config;
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsConfig {
