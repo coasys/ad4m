@@ -52,9 +52,10 @@ export default async function create(context: LanguageContext): Promise<Language
         // Each language instance is created for a specific user
 
         const recipientDid = payload.recipient_did;
+        const localUserDIDs = await agent.getAllLocalUserDIDs();
         
-        if (! agent.getAllLocalUserDIDs().includes(recipientDid)) {
-          console.error(`[p-diff-sync] Received Signal not for user on this node. Recipient is ${payload.recipient_did}. All local user DIDs: ${agent.getAllLocalUserDIDs().join(', ')}`);
+        if (! localUserDIDs.includes(recipientDid)) {
+          console.error(`[p-diff-sync] Received Signal not for user on this node. Recipient is ${payload.recipient_did}. All local user DIDs: ${localUserDIDs.join(', ')}`);
           return; // Not for this user
         }
 
