@@ -1,4 +1,5 @@
 use super::byte_array::ByteArray;
+use super::LanguageController;
 use crate::{
     graphql::graphql_types::{OnlineAgent, PerspectiveExpression},
     js_core::JsCoreHandle,
@@ -10,6 +11,7 @@ use deno_core::error::AnyError;
 #[derive(Clone)]
 pub struct Language {
     address: String,
+    // Legacy field for backward compatibility
     js_core: JsCoreHandle,
 }
 
@@ -29,150 +31,154 @@ impl Language {
     }
 
     pub async fn sync(&mut self) -> Result<(), AnyError> {
-        let script = format!(
-            r#"
-                JSON.stringify(
-                    await core.languageController.languageByRef({{address:"{}"}}) 
-                    ? 
-                    await (await core.languageController.languageByRef({{address:"{}"}})).linksAdapter.sync() 
-                    : 
-                    null
-                )
-            "#,
-            self.address, self.address,
-        );
-        let _result: String = self.js_core.execute(script).await?;
+        let controller = LanguageController::global_instance();
+        let script = r#"
+            (async function() {
+                const language = globalThis.__ad4m_language_instance__;
+                if (language && language.linksAdapter) {
+                    return await language.linksAdapter.sync();
+                }
+                return null;
+            })()
+        "#;
+
+        controller
+            .execute_on_language(&self.address, script)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         Ok(())
     }
 
     pub async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<String>, AnyError> {
+        let controller = LanguageController::global_instance();
+        let diff_json = serde_json::to_string(&diff)?;
         let script = format!(
             r#"
-                JSON.stringify(
-                    await core.languageController.languageByRef({{address:"{}"}}) 
-                    ? 
-                    await (await core.languageController.languageByRef({{address:"{}"}})).linksAdapter.commit({}) 
-                    : 
-                    null
-                )
+            JSON.stringify((async function() {{
+                const language = globalThis.__ad4m_language_instance__;
+                if (language && language.linksAdapter) {{
+                    return await language.linksAdapter.commit({});
+                }}
+                return null;
+            }})())
             "#,
-            self.address,
-            self.address,
-            serde_json::to_string(&diff)?,
+            diff_json
         );
-        let result: String = self.js_core.execute(script).await?;
+
+        let result = controller
+            .execute_on_language(&self.address, &script)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         parse_revision(result)
     }
 
     pub async fn current_revision(&mut self) -> Result<Option<String>, AnyError> {
-        let script = format!(
-            r#"
-                JSON.stringify(
-                    await core.languageController.languageByRef({{address:"{}"}}) 
-                    ? 
-                    await (await core.languageController.languageByRef({{address:"{}"}})).linksAdapter.currentRevision() 
-                    : 
-                    null
-                )
-            "#,
-            self.address, self.address,
-        );
-        let result: String = self.js_core.execute(script).await?;
+        let controller = LanguageController::global_instance();
+        let script = r#"
+            JSON.stringify((async function() {
+                const language = globalThis.__ad4m_language_instance__;
+                if (language && language.linksAdapter) {
+                    return await language.linksAdapter.currentRevision();
+                }
+                return null;
+            })())
+        "#;
+
+        let result = controller
+            .execute_on_language(&self.address, script)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         parse_revision(result)
     }
 
     pub async fn render(&mut self) -> Result<Option<Perspective>, AnyError> {
-        let script = format!(
-            r#"
-                JSON.stringify(
-                    await core.languageController.languageByRef({{address:"{}"}}) 
-                    ? 
-                    await (await core.languageController.languageByRef({{address:"{}"}})).linksAdapter.render() 
-                    : 
-                    null
-                )
-            "#,
-            self.address, self.address,
-        );
-        let result: String = self.js_core.execute(script).await?;
+        let controller = LanguageController::global_instance();
+        let script = r#"
+            JSON.stringify((async function() {
+                const language = globalThis.__ad4m_language_instance__;
+                if (language && language.linksAdapter) {
+                    return await language.linksAdapter.render();
+                }
+                return null;
+            })())
+        "#;
+
+        let result = controller
+            .execute_on_language(&self.address, script)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let maybe_value = serde_json::from_str(&result)?;
         Ok(maybe_value)
     }
 
     pub async fn others(&mut self) -> Result<Vec<String>, AnyError> {
-        let script = format!(
-            r#"
-                JSON.stringify(
-                    await core.languageController.languageByRef({{address:"{}"}}) 
-                    ? 
-                    await (await core.languageController.languageByRef({{address:"{}"}})).linksAdapter.others() 
-                    : 
-                    null
-                )
-            "#,
-            self.address, self.address,
-        );
-        let result: String = self.js_core.execute(script).await?;
+        let controller = LanguageController::global_instance();
+        let script = r#"
+            JSON.stringify((async function() {
+                const language = globalThis.__ad4m_language_instance__;
+                if (language && language.linksAdapter) {
+                    return await language.linksAdapter.others();
+                }
+                return null;
+            })())
+        "#;
+
+        let result = controller
+            .execute_on_language(&self.address, script)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let others_vec = serde_json::from_str(&result)?;
         Ok(others_vec)
     }
 
     pub async fn has_telepresence_adapter(&mut self) -> Result<bool, AnyError> {
-        let script = format!(
-            r#"
-                JSON.stringify(
-                    await core.languageController.languageByRef({{address:"{}"}}) 
-                    &&
-                    await (await core.languageController.languageByRef({{address:"{}"}})).telepresenceAdapter
-                    ? 
-                    true
-                    : 
-                    false
-                )
-            "#,
-            self.address, self.address,
-        );
-        let result: String = self.js_core.execute(script).await?;
-        let has_telepresence_adapter = serde_json::from_str(&result)?;
-        Ok(has_telepresence_adapter)
+        let controller = LanguageController::global_instance();
+        let metadata = controller.get_language_metadata(&self.address).await;
+        Ok(metadata.map(|m| m.has_telepresence_adapter).unwrap_or(false))
     }
 
     pub async fn set_online_status(
         &mut self,
         status: PerspectiveExpression,
     ) -> Result<(), AnyError> {
+        let controller = LanguageController::global_instance();
+        let status_json = serde_json::to_string(&status)?;
         let script = format!(
             r#"
-                JSON.stringify(
-                    await core.languageController.languageByRef({{address:"{}"}}) 
-                    ? 
-                    await (await core.languageController.languageByRef({{address:"{}"}})).telepresenceAdapter.setOnlineStatus({})
-                    : 
-                    null
-                )
+            (async function() {{
+                const language = globalThis.__ad4m_language_instance__;
+                if (language && language.telepresenceAdapter) {{
+                    return await language.telepresenceAdapter.setOnlineStatus({});
+                }}
+                return null;
+            }})()
             "#,
-            self.address,
-            self.address,
-            serde_json::to_string(&status)?,
+            status_json
         );
-        let _result: String = self.js_core.execute(script).await?;
+
+        controller
+            .execute_on_language(&self.address, &script)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         Ok(())
     }
 
     pub async fn get_online_agents(&mut self) -> Result<Vec<OnlineAgent>, AnyError> {
-        let script = format!(
-            r#"
-                JSON.stringify(
-                    await core.languageController.languageByRef({{address:"{}"}}) 
-                    ? 
-                    await (await core.languageController.languageByRef({{address:"{}"}})).telepresenceAdapter.getOnlineAgents()
-                    : 
-                    null
-                )
-            "#,
-            self.address, self.address,
-        );
-        let result: String = self.js_core.execute(script).await?;
+        let controller = LanguageController::global_instance();
+        let script = r#"
+            JSON.stringify((async function() {
+                const language = globalThis.__ad4m_language_instance__;
+                if (language && language.telepresenceAdapter) {
+                    return await language.telepresenceAdapter.getOnlineAgents();
+                }
+                return null;
+            })())
+        "#;
+
+        let result = controller
+            .execute_on_language(&self.address, script)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let online_agents = serde_json::from_str(&result)?;
         Ok(online_agents)
     }
@@ -182,67 +188,74 @@ impl Language {
         remote_agent_did: String,
         payload: PerspectiveExpression,
     ) -> Result<(), AnyError> {
+        let controller = LanguageController::global_instance();
+        let payload_json = serde_json::to_string(&payload)?;
         let script = format!(
             r#"
-                JSON.stringify(
-                    await core.languageController.languageByRef({{address:"{}"}}) 
-                    ? 
-                    await (await core.languageController.languageByRef({{address:"{}"}})).telepresenceAdapter.sendSignal("{}", {})
-                    : 
-                    null
-                )
+            (async function() {{
+                const language = globalThis.__ad4m_language_instance__;
+                if (language && language.telepresenceAdapter) {{
+                    return await language.telepresenceAdapter.sendSignal("{}", {});
+                }}
+                return null;
+            }})()
             "#,
-            self.address,
-            self.address,
-            remote_agent_did,
-            serde_json::to_string(&payload)?,
+            remote_agent_did, payload_json
         );
-        let _result: String = self.js_core.execute(script).await?;
+
+        controller
+            .execute_on_language(&self.address, &script)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         Ok(())
     }
 
     pub async fn send_broadcast(&mut self, payload: PerspectiveExpression) -> Result<(), AnyError> {
+        let controller = LanguageController::global_instance();
+        let payload_json = serde_json::to_string(&payload)?;
         let script = format!(
             r#"
-                JSON.stringify(
-                    await core.languageController.languageByRef({{address:"{}"}})
-                    ?
-                    await (await core.languageController.languageByRef({{address:"{}"}})).telepresenceAdapter.sendBroadcast({})
-                    :
-                    null
-                )
+            (async function() {{
+                const language = globalThis.__ad4m_language_instance__;
+                if (language && language.telepresenceAdapter) {{
+                    return await language.telepresenceAdapter.sendBroadcast({});
+                }}
+                return null;
+            }})()
             "#,
-            self.address,
-            self.address,
-            serde_json::to_string(&payload)?,
+            payload_json
         );
-        let _result: String = self.js_core.execute(script).await?;
+
+        controller
+            .execute_on_language(&self.address, &script)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         Ok(())
     }
 
     pub async fn set_local_agents(&mut self, agents: Vec<String>) -> Result<(), AnyError> {
         log::debug!("set_local_agents: agents: {:?}", agents);
+        let controller = LanguageController::global_instance();
+        let agents_json = serde_json::to_string(&agents)?;
         let script = format!(
             r#"
-                JSON.stringify(
-                    await core.languageController.languageByRef({{address:"{}"}})
-                    && (await core.languageController.languageByRef({{address:"{}"}})).linksAdapter
-                    && (await core.languageController.languageByRef({{address:"{}"}})).linksAdapter.setLocalAgents
-                    ?
-                    await (await core.languageController.languageByRef({{address:"{}"}})).linksAdapter.setLocalAgents({})
-                    :
-                    null
-                )
+            (async function() {{
+                const language = globalThis.__ad4m_language_instance__;
+                if (language && language.linksAdapter && language.linksAdapter.setLocalAgents) {{
+                    return await language.linksAdapter.setLocalAgents({});
+                }}
+                return null;
+            }})()
             "#,
-            self.address,
-            self.address,
-            self.address,
-            self.address,
-            serde_json::to_string(&agents)?,
+            agents_json
         );
+
         log::debug!("set_local_agents script: {}", script);
-        let _result: String = self.js_core.execute(script).await?;
-        log::debug!("set_local_agents result: {}", _result);
+        let result = controller
+            .execute_on_language(&self.address, &script)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        log::debug!("set_local_agents result: {}", result);
         Ok(())
     }
 }

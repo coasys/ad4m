@@ -186,10 +186,10 @@ impl JsCore {
         }
     }
 
-    async fn load_module(&self, file_path: String) -> Result<(), AnyError> {
+    pub async fn load_module(&self, file_path: &str) -> Result<(), AnyError> {
         let mut worker = self.worker.lock().await;
         let mut loaded_modules = self.loaded_modules.lock().await;
-        let url = resolve_url_or_path(&file_path, current_dir()?.as_path())?;
+        let url = resolve_url_or_path(file_path, current_dir()?.as_path())?;
         if loaded_modules.contains(url.clone().as_str()) {
             return Ok(());
         }
@@ -204,12 +204,25 @@ impl JsCore {
         Ok(())
     }
 
-    async fn init_engine(&self) {
+    pub async fn init_engine(&self) -> Result<(), AnyError> {
         let mut worker = self.worker.lock().await;
         worker
             .execute_main_module(&main_module_url())
             .await
-            .expect("init_engine(): could not execute main module");
+            .map_err(|e| anyhow!("init_engine(): could not execute main module: {}", e))?;
+        Ok(())
+    }
+
+    /// Execute a script synchronously in this JsCore instance
+    pub async fn execute(&self, script: &str) -> Result<String, String> {
+        let script_fut = self
+            .execute_async_smart(script.to_string())
+            .await
+            .map_err(|e| format!("Failed to create script future: {}", e))?;
+
+        script_fut
+            .await
+            .map_err(|e| format!("Script execution failed: {}", e))
     }
 
     fn event_loop(&self) -> EventLoopFuture {
@@ -352,7 +365,7 @@ impl JsCore {
                                 let ts_response = request.response_tx;
 
                                 tokio::task::spawn_local(async move {
-                                    match js_core_cloned.load_module(script).await {
+                                    match js_core_cloned.load_module(&script).await {
                                         Ok(()) => {
                                             info!("Module loaded!");
                                             ts_response
