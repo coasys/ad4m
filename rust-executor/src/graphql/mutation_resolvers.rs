@@ -1063,10 +1063,7 @@ impl Mutation {
         db_ref
             .set_verification_code_expiry(&email, &verification_type, expires_at as i64)
             .map_err(|e| {
-                FieldError::new(
-                    format!("Failed to set expiry: {}", e),
-                    graphql_value!(null),
-                )
+                FieldError::new(format!("Failed to set expiry: {}", e), graphql_value!(null))
             })?;
 
         Ok(true)

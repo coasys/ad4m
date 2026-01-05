@@ -2569,7 +2569,11 @@ impl Ad4mDb {
         )?;
 
         if rows_affected == 0 {
-            return Err(anyhow!("No verification code found for email {} and type {}", email, verification_type));
+            return Err(anyhow!(
+                "No verification code found for email {} and type {}",
+                email,
+                verification_type
+            ));
         }
 
         Ok(())
