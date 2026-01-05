@@ -22,6 +22,90 @@ use crate::agent::capabilities::*;
 
 pub struct Subscription;
 
+/// Helper function to get agent DID filter with proper security enforcement.
+/// For main agent, returns the DID if available (or None if not yet initialized).
+/// For user agents, requires DID resolution to succeed - returns an error if it fails.
+/// This prevents data leakage by ensuring user agents always have valid DIDs.
+fn get_agent_did_filter(
+    auth_token: String,
+    subscription_name: &str,
+) -> Result<Option<String>, coasys_juniper::FieldError> {
+    use crate::agent::{did_for_context, AgentContext};
+    let agent_context = AgentContext::from_auth_token(auth_token);
+
+    if agent_context.is_main_agent {
+        // Main agent can use None filter (sees all) or DID if available
+        let agent_did = did_for_context(&agent_context).ok();
+        if let Some(ref did) = agent_did {
+            log::debug!(
+                "{} subscription: Main agent filtering by DID={}",
+                subscription_name,
+                did
+            );
+        }
+        Ok(agent_did)
+    } else {
+        // User agent - MUST have valid DID, otherwise abort to prevent data leakage
+        match did_for_context(&agent_context) {
+            Ok(did) => {
+                log::debug!(
+                    "{} subscription: User agent filtering by DID={}",
+                    subscription_name,
+                    did
+                );
+                Ok(Some(did))
+            }
+            Err(e) => {
+                log::error!(
+                    "{} subscription: Failed to get DID for user context: {}",
+                    subscription_name,
+                    e
+                );
+                Err(coasys_juniper::FieldError::new(
+                    format!("Failed to resolve agent DID: {}", e),
+                    graphql_value!(null),
+                ))
+            }
+        }
+    }
+}
+
+/// Helper function to get composite filter for neighbourhood signals.
+/// Creates a filter in the format "perspective_uuid|agent_did" with proper security enforcement.
+fn get_neighbourhood_signal_filter(
+    auth_token: String,
+    perspective_uuid: String,
+) -> Result<Option<String>, coasys_juniper::FieldError> {
+    use crate::agent::{did_for_context, AgentContext};
+    let agent_context = AgentContext::from_auth_token(auth_token);
+
+    if agent_context.is_main_agent {
+        // Main agent can use perspective-only filter (can see all signals for perspective)
+        let agent_did = did_for_context(&agent_context).ok();
+        if let Some(ref did) = agent_did {
+            Ok(Some(format!("{}|{}", perspective_uuid, did)))
+        } else {
+            // Main agent without DID - use perspective-only filter
+            Ok(Some(perspective_uuid))
+        }
+    } else {
+        // User agent - MUST have valid DID, otherwise abort to prevent signal leakage
+        match did_for_context(&agent_context) {
+            Ok(did) => Ok(Some(format!("{}|{}", perspective_uuid, did))),
+            Err(e) => {
+                log::error!(
+                    "neighbourhood_signal subscription: Failed to get DID for user context: {}",
+                    e
+                );
+                Err(coasys_juniper::FieldError::new(
+                    format!("Failed to resolve agent DID: {}", e),
+                    graphql_value!(null),
+                ))
+            }
+        }
+    }
+}
+
 #[coasys_juniper::graphql_subscription(context = RequestContext)]
 impl Subscription {
     async fn agent_status_changed(
@@ -91,46 +175,21 @@ impl Subscription {
         match check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY) {
             Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
-                let pubsub = get_global_pubsub().await;
-                let topic = &NEIGHBOURHOOD_SIGNAL_TOPIC;
-
-                // Get the agent context and enforce recipient scoping to prevent signal leakage
-                use crate::agent::{did_for_context, AgentContext};
-                let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
-
-                // Create composite filter: perspective_uuid|agent_did
-                // For main agent, allow perspective-only filter (can see all signals for perspective)
-                // For user agents, require DID resolution to succeed - if it fails, abort subscription
-                let filter = if agent_context.is_main_agent {
-                    // Main agent can use perspective-only filter
-                    let agent_did = did_for_context(&agent_context).ok();
-                    if let Some(ref did) = agent_did {
-                        Some(format!("{}|{}", perspectiveUUID, did))
-                    } else {
-                        // Main agent without DID - use perspective-only filter
-                        Some(perspectiveUUID.clone())
-                    }
-                } else {
-                    // User agent - MUST have valid DID, otherwise abort to prevent signal leakage
-                    match did_for_context(&agent_context) {
-                        Ok(did) => Some(format!("{}|{}", perspectiveUUID, did)),
-                        Err(e) => {
-                            log::error!(
-                            "neighbourhood_signal subscription: Failed to get DID for user context: {}",
-                            e
-                        );
-                            return Box::pin(stream::once(async move {
-                                Err(coasys_juniper::FieldError::new(
-                                    format!("Failed to resolve agent DID: {}", e),
-                                    graphql_value!(null),
-                                ))
-                            }));
-                        }
-                    }
+                let filter = match get_neighbourhood_signal_filter(
+                    context.auth_token.clone(),
+                    perspectiveUUID.clone(),
+                ) {
+                    Ok(filter) => filter,
+                    Err(e) => return Box::pin(stream::once(async move { Err(e) })),
                 };
 
-                log::debug!("neighbourhood_signal subscription: perspective={}, is_main_agent={}, filter={:?}",
-                perspectiveUUID, agent_context.is_main_agent, filter);
+                let pubsub = get_global_pubsub().await;
+                let topic = &NEIGHBOURHOOD_SIGNAL_TOPIC;
+                log::debug!(
+                    "neighbourhood_signal subscription: perspective={}, filter={:?}",
+                    perspectiveUUID,
+                    filter
+                );
 
                 subscribe_and_process::<NeighbourhoodSignalFilter>(
                     pubsub,
@@ -149,48 +208,21 @@ impl Subscription {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
             Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
-                let pubsub = get_global_pubsub().await;
-                let topic = &PERSPECTIVE_ADDED_TOPIC;
-
-                // Get user email and DID for filtering
-                let user_email = user_email_from_token(context.auth_token.clone());
-                log::info!(
-                    "📬 PERSPECTIVE_ADDED subscription: user_email={:?}",
-                    user_email
-                );
-
-                // Determine the filter (user DID or None for main agent)
-                let filter = if let Some(email) = user_email {
-                    // Get user DID to filter by owner
-                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email)
-                    {
-                        log::debug!(
-                            "📬 PERSPECTIVE_ADDED subscription: Filtering by user_did={}",
-                            user_did
-                        );
-                        Some(user_did)
-                    } else {
-                        log::warn!(
-                            "📬 PERSPECTIVE_ADDED subscription: Could not get DID for user {}",
-                            email
-                        );
-                        None
-                    }
-                } else {
-                    // Main agent context - get main agent DID
-                    let main_did = crate::agent::AgentService::with_global_instance(|service| {
-                        service.did.clone()
-                    });
-                    if let Some(ref did) = main_did {
-                        log::debug!(
-                            "📬 PERSPECTIVE_ADDED subscription: Filtering by main agent DID={}",
-                            did
-                        );
-                    }
-                    main_did
+                let filter = match get_agent_did_filter(
+                    context.auth_token.clone(),
+                    "PERSPECTIVE_ADDED",
+                ) {
+                    Ok(filter) => filter,
+                    Err(e) => return Box::pin(stream::once(async move { Err(e) })),
                 };
 
-                // Subscribe with filter to only receive perspectives owned by this user/agent
+                let pubsub = get_global_pubsub().await;
+                let topic = &PERSPECTIVE_ADDED_TOPIC;
+                log::info!(
+                    "📬 PERSPECTIVE_ADDED subscription: filter={:?}",
+                    filter
+                );
+
                 subscribe_and_process::<PerspectiveWithOwner>(pubsub, topic.to_string(), filter)
                     .await
             }
@@ -233,35 +265,16 @@ impl Subscription {
                     }));
                 }
 
+                let filter = match get_agent_did_filter(
+                    context.auth_token.clone(),
+                    "PERSPECTIVE_LINK_ADDED",
+                ) {
+                    Ok(filter) => filter,
+                    Err(e) => return Box::pin(stream::once(async move { Err(e) })),
+                };
+
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_LINK_ADDED_TOPIC;
-
-                // Get user DID for filtering (or main agent DID if no user context)
-                let filter = if let Some(email) = user_email {
-                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email)
-                    {
-                        log::debug!(
-                            "📬 PERSPECTIVE_LINK_ADDED subscription: Filtering by user_did={}",
-                            user_did
-                        );
-                        Some(user_did)
-                    } else {
-                        log::warn!(
-                            "📬 PERSPECTIVE_LINK_ADDED subscription: Could not get DID for user {}",
-                            email
-                        );
-                        None
-                    }
-                } else {
-                    // Main agent context - get main agent DID
-                    let main_did = crate::agent::AgentService::with_global_instance(|service| {
-                        service.did.clone()
-                    });
-                    if let Some(ref did) = main_did {
-                        log::debug!("📬 PERSPECTIVE_LINK_ADDED subscription: Filtering by main agent DID={}", did);
-                    }
-                    main_did
-                };
 
                 subscribe_and_process::<PerspectiveLinkWithOwner>(pubsub, topic.to_string(), filter)
                     .await
@@ -303,32 +316,16 @@ impl Subscription {
                     }));
                 }
 
+                let filter = match get_agent_did_filter(
+                    context.auth_token.clone(),
+                    "PERSPECTIVE_LINK_REMOVED",
+                ) {
+                    Ok(filter) => filter,
+                    Err(e) => return Box::pin(stream::once(async move { Err(e) })),
+                };
+
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_LINK_REMOVED_TOPIC;
-
-                // Get user DID for filtering (or main agent DID if no user context)
-                let filter = if let Some(email) = user_email {
-                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email)
-                    {
-                        log::debug!(
-                            "📬 PERSPECTIVE_LINK_REMOVED subscription: Filtering by user_did={}",
-                            user_did
-                        );
-                        Some(user_did)
-                    } else {
-                        log::warn!("📬 PERSPECTIVE_LINK_REMOVED subscription: Could not get DID for user {}", email);
-                        None
-                    }
-                } else {
-                    // Main agent context - get main agent DID
-                    let main_did = crate::agent::AgentService::with_global_instance(|service| {
-                        service.did.clone()
-                    });
-                    if let Some(ref did) = main_did {
-                        log::debug!("📬 PERSPECTIVE_LINK_REMOVED subscription: Filtering by main agent DID={}", did);
-                    }
-                    main_did
-                };
 
                 subscribe_and_process::<PerspectiveLinkWithOwner>(pubsub, topic.to_string(), filter)
                     .await
@@ -370,32 +367,16 @@ impl Subscription {
                     }));
                 }
 
+                let filter = match get_agent_did_filter(
+                    context.auth_token.clone(),
+                    "PERSPECTIVE_LINK_UPDATED",
+                ) {
+                    Ok(filter) => filter,
+                    Err(e) => return Box::pin(stream::once(async move { Err(e) })),
+                };
+
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_LINK_UPDATED_TOPIC;
-
-                // Get user DID for filtering (or main agent DID if no user context)
-                let filter = if let Some(email) = user_email {
-                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email)
-                    {
-                        log::debug!(
-                            "📬 PERSPECTIVE_LINK_UPDATED subscription: Filtering by user_did={}",
-                            user_did
-                        );
-                        Some(user_did)
-                    } else {
-                        log::warn!("📬 PERSPECTIVE_LINK_UPDATED subscription: Could not get DID for user {}", email);
-                        None
-                    }
-                } else {
-                    // Main agent context - get main agent DID
-                    let main_did = crate::agent::AgentService::with_global_instance(|service| {
-                        service.did.clone()
-                    });
-                    if let Some(ref did) = main_did {
-                        log::debug!("📬 PERSPECTIVE_LINK_UPDATED subscription: Filtering by main agent DID={}", did);
-                    }
-                    main_did
-                };
 
                 subscribe_and_process::<PerspectiveLinkUpdatedWithOwner>(
                     pubsub,
@@ -414,48 +395,21 @@ impl Subscription {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
             Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
-                let pubsub = get_global_pubsub().await;
-                let topic = &PERSPECTIVE_REMOVED_TOPIC;
-
-                // Get user email and DID for filtering
-                let user_email = user_email_from_token(context.auth_token.clone());
-                log::info!(
-                    "📬 PERSPECTIVE_REMOVED subscription: user_email={:?}",
-                    user_email
-                );
-
-                // Determine the filter (user DID or None for main agent)
-                let filter = if let Some(email) = user_email {
-                    // Get user DID to filter by owner
-                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email)
-                    {
-                        log::debug!(
-                            "📬 PERSPECTIVE_REMOVED subscription: Filtering by user_did={}",
-                            user_did
-                        );
-                        Some(user_did)
-                    } else {
-                        log::warn!(
-                            "📬 PERSPECTIVE_REMOVED subscription: Could not get DID for user {}",
-                            email
-                        );
-                        None
-                    }
-                } else {
-                    // Main agent context - get main agent DID
-                    let main_did = crate::agent::AgentService::with_global_instance(|service| {
-                        service.did.clone()
-                    });
-                    if let Some(ref did) = main_did {
-                        log::debug!(
-                            "📬 PERSPECTIVE_REMOVED subscription: Filtering by main agent DID={}",
-                            did
-                        );
-                    }
-                    main_did
+                let filter = match get_agent_did_filter(
+                    context.auth_token.clone(),
+                    "PERSPECTIVE_REMOVED",
+                ) {
+                    Ok(filter) => filter,
+                    Err(e) => return Box::pin(stream::once(async move { Err(e) })),
                 };
 
-                // Subscribe with filter to only receive removal events for perspectives owned by this user/agent
+                let pubsub = get_global_pubsub().await;
+                let topic = &PERSPECTIVE_REMOVED_TOPIC;
+                log::info!(
+                    "📬 PERSPECTIVE_REMOVED subscription: filter={:?}",
+                    filter
+                );
+
                 subscribe_and_process::<PerspectiveRemovedWithOwner>(
                     pubsub,
                     topic.to_string(),
@@ -519,48 +473,21 @@ impl Subscription {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
             Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
-                let pubsub = get_global_pubsub().await;
-                let topic = &PERSPECTIVE_UPDATED_TOPIC;
-
-                // Get user email and DID for filtering
-                let user_email = user_email_from_token(context.auth_token.clone());
-                log::info!(
-                    "📬 PERSPECTIVE_UPDATED subscription: user_email={:?}",
-                    user_email
-                );
-
-                // Determine the filter (user DID or None for main agent)
-                let filter = if let Some(email) = user_email {
-                    // Get user DID to filter by owner
-                    if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(&email)
-                    {
-                        log::debug!(
-                            "📬 PERSPECTIVE_UPDATED subscription: Filtering by user_did={}",
-                            user_did
-                        );
-                        Some(user_did)
-                    } else {
-                        log::warn!(
-                            "📬 PERSPECTIVE_UPDATED subscription: Could not get DID for user {}",
-                            email
-                        );
-                        None
-                    }
-                } else {
-                    // Main agent context - get main agent DID
-                    let main_did = crate::agent::AgentService::with_global_instance(|service| {
-                        service.did.clone()
-                    });
-                    if let Some(ref did) = main_did {
-                        log::debug!(
-                            "📬 PERSPECTIVE_UPDATED subscription: Filtering by main agent DID={}",
-                            did
-                        );
-                    }
-                    main_did
+                let filter = match get_agent_did_filter(
+                    context.auth_token.clone(),
+                    "PERSPECTIVE_UPDATED",
+                ) {
+                    Ok(filter) => filter,
+                    Err(e) => return Box::pin(stream::once(async move { Err(e) })),
                 };
 
-                // Subscribe with filter to only receive perspectives owned by this user/agent
+                let pubsub = get_global_pubsub().await;
+                let topic = &PERSPECTIVE_UPDATED_TOPIC;
+                log::info!(
+                    "📬 PERSPECTIVE_UPDATED subscription: filter={:?}",
+                    filter
+                );
+
                 subscribe_and_process::<PerspectiveWithOwner>(pubsub, topic.to_string(), filter)
                     .await
             }
