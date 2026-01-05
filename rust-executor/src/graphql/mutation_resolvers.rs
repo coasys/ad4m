@@ -697,14 +697,14 @@ impl Mutation {
 
         // Extract app info from the current capability token if available
         let auth_info = if context.auth_token.is_empty() {
-            // Admin context - use default app info
+            // Default app info - use user-scoped capabilities instead of admin ALL_CAPABILITY
             AuthInfo {
                 app_name: "multi-user-app".to_string(),
                 app_desc: "Multi-user application".to_string(),
                 app_domain: Some("multi-user".to_string()),
                 app_url: Some("https://multi-user.app".to_string()),
                 app_icon_path: None,
-                capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+                capabilities: Some(get_user_default_capabilities()),
                 user_email: Some(email.clone()),
             }
         } else {
@@ -884,7 +884,7 @@ impl Mutation {
         verification_type: String,
     ) -> FieldResult<String> {
         use crate::agent::capabilities::{
-            token, AuthInfo, ALL_CAPABILITY, DEFAULT_TOKEN_VALID_PERIOD,
+            token, AuthInfo, DEFAULT_TOKEN_VALID_PERIOD, get_user_default_capabilities,
         };
 
         // Check capability
@@ -931,14 +931,14 @@ impl Mutation {
 
         // Generate JWT token for the user
         let auth_info = if context.auth_token.is_empty() {
-            // Default app info
+            // Default app info - use user-scoped capabilities instead of admin ALL_CAPABILITY
             AuthInfo {
                 app_name: "multi-user-app".to_string(),
                 app_desc: "Multi-user application".to_string(),
                 app_domain: Some("multi-user".to_string()),
                 app_url: Some("https://multi-user.app".to_string()),
                 app_icon_path: None,
-                capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+                capabilities: Some(get_user_default_capabilities()),
                 user_email: Some(email.clone()),
             }
         } else {
