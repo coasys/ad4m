@@ -216,6 +216,7 @@ async fn main() -> Result<()> {
                 tls,
                 log_holochain_metrics,
                 enable_multi_user,
+                smtp_config: None,
             })
             .await;
         })
