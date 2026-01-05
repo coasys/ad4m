@@ -85,9 +85,9 @@ export default class AgentService {
   }
 
   // Return all local user DIDs (including main agent)
-  async getAllLocalUserDIDs(): Promise<string[]> {
+  getAllLocalUserDIDs(): string[] {
     // @ts-ignore - Rust implementation includes main agent + managed users
-    return await AGENT.getAllLocalUserDIDs();
+    return AGENT.getAllLocalUserDIDs();
   }
 
   async updateAgent(a: Agent) {
