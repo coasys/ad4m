@@ -182,7 +182,13 @@ pub fn set_log_config(config: HashMap<String, String>) -> Result<(), String> {
 #[tauri::command]
 pub fn get_tls_config() -> Option<TlsConfig> {
     let state = LauncherState::load().ok()?;
-    state.tls_config
+
+    // Prefer multi_user_config, fallback to deprecated tls_config for backwards compatibility
+    if let Some(multi_user_config) = &state.multi_user_config {
+        multi_user_config.tls_config.clone()
+    } else {
+        state.tls_config
+    }
 }
 
 #[tauri::command]
@@ -204,7 +210,21 @@ pub fn set_tls_config(config: TlsConfig) -> Result<(), String> {
     let mut state =
         LauncherState::load().map_err(|e| format!("Failed to load launcher state: {}", e))?;
 
-    // Update TLS config
+    // Get or create multi_user_config
+    // IMPORTANT: Preserve existing SMTP config if migrating
+    let mut multi_user_config = state.multi_user_config.clone().unwrap_or_else(|| {
+        MultiUserConfig {
+            enabled: true,
+            smtp_config: None,
+            tls_config: None,
+        }
+    });
+
+    // Update TLS config in multi_user_config (new location)
+    multi_user_config.tls_config = Some(config.clone());
+    state.multi_user_config = Some(multi_user_config);
+
+    // Also update deprecated field for backwards compatibility
     state.tls_config = Some(config);
 
     // Save updated state
@@ -356,10 +376,13 @@ pub fn set_smtp_config(config: SmtpConfig) -> Result<(), String> {
         LauncherState::load().map_err(|e| format!("Failed to load launcher state: {}", e))?;
 
     // Get or create multi_user_config
-    let mut multi_user_config = state.multi_user_config.clone().unwrap_or(MultiUserConfig {
-        enabled: true,
-        smtp_config: None,
-        tls_config: None,
+    // IMPORTANT: Preserve existing TLS config from deprecated field if migrating
+    let mut multi_user_config = state.multi_user_config.clone().unwrap_or_else(|| {
+        MultiUserConfig {
+            enabled: true,
+            smtp_config: None,
+            tls_config: state.tls_config.clone(), // Preserve existing TLS config!
+        }
     });
 
     // Update SMTP config
