@@ -271,36 +271,7 @@ impl Ad4mDb {
             "UPDATE perspective_handle SET owners = json_array(owner_did) WHERE owner_did IS NOT NULL AND owners = '[]'",
             [],
         );
-
-        // SECURITY MIGRATION: Drop and recreate users table to migrate from plaintext passwords to hashed passwords
-        // Check if users table has old 'password' column instead of 'password_hash'
-        let has_old_password_column: bool = conn
-            .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'")
-            .ok()
-            .and_then(|mut stmt| {
-                stmt.query_row([], |row| {
-                    let sql: String = row.get(0)?;
-                    Ok(sql.contains("password TEXT") && !sql.contains("password_hash"))
-                })
-                .ok()
-            })
-            .unwrap_or(false);
-
-        if has_old_password_column {
-            log::warn!("⚠️  SECURITY MIGRATION: Dropping users table to migrate from plaintext passwords to hashed passwords");
-            log::warn!("⚠️  All existing users will need to be recreated with new passwords");
-            let _ = conn.execute("DROP TABLE users", []);
-            // Recreate the users table with password_hash column
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS users (
-                    username TEXT PRIMARY KEY,
-                    did TEXT NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    last_seen INTEGER
-                 )",
-                [],
-            )?;
-        }
+        
 
         Ok(Self { conn })
     }
