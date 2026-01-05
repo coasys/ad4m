@@ -1,9 +1,9 @@
 use crate::config::SmtpConfig;
 use deno_core::error::AnyError;
+use lazy_static::lazy_static;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 use std::sync::{Arc, Mutex};
-use lazy_static::lazy_static;
 
 lazy_static! {
     /// Test mode: captures sent emails instead of actually sending them
@@ -33,7 +33,9 @@ pub fn disable_test_mode() {
 
 /// Get captured email code for testing
 pub fn get_test_code(email: &str) -> Option<String> {
-    TEST_MODE_EMAILS.lock().ok()
+    TEST_MODE_EMAILS
+        .lock()
+        .ok()
         .and_then(|codes| codes.get(email).cloned())
 }
 
@@ -63,7 +65,9 @@ impl EmailService {
         app_icon: Option<&str>,
     ) -> Result<(), AnyError> {
         // Check if we're in test mode
-        let test_mode = EMAIL_TEST_MODE.lock().ok()
+        let test_mode = EMAIL_TEST_MODE
+            .lock()
+            .ok()
             .map(|mode| *mode)
             .unwrap_or(false);
 
@@ -71,13 +75,18 @@ impl EmailService {
             // In test mode: capture the code instead of sending
             if let Ok(mut codes) = TEST_MODE_EMAILS.lock() {
                 codes.insert(email.to_string(), code.to_string());
-                log::info!("📧 TEST MODE: Captured verification code for {}: {}", email, code);
+                log::info!(
+                    "📧 TEST MODE: Captured verification code for {}: {}",
+                    email,
+                    code
+                );
             }
             return Ok(());
         }
 
         // Normal mode: actually send the email
-        let (html_body, text_body) = self.render_verification_email(code, verification_type, app_name, app_icon);
+        let (html_body, text_body) =
+            self.render_verification_email(code, verification_type, app_name, app_icon);
 
         let subject = match verification_type {
             "signup" => "Complete Your AD4M Account Registration",
@@ -85,7 +94,8 @@ impl EmailService {
             _ => "Your AD4M Verification Code",
         };
 
-        self.send_email(email, subject, &html_body, &text_body).await
+        self.send_email(email, subject, &html_body, &text_body)
+            .await
     }
 
     /// Sends a test email to verify SMTP configuration
@@ -128,7 +138,13 @@ impl EmailService {
     }
 
     /// Renders the HTML and plain text versions of a verification email
-    fn render_verification_email(&self, code: &str, verification_type: &str, app_name: Option<&str>, app_icon: Option<&str>) -> (String, String) {
+    fn render_verification_email(
+        &self,
+        code: &str,
+        verification_type: &str,
+        app_name: Option<&str>,
+        app_icon: Option<&str>,
+    ) -> (String, String) {
         let action = match verification_type {
             "signup" => "complete your account registration",
             "login" => "log in to your account",
@@ -139,8 +155,14 @@ impl EmailService {
         let app_context = if let Some(name) = app_name {
             if let Some(icon_url) = app_icon {
                 // Check if it's a URL or data URI (not a local file path)
-                if icon_url.starts_with("http://") || icon_url.starts_with("https://") || icon_url.starts_with("data:") {
-                    format!(r#" for <span style="display: inline-flex; align-items: center; gap: 8px;"><img src="{}" alt="{}" style="width: 24px; height: 24px; border-radius: 4px; vertical-align: middle;" /><strong>{}</strong></span>"#, icon_url, name, name)
+                if icon_url.starts_with("http://")
+                    || icon_url.starts_with("https://")
+                    || icon_url.starts_with("data:")
+                {
+                    format!(
+                        r#" for <span style="display: inline-flex; align-items: center; gap: 8px;"><img src="{}" alt="{}" style="width: 24px; height: 24px; border-radius: 4px; vertical-align: middle;" /><strong>{}</strong></span>"#,
+                        icon_url, name, name
+                    )
                 } else {
                     format!(" for <strong>{}</strong>", name)
                 }

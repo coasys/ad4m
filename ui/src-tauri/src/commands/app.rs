@@ -212,13 +212,15 @@ pub fn set_tls_config(config: TlsConfig) -> Result<(), String> {
 
     // Get or create multi_user_config
     // IMPORTANT: Preserve existing SMTP config if migrating
-    let mut multi_user_config = state.multi_user_config.clone().unwrap_or_else(|| {
-        MultiUserConfig {
-            enabled: true,
-            smtp_config: None,
-            tls_config: None,
-        }
-    });
+    let mut multi_user_config =
+        state
+            .multi_user_config
+            .clone()
+            .unwrap_or_else(|| MultiUserConfig {
+                enabled: true,
+                smtp_config: None,
+                tls_config: None,
+            });
 
     // Update TLS config in multi_user_config (new location)
     multi_user_config.tls_config = Some(config.clone());
@@ -343,7 +345,8 @@ pub async fn test_smtp_config(config: SmtpConfig, test_email: String) -> Result<
 
     // Send email in blocking task
     tokio::task::spawn_blocking(move || {
-        mailer.send(&email)
+        mailer
+            .send(&email)
             .map_err(|e| format!("Failed to send email: {}", e))
     })
     .await

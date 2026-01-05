@@ -581,13 +581,22 @@ impl Mutation {
 
         // Get app name and icon from provided app_info for email context
         let app_name = app_info.as_ref().map(|info| info.app_name.clone());
-        let app_icon = app_info.as_ref().and_then(|info| info.app_icon_path.clone());
+        let app_icon = app_info
+            .as_ref()
+            .and_then(|info| info.app_icon_path.clone());
 
         // Check if test mode is enabled
-        let test_mode = crate::email_service::EMAIL_TEST_MODE.lock().ok().map(|mode| *mode).unwrap_or(false);
+        let test_mode = crate::email_service::EMAIL_TEST_MODE
+            .lock()
+            .ok()
+            .map(|mode| *mode)
+            .unwrap_or(false);
 
         // Get SMTP config if available OR if test mode is enabled
-        let smtp_config_opt = crate::config::SMTP_CONFIG.lock().ok().and_then(|cfg| cfg.clone());
+        let smtp_config_opt = crate::config::SMTP_CONFIG
+            .lock()
+            .ok()
+            .and_then(|cfg| cfg.clone());
 
         if test_mode || smtp_config_opt.is_some() {
             // In test mode, use dummy config since send_verification_email will capture codes instead
@@ -605,7 +614,13 @@ impl Mutation {
 
             let email_service = crate::email_service::EmailService::new(smtp_config);
             if let Err(e) = email_service
-                .send_verification_email(&email, &code, "signup", app_name.as_deref(), app_icon.as_deref())
+                .send_verification_email(
+                    &email,
+                    &code,
+                    "signup",
+                    app_name.as_deref(),
+                    app_icon.as_deref(),
+                )
                 .await
             {
                 log::warn!("Failed to send verification email to {}: {}", email, e);
@@ -623,7 +638,10 @@ impl Mutation {
             // Note: We intentionally do NOT update rate limit for signup emails
             // Rate limiting only applies to login verification requests
         } else {
-            log::warn!("SMTP not configured - skipping verification email for {}", email);
+            log::warn!(
+                "SMTP not configured - skipping verification email for {}",
+                email
+            );
         }
 
         Ok(UserCreationResult {
@@ -791,10 +809,16 @@ impl Mutation {
 
         // Get app name and icon from provided app_info for email context
         let app_name = app_info.as_ref().map(|info| info.app_name.clone());
-        let app_icon = app_info.as_ref().and_then(|info| info.app_icon_path.clone());
+        let app_icon = app_info
+            .as_ref()
+            .and_then(|info| info.app_icon_path.clone());
 
         // Check if test mode is enabled
-        let test_mode = crate::email_service::EMAIL_TEST_MODE.lock().ok().map(|mode| *mode).unwrap_or(false);
+        let test_mode = crate::email_service::EMAIL_TEST_MODE
+            .lock()
+            .ok()
+            .map(|mode| *mode)
+            .unwrap_or(false);
 
         // Get SMTP config from global instance OR use dummy config in test mode
         let smtp_config_opt = crate::config::SMTP_CONFIG
@@ -823,7 +847,13 @@ impl Mutation {
         // Send verification email
         let email_service = crate::email_service::EmailService::new(smtp_config);
         email_service
-            .send_verification_email(&email, &code, "login", app_name.as_deref(), app_icon.as_deref())
+            .send_verification_email(
+                &email,
+                &code,
+                "login",
+                app_name.as_deref(),
+                app_icon.as_deref(),
+            )
             .await
             .map_err(|e| {
                 FieldError::new(
@@ -853,7 +883,9 @@ impl Mutation {
         code: String,
         verification_type: String,
     ) -> FieldResult<String> {
-        use crate::agent::capabilities::{token, AuthInfo, ALL_CAPABILITY, DEFAULT_TOKEN_VALID_PERIOD};
+        use crate::agent::capabilities::{
+            token, AuthInfo, ALL_CAPABILITY, DEFAULT_TOKEN_VALID_PERIOD,
+        };
 
         // Check capability
         check_capability(
@@ -938,11 +970,7 @@ impl Mutation {
         Ok(cap_token)
     }
 
-    async fn runtime_test_email(
-        &self,
-        context: &RequestContext,
-        to: String,
-    ) -> FieldResult<bool> {
+    async fn runtime_test_email(&self, context: &RequestContext, to: String) -> FieldResult<bool> {
         use crate::agent::capabilities::ALL_CAPABILITY;
 
         // Check capability - admin only
@@ -973,10 +1001,7 @@ impl Mutation {
     }
 
     /// Enable email test mode (for testing only - captures codes instead of sending)
-    async fn runtime_email_test_mode_enable(
-        &self,
-        context: &RequestContext,
-    ) -> FieldResult<bool> {
+    async fn runtime_email_test_mode_enable(&self, context: &RequestContext) -> FieldResult<bool> {
         use crate::agent::capabilities::ALL_CAPABILITY;
 
         // Check capability - admin only
@@ -987,10 +1012,7 @@ impl Mutation {
     }
 
     /// Disable email test mode
-    async fn runtime_email_test_mode_disable(
-        &self,
-        context: &RequestContext,
-    ) -> FieldResult<bool> {
+    async fn runtime_email_test_mode_disable(&self, context: &RequestContext) -> FieldResult<bool> {
         use crate::agent::capabilities::ALL_CAPABILITY;
 
         // Check capability - admin only
@@ -1015,10 +1037,7 @@ impl Mutation {
     }
 
     /// Clear all captured test codes
-    async fn runtime_email_test_clear_codes(
-        &self,
-        context: &RequestContext,
-    ) -> FieldResult<bool> {
+    async fn runtime_email_test_clear_codes(&self, context: &RequestContext) -> FieldResult<bool> {
         use crate::agent::capabilities::ALL_CAPABILITY;
 
         // Check capability - admin only

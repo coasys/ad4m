@@ -27,7 +27,7 @@ pub struct SmtpConfig {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub password: String,  // Will be encrypted
+    pub password: String, // Will be encrypted
     pub from_address: String,
 }
 
@@ -44,7 +44,7 @@ pub struct LauncherState {
     pub selected_agent: Option<AgentConfigDir>,
     pub log_config: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tls_config: Option<TlsConfig>,  // Deprecated - use multi_user_config.tls_config instead
+    pub tls_config: Option<TlsConfig>, // Deprecated - use multi_user_config.tls_config instead
     pub multi_user_config: Option<MultiUserConfig>,
 }
 

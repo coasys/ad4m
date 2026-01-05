@@ -13,12 +13,12 @@ use argon2::{
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use rand::Rng;
-use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
 
