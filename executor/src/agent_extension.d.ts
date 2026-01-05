@@ -59,7 +59,7 @@ declare global {
         unlock: (password: string) => boolean;
         lock: () => void;
         save_agent_profile: (agent: Agent) => void;
-        createSignedExpressionForUser: (userEmail: string, data: unknown) => Promise<string>;
+        createSignedExpressionForUser: (userEmail: string, data: unknown) => Promise<Expression>;
         
         /**
          * Gets the DID for a user by their email address.
