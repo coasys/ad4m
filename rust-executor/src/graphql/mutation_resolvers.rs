@@ -884,7 +884,7 @@ impl Mutation {
         verification_type: String,
     ) -> FieldResult<String> {
         use crate::agent::capabilities::{
-            token, AuthInfo, DEFAULT_TOKEN_VALID_PERIOD, get_user_default_capabilities,
+            get_user_default_capabilities, token, AuthInfo, DEFAULT_TOKEN_VALID_PERIOD,
         };
 
         // Check capability

@@ -492,30 +492,26 @@ pub fn get_user_default_capabilities() -> Vec<Capability> {
         AGENT_SIGN_CAPABILITY.clone(),
         AGENT_SUBSCRIBE_CAPABILITY.clone(),
         // Note: Excluding LOCK, UNLOCK, PERMIT as these are admin operations
-        
+
         // Expression capabilities - allow users to create and manage expressions
         EXPRESSION_READ_CAPABILITY.clone(),
         EXPRESSION_CREATE_CAPABILITY.clone(),
         EXPRESSION_UPDATE_CAPABILITY.clone(),
-        
         // Language capabilities - allow users to use and manage languages
         LANGUAGE_READ_CAPABILITY.clone(),
         LANGUAGE_CREATE_CAPABILITY.clone(),
         LANGUAGE_UPDATE_CAPABILITY.clone(),
         LANGUAGE_DELETE_CAPABILITY.clone(),
-        
         // Perspective capabilities - allow users to manage their perspectives
         PERSPECTIVE_CREATE_CAPABILITY.clone(),
         perspective_query_capability(vec![WILD_CARD.to_string()]),
         perspective_update_capability(vec![WILD_CARD.to_string()]),
         perspective_delete_capability(vec![WILD_CARD.to_string()]),
         PERSPECTIVE_SUBSCRIBE_CAPABILITY.clone(),
-        
         // Neighbourhood capabilities - allow users to create and manage neighbourhoods
         NEIGHBOURHOOD_CREATE_CAPABILITY.clone(),
         NEIGHBOURHOOD_READ_CAPABILITY.clone(),
         NEIGHBOURHOOD_UPDATE_CAPABILITY.clone(),
-        
         // Runtime capabilities for social features
         RUNTIME_TRUSTED_AGENTS_READ_CAPABILITY.clone(),
         RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY.clone(),
@@ -535,14 +531,14 @@ pub fn get_user_default_capabilities() -> Vec<Capability> {
         RUNTIME_MESSAGES_SUBSCRIBE_CAPABILITY.clone(),
         RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY.clone(),
         // Note: Excluding RUNTIME_QUIT_CAPABILITY as this is an admin operation
-        
+
         // AI capabilities - allow users to use AI (prompt, transcribe) but not manage models
         AI_READ_CAPABILITY.clone(),
         AI_PROMPT_CAPABILITY.clone(),
         AI_TRANSCRIBE_CAPABILITY.clone(),
         // Note: Excluding AI_CREATE_CAPABILITY, AI_UPDATE_CAPABILITY, AI_DELETE_CAPABILITY
         // as these are admin operations for managing AI models
-        
+
         // Note: Excluding RUNTIME_USER_MANAGEMENT_READ_CAPABILITY as it allows listing all users,
         // which is an admin operation. Regular users should not be able to enumerate other users.
     ]

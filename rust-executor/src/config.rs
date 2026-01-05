@@ -11,11 +11,12 @@ lazy_static::lazy_static! {
 
 /// Set the global SMTP config (called during server initialization)
 pub fn set_smtp_config(config: Option<SmtpConfig>) -> Result<(), AnyError> {
-    let mut smtp_config = SMTP_CONFIG.lock()
-        .map_err(|e| AnyError::from(std::io::Error::new(
+    let mut smtp_config = SMTP_CONFIG.lock().map_err(|e| {
+        AnyError::from(std::io::Error::new(
             std::io::ErrorKind::Other,
-            format!("Failed to acquire SMTP config mutex lock: {}", e)
-        )))?;
+            format!("Failed to acquire SMTP config mutex lock: {}", e),
+        ))
+    })?;
     *smtp_config = config;
     Ok(())
 }
