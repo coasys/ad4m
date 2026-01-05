@@ -379,6 +379,9 @@ export class PerspectiveProxy {
     /** Current sync state if this perspective is shared */
     state: PerspectiveState|null;
 
+    /** List of owners of this perspective */
+    owners?: string[]
+
     #handle: PerspectiveHandle
     #client: PerspectiveClient
     #perspectiveLinkAddedCallbacks: LinkCallback[]
@@ -399,6 +402,7 @@ export class PerspectiveProxy {
         this.#client = ad4m
         this.uuid = this.#handle.uuid;
         this.name = this.#handle.name;
+        this.owners = this.#handle.owners;
         this.sharedUrl = this.#handle.sharedUrl;
         this.neighbourhood = this.#handle.neighbourhood;
         this.state = this.#handle.state;

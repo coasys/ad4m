@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub struct TlsConfig {
     pub cert_file_path: String,
     pub key_file_path: String,
+    pub tls_port: u16, // Port for the HTTPS/WSS server
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +33,7 @@ pub struct Ad4mConfig {
     pub auto_permit_cap_requests: Option<bool>,
     pub tls: Option<TlsConfig>,
     pub log_holochain_metrics: Option<bool>,
+    pub enable_multi_user: Option<bool>,
 }
 
 impl Ad4mConfig {
@@ -116,6 +118,7 @@ impl Default for Ad4mConfig {
             auto_permit_cap_requests: None,
             tls: None,
             log_holochain_metrics: None,
+            enable_multi_user: None,
         };
         config.prepare();
         config

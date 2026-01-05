@@ -666,10 +666,11 @@ pub fn get_data_facts(links: &[DecoratedLinkExpression]) -> Vec<String> {
 pub fn get_sdna_facts(
     all_links: &[DecoratedLinkExpression],
     neighbourhood_author: Option<String>,
+    perspective_owner_did: Option<String>,
 ) -> Result<Vec<String>, AnyError> {
     let mut lines = Vec::new();
 
-    let mut author_agents = vec![agent::did()];
+    let mut author_agents = vec![perspective_owner_did.unwrap_or(agent::did())];
     if let Some(neughbourhood_author) = neighbourhood_author {
         author_agents.push(neughbourhood_author);
     }
@@ -744,6 +745,7 @@ pub fn get_sdna_facts(
 pub async fn init_engine_facts(
     all_links: Vec<DecoratedLinkExpression>,
     neighbourhood_author: Option<String>,
+    perspective_owner_did: Option<String>,
 ) -> Result<Vec<String>, AnyError> {
     let mut lines = get_static_infrastructure_facts();
 
@@ -751,7 +753,11 @@ pub async fn init_engine_facts(
     lines.extend(get_data_facts(&all_links));
 
     // Add SDNA facts
-    lines.extend(get_sdna_facts(&all_links, neighbourhood_author)?);
+    lines.extend(get_sdna_facts(
+        &all_links,
+        neighbourhood_author,
+        perspective_owner_did,
+    )?);
 
     Ok(lines)
 }

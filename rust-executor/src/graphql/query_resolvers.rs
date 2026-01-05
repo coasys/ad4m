@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 use super::graphql_types::*;
-use crate::agent::{capabilities::*, signatures};
+use crate::agent::{capabilities::*, did_document_for_context, signatures, AgentContext};
 use crate::ai_service::AIService;
 use crate::types::{AITask, ModelType};
 use crate::{agent::AgentService, entanglement_service::get_entanglement_proofs};
@@ -16,10 +16,76 @@ use std::env;
 
 pub struct Query;
 
+// Helper function to check if a user can access a perspective
+pub fn can_access_perspective(
+    user_email: &Option<String>,
+    perspective: &PerspectiveHandle,
+) -> bool {
+    match user_email {
+        Some(email) => {
+            // User context: check if user is in owners list
+            if let Ok(user_did) = AgentService::get_user_did_by_email(email) {
+                log::debug!(
+                    "📋 can_access_perspective(): user {} perspective {} user_did {}",
+                    email,
+                    perspective.uuid,
+                    user_did
+                );
+                log::debug!(
+                    "📋 can_access_perspective(): perspective.owners {:?}",
+                    perspective.owners
+                );
+                perspective.is_owned_by(&user_did)
+            } else {
+                log::debug!("📋 can_access_perspective(): No DID for user {}", email);
+                false
+            }
+        }
+        None => {
+            // Main agent context: access unowned perspectives OR perspectives owned by main agent
+            if perspective.is_unowned() {
+                true
+            } else {
+                // Check if the main agent owns this perspective
+                AgentService::with_global_instance(|agent_service| {
+                    if let Some(main_agent_did) = &agent_service.did {
+                        perspective.is_owned_by(main_agent_did)
+                    } else {
+                        false
+                    }
+                })
+            }
+        }
+    }
+}
+
 #[graphql_object(context = RequestContext)]
 impl Query {
     async fn agent(&self, context: &RequestContext) -> FieldResult<Agent> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
+
+        // For multi-user mode: extract user DID from JWT token if present
+        if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
+            let agent_data = AgentService::get_user_agent_data(&user_email).map_err(|e| {
+                FieldError::new(format!("User agent not available: {}", e), Value::null())
+            })?;
+
+            // Try to load user-specific profile, fallback to empty profile
+            let agent = match AgentService::with_global_instance(|agent_service| {
+                agent_service.load_user_agent_profile(&user_email)
+            }) {
+                Ok(Some(profile)) => profile,
+                Ok(None) | Err(_) => Agent {
+                    did: agent_data.did,
+                    direct_message_language: None,
+                    perspective: Some(Perspective { links: vec![] }),
+                },
+            };
+
+            return Ok(agent);
+        }
+
+        // Fallback to main agent for admin/legacy mode
         AgentService::with_global_instance(|agent_service| {
             let mut agent = agent_service
                 .agent
@@ -45,7 +111,10 @@ impl Query {
         let did_match = {
             let agent_service = agent_instance.lock().expect("agent lock");
             let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
-            did == agent_ref.did.clone().unwrap()
+            match &agent_ref.did {
+                Some(existing) => &did == existing,
+                None => false,
+            }
         };
 
         if !did_match {
@@ -96,6 +165,36 @@ impl Query {
     async fn agent_status(&self, context: &RequestContext) -> FieldResult<AgentStatus> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
 
+        // For multi-user mode: extract user DID from JWT token if present
+        if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
+            let agent_data = AgentService::get_user_agent_data(&user_email).map_err(|e| {
+                FieldError::new(format!("User agent not available: {}", e), Value::null())
+            })?;
+
+            // Generate DID document for user
+            let agent_context = AgentContext::for_user_email(user_email);
+            let did_document = did_document_for_context(&agent_context).map_err(|e| {
+                FieldError::new(
+                    format!("Failed to get DID document for user: {}", e),
+                    Value::null(),
+                )
+            })?;
+
+            return Ok(AgentStatus {
+                did: Some(agent_data.did),
+                did_document: Some(serde_json::to_string(&did_document).map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to serialize DID document: {}", e),
+                        Value::null(),
+                    )
+                })?),
+                error: None,
+                is_initialized: true,
+                is_unlocked: true,
+            });
+        }
+
+        // Fallback to main agent status for admin/legacy mode
         AgentService::with_global_instance(|agent_service| Ok(agent_service.dump()))
     }
 
@@ -293,14 +392,49 @@ impl Query {
     ) -> FieldResult<Vec<String>> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
-        get_perspective(&uuid)
-            .ok_or(FieldError::from(format!(
-                "No perspective found with uuid {}",
-                uuid
-            )))?
+
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        let current_user_did = crate::agent::did_for_context(&agent_context)
+            .map_err(|e| FieldError::from(e.to_string()))?;
+
+        log::debug!("others() for current_user_did: {}", current_user_did);
+        log::debug!("main agent did: {}", crate::agent::did());
+
+        // Check if the current user is an owner of the perspective
+        let perspective = get_perspective(&uuid).ok_or(FieldError::from(format!(
+            "No perspective found with uuid {}",
+            uuid
+        )))?;
+
+        let handle = perspective.persisted.lock().await.clone();
+
+        // Check ownership - either the perspective has no owners (legacy/unowned)
+        // or the current user is in the owners list
+        if let Some(owners) = &handle.owners {
+            if !owners.contains(&current_user_did) {
+                return Err(FieldError::from(format!(
+                    "Access denied: You are not an owner of this neighbourhood perspective"
+                )));
+            }
+        }
+        // If owners is None, allow access for backward compatibility with legacy perspectives
+
+        // Get all DIDs from the link language
+        let all_dids = perspective
             .others()
             .await
-            .map_err(|e| FieldError::from(e.to_string()))
+            .map_err(|e| FieldError::from(e.to_string()))?;
+
+        log::debug!("all_dids: {:?}", all_dids);
+        log::debug!("current_user_did: {}", current_user_did);
+        let others: Vec<String> = all_dids
+            .into_iter()
+            .filter(|did| did != &current_user_did)
+            .collect();
+
+        log::debug!("others: {:?}", others);
+
+        Ok(others)
     }
 
     async fn perspective(
@@ -314,7 +448,16 @@ impl Query {
         )?;
 
         if let Some(p) = get_perspective(&uuid) {
-            Ok(Some(p.persisted.lock().await.clone()))
+            let handle = p.persisted.lock().await.clone();
+
+            // Check if user has access to this perspective
+            let user_email = user_email_from_token(context.auth_token.clone());
+
+            if can_access_perspective(&user_email, &handle) {
+                Ok(Some(handle))
+            } else {
+                Ok(None) // No access to this perspective
+            }
         } else {
             Ok(None)
         }
@@ -351,13 +494,14 @@ impl Query {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(prolog_resolution_to_string(
             get_perspective(&uuid)
                 .ok_or(FieldError::from(format!(
                     "No perspective found with uuid {}",
                     uuid
                 )))?
-                .prolog_query(query)
+                .prolog_query_with_context(query, &agent_context)
                 .await?,
         ))
     }
@@ -412,10 +556,45 @@ impl Query {
         )?;
 
         let mut result = Vec::new();
+
+        // Extract user DID from token for multi-user filtering
+        let user_email = user_email_from_token(context.auth_token.clone());
+
+        // Check if this is an admin request (for launcher/debugging)
+        // Admin capability has wildcards in domain/pointers/can
+        let has_all_caps = match &context.capabilities {
+            Ok(caps) => caps
+                .iter()
+                .any(|cap| cap.with.domain == "*" && cap.can.iter().any(|c| c == "*")),
+            Err(_) => false,
+        };
+
+        let is_admin = has_all_caps && user_email.is_none();
+
         for p in all_perspectives().iter() {
-            let handle = p.persisted.lock().await.clone();
-            result.push(handle);
+            let mut handle = p.persisted.lock().await.clone();
+
+            log::debug!("📋 perspectives(): perspective {} has owners: {:?}, is_admin: {}, user_email: {:?}", 
+                handle.uuid, handle.owners, is_admin, user_email);
+
+            // Admin sees all perspectives (for launcher), otherwise filter by ownership
+            if is_admin {
+                log::debug!(
+                    "📋 perspectives(): is_admin: true, Including perspective {}",
+                    handle.uuid
+                );
+                result.push(handle);
+            } else if can_access_perspective(&user_email, &handle) {
+                handle.owners = None;
+                result.push(handle);
+            } else {
+                log::debug!(
+                    "📋 perspectives(): Excluding perspective {} (no access)",
+                    handle.uuid
+                );
+            }
         }
+
         Ok(result)
     }
 
@@ -570,6 +749,70 @@ impl Query {
             return Err(FieldError::new(e.to_string(), Value::null()));
         }
         Ok(notifications_result.unwrap())
+    }
+
+    async fn runtime_multi_user_enabled(&self, context: &RequestContext) -> FieldResult<bool> {
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY,
+        )?;
+        Ad4mDb::with_global_instance(|db| {
+            db.get_multi_user_enabled()
+                .map_err(|e| FieldError::new(e.to_string(), Value::null()))
+        })
+    }
+
+    async fn runtime_list_users(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<Vec<UserStatistics>> {
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_READ_CAPABILITY,
+        )?;
+
+        // Check if multi-user mode is enabled
+        let multi_user_enabled =
+            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+
+        if !multi_user_enabled {
+            return Ok(vec![]);
+        }
+
+        // Get all users from database
+        let users = Ad4mDb::with_global_instance(|db| db.list_users())
+            .map_err(|e| FieldError::new(format!("Failed to list users: {}", e), Value::null()))?;
+
+        // For each user, count their perspectives
+        let mut user_stats = vec![];
+        let all_perspectives = all_perspectives();
+
+        for user in users {
+            // Count perspectives owned by this user
+            let mut perspective_count = 0;
+            for perspective in &all_perspectives {
+                let handle = perspective.persisted.lock().await.clone();
+                if let Some(owners) = &handle.owners {
+                    if owners.contains(&user.did) {
+                        perspective_count += 1;
+                    }
+                }
+            }
+
+            user_stats.push(UserStatistics {
+                email: user.username,
+                did: user.did,
+                last_seen: user.last_seen.map(|ts| {
+                    DateTime::from(
+                        chrono::DateTime::from_timestamp(ts as i64, 0)
+                            .unwrap_or_else(chrono::Utc::now),
+                    )
+                }),
+                perspective_count,
+            });
+        }
+
+        Ok(user_stats)
     }
 
     async fn ai_get_models(&self, context: &RequestContext) -> FieldResult<Vec<Model>> {

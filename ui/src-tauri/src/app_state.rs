@@ -15,10 +15,19 @@ pub struct AgentConfigDir {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TlsConfig {
+    pub enabled: bool,
+    pub cert_file_path: String,
+    pub key_file_path: String,
+    pub tls_port: Option<u16>, // Port for HTTPS/WSS server (defaults to main_port + 1)
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LauncherState {
     pub agent_list: Vec<AgentConfigDir>,
     pub selected_agent: Option<AgentConfigDir>,
     pub log_config: Option<HashMap<String, String>>,
+    pub tls_config: Option<TlsConfig>,
 }
 
 fn file_path() -> PathBuf {
@@ -59,6 +68,7 @@ impl LauncherState {
                     agent_list: vec![{ agent.clone() }],
                     selected_agent: Some(agent),
                     log_config: None,
+                    tls_config: None,
                 }
             }
         };

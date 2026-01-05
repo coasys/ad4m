@@ -68,6 +68,20 @@ pub struct LocalConductorConfig {
 }
 
 impl HolochainService {
+    /// Formats an error with proper stacktrace formatting for readability
+    fn format_error_with_stacktrace(err: &dyn std::fmt::Debug) -> String {
+        let err_str = format!("{:?}", err);
+
+        // Check if the error contains a stacktrace pattern
+        if err_str.contains("RuntimeError:") && err_str.contains("\\n    at ") {
+            // Replace escaped newlines with actual newlines throughout the error string
+            // This will make the stacktrace readable line by line
+            return err_str.replace("\\n", "\n");
+        }
+
+        err_str
+    }
+
     pub async fn init(local_config: LocalConductorConfig) -> Result<(), AnyError> {
         // Store the config for potential restarts
         {
@@ -536,6 +550,7 @@ impl HolochainService {
         let app_info = self.conductor.get_app_info(&app_id).await?;
 
         if app_info.is_none() {
+            error!("App not installed with id: {:?}", app_id);
             return Err(anyhow!("App not installed with id: {:?}", app_id));
         }
 
@@ -544,6 +559,10 @@ impl HolochainService {
         let cell_entry = app_info.cell_info.get(&cell_name);
 
         if cell_entry.is_none() {
+            error!(
+                "Cell not installed with name: {:?} in app: {:?}",
+                cell_name, app_id
+            );
             return Err(anyhow!(
                 "Cell not installed with name: {:?} in app: {:?}",
                 cell_name,
@@ -552,6 +571,10 @@ impl HolochainService {
         }
 
         if cell_entry.unwrap().is_empty() {
+            error!(
+                "No cells for cell name: {:?} in app: {:?}",
+                cell_name, app_id
+            );
             return Err(anyhow!(
                 "No cells for cell name: {:?} in app: {:?}",
                 cell_name,
@@ -563,7 +586,10 @@ impl HolochainService {
         let cell_id = match cell_info {
             CellInfo::Provisioned(cell) => cell.cell_id,
             CellInfo::Cloned(cell) => cell.cell_id,
-            CellInfo::Stem(_cell) => return Err(anyhow!("Cell is not provisioned or cloned",)),
+            CellInfo::Stem(_cell) => {
+                error!("Cell is not provisioned or cloned");
+                return Err(anyhow!("Cell is not provisioned or cloned"));
+            }
         };
 
         let agent_pub_key = app_info.agent_pub_key;
@@ -600,9 +626,22 @@ impl HolochainService {
         //    .await
         //    .map_err(|err| anyhow!("Could not sign zome call: {:?}", err))?;
 
-        let result = self.conductor.call_zome(zome_call_params).await??;
-
-        Ok(result)
+        let conductor_api_result = self.conductor.call_zome(zome_call_params).await;
+        match conductor_api_result {
+            Ok(result) => match result {
+                Ok(result) => Ok(result.into()),
+                Err(err) => {
+                    let formatted_err = Self::format_error_with_stacktrace(&err);
+                    error!("Error calling zome function:\n{}", formatted_err);
+                    Err(anyhow!("Error calling zome function: {:?}", err))
+                }
+            },
+            Err(err) => {
+                let formatted_err = Self::format_error_with_stacktrace(&err);
+                error!("Conductor API error:\n{}", formatted_err);
+                Err(anyhow!("Conductor API error: {:?}", err))
+            }
+        }
     }
 
     pub async fn remove_app(&self, app_id: String) -> Result<(), AnyError> {

@@ -10,7 +10,7 @@ executor/scripts/note-ipfs-hash
 executor/scripts/perspective-diff-sync-hash
 executorsrc/tests/publishing-agent/ad4m/data/db.json
 .DS_Store
-
+tests/js/ad4m/users/*
 core/Links.test.js
 core/lib/*
 executor/lib/*
@@ -61,3 +61,6 @@ temp
 .aider*
 
 rust-executor/CUSTOM_DENO_SNAPSHOT.bin
+rust-executor/test_data
+
+.npmrc

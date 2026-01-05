@@ -22,6 +22,11 @@ export type Ad4mConnectOptions = {
   url?: string;
   hosting?: boolean;
   mobile?: boolean;
+  // Multi-user options
+  multiUser?: boolean;
+  backendUrl?: string;
+  userEmail?: string;
+  userPassword?: string;
 };
 
 export type AuthStates = "authenticated" | "locked" | "unauthenticated";
@@ -60,6 +65,7 @@ export default class Ad4mConnect {
   appIconPath: string;
   appUrl?: string;
   isHosting: boolean = false;
+  options: Ad4mConnectOptions;
   listeners: Record<Event, Function[]> = {
     ["authstatechange"]: [],
     ["configstatechange"]: [],
@@ -67,31 +73,22 @@ export default class Ad4mConnect {
   };
 
   // @fayeed - params
-  constructor({
-    appName,
-    appDesc,
-    appIconPath,
-    appUrl,
-    appDomain,
-    capabilities,
-    port,
-    token,
-    url,
-    hosting
-  }: Ad4mConnectOptions) {
+  constructor(options: Ad4mConnectOptions) {
     autoBind(this);
     //! @fayeed - make it support node.js
-    this.appName = appName;
-    this.appDesc = appDesc;
-    this.appDomain = appDomain;
-    this.appUrl = appUrl;
-    this.appIconPath = appIconPath;
-    this.capabilities = capabilities;
-    this.port = port || this.port;
-    this.url = url || `ws://localhost:${this.port}/graphql`;
-    this.token = token || this.token;
-    this.isHosting = hosting || false;
-    this.buildClient();
+    this.options = options;
+    this.appName = options.appName;
+    this.appDesc = options.appDesc;
+    this.appDomain = options.appDomain;
+    this.appUrl = options.appUrl;
+    this.appIconPath = options.appIconPath;
+    this.capabilities = options.capabilities;
+    this.port = options.port || this.port;
+    this.url = options.url || `ws://localhost:${this.port}/graphql`;
+    this.token = options.token || this.token;
+    this.isHosting = options.hosting || false;
+    // Don't auto-connect - let the UI decide when to connect
+    // this.buildClient();
   }
 
   private notifyConfigChange(val: ConfigStates, data: string | number) {
@@ -139,6 +136,33 @@ export default class Ad4mConnect {
     this.listeners[event].push(cb);
   }
 
+  // Build a temporary client for detection/queries without changing state
+  buildTempClient(url: string): Ad4mClient {
+    const wsClient = createClient({
+      url: url,
+      connectionParams: async () => ({
+        headers: {
+          authorization: "",
+        },
+      }),
+    });
+
+    const apolloClient = new ApolloClient({
+      link: new GraphQLWsLink(wsClient),
+      cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
+      defaultOptions: {
+        watchQuery: {
+          fetchPolicy: "no-cache",
+        },
+        query: {
+          fetchPolicy: "no-cache",
+        },
+      },
+    });
+
+    return new Ad4mClient(apolloClient);
+  }
+
   // If url is explicit , don't search for open ports
   async connect(url?: string): Promise<Ad4mClient> {
     try {
@@ -149,24 +173,80 @@ export default class Ad4mConnect {
         await this.checkAuth();
         return client;
       } else {
-        // Try local connection first
-        this.notifyConnectionChange("checking_local");
-        try {
-          // Quick check for local agent
-          await connectWebSocket(`ws://localhost:${this.port}/graphql`, 2000);
-          const client = this.buildClient();
-          await this.checkAuth();
-          return client;
-        } catch {
-          // If local connection fails, proceed with port scanning
-          const client = await this.ensureConnection();
-          await this.checkAuth();
-          return client;
-        }
+        // Try default local port
+        const localUrl = `ws://localhost:${this.port}/graphql`;
+        await connectWebSocket(localUrl);
+        this.setUrl(localUrl);
+        const client = this.buildClient();
+        await this.checkAuth();
+        return client;
       }
     } catch {
       this.notifyConnectionChange("not_connected");
       this.notifyAuthChange("unauthenticated");
+    }
+  }
+
+  async connectMultiUser(): Promise<Ad4mClient> {
+    try {
+      // Connect to the multi-user backend
+      const backendUrl = this.options.backendUrl!;
+      console.debug("[Ad4m Connect] Connecting to backend:", backendUrl);
+      await connectWebSocket(backendUrl);
+      
+      this.setUrl(backendUrl);
+      // Build client for user management operations (without token initially)
+      const tempClient = this.buildClient();
+      console.debug("[Ad4m Connect] Built client:", tempClient);
+      // Try to login first, if that fails, try to create user
+      let token: string;
+      try {
+        console.debug("[Ad4m Connect] Logging in user:", this.options.userEmail!);
+        token = await tempClient.agent.loginUser(this.options.userEmail!, this.options.userPassword!);
+        console.debug("[Ad4m Connect] Login successful");
+      } catch (loginError) {
+        console.debug("[Ad4m Connect] Login error:", loginError);
+        // User doesn't exist, try to create
+        console.debug("[Ad4m Connect] User does not exist, trying to create user:", this.options.userEmail!);
+        try {
+          console.debug("[Ad4m Connect] Creating user:", this.options.userEmail!);
+          try {
+            const createResult = await tempClient.agent.createUser(this.options.userEmail!, this.options.userPassword!);
+            console.debug("[Ad4m Connect] Create result:", createResult);
+            if (!createResult.success) {
+              throw new Error(createResult.error || "Failed to create user");
+            }
+          } catch (createError) {
+            console.log("[Ad4m Connect] Failed to create user:", createError);
+          }
+
+          // Now login
+          console.debug("[Ad4m Connect] Logging in user after creation:", this.options.userEmail!);
+          token = await tempClient.agent.loginUser(this.options.userEmail!, this.options.userPassword!);
+          console.log("[Ad4m Connect] Successfully created and logged in user");
+        } catch (createError) {
+          throw new Error(`Failed to create/login user: ${createError.message}`);
+        }
+      }
+
+      // Set the token and build authenticated client
+      this.setToken(token);
+      const authenticatedClient = this.buildClient();
+      
+      // Verify authentication
+      await authenticatedClient.agent.status();
+      
+      // Store the authenticated client so it can be retrieved via getAd4mClient()
+      this.ad4mClient = authenticatedClient;
+      
+      this.notifyAuthChange("authenticated");
+      this.notifyConnectionChange("connected");
+      
+      return authenticatedClient;
+    } catch (error) {
+      this.notifyConnectionChange("error");
+      this.notifyAuthChange("unauthenticated");
+      throw error;
     }
   }
 
@@ -306,7 +386,7 @@ export default class Ad4mConnect {
 
     // Make sure the url is valid
     try {
-      const websocket = new WebSocket(this.url);
+      const websocket = new WebSocket(this.url, "graphql-transport-ws");
     } catch (e) {
       this.notifyConnectionChange("not_connected");
       return;

@@ -54,8 +54,8 @@ const Profile = (props: Props) => {
   } = useContext(AgentContext);
 
   const {
-    state: { url, did, client, expertMode, isInitialized },
-    methods: { toggleExpertMode },
+    state: { url, did, client, expertMode, isInitialized, multiUserEnabled },
+    methods: { toggleExpertMode, setMultiUserEnabled },
   } = useContext(Ad4minContext);
 
   const [appState, setAppState] = useState({} as any);
@@ -96,11 +96,21 @@ const Profile = (props: Props) => {
   const [showAgentInfos, setShowAgentInfos] = useState(false);
 
   const [restartingHolochain, setRestartingHolochain] = useState(false);
-  
+
   const [logConfig, setLogConfig] = useState<Record<string, string>>({});
   const [newCrateName, setNewCrateName] = useState<string>("");
   const [newCrateLevel, setNewCrateLevel] = useState<string>("info");
   const [crateNameError, setCrateNameError] = useState<string>("");
+
+  const [tlsConfig, setTlsConfig] = useState<{
+    enabled: boolean;
+    cert_file_path: string;
+    key_file_path: string;
+    tls_port: number | null;
+  } | null>(null);
+  const [tlsChanged, setTlsChanged] = useState(false);
+  const [certPathError, setCertPathError] = useState<string>("");
+  const [keyPathError, setKeyPathError] = useState<string>("");
 
   // Load current log config on component mount
   useEffect(() => {
@@ -113,6 +123,24 @@ const Profile = (props: Props) => {
       }
     };
     loadLogConfig();
+  }, []);
+
+  // Load TLS config on component mount
+  useEffect(() => {
+    const loadTlsConfig = async () => {
+      try {
+        const config = await invoke<typeof tlsConfig>("get_tls_config");
+        setTlsConfig(config || {
+          enabled: false,
+          cert_file_path: "",
+          key_file_path: "",
+          tls_port: 12001, // Default TLS port
+        });
+      } catch (error) {
+        console.error("Failed to load TLS config:", error);
+      }
+    };
+    loadTlsConfig();
   }, []);
 
   const handleLogConfigChange = async (newConfig: Record<string, string>) => {
@@ -189,6 +217,49 @@ const Profile = (props: Props) => {
     handleLogConfigChange(newConfig);
     setNewCrateName("");
     setNewCrateLevel("info");
+  };
+
+  const handleTlsConfigChange = async (newConfig: typeof tlsConfig) => {
+    if (!newConfig) return;
+
+    try {
+      await invoke<void>("set_tls_config", { config: newConfig });
+      setTlsConfig(newConfig);
+      setTlsChanged(true);
+      setCertPathError("");
+      setKeyPathError("");
+    } catch (error) {
+      const errorMsg = String(error);
+      if (errorMsg.includes("Certificate")) {
+        setCertPathError(errorMsg);
+      } else if (errorMsg.includes("Key")) {
+        setKeyPathError(errorMsg);
+      } else {
+        alert("Failed to save TLS config: " + errorMsg);
+      }
+    }
+  };
+
+  const handleCertFilePicker = async () => {
+    const filePath = await dialogOpen({
+      title: "Select TLS Certificate File",
+      filters: [{ name: 'Certificate', extensions: ['pem', 'crt', 'cert'] }]
+    });
+
+    if (filePath && tlsConfig) {
+      setTlsConfig({ ...tlsConfig, cert_file_path: filePath.toString() });
+    }
+  };
+
+  const handleKeyFilePicker = async () => {
+    const filePath = await dialogOpen({
+      title: "Select TLS Private Key File",
+      filters: [{ name: 'Private Key', extensions: ['pem', 'key'] }]
+    });
+
+    if (filePath && tlsConfig) {
+      setTlsConfig({ ...tlsConfig, key_file_path: filePath.toString() });
+    }
   };
 
   const removeCrate = (crateName: string) => {
@@ -495,6 +566,176 @@ const Profile = (props: Props) => {
           Advanced mode
         </j-toggle>
       </j-box>
+
+      <j-box px="500" my="500">
+        <j-toggle full="" checked={multiUserEnabled} onChange={async (e) => {
+          try {
+            await setMultiUserEnabled(e.target.checked);
+          } catch (error) {
+            console.error("Failed to toggle multi-user mode:", error);
+            e.target.checked = !e.target.checked; // Revert on error
+          }
+        }}>
+          Multi-user mode
+        </j-toggle>
+      </j-box>
+
+      {/* TLS Configuration Section */}
+      <j-box px="500" my="500">
+        <j-text size="600" weight="600" color="black">
+          TLS/HTTPS Configuration
+        </j-text>
+      </j-box>
+
+      <j-box px="500" my="300">
+        <j-text size="500" color="ui-500">
+          Enable HTTPS for secure remote access. Required for multi-user mode over the web.
+        </j-text>
+      </j-box>
+
+      {tlsConfig && (
+        <>
+          <j-box px="500" my="500">
+            <j-toggle
+              checked={tlsConfig.enabled}
+              onChange={(e) => {
+                setTlsConfig({ ...tlsConfig, enabled: e.target.checked });
+              }}
+            >
+              Enable TLS/HTTPS
+            </j-toggle>
+          </j-box>
+
+          {tlsConfig.enabled && (
+            <>
+              {/* Certificate File Input */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">Certificate File</j-text>
+                </j-box>
+                <j-flex gap="200" a="center">
+                  <j-input
+                    value={tlsConfig.cert_file_path}
+                    onChange={(e) => {
+                      setTlsConfig({
+                        ...tlsConfig,
+                        cert_file_path: (e.target as HTMLInputElement).value
+                      });
+                    }}
+                    placeholder="/path/to/certificate.pem"
+                    style={{ flexGrow: "1" }}
+                    error={!!certPathError}
+                  />
+                  <j-button onClick={handleCertFilePicker} variant="secondary" size="sm">
+                    Browse
+                  </j-button>
+                </j-flex>
+                {certPathError && (
+                  <j-box mt="200">
+                    <j-text size="300" color="danger-500">{certPathError}</j-text>
+                  </j-box>
+                )}
+              </j-box>
+
+              {/* Private Key File Input */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">Private Key File</j-text>
+                </j-box>
+                <j-flex gap="200" a="center">
+                  <j-input
+                    value={tlsConfig.key_file_path}
+                    onChange={(e) => {
+                      setTlsConfig({
+                        ...tlsConfig,
+                        key_file_path: (e.target as HTMLInputElement).value
+                      });
+                    }}
+                    placeholder="/path/to/private-key.pem"
+                    style={{ flexGrow: "1" }}
+                    error={!!keyPathError}
+                  />
+                  <j-button onClick={handleKeyFilePicker} variant="secondary" size="sm">
+                    Browse
+                  </j-button>
+                </j-flex>
+                {keyPathError && (
+                  <j-box mt="200">
+                    <j-text size="300" color="danger-500">{keyPathError}</j-text>
+                  </j-box>
+                )}
+              </j-box>
+
+              {/* TLS Port Input */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">TLS Port (HTTPS/WSS)</j-text>
+                </j-box>
+                <j-input
+                  type="number"
+                  value={tlsConfig.tls_port?.toString() || "12001"}
+                  onChange={(e) => {
+                    const port = parseInt((e.target as HTMLInputElement).value);
+                    setTlsConfig({
+                      ...tlsConfig,
+                      tls_port: isNaN(port) ? null : port
+                    });
+                  }}
+                  placeholder="12001"
+                />
+                <j-box mt="200">
+                  <j-text size="300" color="ui-500">
+                    Port for remote HTTPS/WSS access. Local HTTP will use port 12000.
+                  </j-text>
+                </j-box>
+              </j-box>
+
+              {/* Save Button */}
+              <j-box px="500" my="500">
+                <j-button onClick={() => handleTlsConfigChange(tlsConfig)} variant="primary" full>
+                  Save TLS Configuration
+                </j-button>
+              </j-box>
+
+              {/* Restart Required Warning */}
+              {tlsChanged && (
+                <j-box px="500" my="500">
+                  <j-box p="400" style={{
+                    backgroundColor: "#fff3cd",
+                    borderRadius: "8px",
+                    border: "1px solid #ffc107"
+                  }}>
+                    <j-flex a="center" gap="300">
+                      <j-icon name="exclamation-triangle" color="warning"></j-icon>
+                      <j-text size="500">
+                        Restart required: TLS settings will take effect after restarting the launcher.
+                      </j-text>
+                    </j-flex>
+                  </j-box>
+                </j-box>
+              )}
+
+              {/* Info about binding behavior */}
+              <j-box px="500" my="500">
+                <j-box p="400" style={{
+                  backgroundColor: "#e7f3ff",
+                  borderRadius: "8px",
+                  border: "1px solid #2196f3"
+                }}>
+                  <j-text size="400">
+                    <strong>Note:</strong> When TLS is enabled, AD4M will run two GraphQL servers:
+                    <br/>• <strong>HTTP on 127.0.0.1:12000</strong> - for local apps (Flux, launcher, ad4m-connect)
+                    <br/>• <strong>HTTPS on 0.0.0.0:[TLS port]</strong> - for remote access with TLS encryption
+                    <br/><br/>
+                    Local apps will continue using port 12000 for compatibility. Remote users connect
+                    via your domain on the configured TLS port.
+                  </j-text>
+                </j-box>
+              </j-box>
+            </>
+          )}
+        </>
+      )}
 
       {expertMode && (
         <div>

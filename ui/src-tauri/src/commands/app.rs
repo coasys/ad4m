@@ -1,5 +1,5 @@
 extern crate remove_dir_all;
-use crate::app_state::{AgentConfigDir, LauncherState};
+use crate::app_state::{AgentConfigDir, LauncherState, TlsConfig};
 use crate::util::create_tray_message_windows;
 use crate::{config::data_path, get_main_window};
 use rust_executor::logging::{build_rust_log_from_config, get_default_log_config, LogLevel};
@@ -176,5 +176,41 @@ pub fn set_log_config(config: HashMap<String, String>) -> Result<(), String> {
     std::env::set_var("RUST_LOG", &rust_log);
 
     // Note: Full effect requires restart since env_logger doesn't support runtime reconfiguration
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_tls_config() -> Option<TlsConfig> {
+    let state = LauncherState::load().ok()?;
+    state.tls_config
+}
+
+#[tauri::command]
+pub fn set_tls_config(config: TlsConfig) -> Result<(), String> {
+    // Validate file paths exist if TLS is enabled
+    if config.enabled {
+        if !std::path::Path::new(&config.cert_file_path).exists() {
+            return Err(format!(
+                "Certificate file not found: {}",
+                config.cert_file_path
+            ));
+        }
+        if !std::path::Path::new(&config.key_file_path).exists() {
+            return Err(format!("Key file not found: {}", config.key_file_path));
+        }
+    }
+
+    // Load current state
+    let mut state =
+        LauncherState::load().map_err(|e| format!("Failed to load launcher state: {}", e))?;
+
+    // Update TLS config
+    state.tls_config = Some(config);
+
+    // Save updated state
+    state
+        .save()
+        .map_err(|e| format!("Failed to save launcher state: {}", e))?;
+
     Ok(())
 }

@@ -2,7 +2,8 @@ pub mod perspective_instance;
 pub mod sdna;
 pub mod utils;
 use crate::graphql::graphql_types::{
-    LinkQuery, LinkStatus, PerspectiveExpression, PerspectiveHandle, PerspectiveState,
+    LinkQuery, LinkStatus, PerspectiveExpression, PerspectiveHandle, PerspectiveRemovedWithOwner,
+    PerspectiveState, PerspectiveWithOwner,
 };
 use lazy_static::lazy_static;
 use perspective_instance::PerspectiveInstance;
@@ -105,13 +106,37 @@ pub async fn add_perspective(
         perspectives.insert(handle.uuid.clone(), RwLock::new(p));
     }
 
-    get_global_pubsub()
-        .await
-        .publish(
-            &PERSPECTIVE_ADDED_TOPIC,
-            &serde_json::to_string(&handle).unwrap(),
-        )
-        .await;
+    // Publish one event per owner so each user gets their own notification
+    let pubsub = get_global_pubsub().await;
+    let owners_list = handle.owners.as_ref().filter(|o| !o.is_empty());
+
+    if let Some(owners) = owners_list {
+        for owner in owners {
+            let perspective_with_owner = PerspectiveWithOwner {
+                perspective: handle.clone(),
+                owner: owner.clone(),
+            };
+            pubsub
+                .publish(
+                    &PERSPECTIVE_ADDED_TOPIC,
+                    &serde_json::to_string(&perspective_with_owner).unwrap(),
+                )
+                .await;
+        }
+    } else {
+        // For perspectives without explicit owners (main agent), publish with main agent DID
+        let main_agent_did = crate::agent::did();
+        let perspective_with_owner = PerspectiveWithOwner {
+            perspective: handle.clone(),
+            owner: main_agent_did,
+        };
+        pubsub
+            .publish(
+                &PERSPECTIVE_ADDED_TOPIC,
+                &serde_json::to_string(&perspective_with_owner).unwrap(),
+            )
+            .await;
+    }
     Ok(())
 }
 
@@ -162,13 +187,37 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
         })?;
     }
 
-    get_global_pubsub()
-        .await
-        .publish(
-            &PERSPECTIVE_UPDATED_TOPIC,
-            &serde_json::to_string(&handle).unwrap(),
-        )
-        .await;
+    // Publish one event per owner so each user gets their own notification
+    let pubsub = get_global_pubsub().await;
+    let owners_list = handle.owners.as_ref().filter(|o| !o.is_empty());
+
+    if let Some(owners) = owners_list {
+        for owner in owners {
+            let perspective_with_owner = PerspectiveWithOwner {
+                perspective: handle.clone(),
+                owner: owner.clone(),
+            };
+            pubsub
+                .publish(
+                    &PERSPECTIVE_UPDATED_TOPIC,
+                    &serde_json::to_string(&perspective_with_owner).unwrap(),
+                )
+                .await;
+        }
+    } else {
+        // For perspectives without explicit owners (main agent), publish with main agent DID
+        let main_agent_did = crate::agent::did();
+        let perspective_with_owner = PerspectiveWithOwner {
+            perspective: handle.clone(),
+            owner: main_agent_did,
+        };
+        pubsub
+            .publish(
+                &PERSPECTIVE_UPDATED_TOPIC,
+                &serde_json::to_string(&perspective_with_owner).unwrap(),
+            )
+            .await;
+    }
     Ok(())
 }
 
@@ -192,12 +241,26 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
 
     if let Some(ref instance) = removed_instance {
         instance.teardown_background_tasks().await;
+
+        // Publish one removal event per owner so each user gets their own notification
+        let handle = instance.persisted.lock().await.clone();
+        let pubsub = get_global_pubsub().await;
+        if let Some(owners) = &handle.owners {
+            for owner in owners {
+                let removed_with_owner = PerspectiveRemovedWithOwner {
+                    uuid: uuid.to_string(),
+                    owner: owner.clone(),
+                };
+                pubsub
+                    .publish(
+                        &PERSPECTIVE_REMOVED_TOPIC,
+                        &serde_json::to_string(&removed_with_owner).unwrap(),
+                    )
+                    .await;
+            }
+        }
     }
 
-    get_global_pubsub()
-        .await
-        .publish(&PERSPECTIVE_REMOVED_TOPIC, &String::from(uuid))
-        .await;
     removed_instance
 }
 
@@ -261,20 +324,23 @@ pub async fn handle_sync_state_changed_from_link_language_impl(
 pub fn handle_telepresence_signal_from_link_language(
     signal: PerspectiveExpression,
     language_address: String,
+    recipient_did: Option<String>,
 ) {
     tokio::spawn(handle_telepresence_signal_from_link_language_impl(
         signal,
         language_address,
+        recipient_did,
     ));
 }
 
 pub async fn handle_telepresence_signal_from_link_language_impl(
     signal: PerspectiveExpression,
     language_address: String,
+    recipient_did: Option<String>,
 ) {
     if let Some(perspective) = perspective_by_link_language(language_address.clone()).await {
         perspective
-            .telepresence_signal_from_link_language(signal)
+            .telepresence_signal_from_link_language(signal, recipient_did)
             .await;
     }
 }
