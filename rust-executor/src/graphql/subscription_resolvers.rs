@@ -91,30 +91,53 @@ impl Subscription {
         match check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY) {
             Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
-                let pubsub = get_global_pubsub().await;
-                let topic = &NEIGHBOURHOOD_SIGNAL_TOPIC;
+            let pubsub = get_global_pubsub().await;
+            let topic = &NEIGHBOURHOOD_SIGNAL_TOPIC;
 
-                // Get the agent DID from the context to filter signals by recipient
-                use crate::agent::{did_for_context, AgentContext};
-                let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+            // Get the agent context and enforce recipient scoping to prevent signal leakage
+            use crate::agent::{did_for_context, AgentContext};
+            let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+            
+            // Create composite filter: perspective_uuid|agent_did
+            // For main agent, allow perspective-only filter (can see all signals for perspective)
+            // For user agents, require DID resolution to succeed - if it fails, abort subscription
+            let filter = if agent_context.is_main_agent {
+                // Main agent can use perspective-only filter
                 let agent_did = did_for_context(&agent_context).ok();
-
-                // Create composite filter: perspective_uuid|agent_did
-                let filter = if let Some(ref did) = agent_did {
+                if let Some(ref did) = agent_did {
                     Some(format!("{}|{}", perspectiveUUID, did))
                 } else {
+                    // Main agent without DID - use perspective-only filter
                     Some(perspectiveUUID.clone())
-                };
+                }
+            } else {
+                // User agent - MUST have valid DID, otherwise abort to prevent signal leakage
+                match did_for_context(&agent_context) {
+                    Ok(did) => Some(format!("{}|{}", perspectiveUUID, did)),
+                    Err(e) => {
+                        log::error!(
+                            "neighbourhood_signal subscription: Failed to get DID for user context: {}",
+                            e
+                        );
+                        return Box::pin(stream::once(async move {
+                            Err(coasys_juniper::FieldError::new(
+                                format!("Failed to resolve agent DID: {}", e),
+                                graphql_value!(null),
+                            ))
+                        }));
+                    }
+                }
+            };
 
-                log::debug!("neighbourhood_signal subscription: perspective={}, agent_did={:?}, filter={:?}",
-                    perspectiveUUID, agent_did, filter);
+            log::debug!("neighbourhood_signal subscription: perspective={}, is_main_agent={}, filter={:?}",
+                perspectiveUUID, agent_context.is_main_agent, filter);
 
-                subscribe_and_process::<NeighbourhoodSignalFilter>(
-                    pubsub,
-                    topic.to_string(),
-                    filter,
-                )
-                .await
+            subscribe_and_process::<NeighbourhoodSignalFilter>(
+                pubsub,
+                topic.to_string(),
+                filter,
+            )
+            .await
             }
         }
     }
