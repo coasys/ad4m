@@ -271,7 +271,6 @@ impl Ad4mDb {
             "UPDATE perspective_handle SET owners = json_array(owner_did) WHERE owner_did IS NOT NULL AND owners = '[]'",
             [],
         );
-        
 
         Ok(Self { conn })
     }
@@ -1701,16 +1700,18 @@ impl Ad4mDb {
                             }
                             .expect("to serialize PerspectiveState");
 
-                            let owners_json = match perspective.get("owners").and_then(|o| o.as_array()) {
-                                Some(arr) => {
-                                    let owners: Vec<String> = arr
-                                        .iter()
-                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                        .collect();
-                                    serde_json::to_string(&owners).unwrap_or_else(|_| "[]".to_string())
-                                }
-                                None => "[]".to_string(),
-                            };
+                            let owners_json =
+                                match perspective.get("owners").and_then(|o| o.as_array()) {
+                                    Some(arr) => {
+                                        let owners: Vec<String> = arr
+                                            .iter()
+                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                            .collect();
+                                        serde_json::to_string(&owners)
+                                            .unwrap_or_else(|_| "[]".to_string())
+                                    }
+                                    None => "[]".to_string(),
+                                };
 
                             self.conn.execute(
                                 "INSERT INTO perspective_handle (uuid, name, neighbourhood, shared_url, state, owners) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
