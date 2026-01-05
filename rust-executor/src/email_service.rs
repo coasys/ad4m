@@ -5,6 +5,34 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 use std::sync::{Arc, Mutex};
 
+/// Escapes HTML special characters to prevent injection attacks
+fn escape_html(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '<' => "&lt;".to_string(),
+            '>' => "&gt;".to_string(),
+            '&' => "&amp;".to_string(),
+            '"' => "&quot;".to_string(),
+            '\'' => "&#x27;".to_string(),
+            _ => c.to_string(),
+        })
+        .collect()
+}
+
+/// Escapes a URL for use in HTML attributes (escapes quotes and other special characters)
+fn escape_html_attribute(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '"' => "&quot;".to_string(),
+            '\'' => "&#x27;".to_string(),
+            '<' => "&lt;".to_string(),
+            '>' => "&gt;".to_string(),
+            '&' => "&amp;".to_string(),
+            _ => c.to_string(),
+        })
+        .collect()
+}
+
 lazy_static! {
     /// Test mode: captures sent emails instead of actually sending them
     /// Map of email address -> verification code
@@ -152,22 +180,26 @@ impl EmailService {
         };
 
         // Build app context with optional icon
+        // Escape all user-provided values to prevent HTML injection
         let app_context = if let Some(name) = app_name {
+            let escaped_name = escape_html(name);
             if let Some(icon_url) = app_icon {
                 // Check if it's a URL or data URI (not a local file path)
                 if icon_url.starts_with("http://")
                     || icon_url.starts_with("https://")
                     || icon_url.starts_with("data:")
                 {
+                    // Escape URL for use in src attribute and name for alt attribute and content
+                    let escaped_url = escape_html_attribute(icon_url);
                     format!(
                         r#" for <span style="display: inline-flex; align-items: center; gap: 8px;"><img src="{}" alt="{}" style="width: 24px; height: 24px; border-radius: 4px; vertical-align: middle;" /><strong>{}</strong></span>"#,
-                        icon_url, name, name
+                        escaped_url, escaped_name, escaped_name
                     )
                 } else {
-                    format!(" for <strong>{}</strong>", name)
+                    format!(" for <strong>{}</strong>", escaped_name)
                 }
             } else {
-                format!(" for <strong>{}</strong>", name)
+                format!(" for <strong>{}</strong>", escaped_name)
             }
         } else {
             String::new()
