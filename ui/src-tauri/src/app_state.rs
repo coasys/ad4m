@@ -23,11 +23,29 @@ pub struct TlsConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SmtpConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,  // Will be encrypted
+    pub from_address: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MultiUserConfig {
+    pub enabled: bool,
+    pub smtp_config: Option<SmtpConfig>,
+    pub tls_config: Option<TlsConfig>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LauncherState {
     pub agent_list: Vec<AgentConfigDir>,
     pub selected_agent: Option<AgentConfigDir>,
     pub log_config: Option<HashMap<String, String>>,
-    pub tls_config: Option<TlsConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_config: Option<TlsConfig>,  // Deprecated - use multi_user_config.tls_config instead
+    pub multi_user_config: Option<MultiUserConfig>,
 }
 
 fn file_path() -> PathBuf {
@@ -69,6 +87,7 @@ impl LauncherState {
                     selected_agent: Some(agent),
                     log_config: None,
                     tls_config: None,
+                    multi_user_config: None,
                 }
             }
         };
