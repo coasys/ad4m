@@ -805,7 +805,7 @@ const Profile = (props: Props) => {
                 )}
               </j-box>
 
-              {/* Config Changed Warning */}
+              {/* Restart Required Warning */}
               {smtpChanged && (
                 <j-box px="500" my="500">
                   <j-box p="400" style={{
@@ -816,7 +816,7 @@ const Profile = (props: Props) => {
                     <j-flex a="center" gap="300">
                       <j-icon name="exclamation-triangle" color="warning"></j-icon>
                       <j-text size="500">
-                        SMTP configuration saved. Email verification is now active.
+                        Restart required: SMTP settings will take effect after restarting the launcher.
                       </j-text>
                     </j-flex>
                   </j-box>
