@@ -546,5 +546,15 @@ export default class RuntimeResolver {
         // For testing: clear codes
         return true
     }
+
+    @Mutation(returns => Boolean)
+    runtimeEmailTestSetExpiry(
+        @Arg("email") email: string,
+        @Arg("verificationType") verificationType: string,
+        @Arg("expiresAt") expiresAt: number
+    ): boolean {
+        // For testing: simulate setting expiry (no-op in mock)
+        return true
+    }
 }
 

@@ -2555,6 +2555,25 @@ impl Ad4mDb {
 
         Ok(())
     }
+
+    /// Test helper: Set expiry time for a verification code (for testing expiration)
+    pub fn set_verification_code_expiry(
+        &self,
+        email: &str,
+        verification_type: &str,
+        expires_at: i64,
+    ) -> Ad4mDbResult<()> {
+        let rows_affected = self.conn.execute(
+            "UPDATE email_verifications SET expires_at = ?1 WHERE email = ?2 AND verification_type = ?3",
+            params![expires_at, email, verification_type],
+        )?;
+
+        if rows_affected == 0 {
+            return Err(anyhow!("No verification code found for email {} and type {}", email, verification_type));
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

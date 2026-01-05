@@ -155,21 +155,34 @@ describe("Email Verification with Mock Service", () => {
         });
 
         it("should enforce code expiration (15 minutes)", async () => {
-            // This test verifies the database stores expiration times
-            // In a real scenario, we'd wait 15 minutes, but that's impractical
-            // Instead, we verify the system respects the expiry field
-
             const email = "expiry@example.com";
             await adminAd4mClient!.agent.createUser(email, "password123");
 
             const code = await adminAd4mClient!.runtime.emailTestGetCode(email);
             expect(code).to.exist;
 
-            // The code was just created, so it should work now
+            // Verify the code works when fresh
             const token = await adminAd4mClient!.agent.verifyEmailCode(email, code!, "signup");
             expect(token).to.exist;
+            console.log("✅ Fresh code works");
 
-            console.log("✅ Fresh code works (expiration logic in place)");
+            // Create a new code for expiration testing
+            await adminAd4mClient!.agent.requestLoginVerification(email);
+            const expiredCode = await adminAd4mClient!.runtime.emailTestGetCode(email);
+            expect(expiredCode).to.exist;
+
+            // Simulate expiration by setting expiry time to past (1 hour ago)
+            const pastTimestamp = Math.floor(Date.now() / 1000) - (60 * 60);
+            await adminAd4mClient!.runtime.emailTestSetExpiry(email, "login", pastTimestamp);
+
+            // Try to verify with expired code - should fail
+            try {
+                await adminAd4mClient!.agent.verifyEmailCode(email, expiredCode!, "login");
+                expect.fail("Should have thrown error for expired code");
+            } catch (e: any) {
+                expect(e.message).to.match(/Invalid|expired|Expired/i);
+                console.log(`✅ Expired code correctly rejected: ${e.message}`);
+            }
         });
     });
 

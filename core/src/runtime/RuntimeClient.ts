@@ -456,6 +456,16 @@ export class RuntimeClient {
         return runtimeEmailTestClearCodes
     }
 
+    async emailTestSetExpiry(email: string, verificationType: string, expiresAt: number): Promise<boolean> {
+        const { runtimeEmailTestSetExpiry } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeEmailTestSetExpiry($email: String!, $verificationType: String!, $expiresAt: Int!) {
+                runtimeEmailTestSetExpiry(email: $email, verificationType: $verificationType, expiresAt: $expiresAt)
+            }`,
+            variables: { email, verificationType, expiresAt }
+        }))
+        return runtimeEmailTestSetExpiry
+    }
+
     addNotificationTriggeredCallback(cb: NotificationTriggeredCallback) {
         this.#notificationTriggeredCallbacks.push(cb)
     }

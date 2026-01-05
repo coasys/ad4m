@@ -1043,6 +1043,35 @@ impl Mutation {
         Ok(true)
     }
 
+    /// Test helper: Set expiry time for a verification code to simulate expiration
+    async fn runtime_email_test_set_expiry(
+        &self,
+        context: &RequestContext,
+        email: String,
+        verification_type: String,
+        expires_at: i32,
+    ) -> FieldResult<bool> {
+        use crate::agent::capabilities::ALL_CAPABILITY;
+
+        // Check capability - admin only
+        check_capability(&context.capabilities, &ALL_CAPABILITY)?;
+
+        let db = Ad4mDb::global_instance();
+        let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+        let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+        // Convert i32 to i64 for database storage
+        db_ref
+            .set_verification_code_expiry(&email, &verification_type, expires_at as i64)
+            .map_err(|e| {
+                FieldError::new(
+                    format!("Failed to set expiry: {}", e),
+                    graphql_value!(null),
+                )
+            })?;
+
+        Ok(true)
+    }
+
     async fn expression_create(
         &self,
         context: &RequestContext,
