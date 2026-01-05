@@ -13,6 +13,7 @@ import {
 import { AgentStatus } from "./AgentStatus";
 import { LinkMutations } from "../links/Links";
 import { PerspectiveClient } from "../perspectives/PerspectiveClient";
+import { VerificationRequestResult } from "../runtime/RuntimeResolver";
 
 const AGENT_SUBITEMS = `
     did

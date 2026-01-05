@@ -4,6 +4,7 @@ import { ExpressionProof } from "../expression/Expression";
 import { LinkExpression } from "../links/Links";
 import { ExceptionType } from "../Exception";
 import { RUNTIME_MESSAGED_RECEIVED_TOPIC, EXCEPTION_OCCURRED_TOPIC, RUNTIME_NOTIFICATION_REQUESTED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC } from '../PubSub';
+import { UserCreationResult } from "../agent/Agent";
 
 const testLink = new LinkExpression()
 testLink.author = "did:ad4m:test"
@@ -205,6 +206,18 @@ export class UserStatistics {
 
     @Field(type => Int)
     perspectiveCount: number;
+}
+
+@ObjectType()
+export class VerificationRequestResult {
+    @Field()
+    success: boolean;
+
+    @Field()
+    message: string;
+
+    @Field()
+    requiresPassword: boolean;
 }
 
 /**
@@ -460,6 +473,50 @@ export default class RuntimeResolver {
             lastSeen: new Date().toISOString(),
             perspectiveCount: 5
         }]
+    }
+
+    @Mutation(returns => VerificationRequestResult)
+    runtimeRequestLoginVerification(@Arg("email") email: string): VerificationRequestResult {
+        // For testing: simulate existing user
+        return {
+            success: true,
+            message: "Verification email sent",
+            requiresPassword: false
+        }
+    }
+
+    @Mutation(returns => String)
+    runtimeVerifyEmailCode(
+        @Arg("email") email: string,
+        @Arg("code") code: string,
+        @Arg("verificationType") verificationType: string
+    ): string {
+        // For testing: return a test JWT token
+        return "test-jwt-token-from-email-verification"
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeTestEmail(@Arg("to") to: string): boolean {
+        // For testing: simulate successful email send
+        return true
+    }
+
+    @Mutation(returns => UserCreationResult)
+    runtimeCreateUser(
+        @Arg("email") email: string,
+        @Arg("password") password: string
+    ): UserCreationResult {
+        // For testing: simulate successful user creation (email verification flow)
+        return new UserCreationResult("did:key:test123", true)
+    }
+
+    @Mutation(returns => String)
+    runtimeLoginUser(
+        @Arg("email") email: string,
+        @Arg("password") password: string
+    ): string {
+        // For testing: return a test JWT token
+        return "test-jwt-token-from-password-login"
     }
 }
 
