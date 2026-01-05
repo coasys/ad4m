@@ -1701,6 +1701,17 @@ impl Ad4mDb {
                             }
                             .expect("to serialize PerspectiveState");
 
+                            let owners_json = match perspective.get("owners").and_then(|o| o.as_array()) {
+                                Some(arr) => {
+                                    let owners: Vec<String> = arr
+                                        .iter()
+                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                        .collect();
+                                    serde_json::to_string(&owners).unwrap_or_else(|_| "[]".to_string())
+                                }
+                                None => "[]".to_string(),
+                            };
+
                             self.conn.execute(
                                 "INSERT INTO perspective_handle (uuid, name, neighbourhood, shared_url, state, owners) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                                 params![
@@ -1709,7 +1720,7 @@ impl Ad4mDb {
                                     perspective.get("neighbourhood").and_then(|n| n.as_str()),
                                     perspective["shared_url"].as_str(),
                                     perspective["state"].as_str().unwrap_or(state.as_str()),
-                                    serde_json::to_string(&Vec::<String>::new()).unwrap_or_else(|_| "[]".to_string())
+                                    owners_json
                                 ],
                             )
                         };
