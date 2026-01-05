@@ -782,15 +782,43 @@ impl Ad4mDb {
         neighbourhood_url: &str,
         user_did: &str,
     ) -> Ad4mDbResult<()> {
-        // Get current owners
+        // First verify the perspective exists
+        let perspective_exists: bool = self
+            .conn
+            .prepare("SELECT EXISTS(SELECT 1 FROM perspective_handle WHERE shared_url = ?1)")?
+            .query_row([neighbourhood_url], |row| row.get(0))
+            .map_err(|e| anyhow!("Failed to check if perspective exists: {}", e))?;
+
+        if !perspective_exists {
+            return Err(anyhow!(
+                "Perspective with shared_url '{}' not found",
+                neighbourhood_url
+            ));
+        }
+
+        // Get current owners - propagate query errors instead of using unwrap_or_default
         let current_owners: Vec<String> = self
             .conn
             .prepare("SELECT owners FROM perspective_handle WHERE shared_url = ?1")?
             .query_row([neighbourhood_url], |row| {
                 let owners_json: String = row.get(0)?;
-                Ok(serde_json::from_str(&owners_json).unwrap_or_default())
+                serde_json::from_str(&owners_json).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })
             })
-            .unwrap_or_default();
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    anyhow!(
+                        "Perspective with shared_url '{}' not found",
+                        neighbourhood_url
+                    )
+                }
+                e => anyhow!("Failed to fetch owners: {}", e),
+            })?;
 
         // Add new owner if not already present
         let mut updated_owners = current_owners;
@@ -798,12 +826,19 @@ impl Ad4mDb {
             updated_owners.push(user_did.to_string());
         }
 
-        // Update database
+        // Update database and check affected row count
         let owners_json = serde_json::to_string(&updated_owners)?;
-        self.conn.execute(
+        let affected_rows = self.conn.execute(
             "UPDATE perspective_handle SET owners = ?1 WHERE shared_url = ?2",
             params![owners_json, neighbourhood_url],
         )?;
+
+        if affected_rows == 0 {
+            return Err(anyhow!(
+                "Failed to add owner: perspective with shared_url '{}' not found or could not be updated",
+                neighbourhood_url
+            ));
+        }
 
         Ok(())
     }
@@ -1476,7 +1511,6 @@ impl Ad4mDb {
                 let owners: Vec<String> = owners_json
                     .and_then(|json| serde_json::from_str(&json).ok())
                     .unwrap_or_default();
-                
                 Ok(serde_json::json!({
                     "uuid": row.get::<_, String>(0)?,
                     "name": row.get::<_, Option<String>>(1)?,
