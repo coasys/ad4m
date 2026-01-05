@@ -1470,14 +1470,20 @@ impl Ad4mDb {
         // Export perspectives
         let perspectives: Vec<serde_json::Value> = self
             .conn
-            .prepare("SELECT uuid, name, neighbourhood, shared_url, state FROM perspective_handle")?
+            .prepare("SELECT uuid, name, neighbourhood, shared_url, state, owners FROM perspective_handle")?
             .query_map([], |row| {
+                let owners_json: Option<String> = row.get(5)?;
+                let owners: Vec<String> = owners_json
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .unwrap_or_default();
+                
                 Ok(serde_json::json!({
                     "uuid": row.get::<_, String>(0)?,
                     "name": row.get::<_, Option<String>>(1)?,
                     "neighbourhood": row.get::<_, Option<String>>(2)?,
                     "shared_url": row.get::<_, Option<String>>(3)?,
-                    "state": row.get::<_, String>(4)?
+                    "state": row.get::<_, String>(4)?,
+                    "owners": owners
                 }))
             })?
             .collect::<Result<Vec<_>, _>>()?;
