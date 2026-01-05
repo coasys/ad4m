@@ -236,13 +236,10 @@ describe("Email Verification with Mock Service", () => {
             expect(request1.success).to.be.true;
 
             // Immediately try again - should be rate limited
-            try {
-                await adminAd4mClient!.agent.requestLoginVerification(email);
-                expect.fail("Should have been rate limited");
-            } catch (e: any) {
-                expect(e.message).to.match(/rate limit|too many|wait/i);
-                console.log(`✅ Rate limiting enforced: ${e.message}`);
-            }
+            const request2 = await adminAd4mClient!.agent.requestLoginVerification(email);
+            expect(request2.success).to.be.false;
+            expect(request2.message).to.match(/rate limit|too many|wait/i);
+            console.log(`✅ Rate limiting enforced: ${request2.message}`);
         });
     });
 
