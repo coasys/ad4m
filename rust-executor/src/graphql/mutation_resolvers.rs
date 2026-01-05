@@ -578,8 +578,26 @@ impl Mutation {
                 })?
         };
 
-        // Get SMTP config if available
-        if let Some(smtp_config) = crate::config::SMTP_CONFIG.lock().ok().and_then(|cfg| cfg.clone()) {
+        // Check if test mode is enabled
+        let test_mode = crate::email_service::EMAIL_TEST_MODE.lock().ok().map(|mode| *mode).unwrap_or(false);
+
+        // Get SMTP config if available OR if test mode is enabled
+        let smtp_config_opt = crate::config::SMTP_CONFIG.lock().ok().and_then(|cfg| cfg.clone());
+
+        if test_mode || smtp_config_opt.is_some() {
+            // In test mode, use dummy config since send_verification_email will capture codes instead
+            let smtp_config = if test_mode && smtp_config_opt.is_none() {
+                crate::config::SmtpConfig {
+                    host: "test.localhost".to_string(),
+                    port: 587,
+                    username: "test".to_string(),
+                    password: "test".to_string(),
+                    from_address: "test@localhost".to_string(),
+                }
+            } else {
+                smtp_config_opt.unwrap()
+            };
+
             let email_service = crate::email_service::EmailService::new(smtp_config);
             if let Err(e) = email_service
                 .send_verification_email(&email, &code, "signup")
@@ -597,12 +615,8 @@ impl Mutation {
                 });
             }
 
-            // Update rate limit
-            {
-                let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-                let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-                db_ref.update_rate_limit(&email).ok();
-            }
+            // Note: We intentionally do NOT update rate limit for signup emails
+            // Rate limiting only applies to login verification requests
         } else {
             log::warn!("SMTP not configured - skipping verification email for {}", email);
         }
@@ -734,9 +748,10 @@ impl Mutation {
         };
 
         if !user_exists {
+            // New user - they need to sign up with password
             return Ok(VerificationRequestResult {
-                success: false,
-                message: "User not found. Please sign up first.".to_string(),
+                success: true,
+                message: "New user - please provide a password to sign up".to_string(),
                 requires_password: true,
             });
         }
@@ -768,17 +783,32 @@ impl Mutation {
                 })?
         };
 
-        // Get SMTP config from global instance
-        let smtp_config = crate::config::SMTP_CONFIG
+        // Check if test mode is enabled
+        let test_mode = crate::email_service::EMAIL_TEST_MODE.lock().ok().map(|mode| *mode).unwrap_or(false);
+
+        // Get SMTP config from global instance OR use dummy config in test mode
+        let smtp_config_opt = crate::config::SMTP_CONFIG
             .lock()
             .ok()
-            .and_then(|cfg| cfg.clone())
-            .ok_or_else(|| {
-                FieldError::new(
-                    "SMTP is not configured. Please configure email settings in the launcher.",
-                    graphql_value!(null),
-                )
-            })?;
+            .and_then(|cfg| cfg.clone());
+
+        let smtp_config = if test_mode && smtp_config_opt.is_none() {
+            // In test mode without SMTP config, use dummy config
+            crate::config::SmtpConfig {
+                host: "test.localhost".to_string(),
+                port: 587,
+                username: "test".to_string(),
+                password: "test".to_string(),
+                from_address: "test@localhost".to_string(),
+            }
+        } else if let Some(config) = smtp_config_opt {
+            config
+        } else {
+            return Err(FieldError::new(
+                "SMTP is not configured. Please configure email settings in the launcher.",
+                graphql_value!(null),
+            ));
+        };
 
         // Send verification email
         let email_service = crate::email_service::EmailService::new(smtp_config);
@@ -929,6 +959,62 @@ impl Mutation {
             )
         })?;
 
+        Ok(true)
+    }
+
+    /// Enable email test mode (for testing only - captures codes instead of sending)
+    async fn runtime_email_test_mode_enable(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<bool> {
+        use crate::agent::capabilities::ALL_CAPABILITY;
+
+        // Check capability - admin only
+        check_capability(&context.capabilities, &ALL_CAPABILITY)?;
+
+        crate::email_service::enable_test_mode();
+        Ok(true)
+    }
+
+    /// Disable email test mode
+    async fn runtime_email_test_mode_disable(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<bool> {
+        use crate::agent::capabilities::ALL_CAPABILITY;
+
+        // Check capability - admin only
+        check_capability(&context.capabilities, &ALL_CAPABILITY)?;
+
+        crate::email_service::disable_test_mode();
+        Ok(true)
+    }
+
+    /// Get captured verification code from test mode
+    async fn runtime_email_test_get_code(
+        &self,
+        context: &RequestContext,
+        email: String,
+    ) -> FieldResult<Option<String>> {
+        use crate::agent::capabilities::ALL_CAPABILITY;
+
+        // Check capability - admin only
+        check_capability(&context.capabilities, &ALL_CAPABILITY)?;
+
+        Ok(crate::email_service::get_test_code(&email))
+    }
+
+    /// Clear all captured test codes
+    async fn runtime_email_test_clear_codes(
+        &self,
+        context: &RequestContext,
+    ) -> FieldResult<bool> {
+        use crate::agent::capabilities::ALL_CAPABILITY;
+
+        // Check capability - admin only
+        check_capability(&context.capabilities, &ALL_CAPABILITY)?;
+
+        crate::email_service::clear_test_codes();
         Ok(true)
     }
 

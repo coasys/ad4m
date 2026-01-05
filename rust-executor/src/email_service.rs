@@ -2,6 +2,47 @@ use crate::config::SmtpConfig;
 use deno_core::error::AnyError;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
+use std::sync::{Arc, Mutex};
+use lazy_static::lazy_static;
+
+lazy_static! {
+    /// Test mode: captures sent emails instead of actually sending them
+    /// Map of email address -> verification code
+    pub static ref TEST_MODE_EMAILS: Arc<Mutex<std::collections::HashMap<String, String>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+
+    /// Flag to enable test mode (set via environment variable or config)
+    pub static ref EMAIL_TEST_MODE: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+}
+
+/// Enable test mode for email service (captures codes instead of sending)
+pub fn enable_test_mode() {
+    if let Ok(mut test_mode) = EMAIL_TEST_MODE.lock() {
+        *test_mode = true;
+        log::info!("Email service test mode ENABLED - emails will be captured, not sent");
+    }
+}
+
+/// Disable test mode
+pub fn disable_test_mode() {
+    if let Ok(mut test_mode) = EMAIL_TEST_MODE.lock() {
+        *test_mode = false;
+        log::info!("Email service test mode DISABLED - emails will be sent normally");
+    }
+}
+
+/// Get captured email code for testing
+pub fn get_test_code(email: &str) -> Option<String> {
+    TEST_MODE_EMAILS.lock().ok()
+        .and_then(|codes| codes.get(email).cloned())
+}
+
+/// Clear all captured test codes
+pub fn clear_test_codes() {
+    if let Ok(mut codes) = TEST_MODE_EMAILS.lock() {
+        codes.clear();
+    }
+}
 
 pub struct EmailService {
     smtp_config: SmtpConfig,
@@ -19,6 +60,21 @@ impl EmailService {
         code: &str,
         verification_type: &str,
     ) -> Result<(), AnyError> {
+        // Check if we're in test mode
+        let test_mode = EMAIL_TEST_MODE.lock().ok()
+            .map(|mode| *mode)
+            .unwrap_or(false);
+
+        if test_mode {
+            // In test mode: capture the code instead of sending
+            if let Ok(mut codes) = TEST_MODE_EMAILS.lock() {
+                codes.insert(email.to_string(), code.to_string());
+                log::info!("📧 TEST MODE: Captured verification code for {}: {}", email, code);
+            }
+            return Ok(());
+        }
+
+        // Normal mode: actually send the email
         let (html_body, text_body) = self.render_verification_email(code, verification_type);
 
         let subject = match verification_type {

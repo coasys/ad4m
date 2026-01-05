@@ -419,6 +419,43 @@ export class RuntimeClient {
         return runtimeListUsers
     }
 
+    async emailTestModeEnable(): Promise<boolean> {
+        const { runtimeEmailTestModeEnable } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeEmailTestModeEnable {
+                runtimeEmailTestModeEnable
+            }`
+        }))
+        return runtimeEmailTestModeEnable
+    }
+
+    async emailTestModeDisable(): Promise<boolean> {
+        const { runtimeEmailTestModeDisable } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeEmailTestModeDisable {
+                runtimeEmailTestModeDisable
+            }`
+        }))
+        return runtimeEmailTestModeDisable
+    }
+
+    async emailTestGetCode(email: string): Promise<string | null> {
+        const { runtimeEmailTestGetCode } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeEmailTestGetCode($email: String!) {
+                runtimeEmailTestGetCode(email: $email)
+            }`,
+            variables: { email }
+        }))
+        return runtimeEmailTestGetCode
+    }
+
+    async emailTestClearCodes(): Promise<boolean> {
+        const { runtimeEmailTestClearCodes } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation runtimeEmailTestClearCodes {
+                runtimeEmailTestClearCodes
+            }`
+        }))
+        return runtimeEmailTestClearCodes
+    }
+
     addNotificationTriggeredCallback(cb: NotificationTriggeredCallback) {
         this.#notificationTriggeredCallbacks.push(cb)
     }

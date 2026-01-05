@@ -518,5 +518,29 @@ export default class RuntimeResolver {
         // For testing: return a test JWT token
         return "test-jwt-token-from-password-login"
     }
+
+    @Mutation(returns => Boolean)
+    runtimeEmailTestModeEnable(): boolean {
+        // For testing: enable test mode
+        return true
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeEmailTestModeDisable(): boolean {
+        // For testing: disable test mode
+        return true
+    }
+
+    @Mutation(returns => String, { nullable: true })
+    runtimeEmailTestGetCode(@Arg("email") email: string): string | null {
+        // For testing: return a mock code
+        return "123456"
+    }
+
+    @Mutation(returns => Boolean)
+    runtimeEmailTestClearCodes(): boolean {
+        // For testing: clear codes
+        return true
+    }
 }
 
