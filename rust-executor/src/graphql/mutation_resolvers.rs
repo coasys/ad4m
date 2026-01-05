@@ -791,6 +791,9 @@ impl Mutation {
                     requires_password: false,
                 });
             }
+            // Update rate limit immediately after check to prevent bypass via email failures
+            // This ensures the rate limit is consumed even if email sending fails
+            db_ref.update_rate_limit(&email).ok();
         }
 
         // Generate verification code
@@ -861,13 +864,6 @@ impl Mutation {
                     graphql_value!(null),
                 )
             })?;
-
-        // Update rate limit
-        {
-            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-            db_ref.update_rate_limit(&email).ok();
-        }
 
         Ok(VerificationRequestResult {
             success: true,
