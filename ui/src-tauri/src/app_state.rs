@@ -1,5 +1,6 @@
+use crate::encryption::{decrypt_password, encrypt_password};
 use dirs::home_dir;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::prelude::*;
@@ -22,13 +23,100 @@ pub struct TlsConfig {
     pub tls_port: Option<u16>, // Port for HTTPS/WSS server (defaults to main_port + 1)
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct SmtpConfig {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub password: String, // Will be encrypted
+    pub password: String, // Plain password in memory, encrypted on disk
     pub from_address: String,
+    #[allow(dead_code)]
+    password_encrypted: Option<String>, // Internal: encrypted password for serialization
+}
+
+impl SmtpConfig {
+    /// Create a new SmtpConfig with plain password
+    pub fn new(host: String, port: u16, username: String, password: String, from_address: String) -> Self {
+        SmtpConfig {
+            host,
+            port,
+            username,
+            password,
+            from_address,
+            password_encrypted: None,
+        }
+    }
+
+    /// Get the plain password
+    pub fn get_password(&self) -> &str {
+        &self.password
+    }
+
+    /// Set the plain password
+    pub fn set_password(&mut self, password: String) {
+        self.password = password;
+        self.password_encrypted = None; // Clear encrypted version to force re-encryption
+    }
+}
+
+impl Serialize for SmtpConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        
+        // Always encrypt password on save to ensure it's encrypted
+        let encrypted = encrypt_password(&self.password)
+            .map_err(|e| serde::ser::Error::custom(format!("Failed to encrypt password: {}", e)))?;
+        
+        let mut state = serializer.serialize_struct("SmtpConfig", 5)?;
+        state.serialize_field("host", &self.host)?;
+        state.serialize_field("port", &self.port)?;
+        state.serialize_field("username", &self.username)?;
+        state.serialize_field("password", &encrypted)?;
+        state.serialize_field("from_address", &self.from_address)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for SmtpConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct SmtpConfigHelper {
+            host: String,
+            port: u16,
+            username: String,
+            password: String, // This will be the encrypted password
+            from_address: String,
+        }
+
+        let helper = SmtpConfigHelper::deserialize(deserializer)?;
+        
+        // Try to decrypt the password
+        // If decryption fails, assume it's plain text (backwards compatibility)
+        let encrypted_password = helper.password.clone();
+        let plain_password = match decrypt_password(&helper.password) {
+            Ok(decrypted) => decrypted,
+            Err(_) => {
+                // If decryption fails, assume it's plain text (for backwards compatibility)
+                // This allows migration from unencrypted to encrypted storage
+                helper.password
+            }
+        };
+        
+        Ok(SmtpConfig {
+            host: helper.host,
+            port: helper.port,
+            username: helper.username,
+            password: plain_password,
+            from_address: helper.from_address,
+            password_encrypted: Some(encrypted_password), // Store encrypted version
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

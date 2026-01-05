@@ -33,6 +33,7 @@ use uuid::Uuid;
 mod app_state;
 mod commands;
 mod config;
+mod encryption;
 mod menu;
 mod system_tray;
 mod util;
