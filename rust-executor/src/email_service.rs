@@ -328,11 +328,42 @@ Please do not reply to this email.
             self.smtp_config.password.clone(),
         );
 
-        // Build SMTP transport with STARTTLS
-        let mailer = SmtpTransport::relay(&self.smtp_config.host)?
-            .credentials(creds)
-            .port(self.smtp_config.port)
-            .build();
+        // Build SMTP transport based on port
+        let mailer = if self.smtp_config.port == 465 {
+            // Port 465 uses implicit TLS (wrapper mode)
+            use lettre::transport::smtp::client::{Tls, TlsParameters};
+
+            let tls_params = TlsParameters::builder(self.smtp_config.host.clone())
+                .dangerous_accept_invalid_certs(false)
+                .build()?;
+
+            SmtpTransport::builder_dangerous(&self.smtp_config.host)
+                .port(self.smtp_config.port)
+                .credentials(creds)
+                .tls(Tls::Wrapper(tls_params))
+                .build()
+        } else if self.smtp_config.port == 25 {
+            // Port 25 usually plain text or opportunistic TLS
+            use lettre::transport::smtp::client::Tls;
+            SmtpTransport::builder_dangerous(&self.smtp_config.host)
+                .port(self.smtp_config.port)
+                .credentials(creds)
+                .tls(Tls::None)
+                .build()
+        } else {
+            // Port 587, 2525, etc. use STARTTLS
+            use lettre::transport::smtp::client::{Tls, TlsParameters};
+
+            let tls_params = TlsParameters::builder(self.smtp_config.host.clone())
+                .dangerous_accept_invalid_certs(false)
+                .build()?;
+
+            SmtpTransport::builder_dangerous(&self.smtp_config.host)
+                .port(self.smtp_config.port)
+                .credentials(creds)
+                .tls(Tls::Required(tls_params))
+                .build()
+        };
 
         // Send the email
         tokio::task::spawn_blocking(move || mailer.send(&email))

@@ -40,8 +40,9 @@ mod util;
 use crate::app_state::LauncherState;
 use crate::commands::app::{
     add_app_agent_state, clear_state, close_application, close_main_window, get_app_agent_list,
-    get_data_path, get_log_config, get_tls_config, open_dapp, open_tray, open_tray_message,
-    remove_app_agent_state, set_log_config, set_selected_agent, set_tls_config, show_main_window,
+    get_data_path, get_log_config, get_smtp_config, get_tls_config, open_dapp, open_tray, open_tray_message,
+    remove_app_agent_state, set_log_config, set_selected_agent, set_smtp_config, set_tls_config, show_main_window,
+    test_smtp_config,
 };
 use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
@@ -247,6 +248,9 @@ pub fn run() {
             get_data_path,
             get_log_config,
             set_log_config,
+            get_smtp_config,
+            set_smtp_config,
+            test_smtp_config,
             get_tls_config,
             set_tls_config
         ])

@@ -170,6 +170,7 @@ dependencies = [
  "directories",
  "dirs 5.0.1",
  "env_logger 0.10.2",
+ "lettre",
  "libc",
  "localtunnel-client",
  "log",

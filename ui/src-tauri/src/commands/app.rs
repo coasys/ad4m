@@ -268,25 +268,58 @@ pub fn set_multi_user_config(config: MultiUserConfig) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn test_smtp_config(smtp_config: SmtpConfig, to_email: String) -> Result<bool, String> {
+pub async fn test_smtp_config(config: SmtpConfig, test_email: String) -> Result<bool, String> {
     use lettre::transport::smtp::authentication::Credentials;
     use lettre::{Message, SmtpTransport, Transport};
 
     // Build test email
     let email = Message::builder()
-        .from(smtp_config.from_address.parse().map_err(|e| format!("Invalid from address: {}", e))?)
-        .to(to_email.parse().map_err(|e| format!("Invalid to address: {}", e))?)
+        .from(config.from_address.parse().map_err(|e| format!("Invalid from address: {}", e))?)
+        .to(test_email.parse().map_err(|e| format!("Invalid to address: {}", e))?)
         .subject("AD4M SMTP Configuration Test")
         .body("This is a test email from your AD4M instance. Your SMTP configuration is working correctly!".to_string())
         .map_err(|e| format!("Failed to build email: {}", e))?;
 
-    // Build SMTP transport
-    let creds = Credentials::new(smtp_config.username.clone(), smtp_config.password.clone());
-    let mailer = SmtpTransport::relay(&smtp_config.host)
-        .map_err(|e| format!("Invalid SMTP host: {}", e))?
-        .credentials(creds)
-        .port(smtp_config.port)
-        .build();
+    // Build SMTP transport based on port
+    let creds = Credentials::new(config.username.clone(), config.password.clone());
+
+    let mailer = if config.port == 465 {
+        // Port 465 uses implicit TLS (wrapper mode)
+        use lettre::transport::smtp::client::{Tls, TlsParameters};
+
+        let tls_params = TlsParameters::builder(config.host.clone())
+            .dangerous_accept_invalid_certs(false)
+            .build()
+            .map_err(|e| format!("Failed to create TLS parameters: {}", e))?;
+
+        SmtpTransport::builder_dangerous(&config.host)
+            .port(config.port)
+            .credentials(creds)
+            .tls(Tls::Wrapper(tls_params))
+            .build()
+    } else if config.port == 25 {
+        // Port 25 usually plain text or opportunistic TLS
+        use lettre::transport::smtp::client::Tls;
+        SmtpTransport::builder_dangerous(&config.host)
+            .port(config.port)
+            .credentials(creds)
+            .tls(Tls::None)
+            .build()
+    } else {
+        // Port 587, 2525, etc. use STARTTLS
+        use lettre::transport::smtp::client::{Tls, TlsParameters};
+
+        let tls_params = TlsParameters::builder(config.host.clone())
+            .dangerous_accept_invalid_certs(false)
+            .build()
+            .map_err(|e| format!("Failed to create TLS parameters: {}", e))?;
+
+        SmtpTransport::builder_dangerous(&config.host)
+            .port(config.port)
+            .credentials(creds)
+            .tls(Tls::Required(tls_params))
+            .build()
+    };
 
     // Send email in blocking task
     tokio::task::spawn_blocking(move || {
@@ -297,4 +330,46 @@ pub async fn test_smtp_config(smtp_config: SmtpConfig, to_email: String) -> Resu
     .map_err(|e| format!("Task error: {}", e))??;
 
     Ok(true)
+}
+
+#[tauri::command]
+pub fn get_smtp_config() -> Option<SmtpConfig> {
+    let state = LauncherState::load().ok()?;
+    state.multi_user_config?.smtp_config
+}
+
+#[tauri::command]
+pub fn set_smtp_config(config: SmtpConfig) -> Result<(), String> {
+    // Validate SMTP config
+    if config.host.is_empty() {
+        return Err("SMTP host cannot be empty".to_string());
+    }
+    if config.username.is_empty() {
+        return Err("SMTP username cannot be empty".to_string());
+    }
+    if config.from_address.is_empty() {
+        return Err("SMTP from address cannot be empty".to_string());
+    }
+
+    // Load current state
+    let mut state =
+        LauncherState::load().map_err(|e| format!("Failed to load launcher state: {}", e))?;
+
+    // Get or create multi_user_config
+    let mut multi_user_config = state.multi_user_config.clone().unwrap_or(MultiUserConfig {
+        enabled: true,
+        smtp_config: None,
+        tls_config: None,
+    });
+
+    // Update SMTP config
+    multi_user_config.smtp_config = Some(config);
+    state.multi_user_config = Some(multi_user_config);
+
+    // Save updated state
+    state
+        .save()
+        .map_err(|e| format!("Failed to save launcher state: {}", e))?;
+
+    Ok(())
 }

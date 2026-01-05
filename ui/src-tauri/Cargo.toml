@@ -37,6 +37,7 @@ remove_dir_all = "0.7.0"
 reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
 ad4m-client = { path = "../../rust-client" }
 ad4m-executor = { path = "../../rust-executor" }
+lettre = "0.11"
 chrono = "0.4"
 env_logger = "0.10.0"
 colored = "2.0"
