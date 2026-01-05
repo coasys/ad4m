@@ -36,7 +36,13 @@ pub struct SmtpConfig {
 
 impl SmtpConfig {
     /// Create a new SmtpConfig with plain password
-    pub fn new(host: String, port: u16, username: String, password: String, from_address: String) -> Self {
+    pub fn new(
+        host: String,
+        port: u16,
+        username: String,
+        password: String,
+        from_address: String,
+    ) -> Self {
         SmtpConfig {
             host,
             port,
@@ -65,11 +71,11 @@ impl Serialize for SmtpConfig {
         S: Serializer,
     {
         use serde::ser::SerializeStruct;
-        
+
         // Always encrypt password on save to ensure it's encrypted
         let encrypted = encrypt_password(&self.password)
             .map_err(|e| serde::ser::Error::custom(format!("Failed to encrypt password: {}", e)))?;
-        
+
         let mut state = serializer.serialize_struct("SmtpConfig", 5)?;
         state.serialize_field("host", &self.host)?;
         state.serialize_field("port", &self.port)?;
@@ -95,7 +101,7 @@ impl<'de> Deserialize<'de> for SmtpConfig {
         }
 
         let helper = SmtpConfigHelper::deserialize(deserializer)?;
-        
+
         // Try to decrypt the password
         // If decryption fails, assume it's plain text (backwards compatibility)
         let encrypted_password = helper.password.clone();
@@ -107,7 +113,7 @@ impl<'de> Deserialize<'de> for SmtpConfig {
                 helper.password
             }
         };
-        
+
         Ok(SmtpConfig {
             host: helper.host,
             port: helper.port,
