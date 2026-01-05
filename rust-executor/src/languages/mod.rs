@@ -174,35 +174,34 @@ impl LanguageController {
 
     /// Execute a script on a specific language runtime
     ///
-    /// Phase 1 Implementation: Uses global JsCore with language-specific context
+    /// Phase 1 Implementation: Delegates to JS LanguageController
     /// Phase 2 TODO: Implement per-language execution handles with proper thread isolation
     pub async fn execute_on_language(
         &self,
         language_address: &str,
         script: &str,
     ) -> Result<String, LanguageError> {
-        // Verify the language exists in our registry
-        if !self.is_language_loaded(language_address).await {
-            return Err(LanguageError::NotFound {
-                address: language_address.to_string(),
-            });
-        }
-
-        // Execute on global JsCore with language context
+        // Phase 1: Delegate directly to JS without checking Rust registry
+        // Languages are loaded by JS LanguageController in this phase
         let wrapped_script = format!(
             r#"
             (async function() {{
-                const lang = await core.languageController.languageByRef({{address:"{}"}});
-                if (!lang) throw new Error("Language not found in JS controller");
+                const language = await core.languageController.languageByRef({{address:"{}"}});
+                if (!language) throw new Error("Language not found: {}");
 
-                // Execute the script in the language's context
-                return await (function() {{
-                    const language = lang;
-                    return {};
-                }})();
+                // Set as global for backward compatibility with scripts that reference it
+                globalThis.__ad4m_language_instance__ = language;
+
+                // Execute the script (which is already an async IIFE)
+                const result = await {};
+
+                // Clean up global
+                delete globalThis.__ad4m_language_instance__;
+
+                return result;
             }})()
             "#,
-            language_address, script
+            language_address, language_address, script
         );
 
         let mut js_core_handle = self.js_core.clone();

@@ -33,13 +33,7 @@ impl Language {
     pub async fn sync(&mut self) -> Result<(), AnyError> {
         let controller = LanguageController::global_instance();
         let script = r#"
-            (async function() {
-                const language = globalThis.__ad4m_language_instance__;
-                if (language && language.linksAdapter) {
-                    return await language.linksAdapter.sync();
-                }
-                return null;
-            })()
+            language.linksAdapter ? await language.linksAdapter.sync() : null
         "#;
 
         controller
@@ -54,13 +48,7 @@ impl Language {
         let diff_json = serde_json::to_string(&diff)?;
         let script = format!(
             r#"
-            JSON.stringify((async function() {{
-                const language = globalThis.__ad4m_language_instance__;
-                if (language && language.linksAdapter) {{
-                    return await language.linksAdapter.commit({});
-                }}
-                return null;
-            }})())
+            JSON.stringify(language.linksAdapter ? await language.linksAdapter.commit({}) : null)
             "#,
             diff_json
         );
@@ -75,13 +63,7 @@ impl Language {
     pub async fn current_revision(&mut self) -> Result<Option<String>, AnyError> {
         let controller = LanguageController::global_instance();
         let script = r#"
-            JSON.stringify((async function() {
-                const language = globalThis.__ad4m_language_instance__;
-                if (language && language.linksAdapter) {
-                    return await language.linksAdapter.currentRevision();
-                }
-                return null;
-            })())
+            JSON.stringify(language.linksAdapter ? await language.linksAdapter.currentRevision() : null)
         "#;
 
         let result = controller
@@ -94,13 +76,7 @@ impl Language {
     pub async fn render(&mut self) -> Result<Option<Perspective>, AnyError> {
         let controller = LanguageController::global_instance();
         let script = r#"
-            JSON.stringify((async function() {
-                const language = globalThis.__ad4m_language_instance__;
-                if (language && language.linksAdapter) {
-                    return await language.linksAdapter.render();
-                }
-                return null;
-            })())
+            JSON.stringify(language.linksAdapter ? await language.linksAdapter.render() : null)
         "#;
 
         let result = controller
@@ -114,13 +90,7 @@ impl Language {
     pub async fn others(&mut self) -> Result<Vec<String>, AnyError> {
         let controller = LanguageController::global_instance();
         let script = r#"
-            JSON.stringify((async function() {
-                const language = globalThis.__ad4m_language_instance__;
-                if (language && language.linksAdapter) {
-                    return await language.linksAdapter.others();
-                }
-                return null;
-            })())
+            JSON.stringify(language.linksAdapter ? await language.linksAdapter.others() : null)
         "#;
 
         let result = controller
@@ -133,8 +103,17 @@ impl Language {
 
     pub async fn has_telepresence_adapter(&mut self) -> Result<bool, AnyError> {
         let controller = LanguageController::global_instance();
-        let metadata = controller.get_language_metadata(&self.address).await;
-        Ok(metadata.map(|m| m.has_telepresence_adapter).unwrap_or(false))
+        let script = r#"
+            language.telepresenceAdapter ? true : false
+        "#;
+
+        let result = controller
+            .execute_on_language(&self.address, script)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+        // The result should be "true" or "false" as a string
+        Ok(result.trim() == "true")
     }
 
     pub async fn set_online_status(
@@ -145,13 +124,7 @@ impl Language {
         let status_json = serde_json::to_string(&status)?;
         let script = format!(
             r#"
-            (async function() {{
-                const language = globalThis.__ad4m_language_instance__;
-                if (language && language.telepresenceAdapter) {{
-                    return await language.telepresenceAdapter.setOnlineStatus({});
-                }}
-                return null;
-            }})()
+            language.telepresenceAdapter ? await language.telepresenceAdapter.setOnlineStatus({}) : null
             "#,
             status_json
         );
@@ -166,13 +139,7 @@ impl Language {
     pub async fn get_online_agents(&mut self) -> Result<Vec<OnlineAgent>, AnyError> {
         let controller = LanguageController::global_instance();
         let script = r#"
-            JSON.stringify((async function() {
-                const language = globalThis.__ad4m_language_instance__;
-                if (language && language.telepresenceAdapter) {
-                    return await language.telepresenceAdapter.getOnlineAgents();
-                }
-                return null;
-            })())
+            JSON.stringify(language.telepresenceAdapter ? await language.telepresenceAdapter.getOnlineAgents() : null)
         "#;
 
         let result = controller
@@ -192,13 +159,7 @@ impl Language {
         let payload_json = serde_json::to_string(&payload)?;
         let script = format!(
             r#"
-            (async function() {{
-                const language = globalThis.__ad4m_language_instance__;
-                if (language && language.telepresenceAdapter) {{
-                    return await language.telepresenceAdapter.sendSignal("{}", {});
-                }}
-                return null;
-            }})()
+            language.telepresenceAdapter ? await language.telepresenceAdapter.sendSignal("{}", {}) : null
             "#,
             remote_agent_did, payload_json
         );
@@ -215,13 +176,7 @@ impl Language {
         let payload_json = serde_json::to_string(&payload)?;
         let script = format!(
             r#"
-            (async function() {{
-                const language = globalThis.__ad4m_language_instance__;
-                if (language && language.telepresenceAdapter) {{
-                    return await language.telepresenceAdapter.sendBroadcast({});
-                }}
-                return null;
-            }})()
+            language.telepresenceAdapter ? await language.telepresenceAdapter.sendBroadcast({}) : null
             "#,
             payload_json
         );
@@ -239,13 +194,7 @@ impl Language {
         let agents_json = serde_json::to_string(&agents)?;
         let script = format!(
             r#"
-            (async function() {{
-                const language = globalThis.__ad4m_language_instance__;
-                if (language && language.linksAdapter && language.linksAdapter.setLocalAgents) {{
-                    return await language.linksAdapter.setLocalAgents({});
-                }}
-                return null;
-            }})()
+            (language.linksAdapter && language.linksAdapter.setLocalAgents) ? await language.linksAdapter.setLocalAgents({}) : null
             "#,
             agents_json
         );
