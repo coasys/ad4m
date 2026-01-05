@@ -745,6 +745,10 @@ export class Ad4mConnectElement extends LitElement {
       this._client.setToken(token);
       this._client.setUrl(this.backendUrl);
 
+      // Rebuild client with new token to establish authenticated connection
+      await this._client.buildClient();
+      await this._client.checkAuth();
+
       // Clear form and close modal
       this._multiUserEmail = "";
       this._multiUserPassword = "";
