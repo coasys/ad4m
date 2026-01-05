@@ -208,20 +208,15 @@ impl Subscription {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
             Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
-                let filter = match get_agent_did_filter(
-                    context.auth_token.clone(),
-                    "PERSPECTIVE_ADDED",
-                ) {
-                    Ok(filter) => filter,
-                    Err(e) => return Box::pin(stream::once(async move { Err(e) })),
-                };
+                let filter =
+                    match get_agent_did_filter(context.auth_token.clone(), "PERSPECTIVE_ADDED") {
+                        Ok(filter) => filter,
+                        Err(e) => return Box::pin(stream::once(async move { Err(e) })),
+                    };
 
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_ADDED_TOPIC;
-                log::info!(
-                    "📬 PERSPECTIVE_ADDED subscription: filter={:?}",
-                    filter
-                );
+                log::info!("📬 PERSPECTIVE_ADDED subscription: filter={:?}", filter);
 
                 subscribe_and_process::<PerspectiveWithOwner>(pubsub, topic.to_string(), filter)
                     .await
@@ -395,20 +390,15 @@ impl Subscription {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
             Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
-                let filter = match get_agent_did_filter(
-                    context.auth_token.clone(),
-                    "PERSPECTIVE_REMOVED",
-                ) {
-                    Ok(filter) => filter,
-                    Err(e) => return Box::pin(stream::once(async move { Err(e) })),
-                };
+                let filter =
+                    match get_agent_did_filter(context.auth_token.clone(), "PERSPECTIVE_REMOVED") {
+                        Ok(filter) => filter,
+                        Err(e) => return Box::pin(stream::once(async move { Err(e) })),
+                    };
 
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_REMOVED_TOPIC;
-                log::info!(
-                    "📬 PERSPECTIVE_REMOVED subscription: filter={:?}",
-                    filter
-                );
+                log::info!("📬 PERSPECTIVE_REMOVED subscription: filter={:?}", filter);
 
                 subscribe_and_process::<PerspectiveRemovedWithOwner>(
                     pubsub,
@@ -473,20 +463,15 @@ impl Subscription {
         match check_capability(&context.capabilities, &PERSPECTIVE_SUBSCRIBE_CAPABILITY) {
             Err(e) => Box::pin(stream::once(async move { Err(e.into()) })),
             Ok(_) => {
-                let filter = match get_agent_did_filter(
-                    context.auth_token.clone(),
-                    "PERSPECTIVE_UPDATED",
-                ) {
-                    Ok(filter) => filter,
-                    Err(e) => return Box::pin(stream::once(async move { Err(e) })),
-                };
+                let filter =
+                    match get_agent_did_filter(context.auth_token.clone(), "PERSPECTIVE_UPDATED") {
+                        Ok(filter) => filter,
+                        Err(e) => return Box::pin(stream::once(async move { Err(e) })),
+                    };
 
                 let pubsub = get_global_pubsub().await;
                 let topic = &PERSPECTIVE_UPDATED_TOPIC;
-                log::info!(
-                    "📬 PERSPECTIVE_UPDATED subscription: filter={:?}",
-                    filter
-                );
+                log::info!("📬 PERSPECTIVE_UPDATED subscription: filter={:?}", filter);
 
                 subscribe_and_process::<PerspectiveWithOwner>(pubsub, topic.to_string(), filter)
                     .await

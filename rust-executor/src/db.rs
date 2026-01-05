@@ -2260,9 +2260,9 @@ impl Ad4mDb {
 
     // Public function to get user without password_hash
     pub fn get_user(&self, username: &str) -> Ad4mDbResult<UserInfo> {
-        let mut stmt = self.conn.prepare(
-            "SELECT username, did, last_seen FROM users WHERE username = ?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT username, did, last_seen FROM users WHERE username = ?1")?;
         let user = stmt.query_row([username], |row| {
             Ok(UserInfo {
                 username: row.get(0)?,
@@ -2284,7 +2284,7 @@ impl Ad4mDb {
 
     pub fn list_users(&self) -> Ad4mDbResult<Vec<UserInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT username, did, last_seen FROM users ORDER BY last_seen DESC NULLS LAST"
+            "SELECT username, did, last_seen FROM users ORDER BY last_seen DESC NULLS LAST",
         )?;
 
         let users = stmt
@@ -3452,7 +3452,11 @@ mod tests {
         for (username, _did, password) in &users {
             let retrieved = db.get_user(username).unwrap();
             // Verify user info is correct
-            assert_eq!(retrieved.username, *username, "Username should match for {}", username);
+            assert_eq!(
+                retrieved.username, *username,
+                "Username should match for {}",
+                username
+            );
 
             // Password verification should work (tests that password is properly hashed)
             assert!(
