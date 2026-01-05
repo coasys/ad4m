@@ -9,6 +9,7 @@ pub const DELETE: &str = "DELETE";
 pub const SUBSCRIBE: &str = "SUBSCRIBE";
 pub const PROMPT: &str = "PROMPT";
 pub const TRANSCRIBE: &str = "TRANSCRIBE";
+pub const VERIFY: &str = "VERIFY";
 
 // capabilities domains
 pub const AGENT: &str = "agent";
@@ -467,5 +468,13 @@ lazy_static! {
             pointers: vec![WILD_CARD.to_string()],
         },
         can: vec![READ.to_string()],
+    };
+
+    pub static ref RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY: Capability = Capability {
+        with: Resource {
+            domain: RUNTIME_USER_MANAGEMENT.to_string(),
+            pointers: vec![WILD_CARD.to_string()],
+        },
+        can: vec![VERIFY.to_string()],
     };
 }

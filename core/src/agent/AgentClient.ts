@@ -558,4 +558,32 @@ export class AgentClient {
     );
     return runtimeLoginUser;
   }
+
+  async requestLoginVerification(email: string): Promise<VerificationRequestResult> {
+    const { runtimeRequestLoginVerification } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeRequestLoginVerification($email: String!) {
+          runtimeRequestLoginVerification(email: $email) {
+            success
+            message
+            requiresPassword
+          }
+        }`,
+        variables: { email },
+      })
+    );
+    return runtimeRequestLoginVerification;
+  }
+
+  async verifyEmailCode(email: string, code: string, verificationType: string): Promise<string> {
+    const { runtimeVerifyEmailCode } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation runtimeVerifyEmailCode($email: String!, $code: String!, $verificationType: String!) {
+          runtimeVerifyEmailCode(email: $email, code: $code, verificationType: $verificationType)
+        }`,
+        variables: { email, code, verificationType },
+      })
+    );
+    return runtimeVerifyEmailCode;
+  }
 }

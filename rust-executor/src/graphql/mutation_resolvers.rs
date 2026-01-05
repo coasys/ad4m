@@ -564,6 +564,49 @@ impl Mutation {
             // Don't fail the user creation, just log the warning
         }
 
+        // Generate verification code and send email
+        let code = {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref
+                .create_verification_code(&email, "signup")
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to create verification code: {}", e),
+                        graphql_value!(null),
+                    )
+                })?
+        };
+
+        // Get SMTP config if available
+        if let Some(smtp_config) = context.js_handle.config.smtp_config.clone() {
+            let email_service = crate::email_service::EmailService::new(smtp_config);
+            if let Err(e) = email_service
+                .send_verification_email(&email, &code, "signup")
+                .await
+            {
+                log::warn!("Failed to send verification email to {}: {}", email, e);
+                // Don't fail user creation if email sending fails
+                return Ok(UserCreationResult {
+                    did,
+                    success: true,
+                    error: Some(format!(
+                        "User created but failed to send verification email: {}",
+                        e
+                    )),
+                });
+            }
+
+            // Update rate limit
+            {
+                let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+                let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+                db_ref.update_rate_limit(&email).ok();
+            }
+        } else {
+            log::warn!("SMTP not configured - skipping verification email for {}", email);
+        }
+
         Ok(UserCreationResult {
             did,
             success: true,
@@ -655,6 +698,240 @@ impl Mutation {
         })?;
 
         Ok(cap_token)
+    }
+
+    async fn runtime_request_login_verification(
+        &self,
+        context: &RequestContext,
+        email: String,
+    ) -> FieldResult<VerificationRequestResult> {
+        use crate::graphql::graphql_types::VerificationRequestResult;
+
+        // Check capability
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY,
+        )?;
+
+        // Check if multi-user mode is enabled
+        let multi_user_enabled =
+            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+
+        if !multi_user_enabled {
+            return Ok(VerificationRequestResult {
+                success: false,
+                message: "Multi-user mode is not enabled".to_string(),
+                requires_password: false,
+            });
+        }
+
+        // Check if user exists
+        let db = Ad4mDb::global_instance();
+        let user_exists = {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref.get_user(&email).is_ok()
+        };
+
+        if !user_exists {
+            return Ok(VerificationRequestResult {
+                success: false,
+                message: "User not found. Please sign up first.".to_string(),
+                requires_password: true,
+            });
+        }
+
+        // Check rate limit
+        {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            if let Err(e) = db_ref.check_rate_limit(&email) {
+                return Ok(VerificationRequestResult {
+                    success: false,
+                    message: e.to_string(),
+                    requires_password: false,
+                });
+            }
+        }
+
+        // Generate verification code
+        let code = {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref
+                .create_verification_code(&email, "login")
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to create verification code: {}", e),
+                        graphql_value!(null),
+                    )
+                })?
+        };
+
+        // Get SMTP config from context
+        let smtp_config = context
+            .js_handle
+            .config
+            .smtp_config
+            .clone()
+            .ok_or_else(|| {
+                FieldError::new(
+                    "SMTP is not configured. Please configure email settings in the launcher.",
+                    graphql_value!(null),
+                )
+            })?;
+
+        // Send verification email
+        let email_service = crate::email_service::EmailService::new(smtp_config);
+        email_service
+            .send_verification_email(&email, &code, "login")
+            .await
+            .map_err(|e| {
+                FieldError::new(
+                    format!("Failed to send verification email: {}", e),
+                    graphql_value!(null),
+                )
+            })?;
+
+        // Update rate limit
+        {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref.update_rate_limit(&email).ok();
+        }
+
+        Ok(VerificationRequestResult {
+            success: true,
+            message: "Verification email sent".to_string(),
+            requires_password: false,
+        })
+    }
+
+    async fn runtime_verify_email_code(
+        &self,
+        context: &RequestContext,
+        email: String,
+        code: String,
+        verification_type: String,
+    ) -> FieldResult<String> {
+        use crate::agent::capabilities::{token, AuthInfo, ALL_CAPABILITY, DEFAULT_TOKEN_VALID_PERIOD};
+
+        // Check capability
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY,
+        )?;
+
+        // Check if multi-user mode is enabled
+        let multi_user_enabled =
+            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+
+        if !multi_user_enabled {
+            return Err(FieldError::new(
+                "Multi-user mode is not enabled",
+                graphql_value!(null),
+            ));
+        }
+
+        // Verify the code
+        let db = Ad4mDb::global_instance();
+        let code_valid = {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref
+                .verify_code(&email, &code, &verification_type)
+                .unwrap_or(false)
+        };
+
+        if !code_valid {
+            return Err(FieldError::new(
+                "Invalid or expired verification code",
+                graphql_value!(null),
+            ));
+        }
+
+        // Verify user exists
+        if !AgentService::user_exists(&email) {
+            return Err(FieldError::new(
+                "User key not found on executor",
+                graphql_value!(null),
+            ));
+        }
+
+        // Generate JWT token for the user
+        let auth_info = if context.auth_token.is_empty() {
+            // Default app info
+            AuthInfo {
+                app_name: "multi-user-app".to_string(),
+                app_desc: "Multi-user application".to_string(),
+                app_domain: Some("multi-user".to_string()),
+                app_url: Some("https://multi-user.app".to_string()),
+                app_icon_path: None,
+                capabilities: Some(vec![ALL_CAPABILITY.clone()]),
+                user_email: Some(email.clone()),
+            }
+        } else {
+            // Preserve app context
+            match token::decode_jwt(context.auth_token.clone()) {
+                Ok(current_claims) => {
+                    let mut auth_info = current_claims.capabilities;
+                    auth_info.user_email = Some(email.clone());
+                    auth_info
+                }
+                Err(_) => {
+                    return Err(FieldError::new("Invalid auth token", graphql_value!(null)));
+                }
+            }
+        };
+
+        let cap_token = token::generate_jwt(
+            auth_info.app_name.clone(),
+            DEFAULT_TOKEN_VALID_PERIOD,
+            auth_info,
+        )
+        .map_err(|e| {
+            FieldError::new(
+                format!("Failed to generate token: {}", e),
+                graphql_value!(null),
+            )
+        })?;
+
+        Ok(cap_token)
+    }
+
+    async fn runtime_test_email(
+        &self,
+        context: &RequestContext,
+        to: String,
+    ) -> FieldResult<bool> {
+        use crate::agent::capabilities::ALL_CAPABILITY;
+
+        // Check capability - admin only
+        check_capability(&context.capabilities, &ALL_CAPABILITY)?;
+
+        // Get SMTP config
+        let smtp_config = context
+            .js_handle
+            .config
+            .smtp_config
+            .clone()
+            .ok_or_else(|| {
+                FieldError::new(
+                    "SMTP is not configured. Please configure email settings in the launcher.",
+                    graphql_value!(null),
+                )
+            })?;
+
+        // Send test email
+        let email_service = crate::email_service::EmailService::new(smtp_config);
+        email_service.send_test_email(&to).await.map_err(|e| {
+            FieldError::new(
+                format!("Failed to send test email: {}", e),
+                graphql_value!(null),
+            )
+        })?;
+
+        Ok(true)
     }
 
     async fn expression_create(

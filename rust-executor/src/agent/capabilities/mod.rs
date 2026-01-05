@@ -272,6 +272,7 @@ pub fn capabilities_from_token(
                 AGENT_AUTH_CAPABILITY.clone(),
                 RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY.clone(),
                 RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY.clone(),
+                RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY.clone(),
                 RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
             ]);
         }
