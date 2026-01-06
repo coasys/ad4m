@@ -1,5 +1,5 @@
 extern crate remove_dir_all;
-use crate::app_state::{AgentConfigDir, LauncherState, MultiUserConfig, SmtpConfig, TlsConfig};
+use crate::app_state::{AgentConfigDir, LauncherState, MultiUserConfig, SmtpConfig, SmtpConfigDto, TlsConfig};
 use crate::util::create_tray_message_windows;
 use crate::{config::data_path, get_main_window};
 use rust_executor::logging::{build_rust_log_from_config, get_default_log_config, LogLevel};
@@ -290,7 +290,7 @@ pub fn set_multi_user_config(config: MultiUserConfig) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn test_smtp_config(config: SmtpConfig, test_email: String) -> Result<bool, String> {
+pub async fn test_smtp_config(config: SmtpConfigDto, test_email: String) -> Result<bool, String> {
     use lettre::transport::smtp::authentication::Credentials;
     use lettre::{Message, SmtpTransport, Transport};
 
@@ -356,13 +356,13 @@ pub async fn test_smtp_config(config: SmtpConfig, test_email: String) -> Result<
 }
 
 #[tauri::command]
-pub fn get_smtp_config() -> Option<SmtpConfig> {
+pub fn get_smtp_config() -> Option<SmtpConfigDto> {
     let state = LauncherState::load().ok()?;
-    state.multi_user_config?.smtp_config
+    state.multi_user_config?.smtp_config.map(|config| SmtpConfigDto::from(&config))
 }
 
 #[tauri::command]
-pub fn set_smtp_config(config: SmtpConfig) -> Result<(), String> {
+pub fn set_smtp_config(config: SmtpConfigDto) -> Result<(), String> {
     // Validate SMTP config
     if config.host.is_empty() {
         return Err("SMTP host cannot be empty".to_string());
@@ -373,6 +373,9 @@ pub fn set_smtp_config(config: SmtpConfig) -> Result<(), String> {
     if config.from_address.is_empty() {
         return Err("SMTP from address cannot be empty".to_string());
     }
+
+    // Convert DTO to SmtpConfig (password will be encrypted on save)
+    let smtp_config: SmtpConfig = config.into();
 
     // Load current state
     let mut state =
@@ -389,7 +392,7 @@ pub fn set_smtp_config(config: SmtpConfig) -> Result<(), String> {
     });
 
     // Update SMTP config
-    multi_user_config.smtp_config = Some(config);
+    multi_user_config.smtp_config = Some(smtp_config);
     state.multi_user_config = Some(multi_user_config);
 
     // Save updated state

@@ -159,6 +159,41 @@ impl<'de> Deserialize<'de> for SmtpConfig {
     }
 }
 
+/// DTO for SMTP config sent to frontend (plain password, no encryption)
+/// This is separate from SmtpConfig to avoid encrypting passwords when sending to UI
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SmtpConfigDto {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String, // Plain password for UI display/editing
+    pub from_address: String,
+}
+
+impl From<&SmtpConfig> for SmtpConfigDto {
+    fn from(config: &SmtpConfig) -> Self {
+        SmtpConfigDto {
+            host: config.host.clone(),
+            port: config.port,
+            username: config.username.clone(),
+            password: config.password.clone(), // Plain password
+            from_address: config.from_address.clone(),
+        }
+    }
+}
+
+impl From<SmtpConfigDto> for SmtpConfig {
+    fn from(dto: SmtpConfigDto) -> Self {
+        SmtpConfig::new(
+            dto.host,
+            dto.port,
+            dto.username,
+            dto.password, // Plain password will be encrypted on save
+            dto.from_address,
+        )
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MultiUserConfig {
     pub enabled: bool,
