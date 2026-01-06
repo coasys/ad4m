@@ -54,7 +54,13 @@ impl SmtpConfig {
         password: String,
         from_address: String,
     ) -> Self {
-        SmtpConfig { host, port, username, password, from_address }
+        SmtpConfig {
+            host,
+            port,
+            username,
+            password,
+            from_address,
+        }
     }
 
     /// Get the plain password
