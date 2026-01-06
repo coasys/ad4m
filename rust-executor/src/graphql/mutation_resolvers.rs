@@ -466,6 +466,9 @@ impl Mutation {
         password: String,
         app_info: Option<AuthInfoInput>,
     ) -> FieldResult<UserCreationResult> {
+        // Normalize email: trim whitespace and convert to lowercase
+        let email = email.trim().to_lowercase();
+
         // Check capability (empty tokens get user management caps in multi-user mode)
         check_capability(
             &context.capabilities,
@@ -814,6 +817,9 @@ impl Mutation {
     ) -> FieldResult<VerificationRequestResult> {
         use crate::graphql::graphql_types::VerificationRequestResult;
 
+        // Normalize email: trim whitespace and convert to lowercase
+        let email = email.trim().to_lowercase();
+
         // Check capability
         check_capability(
             &context.capabilities,
@@ -1007,6 +1013,9 @@ impl Mutation {
         use crate::agent::capabilities::{
             get_user_default_capabilities, token, AuthInfo, DEFAULT_TOKEN_VALID_PERIOD,
         };
+
+        // Normalize email: trim whitespace and convert to lowercase
+        let email = email.trim().to_lowercase();
 
         // Check capability
         check_capability(
