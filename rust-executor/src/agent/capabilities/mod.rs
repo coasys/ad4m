@@ -11,6 +11,7 @@ pub use types::*;
 
 use crate::graphql::graphql_types::*;
 use crate::pubsub::{get_global_pubsub, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC};
+use crate::utils::constant_time_eq;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -76,7 +77,11 @@ pub fn check_capability(
 }
 
 pub fn check_token_revoked(token: &String) -> Result<(), String> {
-    if let Some(app) = apps_map::get_apps().iter().find(|app| app.token == *token) {
+    // Use constant-time comparison to prevent timing attacks
+    if let Some(app) = apps_map::get_apps()
+        .iter()
+        .find(|app| constant_time_eq(&app.token, token))
+    {
         if app.revoked.unwrap_or(false) {
             return Err("Unauthorized access".to_string());
         }
@@ -248,7 +253,8 @@ pub fn capabilities_from_token(
 ) -> Result<Vec<Capability>, String> {
     match admin_credential {
         Some(admin_credential) => {
-            if token == admin_credential {
+            // Use constant-time comparison to prevent timing attacks
+            if constant_time_eq(&token, &admin_credential) {
                 return Ok(vec![ALL_CAPABILITY.clone()]);
             }
         }

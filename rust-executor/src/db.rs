@@ -7,6 +7,7 @@ use crate::types::{
     ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff, TokenizerSource, User,
     UserInfo,
 };
+use crate::utils::constant_time_eq;
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
@@ -2481,8 +2482,8 @@ impl Ad4mDb {
                     return Ok(false);
                 }
 
-                // Constant-time comparison
-                if stored_hash == code_hash {
+                // Constant-time comparison to prevent timing attacks
+                if constant_time_eq(&stored_hash, &code_hash) {
                     // Mark as verified and delete
                     self.conn.execute(
                         "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
