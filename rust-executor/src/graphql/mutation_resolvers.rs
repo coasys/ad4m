@@ -642,6 +642,15 @@ impl Mutation {
                 "SMTP not configured - skipping verification email for {}",
                 email
             );
+            // Return error message when SMTP is not configured (similar to email failure case)
+            // Note: User can still login with password - email verification is optional
+            return Ok(UserCreationResult {
+                did,
+                success: true,
+                error: Some(
+                    "User created successfully. You can login with your password. Email verification was not sent because SMTP is not configured. To enable email verification, please configure email settings in the launcher.".to_string(),
+                ),
+            });
         }
 
         Ok(UserCreationResult {
@@ -854,10 +863,17 @@ impl Mutation {
         } else if let Some(config) = smtp_config_opt {
             config
         } else {
-            return Err(FieldError::new(
-                "SMTP is not configured. Please configure email settings in the launcher.",
-                graphql_value!(null),
-            ));
+            // SMTP not configured - return requires_password so UI can show password field for login
+            log::warn!(
+                "SMTP not configured - requiring password login for {}",
+                email
+            );
+            return Ok(VerificationRequestResult {
+                success: true,
+                message: "Email verification is not available. Please login with your password."
+                    .to_string(),
+                requires_password: true,
+            });
         };
 
         // Send verification email

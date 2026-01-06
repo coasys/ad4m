@@ -682,9 +682,11 @@ export class Ad4mConnectElement extends LitElement {
         this._multiUserStep = "code";
         this._multiUserVerificationType = "login";
       } else if (result.requiresPassword) {
-        // User doesn't exist, need password for signup
+        // Check if this is for login (SMTP not configured) or signup (new user)
+        // If message indicates SMTP not configured, it's login; otherwise it's signup
+        const isLogin = result.message && result.message.includes("Email verification is not available");
         this._multiUserStep = "password";
-        this._multiUserVerificationType = "signup";
+        this._multiUserVerificationType = isLogin ? "login" : "signup";
       } else {
         this._multiUserError = result.message || "Failed to send verification email";
       }
@@ -700,29 +702,86 @@ export class Ad4mConnectElement extends LitElement {
       this._multiUserLoading = true;
       this._multiUserError = null;
 
-      // Build temporary client to call createUser
+      // Build temporary client
       const tempClient = this._client.buildTempClient(this.backendUrl);
 
-      // Build AuthInfo object from app properties
-      const appInfo = {
-        appName: this.appName,
-        appDesc: this.appDesc,
-        appDomain: this.appDomain,
-        appUrl: window.location.origin,
-        appIconPath: this.appIconPath,
-      };
+      if (this._multiUserVerificationType === "login") {
+        // Existing user - try password login
+        try {
+          const token = await tempClient.agent.loginUser(this._multiUserEmail, this._multiUserPassword);
+          
+          // Success! Store token and authenticate
+          this._client.setToken(token);
+          this._client.setUrl(this.backendUrl);
 
-      const result = await tempClient.agent.createUser(this._multiUserEmail, this._multiUserPassword, appInfo);
+          // Rebuild client with new token to establish authenticated connection
+          await this._client.buildClient();
+          await this._client.checkAuth();
 
-      if (result.success) {
-        // User created, verification email sent
-        this._multiUserStep = "code";
-        this._multiUserVerificationType = "signup";
+          // Clear form and close modal
+          this._multiUserEmail = "";
+          this._multiUserPassword = "";
+          this._multiUserVerificationCode = "";
+          this._multiUserStep = "email";
+          this._isOpen = false;
+          this.changeUIState("connected");
+          this.handleAuthChange("authenticated");
+        } catch (loginError) {
+          this._multiUserError = loginError.message || "Invalid email or password. Please try again.";
+        }
       } else {
-        this._multiUserError = result.error || "Failed to create account. Please try again.";
+        // New user - create account
+        // Build AuthInfo object from app properties
+        const appInfo = {
+          appName: this.appName,
+          appDesc: this.appDesc,
+          appDomain: this.appDomain,
+          appUrl: window.location.origin,
+          appIconPath: this.appIconPath,
+        };
+
+        const result = await tempClient.agent.createUser(this._multiUserEmail, this._multiUserPassword, appInfo);
+
+        if (result.success) {
+          // Check if email verification was sent or if we should proceed directly to login
+          if (result.error && result.error.includes("SMTP is not configured")) {
+            // SMTP not configured - login immediately with password
+            try {
+              const token = await tempClient.agent.loginUser(this._multiUserEmail, this._multiUserPassword);
+              
+              // Success! Store token and authenticate
+              this._client.setToken(token);
+              this._client.setUrl(this.backendUrl);
+
+              // Rebuild client with new token to establish authenticated connection
+              await this._client.buildClient();
+              await this._client.checkAuth();
+
+              // Clear form and close modal
+              this._multiUserEmail = "";
+              this._multiUserPassword = "";
+              this._multiUserVerificationCode = "";
+              this._multiUserStep = "email";
+              this._isOpen = false;
+              this.changeUIState("connected");
+              this.handleAuthChange("authenticated");
+            } catch (loginError) {
+              this._multiUserError = loginError.message || "Account created but login failed. Please try logging in.";
+            }
+          } else if (!result.error) {
+            // User created, verification email sent
+            this._multiUserStep = "code";
+            this._multiUserVerificationType = "signup";
+          } else {
+            // User created but email failed - still allow login
+            this._multiUserError = result.error + " You can try logging in with your password.";
+          }
+        } else {
+          this._multiUserError = result.error || "Failed to create account. Please try again.";
+        }
       }
     } catch (e) {
-      this._multiUserError = e.message || "Failed to create account. Please try again.";
+      this._multiUserError = e.message || "Failed to process request. Please try again.";
     } finally {
       this._multiUserLoading = false;
     }
