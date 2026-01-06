@@ -2635,6 +2635,57 @@ impl Ad4mDb {
         Ok(())
     }
 
+    /// Atomically checks and updates the rate limit for an email
+    /// This prevents TOCTOU race conditions where concurrent requests could bypass rate limiting
+    /// by checking before any of them update the timestamp.
+    ///
+    /// Returns an error if the email is rate-limited (within 60 seconds of last request),
+    /// otherwise updates the timestamp and returns Ok(()).
+    pub fn check_and_update_rate_limit(&self, email: &str) -> Ad4mDbResult<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Use a transaction to make check-and-update atomic
+        let tx = self.conn.unchecked_transaction()?;
+
+        // Check if rate limited
+        let result: Result<i64, _> = tx.query_row(
+            "SELECT last_sent_at FROM email_rate_limits WHERE email = ?1",
+            params![email],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(last_sent_at) => {
+                let seconds_since_last = now - last_sent_at;
+                if seconds_since_last < 60 {
+                    // Rate limited - rollback transaction and return error
+                    tx.rollback()?;
+                    return Err(anyhow!(
+                        "Please wait {} seconds before requesting another verification code",
+                        60 - seconds_since_last
+                    ));
+                }
+            }
+            Err(_) => {
+                // No rate limit entry exists yet, will be created below
+            }
+        }
+
+        // Update the rate limit timestamp
+        tx.execute(
+            "INSERT INTO email_rate_limits (email, last_sent_at) VALUES (?1, ?2)
+             ON CONFLICT(email) DO UPDATE SET last_sent_at = excluded.last_sent_at",
+            params![email, now],
+        )?;
+
+        // Commit the transaction
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Test helper: Set expiry time for a verification code (for testing expiration)
     pub fn set_verification_code_expiry(
         &self,

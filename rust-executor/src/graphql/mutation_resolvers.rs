@@ -577,11 +577,12 @@ impl Mutation {
 
         // Apply rate limiting before generating verification code (but skip in test mode)
         // This prevents abuse by repeatedly creating accounts to spam the email server
+        // Using atomic check-and-update to prevent TOCTOU race conditions.
         if !test_mode {
             let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
             let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
 
-            if let Err(e) = db_ref.check_rate_limit(&email) {
+            if let Err(e) = db_ref.check_and_update_rate_limit(&email) {
                 log::warn!("Rate limit exceeded for signup verification: {}", e);
                 return Ok(UserCreationResult {
                     did,
@@ -590,18 +591,6 @@ impl Mutation {
                         "User created successfully but verification email was not sent due to rate limiting: {}",
                         e
                     )),
-                });
-            }
-
-            // Update rate limit immediately after check to prevent bypass
-            if let Err(e) = db_ref.update_rate_limit(&email) {
-                log::error!("Failed to update email rate limit for {}: {}", email, e);
-                return Ok(UserCreationResult {
-                    did,
-                    success: true,
-                    error: Some(
-                        "User created successfully but failed to update rate limit".to_string(),
-                    ),
                 });
             }
         }
@@ -846,25 +835,14 @@ impl Mutation {
         // This ensures that both existing and non-existing emails are subject
         // to the same rate limiting behaviour, preventing user enumeration
         // without hitting the rate limit.
+        // Using atomic check-and-update to prevent TOCTOU race conditions.
         {
             let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
             let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-            if let Err(e) = db_ref.check_rate_limit(&email) {
+            if let Err(e) = db_ref.check_and_update_rate_limit(&email) {
                 return Ok(VerificationRequestResult {
                     success: false,
                     message: e.to_string(),
-                    requires_password: false,
-                    is_existing_user: false,
-                });
-            }
-            // Update rate limit immediately after check to prevent bypass via email failures.
-            // If we fail to persist the rate limit, log and return an error so callers
-            // cannot bypass rate limiting by triggering DB write failures.
-            if let Err(e) = db_ref.update_rate_limit(&email) {
-                log::error!("Failed to update email rate limit for {}: {}", email, e);
-                return Ok(VerificationRequestResult {
-                    success: false,
-                    message: "Failed to update rate limit, please try again later".to_string(),
                     requires_password: false,
                     is_existing_user: false,
                 });
