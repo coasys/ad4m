@@ -934,9 +934,16 @@ impl Mutation {
         let code_valid = {
             let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
             let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-            db_ref
-                .verify_code(&email, &code, &verification_type)
-                .unwrap_or(false)
+            match db_ref.verify_code(&email, &code, &verification_type) {
+                Ok(valid) => valid,
+                Err(e) => {
+                    // Code was invalidated due to too many failed attempts
+                    return Err(FieldError::new(
+                        e.to_string(),
+                        graphql_value!(null),
+                    ));
+                }
+            }
         };
 
         if !code_valid {

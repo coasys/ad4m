@@ -291,6 +291,13 @@ impl Ad4mDb {
             [],
         )?;
 
+        // Add failed_attempts column to email_verifications table if it doesn't exist
+        // This column tracks failed verification attempts to prevent brute force attacks
+        let _ = conn.execute(
+            "ALTER TABLE email_verifications ADD COLUMN failed_attempts INTEGER DEFAULT 0",
+            [],
+        );
+
         // Add owner_did column to existing perspective_handle table if it doesn't exist
         let _ = conn.execute(
             "ALTER TABLE perspective_handle ADD COLUMN owner_did TEXT",
@@ -2434,10 +2441,10 @@ impl Ad4mDb {
             params![email, verification_type],
         )?;
 
-        // Insert new verification
+        // Insert new verification (initialize failed_attempts to 0)
         self.conn.execute(
-            "INSERT INTO email_verifications (email, code_hash, created_at, expires_at, verified, verification_type)
-             VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+            "INSERT INTO email_verifications (email, code_hash, created_at, expires_at, verified, verification_type, failed_attempts)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, 0)",
             params![email, code_hash, now, expires_at, verification_type],
         )?;
 
@@ -2445,12 +2452,16 @@ impl Ad4mDb {
     }
 
     /// Verifies a code against the stored hash for a given email and verification type
+    /// Returns Ok(true) on success, Ok(false) on failure, or Err if code is invalidated due to too many attempts
     pub fn verify_code(
         &self,
         email: &str,
         code: &str,
         verification_type: &str,
     ) -> Ad4mDbResult<bool> {
+        // Maximum allowed failed attempts before invalidating the code
+        const MAX_FAILED_ATTEMPTS: i32 = 5;
+
         // Hash the provided code
         let mut hasher = Sha256::new();
         hasher.update(code.as_bytes());
@@ -2462,16 +2473,29 @@ impl Ad4mDb {
             .unwrap()
             .as_secs() as i64;
 
-        // Query for matching verification that hasn't expired
-        let result: Result<(String, i64), _> = self.conn.query_row(
-            "SELECT code_hash, expires_at FROM email_verifications
+        // Query for matching verification that hasn't expired, including failed_attempts
+        // Use COALESCE to handle NULL values for existing rows created before the migration
+        let result: Result<(String, i64, i32), _> = self.conn.query_row(
+            "SELECT code_hash, expires_at, COALESCE(failed_attempts, 0) FROM email_verifications
              WHERE email = ?1 AND verification_type = ?2 AND verified = 0",
             params![email, verification_type],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         );
 
         match result {
-            Ok((stored_hash, expires_at)) => {
+            Ok((stored_hash, expires_at, failed_attempts)) => {
+                // Check if code has been invalidated due to too many failed attempts
+                if failed_attempts >= MAX_FAILED_ATTEMPTS {
+                    // Delete the invalidated code
+                    self.conn.execute(
+                        "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+                        params![email, verification_type],
+                    )?;
+                    return Err(anyhow!(
+                        "Verification code has been invalidated due to too many failed attempts. Please request a new code."
+                    ));
+                }
+
                 // Check if expired
                 if now > expires_at {
                     // Clean up expired code
@@ -2491,6 +2515,24 @@ impl Ad4mDb {
                     )?;
                     Ok(true)
                 } else {
+                    // Increment failed attempts counter
+                    let new_failed_attempts = failed_attempts + 1;
+                    self.conn.execute(
+                        "UPDATE email_verifications SET failed_attempts = ?1 WHERE email = ?2 AND verification_type = ?3",
+                        params![new_failed_attempts, email, verification_type],
+                    )?;
+
+                    // If we've reached the max attempts, invalidate the code
+                    if new_failed_attempts >= MAX_FAILED_ATTEMPTS {
+                        self.conn.execute(
+                            "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+                            params![email, verification_type],
+                        )?;
+                        return Err(anyhow!(
+                            "Verification code has been invalidated due to too many failed attempts. Please request a new code."
+                        ));
+                    }
+
                     Ok(false)
                 }
             }
@@ -2511,6 +2553,27 @@ impl Ad4mDb {
         )?;
 
         Ok(())
+    }
+
+    /// Check if a verification code exists for the given email (for any verification type)
+    /// Returns true if an active (non-expired, non-verified) code exists
+    pub fn has_verification_code(&self, email: &str) -> Ad4mDbResult<bool> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let result: Result<i32, _> = self.conn.query_row(
+            "SELECT COUNT(*) FROM email_verifications
+             WHERE email = ?1 AND verified = 0 AND expires_at > ?2",
+            params![email, now],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(count) => Ok(count > 0),
+            Err(_) => Ok(false),
+        }
     }
 
     /// Checks if an email is rate-limited (returns error if rate-limited)

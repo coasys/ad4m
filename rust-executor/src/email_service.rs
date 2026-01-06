@@ -1,4 +1,5 @@
 use crate::config::SmtpConfig;
+use crate::db::Ad4mDb;
 use deno_core::error::AnyError;
 use lazy_static::lazy_static;
 use lettre::transport::smtp::authentication::Credentials;
@@ -60,7 +61,24 @@ pub fn disable_test_mode() {
 }
 
 /// Get captured email code for testing
+/// Only returns the code if it still exists in the database (hasn't been invalidated or used)
 pub fn get_test_code(email: &str) -> Option<String> {
+    // First check if a verification code still exists in the database
+    // If it was invalidated or used, it will have been deleted from the database
+    let code_exists = Ad4mDb::with_global_instance(|db| {
+        db.has_verification_code(email).unwrap_or(false)
+    });
+
+    if !code_exists {
+        // Code doesn't exist in database (was invalidated, used, or expired)
+        // Remove from cache as well
+        if let Ok(mut codes) = TEST_MODE_EMAILS.lock() {
+            codes.remove(email);
+        }
+        return None;
+    }
+
+    // Code exists in database, return from cache
     TEST_MODE_EMAILS
         .lock()
         .ok()

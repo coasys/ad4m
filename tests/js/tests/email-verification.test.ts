@@ -343,5 +343,180 @@ describe("Email Verification with Mock Service", () => {
                 console.log(`✅ Single-use enforced: ${e.message}`);
             }
         });
+
+        describe("Failed Attempt Rate Limiting", () => {
+            it("should track failed verification attempts", async () => {
+                const email = "failedattempts@example.com";
+                await adminAd4mClient!.agent.createUser(email, "password123");
+
+                const realCode = await adminAd4mClient!.runtime.emailTestGetCode(email);
+                expect(realCode).to.exist;
+
+                // Try wrong codes multiple times
+                for (let i = 1; i <= 4; i++) {
+                    try {
+                        await adminAd4mClient!.agent.verifyEmailCode(email, "000000", "signup");
+                        expect.fail(`Should have failed on attempt ${i}`);
+                    } catch (e: any) {
+                        expect(e.message).to.match(/Invalid|expired/i);
+                        console.log(`✅ Failed attempt ${i} correctly rejected`);
+                    }
+                }
+
+                // Code should still be valid (not yet invalidated)
+                const stillValid = await adminAd4mClient!.runtime.emailTestGetCode(email);
+                expect(stillValid).to.equal(realCode);
+                console.log("✅ Code still valid after 4 failed attempts");
+            });
+
+            it("should invalidate code after 5 failed attempts", async () => {
+                const email = "invalidate@example.com";
+                await adminAd4mClient!.agent.createUser(email, "password123");
+
+                const realCode = await adminAd4mClient!.runtime.emailTestGetCode(email);
+                expect(realCode).to.exist;
+
+                // Make 5 failed attempts
+                for (let i = 1; i <= 5; i++) {
+                    try {
+                        await adminAd4mClient!.agent.verifyEmailCode(email, "000000", "signup");
+                        expect.fail(`Should have failed on attempt ${i}`);
+                    } catch (e: any) {
+                        if (i < 5) {
+                            // First 4 attempts should just say invalid
+                            expect(e.message).to.match(/Invalid|expired/i);
+                            console.log(`✅ Failed attempt ${i} rejected`);
+                        } else {
+                            // 5th attempt should indicate code is invalidated
+                            expect(e.message).to.match(/invalidated|too many/i);
+                            console.log(`✅ Code invalidated after ${i} failed attempts: ${e.message}`);
+                        }
+                    }
+                }
+
+                // Code should be deleted/invalidated
+                const codeAfterInvalidation = await adminAd4mClient!.runtime.emailTestGetCode(email);
+                expect(codeAfterInvalidation).to.be.null;
+                console.log("✅ Code successfully invalidated and removed");
+
+                // Even the real code should not work anymore
+                try {
+                    await adminAd4mClient!.agent.verifyEmailCode(email, realCode!, "signup");
+                    expect.fail("Should not accept code after invalidation");
+                } catch (e: any) {
+                    expect(e.message).to.match(/Invalid|expired|invalidated/i);
+                    console.log(`✅ Real code correctly rejected after invalidation: ${e.message}`);
+                }
+            });
+
+            it("should require new code request after invalidation", async () => {
+                const email = "newcode@example.com";
+                await adminAd4mClient!.agent.createUser(email, "password123");
+
+                const code1 = await adminAd4mClient!.runtime.emailTestGetCode(email);
+                expect(code1).to.exist;
+
+                // Invalidate the code with 5 failed attempts
+                for (let i = 1; i <= 5; i++) {
+                    try {
+                        await adminAd4mClient!.agent.verifyEmailCode(email, "000000", "signup");
+                    } catch (e: any) {
+                        // Expected to fail
+                    }
+                }
+
+                // Verify code is gone
+                const codeAfterInvalidation = await adminAd4mClient!.runtime.emailTestGetCode(email);
+                expect(codeAfterInvalidation).to.be.null;
+
+                // Request a new code
+                const verifyRequest = await adminAd4mClient!.agent.requestLoginVerification(email);
+                expect(verifyRequest.success).to.be.true;
+
+                // Get the new code
+                const code2 = await adminAd4mClient!.runtime.emailTestGetCode(email);
+                expect(code2).to.exist;
+                expect(code2).to.not.equal(code1);
+                console.log(`✅ New code generated: ${code1} -> ${code2}`);
+
+                // New code should work
+                const token = await adminAd4mClient!.agent.verifyEmailCode(email, code2!, "login");
+                expect(token).to.be.a("string");
+                expect(token.length).to.be.greaterThan(0);
+                console.log("✅ New code works after invalidation");
+            });
+
+            it("should reset failed attempts counter on successful verification", async () => {
+                const email = "reset@example.com";
+                await adminAd4mClient!.agent.createUser(email, "password123");
+
+                const code1 = await adminAd4mClient!.runtime.emailTestGetCode(email);
+                expect(code1).to.exist;
+
+                // Make 3 failed attempts
+                for (let i = 1; i <= 3; i++) {
+                    try {
+                        await adminAd4mClient!.agent.verifyEmailCode(email, "000000", "signup");
+                        expect.fail(`Should have failed on attempt ${i}`);
+                    } catch (e: any) {
+                        expect(e.message).to.match(/Invalid|expired/i);
+                    }
+                }
+
+                // Now verify with correct code - should work
+                const token = await adminAd4mClient!.agent.verifyEmailCode(email, code1!, "signup");
+                expect(token).to.be.a("string");
+                console.log("✅ Correct code works after failed attempts");
+
+                // Request a new code for login
+                await adminAd4mClient!.agent.requestLoginVerification(email);
+                const code2 = await adminAd4mClient!.runtime.emailTestGetCode(email);
+                expect(code2).to.exist;
+
+                // Failed attempts counter should be reset (we can make 5 more attempts)
+                for (let i = 1; i <= 4; i++) {
+                    try {
+                        await adminAd4mClient!.agent.verifyEmailCode(email, "000000", "login");
+                        expect.fail(`Should have failed on attempt ${i}`);
+                    } catch (e: any) {
+                        expect(e.message).to.match(/Invalid|expired/i);
+                    }
+                }
+
+                // Code should still be valid
+                const stillValid = await adminAd4mClient!.runtime.emailTestGetCode(email);
+                expect(stillValid).to.equal(code2);
+                console.log("✅ Failed attempts counter reset after successful verification");
+            });
+
+            it("should handle concurrent failed attempts correctly", async () => {
+                const email = "concurrent@example.com";
+                await adminAd4mClient!.agent.createUser(email, "password123");
+
+                const realCode = await adminAd4mClient!.runtime.emailTestGetCode(email);
+                expect(realCode).to.exist;
+
+                // Make multiple failed attempts concurrently
+                const promises = Array.from({ length: 5 }, () =>
+                    adminAd4mClient!.agent.verifyEmailCode(email, "000000", "signup").catch(e => e)
+                );
+
+                const results = await Promise.all(promises);
+
+                // All should fail
+                results.forEach((result, i) => {
+                    if (result instanceof Error) {
+                        expect(result.message).to.match(/Invalid|expired|invalidated/i);
+                    } else {
+                        expect.fail(`Attempt ${i + 1} should have failed`);
+                    }
+                });
+
+                // Code should be invalidated
+                const codeAfterInvalidation = await adminAd4mClient!.runtime.emailTestGetCode(email);
+                expect(codeAfterInvalidation).to.be.null;
+                console.log("✅ Concurrent failed attempts correctly handled and code invalidated");
+            });
+        });
     });
 });
