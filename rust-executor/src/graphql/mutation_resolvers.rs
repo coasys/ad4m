@@ -763,24 +763,13 @@ impl Mutation {
             });
         }
 
-        // Check if user exists
+        // Get DB handle for subsequent operations
         let db = Ad4mDb::global_instance();
-        let user_exists = {
-            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-            db_ref.get_user(&email).is_ok()
-        };
 
-        if !user_exists {
-            // New user - they need to sign up with password
-            return Ok(VerificationRequestResult {
-                success: true,
-                message: "New user - please provide a password to sign up".to_string(),
-                requires_password: true,
-            });
-        }
-
-        // Check rate limit
+        // Check rate limit before revealing whether the user exists.
+        // This ensures that both existing and non-existing emails are subject
+        // to the same rate limiting behaviour, preventing user enumeration
+        // without hitting the rate limit.
         {
             let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
             let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
@@ -794,6 +783,22 @@ impl Mutation {
             // Update rate limit immediately after check to prevent bypass via email failures
             // This ensures the rate limit is consumed even if email sending fails
             db_ref.update_rate_limit(&email).ok();
+        }
+
+        // Check if user exists
+        let user_exists = {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref.get_user(&email).is_ok()
+        };
+
+        if !user_exists {
+            // New user - they need to sign up with password
+            return Ok(VerificationRequestResult {
+                success: true,
+                message: "New user - please provide a password to sign up".to_string(),
+                requires_password: true,
+            });
         }
 
         // Generate verification code
