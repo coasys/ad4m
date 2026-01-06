@@ -673,6 +673,7 @@ pub struct VerificationRequestResult {
     pub success: bool,
     pub message: String,
     pub requires_password: bool,
+    pub is_existing_user: bool,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize)]

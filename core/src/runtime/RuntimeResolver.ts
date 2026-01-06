@@ -218,6 +218,9 @@ export class VerificationRequestResult {
 
     @Field()
     requiresPassword: boolean;
+
+    @Field()
+    isExistingUser: boolean;
 }
 
 /**
@@ -484,7 +487,8 @@ export default class RuntimeResolver {
         return {
             success: true,
             message: "Verification email sent",
-            requiresPassword: false
+            requiresPassword: false,
+            isExistingUser: true
         }
     }
 

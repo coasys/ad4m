@@ -104,7 +104,8 @@ describe("Email Verification with Mock Service", () => {
 
             expect(verifyRequest.success).to.be.true;
             expect(verifyRequest.requiresPassword).to.be.true; // New user
-            console.log(`✅ Result: success=${verifyRequest.success}, requiresPassword=${verifyRequest.requiresPassword}`);
+            expect(verifyRequest.isExistingUser).to.be.false; // New user
+            console.log(`✅ Result: success=${verifyRequest.success}, requiresPassword=${verifyRequest.requiresPassword}, isExistingUser=${verifyRequest.isExistingUser}`);
             console.log(`   Message: ${verifyRequest.message}`);
 
             console.log("\n🔹 Step 2: Create user (triggers verification email)");
@@ -204,7 +205,8 @@ describe("Email Verification with Mock Service", () => {
 
             expect(verifyRequest.success).to.be.true;
             expect(verifyRequest.requiresPassword).to.be.false; // Existing user
-            console.log(`✅ Result: success=${verifyRequest.success}, requiresPassword=${verifyRequest.requiresPassword}`);
+            expect(verifyRequest.isExistingUser).to.be.true; // Existing user
+            console.log(`✅ Result: success=${verifyRequest.success}, requiresPassword=${verifyRequest.requiresPassword}, isExistingUser=${verifyRequest.isExistingUser}`);
 
             console.log("\n🔹 Step 2: Retrieve captured verification code");
             const code = await adminAd4mClient!.runtime.emailTestGetCode(existingEmail);

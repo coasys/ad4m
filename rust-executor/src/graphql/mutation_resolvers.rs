@@ -829,6 +829,7 @@ impl Mutation {
                 success: false,
                 message: "Multi-user mode is not enabled".to_string(),
                 requires_password: false,
+                is_existing_user: false,
             });
         }
 
@@ -847,6 +848,7 @@ impl Mutation {
                     success: false,
                     message: e.to_string(),
                     requires_password: false,
+                    is_existing_user: false,
                 });
             }
             // Update rate limit immediately after check to prevent bypass via email failures.
@@ -858,6 +860,7 @@ impl Mutation {
                     success: false,
                     message: "Failed to update rate limit, please try again later".to_string(),
                     requires_password: false,
+                    is_existing_user: false,
                 });
             }
         }
@@ -875,6 +878,7 @@ impl Mutation {
                 success: true,
                 message: "New user - please provide a password to sign up".to_string(),
                 requires_password: true,
+                is_existing_user: false,
             });
         }
 
@@ -933,6 +937,7 @@ impl Mutation {
                 message: "Email verification is not available. Please login with your password."
                     .to_string(),
                 requires_password: true,
+                is_existing_user: true,
             });
         };
 
@@ -958,6 +963,7 @@ impl Mutation {
             success: true,
             message: "Verification email sent".to_string(),
             requires_password: false,
+            is_existing_user: true,
         })
     }
 

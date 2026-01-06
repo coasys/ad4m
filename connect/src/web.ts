@@ -685,11 +685,10 @@ export class Ad4mConnectElement extends LitElement {
         this._multiUserStep = "code";
         this._multiUserVerificationType = "login";
       } else if (result.requiresPassword) {
-        // Check if this is for login (SMTP not configured) or signup (new user)
-        // If message indicates SMTP not configured, it's login; otherwise it's signup
-        const isLogin = result.message && result.message.includes("Email verification is not available");
+        // Determine if this is login or signup based on whether user exists
+        // If isExistingUser is true, show password for login; otherwise for signup
         this._multiUserStep = "password";
-        this._multiUserVerificationType = isLogin ? "login" : "signup";
+        this._multiUserVerificationType = result.isExistingUser ? "login" : "signup";
       } else {
         this._multiUserError = result.message || "Failed to send verification email";
       }

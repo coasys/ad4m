@@ -568,6 +568,7 @@ export class AgentClient {
             success
             message
             requiresPassword
+            isExistingUser
           }
         }`,
         variables: { email, appInfo },
