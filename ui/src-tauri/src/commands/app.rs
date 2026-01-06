@@ -1,5 +1,7 @@
 extern crate remove_dir_all;
-use crate::app_state::{AgentConfigDir, LauncherState, MultiUserConfig, SmtpConfig, SmtpConfigDto, TlsConfig};
+use crate::app_state::{
+    AgentConfigDir, LauncherState, MultiUserConfig, SmtpConfig, SmtpConfigDto, TlsConfig,
+};
 use crate::util::create_tray_message_windows;
 use crate::{config::data_path, get_main_window};
 use rust_executor::logging::{build_rust_log_from_config, get_default_log_config, LogLevel};
@@ -306,7 +308,10 @@ pub async fn test_smtp_config(config: SmtpConfigDto, test_email: String) -> Resu
 #[tauri::command]
 pub fn get_smtp_config() -> Option<SmtpConfigDto> {
     let state = LauncherState::load().ok()?;
-    state.multi_user_config?.smtp_config.map(|config| SmtpConfigDto::from(&config))
+    state
+        .multi_user_config?
+        .smtp_config
+        .map(|config| SmtpConfigDto::from(&config))
 }
 
 #[tauri::command]
