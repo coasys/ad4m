@@ -45,7 +45,10 @@ impl fmt::Debug for SmtpConfig {
             .field("username", &self.username)
             .field("password", &"<redacted>")
             .field("from_address", &self.from_address)
-            .field("password_encrypted", &self.password_encrypted.as_ref().map(|_| "<redacted>"))
+            .field(
+                "password_encrypted",
+                &self.password_encrypted.as_ref().map(|_| "<redacted>"),
+            )
             .field("password_migrated", &self.password_migrated)
             .finish()
     }
