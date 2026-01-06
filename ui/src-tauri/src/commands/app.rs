@@ -238,58 +238,6 @@ pub fn set_tls_config(config: TlsConfig) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn get_multi_user_config() -> Option<MultiUserConfig> {
-    let state = LauncherState::load().ok()?;
-    state.multi_user_config
-}
-
-#[tauri::command]
-pub fn set_multi_user_config(config: MultiUserConfig) -> Result<(), String> {
-    // Validate SMTP config if provided
-    if let Some(smtp_config) = &config.smtp_config {
-        if smtp_config.host.is_empty() {
-            return Err("SMTP host cannot be empty".to_string());
-        }
-        if smtp_config.username.is_empty() {
-            return Err("SMTP username cannot be empty".to_string());
-        }
-        if smtp_config.from_address.is_empty() {
-            return Err("SMTP from address cannot be empty".to_string());
-        }
-        // TODO: Validate email format
-    }
-
-    // Validate TLS config if provided
-    if let Some(tls_config) = &config.tls_config {
-        if tls_config.enabled {
-            if !std::path::Path::new(&tls_config.cert_file_path).exists() {
-                return Err(format!(
-                    "Certificate file not found: {}",
-                    tls_config.cert_file_path
-                ));
-            }
-            if !std::path::Path::new(&tls_config.key_file_path).exists() {
-                return Err(format!("Key file not found: {}", tls_config.key_file_path));
-            }
-        }
-    }
-
-    // Load current state
-    let mut state =
-        LauncherState::load().map_err(|e| format!("Failed to load launcher state: {}", e))?;
-
-    // Update multi-user config
-    state.multi_user_config = Some(config);
-
-    // Save updated state
-    state
-        .save()
-        .map_err(|e| format!("Failed to save launcher state: {}", e))?;
-
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn test_smtp_config(config: SmtpConfigDto, test_email: String) -> Result<bool, String> {
     use lettre::transport::smtp::authentication::Credentials;
     use lettre::{Message, SmtpTransport, Transport};

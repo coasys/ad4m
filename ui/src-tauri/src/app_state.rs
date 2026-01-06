@@ -75,11 +75,13 @@ impl SmtpConfig {
     }
 
     /// Get the plain password
+    #[allow(dead_code)]
     pub fn get_password(&self) -> &str {
         &self.password
     }
 
     /// Set the plain password
+    #[allow(dead_code)]
     pub fn set_password(&mut self, password: String) {
         self.password = password;
         self.password_encrypted = None; // Clear encrypted version to force re-encryption
