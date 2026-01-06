@@ -117,10 +117,10 @@ export default function MultiUserAuth({
     return html`
       <div class="items">
         <div class="text-center">
-          <h3 class="heading">Create your account</h3>
+          <h3 class="heading">${verificationType === "signup" ? "Create your account" : "Sign in to your account"}</h3>
           <p class="body">Email: <strong>${email}</strong></p>
           <p class="body" style="margin-top: 10px;">
-            Choose a password to create your account
+            ${verificationType === "signup" ? "Choose a password to create your account" : "Enter your password to sign in"}
           </p>
         </div>
 
@@ -139,7 +139,7 @@ export default function MultiUserAuth({
               id="password"
               type="password"
               class="input__field"
-              placeholder="Enter a strong password"
+              placeholder="${verificationType === "signup" ? "Enter a strong password" : "Enter your password"}"
               .value=${password}
               @input=${(e: Event) =>
                 changePassword((e.target as HTMLInputElement).value)}
@@ -160,7 +160,12 @@ export default function MultiUserAuth({
             @click=${onPasswordSubmit}
             ?disabled=${isLoading || !password}
           >
-            ${isLoading ? "Creating account..." : "Create Account"}
+            ${verificationType === "signup" ? 
+              isLoading ? "Creating account..." : "Create Account"
+              : 
+              isLoading ? "Signing in..." : "Sign In"
+            }
+            
           </button>
         </div>
 
