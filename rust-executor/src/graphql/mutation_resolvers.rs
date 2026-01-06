@@ -780,9 +780,17 @@ impl Mutation {
                     requires_password: false,
                 });
             }
-            // Update rate limit immediately after check to prevent bypass via email failures
-            // This ensures the rate limit is consumed even if email sending fails
-            db_ref.update_rate_limit(&email).ok();
+            // Update rate limit immediately after check to prevent bypass via email failures.
+            // If we fail to persist the rate limit, log and return an error so callers
+            // cannot bypass rate limiting by triggering DB write failures.
+            if let Err(e) = db_ref.update_rate_limit(&email) {
+                log::error!("Failed to update email rate limit for {}: {}", email, e);
+                return Ok(VerificationRequestResult {
+                    success: false,
+                    message: "Failed to update rate limit, please try again later".to_string(),
+                    requires_password: false,
+                });
+            }
         }
 
         // Check if user exists
