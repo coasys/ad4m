@@ -505,6 +505,9 @@ export class Ad4mConnectElement extends LitElement {
   @state()
   private _multiUserLoading = false;
 
+  // Timeout reference for auto-submit when 6 digits are entered
+  private _codeSubmitTimeout: ReturnType<typeof setTimeout> | null = null;
+
   @state()
   private _multiUserStep: "email" | "password" | "code" = "email";
 
@@ -788,6 +791,17 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private async handleMultiUserCodeSubmit() {
+    // Guard against duplicate calls - if already loading, ignore this request
+    if (this._multiUserLoading) {
+      return;
+    }
+
+    // Cancel any pending auto-submit timeout since we're submitting now
+    if (this._codeSubmitTimeout !== null) {
+      clearTimeout(this._codeSubmitTimeout);
+      this._codeSubmitTimeout = null;
+    }
+
     try {
       this._multiUserLoading = true;
       this._multiUserError = null;
@@ -825,6 +839,11 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private handleMultiUserBackToEmail() {
+    // Cancel any pending auto-submit timeout
+    if (this._codeSubmitTimeout !== null) {
+      clearTimeout(this._codeSubmitTimeout);
+      this._codeSubmitTimeout = null;
+    }
     this._multiUserStep = "email";
     this._multiUserPassword = "";
     this._multiUserVerificationCode = "";
@@ -842,8 +861,25 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private changeMultiUserVerificationCode(code: string) {
+    // Cancel any pending auto-submit timeout
+    if (this._codeSubmitTimeout !== null) {
+      clearTimeout(this._codeSubmitTimeout);
+      this._codeSubmitTimeout = null;
+    }
+
     this._multiUserVerificationCode = code;
     this._multiUserError = null; // Clear error when user types
+
+    // Auto-submit when 6 digits entered (with debounce to prevent race conditions)
+    if (code.length === 6 && !this._multiUserLoading) {
+      this._codeSubmitTimeout = setTimeout(() => {
+        this._codeSubmitTimeout = null;
+        // Only submit if still 6 digits and not already loading
+        if (this._multiUserVerificationCode.length === 6 && !this._multiUserLoading) {
+          this.handleMultiUserCodeSubmit();
+        }
+      }, 100);
+    }
   }
 
   private async detectLocal() {

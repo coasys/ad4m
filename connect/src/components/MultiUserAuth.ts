@@ -232,10 +232,8 @@ export default function MultiUserAuth({
                 // Only allow digits
                 const cleaned = input.value.replace(/\D/g, "");
                 changeVerificationCode(cleaned);
-                // Auto-submit when 6 digits entered
-                if (cleaned.length === 6) {
-                  setTimeout(() => onCodeSubmit(), 100);
-                }
+                // Auto-submit is handled in changeVerificationCode callback
+                // to properly manage timeout cancellation
               }}
               ?disabled=${isLoading}
               autofocus
