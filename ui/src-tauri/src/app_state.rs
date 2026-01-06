@@ -2,6 +2,7 @@ use crate::encryption::{decrypt_password, encrypt_password};
 use dirs::home_dir;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
+use std::fmt;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::prelude::*;
 use std::path::PathBuf;
@@ -23,7 +24,7 @@ pub struct TlsConfig {
     pub tls_port: Option<u16>, // Port for HTTPS/WSS server (defaults to main_port + 1)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SmtpConfig {
     pub host: String,
     pub port: u16,
@@ -32,6 +33,22 @@ pub struct SmtpConfig {
     pub from_address: String,
     #[allow(dead_code)]
     password_encrypted: Option<String>, // Internal: encrypted password for serialization
+    #[allow(dead_code)]
+    password_migrated: bool, // True if password was loaded as plaintext (migration case)
+}
+
+impl fmt::Debug for SmtpConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SmtpConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("from_address", &self.from_address)
+            .field("password_encrypted", &self.password_encrypted.as_ref().map(|_| "<redacted>"))
+            .field("password_migrated", &self.password_migrated)
+            .finish()
+    }
 }
 
 impl SmtpConfig {
@@ -50,6 +67,7 @@ impl SmtpConfig {
             password,
             from_address,
             password_encrypted: None,
+            password_migrated: false,
         }
     }
 
@@ -62,6 +80,7 @@ impl SmtpConfig {
     pub fn set_password(&mut self, password: String) {
         self.password = password;
         self.password_encrypted = None; // Clear encrypted version to force re-encryption
+        self.password_migrated = false; // Reset migration flag when password is set
     }
 }
 
@@ -105,12 +124,19 @@ impl<'de> Deserialize<'de> for SmtpConfig {
         // Try to decrypt the password
         // If decryption fails, assume it's plain text (backwards compatibility)
         let encrypted_password = helper.password.clone();
-        let plain_password = match decrypt_password(&helper.password) {
-            Ok(decrypted) => decrypted,
-            Err(_) => {
+        let (plain_password, password_migrated) = match decrypt_password(&helper.password) {
+            Ok(decrypted) => (decrypted, false),
+            Err(e) => {
                 // If decryption fails, assume it's plain text (for backwards compatibility)
                 // This allows migration from unencrypted to encrypted storage
-                helper.password
+                log::warn!(
+                    "SMTP password decryption failed for user '{}' on host '{}': {}. \
+                     Treating as plaintext for backwards compatibility migration.",
+                    helper.username,
+                    helper.host,
+                    e
+                );
+                (helper.password, true)
             }
         };
 
@@ -120,7 +146,12 @@ impl<'de> Deserialize<'de> for SmtpConfig {
             username: helper.username,
             password: plain_password,
             from_address: helper.from_address,
-            password_encrypted: Some(encrypted_password), // Store encrypted version
+            password_encrypted: if password_migrated {
+                None // Don't store encrypted version if it was plaintext
+            } else {
+                Some(encrypted_password) // Store encrypted version
+            },
+            password_migrated,
         })
     }
 }
