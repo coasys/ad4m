@@ -565,6 +565,44 @@ impl Mutation {
             // Don't fail the user creation, just log the warning
         }
 
+        // Check if test mode is enabled (we check this early to use in rate limiting)
+        let test_mode = crate::email_service::EMAIL_TEST_MODE
+            .lock()
+            .ok()
+            .map(|mode| *mode)
+            .unwrap_or(false);
+
+        // Apply rate limiting before generating verification code (but skip in test mode)
+        // This prevents abuse by repeatedly creating accounts to spam the email server
+        if !test_mode {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+
+            if let Err(e) = db_ref.check_rate_limit(&email) {
+                log::warn!("Rate limit exceeded for signup verification: {}", e);
+                return Ok(UserCreationResult {
+                    did,
+                    success: true,
+                    error: Some(format!(
+                        "User created successfully but verification email was not sent due to rate limiting: {}",
+                        e
+                    )),
+                });
+            }
+
+            // Update rate limit immediately after check to prevent bypass
+            if let Err(e) = db_ref.update_rate_limit(&email) {
+                log::error!("Failed to update email rate limit for {}: {}", email, e);
+                return Ok(UserCreationResult {
+                    did,
+                    success: true,
+                    error: Some(
+                        "User created successfully but failed to update rate limit".to_string(),
+                    ),
+                });
+            }
+        }
+
         // Generate verification code and send email
         let code = {
             let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
@@ -584,13 +622,6 @@ impl Mutation {
         let app_icon = app_info
             .as_ref()
             .and_then(|info| info.app_icon_path.clone());
-
-        // Check if test mode is enabled
-        let test_mode = crate::email_service::EMAIL_TEST_MODE
-            .lock()
-            .ok()
-            .map(|mode| *mode)
-            .unwrap_or(false);
 
         // Get SMTP config if available OR if test mode is enabled
         let smtp_config_opt = crate::config::SMTP_CONFIG
@@ -624,6 +655,21 @@ impl Mutation {
                 .await
             {
                 log::warn!("Failed to send verification email to {}: {}", email, e);
+
+                // Clean up the verification code since email delivery failed
+                // (but not in test mode, where codes need to be preserved for testing)
+                if !test_mode {
+                    let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+                    let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+                    if let Err(cleanup_err) = db_ref.delete_verification_code(&email, "signup") {
+                        log::error!(
+                            "Failed to cleanup verification code for {} after email failure: {}",
+                            email,
+                            cleanup_err
+                        );
+                    }
+                }
+
                 // Don't fail user creation if email sending fails
                 return Ok(UserCreationResult {
                     did,
@@ -635,13 +681,27 @@ impl Mutation {
                 });
             }
 
-            // Note: We intentionally do NOT update rate limit for signup emails
-            // Rate limiting only applies to login verification requests
+            // Note: Rate limiting for signup is now applied earlier (before verification code creation)
+            // to prevent abuse of the signup endpoint
         } else {
             log::warn!(
                 "SMTP not configured - skipping verification email for {}",
                 email
             );
+
+            // Clean up the verification code since SMTP is not configured
+            {
+                let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+                let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+                if let Err(cleanup_err) = db_ref.delete_verification_code(&email, "signup") {
+                    log::error!(
+                        "Failed to cleanup verification code for {} when SMTP unconfigured: {}",
+                        email,
+                        cleanup_err
+                    );
+                }
+            }
+
             // Return error message when SMTP is not configured (similar to email failure case)
             // Note: User can still login with password - email verification is optional
             return Ok(UserCreationResult {
@@ -938,10 +998,7 @@ impl Mutation {
                 Ok(valid) => valid,
                 Err(e) => {
                     // Code was invalidated due to too many failed attempts
-                    return Err(FieldError::new(
-                        e.to_string(),
-                        graphql_value!(null),
-                    ));
+                    return Err(FieldError::new(e.to_string(), graphql_value!(null)));
                 }
             }
         };

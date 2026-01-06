@@ -2555,6 +2555,21 @@ impl Ad4mDb {
         Ok(())
     }
 
+    /// Deletes a specific verification code for an email and type
+    /// Used for cleanup when email sending fails or SMTP is unconfigured
+    pub fn delete_verification_code(
+        &self,
+        email: &str,
+        verification_type: &str,
+    ) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+            params![email, verification_type],
+        )?;
+
+        Ok(())
+    }
+
     /// Check if a verification code exists for the given email (for any verification type)
     /// Returns true if an active (non-expired, non-verified) code exists
     pub fn has_verification_code(&self, email: &str) -> Ad4mDbResult<bool> {
