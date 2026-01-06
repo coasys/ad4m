@@ -932,6 +932,20 @@ impl Mutation {
                 "SMTP not configured - requiring password login for {}",
                 email
             );
+
+            // Clean up the verification code since SMTP is not configured
+            {
+                let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+                let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+                if let Err(cleanup_err) = db_ref.delete_verification_code(&email, "login") {
+                    log::error!(
+                        "Failed to cleanup verification code for {} when SMTP unconfigured: {}",
+                        email,
+                        cleanup_err
+                    );
+                }
+            }
+
             return Ok(VerificationRequestResult {
                 success: true,
                 message: "Email verification is not available. Please login with your password."
@@ -943,7 +957,7 @@ impl Mutation {
 
         // Send verification email
         let email_service = crate::email_service::EmailService::new(smtp_config);
-        email_service
+        if let Err(e) = email_service
             .send_verification_email(
                 &email,
                 &code,
@@ -952,12 +966,28 @@ impl Mutation {
                 app_icon.as_deref(),
             )
             .await
-            .map_err(|e| {
-                FieldError::new(
-                    format!("Failed to send verification email: {}", e),
-                    graphql_value!(null),
-                )
-            })?;
+        {
+            log::warn!("Failed to send verification email to {}: {}", email, e);
+
+            // Clean up the verification code since email delivery failed
+            // (but not in test mode, where codes need to be preserved for testing)
+            if !test_mode {
+                let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+                let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+                if let Err(cleanup_err) = db_ref.delete_verification_code(&email, "login") {
+                    log::error!(
+                        "Failed to cleanup verification code for {} after email failure: {}",
+                        email,
+                        cleanup_err
+                    );
+                }
+            }
+
+            return Err(FieldError::new(
+                format!("Failed to send verification email: {}", e),
+                graphql_value!(null),
+            ));
+        }
 
         Ok(VerificationRequestResult {
             success: true,
