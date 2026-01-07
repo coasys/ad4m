@@ -808,7 +808,8 @@ impl PerspectiveInstance {
                 .collect(),
         };
 
-        self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+        // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
+        // self.spawn_prolog_facts_update(decorated_diff.clone(), None);
         self.update_surreal_cache(&decorated_diff).await;
         self.pubsub_publish_diff(decorated_diff).await;
     }
@@ -913,7 +914,8 @@ impl PerspectiveInstance {
                 let decorated_diff =
                     DecoratedPerspectiveDiff::from_removals(vec![decorated_link.clone()]);
 
-                self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+                // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
+                // self.spawn_prolog_facts_update(decorated_diff.clone(), None);
                 self.update_surreal_cache(&decorated_diff).await;
                 self.pubsub_publish_diff(decorated_diff.clone()).await;
 
@@ -1036,7 +1038,8 @@ impl PerspectiveInstance {
         let decorated_perspective_diff =
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
-        self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
+        // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
+        // self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
         self.update_surreal_cache(&decorated_perspective_diff).await;
 
         if status == LinkStatus::Shared {
@@ -1213,7 +1216,8 @@ impl PerspectiveInstance {
                 vec![decorated_old_link.clone()],
             );
 
-            self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+            // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
+            // self.spawn_prolog_facts_update(decorated_diff.clone(), None);
             self.update_surreal_cache(&decorated_diff).await;
 
             // Publish link updated events - one per owner for proper multi-user isolation
@@ -1317,7 +1321,8 @@ impl PerspectiveInstance {
                 Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, link))?;
             }
 
-            self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+            // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
+            // self.spawn_prolog_facts_update(decorated_diff.clone(), None);
             self.update_surreal_cache(&decorated_diff).await;
             self.pubsub_publish_diff(decorated_diff).await;
 
@@ -3738,7 +3743,8 @@ impl PerspectiveInstance {
             //    combined_diff.additions.len(), combined_diff.removals.len());
 
             // Update prolog facts once for all changes and wait for completion
-            self.spawn_prolog_facts_update(combined_diff.clone(), None);
+            // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
+            // self.spawn_prolog_facts_update(combined_diff.clone(), None);
             self.update_surreal_cache(&combined_diff).await;
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
