@@ -50,11 +50,28 @@ static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;
 static IMMEDIATE_COMMITS_COUNT: usize = 20;
-static QUERY_SUBSCRIPTION_TIMEOUT: u64 = 300; // 5 minutes in seconds
+static QUERY_SUBSCRIPTION_TIMEOUT: u64 = 60; // 1 minute in seconds (was 5 min)
 static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
+static MAX_SUBSCRIPTION_RESULT_SIZE: usize = 100_000; // Max 100KB per subscription result
 
 fn notification_pool_name(uuid: &str) -> String {
     format!("notification_{}", uuid)
+}
+
+/// Truncate a string to prevent excessive memory usage in subscription results
+fn truncate_subscription_result(s: String) -> String {
+    if s.len() > MAX_SUBSCRIPTION_RESULT_SIZE {
+        log::warn!(
+            "Subscription result truncated from {} to {} bytes",
+            s.len(),
+            MAX_SUBSCRIPTION_RESULT_SIZE
+        );
+        let mut truncated = s.chars().take(MAX_SUBSCRIPTION_RESULT_SIZE).collect::<String>();
+        truncated.push_str("...[TRUNCATED]");
+        truncated
+    } else {
+        s
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -3316,19 +3333,20 @@ impl PerspectiveInstance {
         let mut query_futures = Vec::new();
         let now = Instant::now();
 
-        // First collect all the queries and their IDs
+        // Collect only the minimal data needed: ID, query string, and keepalive time
+        // DON'T clone the potentially huge last_result string
         let queries = {
             let queries_guard = self.surreal_subscribed_queries.lock().await;
             queries_guard
                 .iter()
-                .map(|(id, query)| (id.clone(), query.clone()))
+                .map(|(id, query)| (id.clone(), query.query.clone(), query.last_keepalive))
                 .collect::<Vec<_>>()
         };
 
         // Create futures for each query check
-        for (id, query) in queries {
+        for (id, query_string, last_keepalive) in queries {
             // Check for timeout
-            if now.duration_since(query.last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
+            if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
                 queries_to_remove.push(id);
                 continue;
             }
@@ -3336,12 +3354,15 @@ impl PerspectiveInstance {
             // Spawn query check future
             let self_clone = self.clone();
             let query_future = async move {
-                match self_clone.surreal_query(query.query.clone()).await {
+                match self_clone.surreal_query(query_string).await {
                     Ok(result_vec) => {
                         if let Ok(result_string) = serde_json::to_string(&result_vec) {
-                            if result_string != query.last_result {
-                                // Update the query result and send notification immediately
-                                {
+                            // Compare with stored last_result only now, avoiding the clone earlier
+                            let mut queries = self_clone.surreal_subscribed_queries.lock().await;
+                            if let Some(stored_query) = queries.get_mut(&id) {
+                                if result_string != stored_query.last_result {
+                                    // Release lock before sending update
+                                    drop(queries);
                                     self_clone
                                         .send_subscription_update(
                                             id.clone(),
@@ -3349,10 +3370,10 @@ impl PerspectiveInstance {
                                             None,
                                         )
                                         .await;
-                                    let mut queries =
-                                        self_clone.surreal_subscribed_queries.lock().await;
+                                    // Re-acquire lock to update and truncate the result to save memory
+                                    let mut queries = self_clone.surreal_subscribed_queries.lock().await;
                                     if let Some(stored_query) = queries.get_mut(&id) {
-                                        stored_query.last_result = result_string.clone();
+                                        stored_query.last_result = truncate_subscription_result(result_string);
                                     }
                                 }
                             }
@@ -3389,19 +3410,20 @@ impl PerspectiveInstance {
         let mut query_futures = Vec::new();
         let now = Instant::now();
 
-        // First collect all the queries and their IDs
+        // Collect only the minimal data needed: ID, query string, and keepalive time
+        // DON'T clone the potentially huge last_result string
         let queries = {
             let queries = self.subscribed_queries.lock().await;
             queries
                 .iter()
-                .map(|(id, query)| (id.clone(), query.clone()))
+                .map(|(id, query)| (id.clone(), query.query.clone(), query.last_keepalive))
                 .collect::<Vec<_>>()
         };
 
         // Create futures for each query check
-        for (id, query) in queries {
+        for (id, query_string, last_keepalive) in queries {
             // Check for timeout
-            if now.duration_since(query.last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
+            if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
                 queries_to_remove.push(id);
                 continue;
             }
@@ -3411,20 +3433,24 @@ impl PerspectiveInstance {
             let query_future = async move {
                 //let this_now = Instant::now();
                 if let Ok(result) = self_clone
-                    .prolog_query_subscription(query.query.clone())
+                    .prolog_query_subscription(query_string)
                     .await
                 {
                     let result_string = prolog_resolution_to_string(result);
-                    if result_string != query.last_result {
-                        //log::info!("Query {} has changed: {}", id, result_string);
-                        // Update the query result and send notification immediately
-                        {
+                    // Compare with stored last_result only now, avoiding the clone earlier
+                    let mut queries = self_clone.subscribed_queries.lock().await;
+                    if let Some(stored_query) = queries.get_mut(&id) {
+                        if result_string != stored_query.last_result {
+                            //log::info!("Query {} has changed: {}", id, result_string);
+                            // Release lock before sending update
+                            drop(queries);
                             self_clone
                                 .send_subscription_update(id.clone(), result_string.clone(), None)
                                 .await;
+                            // Re-acquire lock to update and truncate the result to save memory
                             let mut queries = self_clone.subscribed_queries.lock().await;
                             if let Some(stored_query) = queries.get_mut(&id) {
-                                stored_query.last_result = result_string.clone();
+                                stored_query.last_result = truncate_subscription_result(result_string);
                             }
                         }
                     }
