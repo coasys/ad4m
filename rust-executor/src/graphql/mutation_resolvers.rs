@@ -1160,6 +1160,11 @@ impl Mutation {
         // Check capability - admin only
         check_capability(&context.capabilities, &ALL_CAPABILITY)?;
 
+        // Normalize email: trim whitespace and convert to lowercase
+        // This ensures consistency with how emails are stored by runtime_create_user
+        // and runtime_request_login_verification
+        let email = email.trim().to_lowercase();
+
         Ok(crate::email_service::get_test_code(&email))
     }
 
@@ -1186,6 +1191,11 @@ impl Mutation {
 
         // Check capability - admin only
         check_capability(&context.capabilities, &ALL_CAPABILITY)?;
+
+        // Normalize email: trim whitespace and convert to lowercase
+        // This ensures consistency with how emails are stored by runtime_create_user
+        // and runtime_request_login_verification
+        let email = email.trim().to_lowercase();
 
         let db = Ad4mDb::global_instance();
         let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
