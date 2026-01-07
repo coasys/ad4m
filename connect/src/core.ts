@@ -71,6 +71,11 @@ export default class Ad4mConnect {
     ["configstatechange"]: [],
     ["connectionstatechange"]: [],
   };
+  
+  // Embedded mode support
+  private embeddedMode: boolean = false;
+  private embeddedResolve?: (client: Ad4mClient) => void;
+  private embeddedReject?: (error: Error) => void;
 
   // @fayeed - params
   constructor(options: Ad4mConnectOptions) {
@@ -83,12 +88,89 @@ export default class Ad4mConnect {
     this.appUrl = options.appUrl;
     this.appIconPath = options.appIconPath;
     this.capabilities = options.capabilities;
-    this.port = options.port || this.port;
-    this.url = options.url || `ws://localhost:${this.port}/graphql`;
-    this.token = options.token || this.token;
+    
+    // Check if running in embedded mode first
+    this.embeddedMode = this.isEmbedded();
+    
+    if (this.embeddedMode) {
+      // In embedded mode, ignore localStorage/options - wait for parent to send config
+      // This prevents using stale tokens from previous sessions
+      this.port = DEFAULT_PORT;
+      this.url = '';
+      this.token = '';
+      this.initializeEmbeddedMode();
+    } else {
+      // In standalone mode, use provided options
+      this.port = options.port || this.port;
+      this.url = options.url || `ws://localhost:${this.port}/graphql`;
+      this.token = options.token || this.token;
+    }
+    
     this.isHosting = options.hosting || false;
     // Don't auto-connect - let the UI decide when to connect
     // this.buildClient();
+  }
+  
+  /**
+   * Detect if running in an iframe (embedded mode)
+   */
+  isEmbedded(): boolean {
+    return typeof window !== 'undefined' && window.self !== window.top;
+  }
+  
+  /**
+   * Initialize embedded mode - set up postMessage protocol
+   */
+  private initializeEmbeddedMode(): void {
+    console.log('[Ad4m Connect] Running in embedded mode - waiting for AD4M config from parent');
+    
+    // Set up listener for AD4M_CONFIG from parent window
+    window.addEventListener('message', async (event: MessageEvent) => {
+      if (event.data?.type === 'AD4M_CONFIG') {
+        console.log('[Ad4m Connect] Received AD4M_CONFIG from parent:', { 
+          port: event.data.port,
+          hasToken: !!event.data.token 
+        });
+        
+        try {
+          const { port, token } = event.data;
+          
+          // Set connection details from parent
+          this.port = port;
+          this.token = token;
+          this.url = `ws://localhost:${port}/graphql`;
+          
+          // Store in localStorage for persistence
+          setForVersion('ad4mport', port.toString());
+          setForVersion('ad4mtoken', token);
+          setForVersion('ad4murl', this.url);
+          
+          // Build the client with received credentials
+          const client = this.buildClient();
+          
+          // Check auth status
+          await this.checkAuth();
+          
+          // Resolve any pending connect() promises
+          if (this.embeddedResolve) {
+            this.embeddedResolve(client);
+            this.embeddedResolve = undefined;
+            this.embeddedReject = undefined;
+          }
+        } catch (error) {
+          console.error('[Ad4m Connect] Failed to initialize from AD4M_CONFIG:', error);
+          if (this.embeddedReject) {
+            this.embeddedReject(error as Error);
+            this.embeddedResolve = undefined;
+            this.embeddedReject = undefined;
+          }
+        }
+      }
+    });
+    
+    // Request AD4M config from parent window
+    console.log('[Ad4m Connect] Requesting AD4M config from parent window');
+    window.parent.postMessage({ type: 'REQUEST_AD4M_CONFIG' }, '*');
   }
 
   private notifyConfigChange(val: ConfigStates, data: string | number) {
@@ -167,6 +249,38 @@ export default class Ad4mConnect {
 
   // If url is explicit , don't search for open ports
   async connect(url?: string): Promise<Ad4mClient> {
+    // In embedded mode, wait for postMessage from parent instead of connecting
+    if (this.embeddedMode) {
+      console.log('[Ad4m Connect] Embedded mode - waiting for AD4M config via postMessage');
+      
+      return new Promise((resolve, reject) => {
+        // Set up timeout
+        const timeout = setTimeout(() => {
+          reject(new Error('Timeout waiting for AD4M config from parent window'));
+        }, 30000); // 30 second timeout
+        
+        // Store resolvers to call when AD4M_CONFIG arrives
+        this.embeddedResolve = (client: Ad4mClient) => {
+          clearTimeout(timeout);
+          console.log('[Ad4m Connect] Successfully connected in embedded mode');
+          resolve(client);
+        };
+        
+        this.embeddedReject = (error: Error) => {
+          clearTimeout(timeout);
+          reject(error);
+        };
+        
+        // If we already have a client (message arrived before connect() was called)
+        if (this.ad4mClient && this.authState === 'authenticated') {
+          clearTimeout(timeout);
+          console.log('[Ad4m Connect] Client already initialized in embedded mode');
+          resolve(this.ad4mClient);
+        }
+      });
+    }
+    
+    // Standalone mode - normal connection logic
     try {
       if (url) {
         await connectWebSocket(url);

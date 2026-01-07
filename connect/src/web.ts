@@ -623,6 +623,19 @@ export class Ad4mConnectElement extends LitElement {
       hosting: this.hosting,
     });
 
+    // Don't show UI if running in embedded mode - core will handle connection
+    if (this._client.isEmbedded()) {
+      console.log('[Ad4m Connect UI] Running in embedded mode - UI will not be shown');
+      this._isOpen = false;
+      
+      // Still set up event listeners so app can track state
+      this._client.on("configstatechange", this.handleConfigChange);
+      this._client.on("authstatechange", this.handleAuthChange);
+      this._client.on("connectionstatechange", this.handleConnectionChange);
+      
+      return; // Skip rest of UI initialization
+    }
+
     this._client.on("configstatechange", this.handleConfigChange);
     this._client.on("authstatechange", this.handleAuthChange);
     this._client.on("connectionstatechange", this.handleConnectionChange);
