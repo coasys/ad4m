@@ -54,10 +54,11 @@ pub struct AIService {
     llm_channel: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<LLMTaskRequest>>>>,
     transcription_streams: Arc<Mutex<HashMap<String, TranscriptionSession>>>,
     cleanup_task_shutdown: Arc<std::sync::Mutex<Option<oneshot::Sender<()>>>>,
-    /// Shared Whisper model - ONE model shared across ALL transcription streams via Arc
+    /// Shared Whisper models - ONE model per size, shared across ALL streams using that size
+    /// Key = WhisperSource (Tiny/Small/Medium/Large), Value = Arc<Whisper>
     /// Cloning Arc is cheap (just increments ref count), model weights stay in memory once
     /// Saves 500MB-1.5GB per stream!
-    shared_whisper: Arc<Mutex<Option<Arc<Whisper>>>>,
+    shared_whisper_models: Arc<Mutex<HashMap<String, Arc<Whisper>>>>,
 }
 
 impl Drop for AIService {
@@ -226,7 +227,7 @@ impl AIService {
             llm_channel: Arc::new(Mutex::new(HashMap::new())),
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
             cleanup_task_shutdown: Arc::new(std::sync::Mutex::new(None)),
-            shared_whisper: Arc::new(Mutex::new(None)), // Will be loaded on first transcription stream
+            shared_whisper_models: Arc::new(Mutex::new(HashMap::new())), // Models loaded on demand per size
         };
 
         let clone = service.clone();
@@ -1115,15 +1116,17 @@ impl AIService {
     ) -> Result<String> {
         let model_size = Self::get_whisper_model_size(model_id.clone())?;
 
-        // MEMORY OPTIMIZATION: Load the Whisper model ONCE and share it across all streams
+        // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
         // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
         let whisper_model = {
-            let mut shared_whisper = self.shared_whisper.lock().await;
+            let mut shared_models = self.shared_whisper_models.lock().await;
+            let model_key = format!("{:?}", model_size); // Use Debug format as key (e.g., "Small", "Medium")
 
-            if shared_whisper.is_none() {
+            if !shared_models.contains_key(&model_key) {
                 log::info!(
-                    "Loading shared Whisper model {} (ONE model for ALL streams, ~500MB-1.5GB)...",
-                    model_id
+                    "Loading shared Whisper model {} ({:?}) (ONE model per size, ~500MB-1.5GB)...",
+                    model_id,
+                    model_size
                 );
 
                 let model = WhisperBuilder::default()
@@ -1132,15 +1135,23 @@ impl AIService {
                     .build()
                     .await?;
 
-                log::info!("Shared Whisper model loaded! All transcription streams will reuse this model.");
-                *shared_whisper = Some(Arc::new(model));
+                log::info!(
+                    "Shared Whisper model {:?} loaded! All streams using this size will reuse this model.",
+                    model_size
+                );
+                shared_models.insert(model_key.clone(), Arc::new(model));
+            } else {
+                log::info!(
+                    "Reusing existing shared Whisper model {:?} for new stream",
+                    model_size
+                );
             }
 
             // Clone the Arc - this is CHEAP! Just increments a reference count
-            shared_whisper.clone().unwrap()
+            shared_models.get(&model_key).unwrap().clone()
         };
 
-        log::info!("Opening transcription stream (reusing shared Whisper model)");
+        log::info!("Opening transcription stream with model {:?}", model_size);
 
         let stream_id = uuid::Uuid::new_v4().to_string();
         let stream_id_clone = stream_id.clone();
