@@ -2,6 +2,7 @@
 extern crate lazy_static;
 
 pub mod config;
+pub mod email_service;
 pub mod entanglement_service;
 mod globals;
 pub mod graphql;
@@ -116,6 +117,18 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     info!("Initializing Agent service...");
     AgentService::init_global_instance(config.app_data_path.clone().unwrap());
+
+    // Spawn background task to clean up expired verification codes every 5 minutes
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+            if let Err(e) = Ad4mDb::with_global_instance(|db| db.cleanup_expired_codes()) {
+                error!("Failed to cleanup expired verification codes: {}", e);
+            } else {
+                info!("Cleaned up expired verification codes");
+            }
+        }
+    });
 
     info!("Initializing Runtime service...");
     RuntimeService::init_global_instance(

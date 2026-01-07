@@ -33,6 +33,7 @@ use uuid::Uuid;
 mod app_state;
 mod commands;
 mod config;
+mod encryption;
 mod menu;
 mod system_tray;
 mod util;
@@ -40,8 +41,9 @@ mod util;
 use crate::app_state::LauncherState;
 use crate::commands::app::{
     add_app_agent_state, clear_state, close_application, close_main_window, get_app_agent_list,
-    get_data_path, get_log_config, get_tls_config, open_dapp, open_tray, open_tray_message,
-    remove_app_agent_state, set_log_config, set_selected_agent, set_tls_config, show_main_window,
+    get_data_path, get_log_config, get_smtp_config, get_tls_config, open_dapp, open_tray,
+    open_tray_message, remove_app_agent_state, set_log_config, set_selected_agent, set_smtp_config,
+    set_tls_config, show_main_window, test_smtp_config,
 };
 use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
@@ -247,6 +249,9 @@ pub fn run() {
             get_data_path,
             get_log_config,
             set_log_config,
+            get_smtp_config,
+            set_smtp_config,
+            test_smtp_config,
             get_tls_config,
             set_tls_config
         ])
@@ -271,21 +276,52 @@ pub fn run() {
             build_menu(app.handle())?;
             build_system_tray(app.handle())?;
 
-            // Convert TlsConfig if enabled
+            // Convert TlsConfig and SmtpConfig if enabled
             let launcher_state = LauncherState::load().unwrap();
-            let tls_config = launcher_state.tls_config.as_ref().and_then(|config| {
-                if config.enabled {
-                    // Use configured TLS port, or default to main port + 1
-                    let tls_port = config.tls_port.unwrap_or(free_port + 1);
-                    Some(ExecutorTlsConfig {
-                        cert_file_path: config.cert_file_path.clone(),
-                        key_file_path: config.key_file_path.clone(),
-                        tls_port,
-                    })
+
+            // Prefer multi_user_config over deprecated tls_config
+            let (tls_config, smtp_config, enable_multi_user) =
+                if let Some(multi_user_config) = &launcher_state.multi_user_config {
+                    let tls = multi_user_config.tls_config.as_ref().and_then(|config| {
+                        if config.enabled {
+                            let tls_port = config.tls_port.unwrap_or(free_port + 1);
+                            Some(ExecutorTlsConfig {
+                                cert_file_path: config.cert_file_path.clone(),
+                                key_file_path: config.key_file_path.clone(),
+                                tls_port,
+                            })
+                        } else {
+                            None
+                        }
+                    });
+
+                    let smtp = multi_user_config.smtp_config.as_ref().map(|config| {
+                        rust_executor::config::SmtpConfig {
+                            host: config.host.clone(),
+                            port: config.port,
+                            username: config.username.clone(),
+                            password: config.password.clone(),
+                            from_address: config.from_address.clone(),
+                        }
+                    });
+
+                    (tls, smtp, Some(multi_user_config.enabled))
                 } else {
-                    None
-                }
-            });
+                    // Fallback to deprecated tls_config for backwards compatibility
+                    let tls = launcher_state.tls_config.as_ref().and_then(|config| {
+                        if config.enabled {
+                            let tls_port = config.tls_port.unwrap_or(free_port + 1);
+                            Some(ExecutorTlsConfig {
+                                cert_file_path: config.cert_file_path.clone(),
+                                key_file_path: config.key_file_path.clone(),
+                                tls_port,
+                            })
+                        } else {
+                            None
+                        }
+                    });
+                    (tls, None, None)
+                };
 
             // TLS enabled = bind to 0.0.0.0, TLS disabled = bind to 127.0.0.1
             let localhost = tls_config.is_none();
@@ -301,6 +337,8 @@ pub fn run() {
                 hc_use_proxy: Some(true),
                 tls: tls_config,
                 localhost: Some(localhost),
+                enable_multi_user,
+                smtp_config,
                 ..Default::default()
             };
 

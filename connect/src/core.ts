@@ -187,18 +187,29 @@ export default class Ad4mConnect {
     }
   }
 
+  /**
+   * @deprecated This method is deprecated in favor of the UI-driven email verification flow.
+   * The new flow uses requestLoginVerification() -> verifyEmailCode() which is handled
+   * automatically by the ad4m-connect web component. This method is kept for backwards
+   * compatibility but will only work if email verification is not enabled on the server.
+   */
   async connectMultiUser(): Promise<Ad4mClient> {
+    console.warn("[Ad4m Connect] connectMultiUser() is deprecated. The new email verification flow is handled automatically by the UI.");
+
     try {
       // Connect to the multi-user backend
       const backendUrl = this.options.backendUrl!;
       console.debug("[Ad4m Connect] Connecting to backend:", backendUrl);
       await connectWebSocket(backendUrl);
-      
+
       this.setUrl(backendUrl);
+
       // Build client for user management operations (without token initially)
       const tempClient = this.buildClient();
       console.debug("[Ad4m Connect] Built client:", tempClient);
-      // Try to login first, if that fails, try to create user
+
+      // For backwards compatibility with servers that don't have email verification enabled,
+      // try the old password-based login/signup flow
       let token: string;
       try {
         console.debug("[Ad4m Connect] Logging in user:", this.options.userEmail!);
@@ -210,14 +221,10 @@ export default class Ad4mConnect {
         console.debug("[Ad4m Connect] User does not exist, trying to create user:", this.options.userEmail!);
         try {
           console.debug("[Ad4m Connect] Creating user:", this.options.userEmail!);
-          try {
-            const createResult = await tempClient.agent.createUser(this.options.userEmail!, this.options.userPassword!);
-            console.debug("[Ad4m Connect] Create result:", createResult);
-            if (!createResult.success) {
-              throw new Error(createResult.error || "Failed to create user");
-            }
-          } catch (createError) {
-            console.log("[Ad4m Connect] Failed to create user:", createError);
+          const createResult = await tempClient.agent.createUser(this.options.userEmail!, this.options.userPassword!);
+          console.debug("[Ad4m Connect] Create result:", createResult);
+          if (!createResult.success) {
+            throw new Error(createResult.error || "Failed to create user. Server may require email verification.");
           }
 
           // Now login
@@ -225,23 +232,23 @@ export default class Ad4mConnect {
           token = await tempClient.agent.loginUser(this.options.userEmail!, this.options.userPassword!);
           console.log("[Ad4m Connect] Successfully created and logged in user");
         } catch (createError) {
-          throw new Error(`Failed to create/login user: ${createError.message}`);
+          throw new Error(`Failed to create/login user: ${createError.message}. If email verification is enabled, please use the UI-driven flow instead.`);
         }
       }
 
       // Set the token and build authenticated client
       this.setToken(token);
       const authenticatedClient = this.buildClient();
-      
+
       // Verify authentication
       await authenticatedClient.agent.status();
-      
+
       // Store the authenticated client so it can be retrieved via getAd4mClient()
       this.ad4mClient = authenticatedClient;
-      
+
       this.notifyAuthChange("authenticated");
       this.notifyConnectionChange("connected");
-      
+
       return authenticatedClient;
     } catch (error) {
       this.notifyConnectionChange("error");

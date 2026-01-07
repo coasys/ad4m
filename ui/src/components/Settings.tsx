@@ -112,6 +112,20 @@ const Profile = (props: Props) => {
   const [certPathError, setCertPathError] = useState<string>("");
   const [keyPathError, setKeyPathError] = useState<string>("");
 
+  // SMTP Configuration state
+  const [smtpConfig, setSmtpConfig] = useState<{
+    host: string;
+    port: number;
+    username: string;
+    password: string;
+    from_address: string;
+  } | null>(null);
+  const [smtpChanged, setSmtpChanged] = useState(false);
+  const [smtpTesting, setSmtpTesting] = useState(false);
+  const [smtpTestStatus, setSmtpTestStatus] = useState<string>("");
+  const [smtpTestEmail, setSmtpTestEmail] = useState<string>("");
+  const [showSmtpPassword, setShowSmtpPassword] = useState(false);
+
   // Load current log config on component mount
   useEffect(() => {
     const loadLogConfig = async () => {
@@ -141,6 +155,25 @@ const Profile = (props: Props) => {
       }
     };
     loadTlsConfig();
+  }, []);
+
+  // Load SMTP config on component mount
+  useEffect(() => {
+    const loadSmtpConfig = async () => {
+      try {
+        const config = await invoke<typeof smtpConfig>("get_smtp_config");
+        setSmtpConfig(config || {
+          host: "",
+          port: 587,
+          username: "",
+          password: "",
+          from_address: "",
+        });
+      } catch (error) {
+        console.error("Failed to load SMTP config:", error);
+      }
+    };
+    loadSmtpConfig();
   }, []);
 
   const handleLogConfigChange = async (newConfig: Record<string, string>) => {
@@ -259,6 +292,40 @@ const Profile = (props: Props) => {
 
     if (filePath && tlsConfig) {
       setTlsConfig({ ...tlsConfig, key_file_path: filePath.toString() });
+    }
+  };
+
+  const handleSmtpConfigChange = async (newConfig: typeof smtpConfig) => {
+    if (!newConfig) return;
+
+    try {
+      await invoke<void>("set_smtp_config", { config: newConfig });
+      setSmtpConfig(newConfig);
+      setSmtpChanged(true);
+    } catch (error) {
+      alert("Failed to save SMTP config: " + error);
+    }
+  };
+
+  const handleSmtpTest = async () => {
+    if (!smtpConfig || !smtpTestEmail) {
+      alert("Please configure SMTP settings and provide a test email address");
+      return;
+    }
+
+    setSmtpTesting(true);
+    setSmtpTestStatus("");
+
+    try {
+      await invoke<void>("test_smtp_config", {
+        config: smtpConfig,
+        testEmail: smtpTestEmail
+      });
+      setSmtpTestStatus("Test email sent successfully! Check your inbox.");
+    } catch (error) {
+      setSmtpTestStatus("Failed to send test email: " + error);
+    } finally {
+      setSmtpTesting(false);
     }
   };
 
@@ -579,6 +646,211 @@ const Profile = (props: Props) => {
           Multi-user mode
         </j-toggle>
       </j-box>
+
+      {/* SMTP/Email Configuration Section */}
+      {multiUserEnabled && (
+        <>
+          <j-box px="500" my="500">
+            <j-text size="600" weight="600" color="black">
+              Email Configuration (SMTP)
+            </j-text>
+          </j-box>
+
+          <j-box px="500" my="300">
+            <j-text size="500" color="ui-500">
+              Configure SMTP settings for email verification. Required for email-based user authentication.
+            </j-text>
+          </j-box>
+
+          {smtpConfig && (
+            <>
+              {/* SMTP Host */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">SMTP Host</j-text>
+                </j-box>
+                <j-input
+                  value={smtpConfig.host}
+                  onChange={(e) => {
+                    setSmtpConfig({
+                      ...smtpConfig,
+                      host: (e.target as HTMLInputElement).value
+                    });
+                  }}
+                  placeholder="smtp.gmail.com"
+                />
+              </j-box>
+
+              {/* SMTP Port */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">SMTP Port</j-text>
+                </j-box>
+                <j-input
+                  type="number"
+                  value={smtpConfig.port.toString()}
+                  onChange={(e) => {
+                    const port = parseInt((e.target as HTMLInputElement).value);
+                    setSmtpConfig({
+                      ...smtpConfig,
+                      port: isNaN(port) ? 587 : port
+                    });
+                  }}
+                  placeholder="587"
+                />
+                <j-box mt="200">
+                  <j-text size="300" color="ui-500">
+                    Common ports: 587 (STARTTLS), 465 (SSL/TLS), 25 (unencrypted)
+                  </j-text>
+                </j-box>
+              </j-box>
+
+              {/* SMTP Username */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">Username</j-text>
+                </j-box>
+                <j-input
+                  value={smtpConfig.username}
+                  onChange={(e) => {
+                    setSmtpConfig({
+                      ...smtpConfig,
+                      username: (e.target as HTMLInputElement).value
+                    });
+                  }}
+                  placeholder="your-email@example.com"
+                />
+              </j-box>
+
+              {/* SMTP Password */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">Password / App Password</j-text>
+                </j-box>
+                <j-input
+                  type={showSmtpPassword ? "text" : "password"}
+                  value={smtpConfig.password}
+                  onChange={(e) => {
+                    setSmtpConfig({
+                      ...smtpConfig,
+                      password: (e.target as HTMLInputElement).value
+                    });
+                  }}
+                  placeholder="Enter SMTP password or app password"
+                >
+                  <j-button onClick={() => setShowSmtpPassword(!showSmtpPassword)} slot="end" variant="link" square>
+                    <j-icon name={showSmtpPassword ? "eye-slash" : "eye"} size="sm"></j-icon>
+                  </j-button>
+                </j-input>
+                <j-box mt="200">
+                  <j-text size="300" color="ui-500">
+                    For Gmail, use an App Password. Regular passwords won't work with 2FA enabled.
+                  </j-text>
+                </j-box>
+              </j-box>
+
+              {/* From Address */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">From Email Address</j-text>
+                </j-box>
+                <j-input
+                  value={smtpConfig.from_address}
+                  onChange={(e) => {
+                    setSmtpConfig({
+                      ...smtpConfig,
+                      from_address: (e.target as HTMLInputElement).value
+                    });
+                  }}
+                  placeholder="noreply@yourdomain.com"
+                />
+                <j-box mt="200">
+                  <j-text size="300" color="ui-500">
+                    Email address that will appear in the "From" field of verification emails
+                  </j-text>
+                </j-box>
+              </j-box>
+
+              {/* Save Button */}
+              <j-box px="500" my="500">
+                <j-button onClick={() => handleSmtpConfigChange(smtpConfig)} variant="primary" full>
+                  Save SMTP Configuration
+                </j-button>
+              </j-box>
+
+              {/* Test Email Section */}
+              <j-box px="500" my="500">
+                <j-box mb="200">
+                  <j-text size="500" weight="500">Test Email Configuration</j-text>
+                </j-box>
+                <j-flex gap="200" a="center">
+                  <j-input
+                    value={smtpTestEmail}
+                    onChange={(e) => {
+                      setSmtpTestEmail((e.target as HTMLInputElement).value);
+                    }}
+                    placeholder="test@example.com"
+                    style={{ flexGrow: "1" }}
+                  />
+                  <j-button onClick={handleSmtpTest} variant="secondary" loading={smtpTesting} disabled={smtpTesting}>
+                    Send Test
+                  </j-button>
+                </j-flex>
+                {smtpTestStatus && (
+                  <j-box mt="200">
+                    <j-text size="400" color={smtpTestStatus.includes("success") ? "success-500" : "danger-500"}>
+                      {smtpTestStatus}
+                    </j-text>
+                  </j-box>
+                )}
+              </j-box>
+
+              {/* Restart Required Warning */}
+              {smtpChanged && (
+                <j-box px="500" my="500">
+                  <j-box p="400" style={{
+                    backgroundColor: "#fff3cd",
+                    borderRadius: "8px",
+                    border: "1px solid #ffc107"
+                  }}>
+                    <j-flex a="center" gap="300">
+                      <j-icon name="exclamation-triangle" color="warning"></j-icon>
+                      <j-text size="500">
+                        Restart required: SMTP settings will take effect after restarting the launcher.
+                      </j-text>
+                    </j-flex>
+                  </j-box>
+                </j-box>
+              )}
+
+              {/* Info about SMTP providers setup */}
+              <j-box px="500" my="500">
+                <j-box p="400" style={{
+                  backgroundColor: "#e7f3ff",
+                  borderRadius: "8px",
+                  border: "1px solid #2196f3"
+                }}>
+                  <j-text size="400">
+                    <strong>Common SMTP Provider Settings:</strong>
+                    <br/><br/>
+                    <strong>Gmail:</strong>
+                    <br/>• Host: smtp.gmail.com, Port: 587
+                    <br/>• Enable 2FA and generate an App Password (Google Account → Security → App Passwords)
+                    <br/><br/>
+                    <strong>Mailgun:</strong>
+                    <br/>• Host: smtp.mailgun.org (or your region-specific host)
+                    <br/>• Port: 587 (STARTTLS) or 465 (SSL/TLS)
+                    <br/>• Username: Your Mailgun SMTP username (usually postmaster@your-domain)
+                    <br/>• Password: Your Mailgun SMTP password
+                    <br/><br/>
+                    <strong>Note:</strong> Port 465 uses implicit SSL/TLS, Port 587 uses STARTTLS
+                  </j-text>
+                </j-box>
+              </j-box>
+            </>
+          )}
+        </>
+      )}
 
       {/* TLS Configuration Section */}
       <j-box px="500" my="500">

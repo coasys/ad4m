@@ -155,6 +155,17 @@ jobs:
           command: cd ./tests/js && ./test-multi-user-with-setup.sh
           no_output_timeout: 30m
 
+  integration-tests-email-verification:
+    docker:
+      - image: *ad4m_image
+    resource_class: xlarge
+    steps:
+      - setup_integration_test_environment
+      - run:
+          name: Run email-verification integration tests
+          command: cd ./tests/js && ./email-verification-test-with-setup.sh
+          no_output_timeout: 30m
+
   integration-tests-cli:
     docker:
       - image: *ad4m_image
@@ -181,5 +192,8 @@ workflows:
           requires:
             - build-and-test
       - integration-tests-multi-user-simple:
+          requires:
+            - build-and-test
+      - integration-tests-email-verification:
           requires:
             - build-and-test

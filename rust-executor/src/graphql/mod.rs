@@ -46,6 +46,9 @@ pub async fn start_server(
     js_core_handle: JsCoreHandle,
     config: Ad4mConfig,
 ) -> Result<(), AnyError> {
+    // Set global SMTP config for email verification
+    crate::config::set_smtp_config(config.smtp_config.clone())?;
+
     let port = config.gql_port.expect("Did not get gql port");
     let app_data_path = config.app_data_path.expect("Did not get app data path");
     let log = warp::log("warp::server");

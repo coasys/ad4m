@@ -1,5 +1,7 @@
 extern crate remove_dir_all;
-use crate::app_state::{AgentConfigDir, LauncherState, TlsConfig};
+use crate::app_state::{
+    AgentConfigDir, LauncherState, MultiUserConfig, SmtpConfig, SmtpConfigDto, TlsConfig,
+};
 use crate::util::create_tray_message_windows;
 use crate::{config::data_path, get_main_window};
 use rust_executor::logging::{build_rust_log_from_config, get_default_log_config, LogLevel};
@@ -182,7 +184,13 @@ pub fn set_log_config(config: HashMap<String, String>) -> Result<(), String> {
 #[tauri::command]
 pub fn get_tls_config() -> Option<TlsConfig> {
     let state = LauncherState::load().ok()?;
-    state.tls_config
+
+    // Prefer multi_user_config, fallback to deprecated tls_config for backwards compatibility
+    if let Some(multi_user_config) = &state.multi_user_config {
+        multi_user_config.tls_config.clone()
+    } else {
+        state.tls_config
+    }
 }
 
 #[tauri::command]
@@ -204,8 +212,141 @@ pub fn set_tls_config(config: TlsConfig) -> Result<(), String> {
     let mut state =
         LauncherState::load().map_err(|e| format!("Failed to load launcher state: {}", e))?;
 
-    // Update TLS config
+    // Get or create multi_user_config
+    // IMPORTANT: Preserve existing SMTP config if migrating
+    let mut multi_user_config =
+        state
+            .multi_user_config
+            .clone()
+            .unwrap_or_else(|| MultiUserConfig {
+                enabled: true,
+                smtp_config: None,
+                tls_config: None,
+            });
+
+    // Update TLS config in multi_user_config (new location)
+    multi_user_config.tls_config = Some(config.clone());
+    state.multi_user_config = Some(multi_user_config);
+
+    // Also update deprecated field for backwards compatibility
     state.tls_config = Some(config);
+
+    // Save updated state
+    state
+        .save()
+        .map_err(|e| format!("Failed to save launcher state: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn test_smtp_config(config: SmtpConfigDto, test_email: String) -> Result<bool, String> {
+    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::{Message, SmtpTransport, Transport};
+
+    // Build test email
+    let email = Message::builder()
+        .from(config.from_address.parse().map_err(|e| format!("Invalid from address: {}", e))?)
+        .to(test_email.parse().map_err(|e| format!("Invalid to address: {}", e))?)
+        .subject("AD4M SMTP Configuration Test")
+        .body("This is a test email from your AD4M instance. Your SMTP configuration is working correctly!".to_string())
+        .map_err(|e| format!("Failed to build email: {}", e))?;
+
+    // Build SMTP transport based on port
+    let creds = Credentials::new(config.username.clone(), config.password.clone());
+
+    let mailer = if config.port == 465 {
+        // Port 465 uses implicit TLS (wrapper mode)
+        use lettre::transport::smtp::client::{Tls, TlsParameters};
+
+        let tls_params = TlsParameters::builder(config.host.clone())
+            .dangerous_accept_invalid_certs(false)
+            .build()
+            .map_err(|e| format!("Failed to create TLS parameters: {}", e))?;
+
+        SmtpTransport::builder_dangerous(&config.host)
+            .port(config.port)
+            .credentials(creds)
+            .tls(Tls::Wrapper(tls_params))
+            .build()
+    } else if config.port == 25 {
+        // Port 25 usually plain text or opportunistic TLS
+        use lettre::transport::smtp::client::Tls;
+        SmtpTransport::builder_dangerous(&config.host)
+            .port(config.port)
+            .credentials(creds)
+            .tls(Tls::None)
+            .build()
+    } else {
+        // Port 587, 2525, etc. use STARTTLS
+        use lettre::transport::smtp::client::{Tls, TlsParameters};
+
+        let tls_params = TlsParameters::builder(config.host.clone())
+            .dangerous_accept_invalid_certs(false)
+            .build()
+            .map_err(|e| format!("Failed to create TLS parameters: {}", e))?;
+
+        SmtpTransport::builder_dangerous(&config.host)
+            .port(config.port)
+            .credentials(creds)
+            .tls(Tls::Required(tls_params))
+            .build()
+    };
+
+    // Send email in blocking task
+    tokio::task::spawn_blocking(move || {
+        mailer
+            .send(&email)
+            .map_err(|e| format!("Failed to send email: {}", e))
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))??;
+
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn get_smtp_config() -> Option<SmtpConfigDto> {
+    let state = LauncherState::load().ok()?;
+    state
+        .multi_user_config?
+        .smtp_config
+        .map(|config| SmtpConfigDto::from(&config))
+}
+
+#[tauri::command]
+pub fn set_smtp_config(config: SmtpConfigDto) -> Result<(), String> {
+    // Validate SMTP config
+    if config.host.is_empty() {
+        return Err("SMTP host cannot be empty".to_string());
+    }
+    if config.username.is_empty() {
+        return Err("SMTP username cannot be empty".to_string());
+    }
+    if config.from_address.is_empty() {
+        return Err("SMTP from address cannot be empty".to_string());
+    }
+
+    // Convert DTO to SmtpConfig (password will be encrypted on save)
+    let smtp_config: SmtpConfig = config.into();
+
+    // Load current state
+    let mut state =
+        LauncherState::load().map_err(|e| format!("Failed to load launcher state: {}", e))?;
+
+    // Get or create multi_user_config
+    // IMPORTANT: Preserve existing TLS config from deprecated field if migrating
+    let mut multi_user_config = state.multi_user_config.clone().unwrap_or_else(|| {
+        MultiUserConfig {
+            enabled: true,
+            smtp_config: None,
+            tls_config: state.tls_config.clone(), // Preserve existing TLS config!
+        }
+    });
+
+    // Update SMTP config
+    multi_user_config.smtp_config = Some(smtp_config);
+    state.multi_user_config = Some(multi_user_config);
 
     // Save updated state
     state

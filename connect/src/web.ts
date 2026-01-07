@@ -497,13 +497,22 @@ export class Ad4mConnectElement extends LitElement {
   private _multiUserPassword = "";
 
   @state()
+  private _multiUserVerificationCode = "";
+
+  @state()
   private _multiUserError: string | null = null;
 
   @state()
   private _multiUserLoading = false;
 
+  // Timeout reference for auto-submit when 6 digits are entered
+  private _codeSubmitTimeout: ReturnType<typeof setTimeout> | null = null;
+
   @state()
-  private _multiUserTab: "login" | "signup" = "login";
+  private _multiUserStep: "email" | "password" | "code" = "email";
+
+  @state()
+  private _multiUserVerificationType: "signup" | "login" = "login";
 
   @state()
   private _localDetected = false;
@@ -652,52 +661,192 @@ export class Ad4mConnectElement extends LitElement {
     }
   }
 
-  private async handleMultiUserSignup() {
+  private async handleMultiUserEmailSubmit() {
     try {
       this._multiUserLoading = true;
       this._multiUserError = null;
 
-      // Use the existing connectMultiUser method with credentials
-      this._client.options.userEmail = this._multiUserEmail;
-      this._client.options.userPassword = this._multiUserPassword;
-      this._client.options.backendUrl = this.backendUrl;
+      // Build temporary client to call requestLoginVerification
+      const tempClient = this._client.buildTempClient(this.backendUrl);
 
-      const client = await this._client.connectMultiUser();
+      // Build AuthInfo object from app properties
+      const appInfo = {
+        appName: this.appName,
+        appDesc: this.appDesc,
+        appDomain: this.appDomain,
+        appUrl: window.location.origin,
+        appIconPath: this.appIconPath,
+      };
 
-      // Success! Clear form and close modal
-      this._multiUserEmail = "";
-      this._multiUserPassword = "";
-      this._isOpen = false;
-      this.changeUIState("connected");
+      const result = await tempClient.agent.requestLoginVerification(this._multiUserEmail, appInfo);
+
+      if (result.success && !result.requiresPassword) {
+        // User exists, verification email sent
+        this._multiUserStep = "code";
+        this._multiUserVerificationType = "login";
+      } else if (result.requiresPassword) {
+        // Determine if this is login or signup based on whether user exists
+        // If isExistingUser is true, show password for login; otherwise for signup
+        this._multiUserStep = "password";
+        this._multiUserVerificationType = result.isExistingUser ? "login" : "signup";
+      } else {
+        this._multiUserError = result.message || "Failed to send verification email";
+      }
     } catch (e) {
-      this._multiUserError = e.message || "Failed to create account. Please try again.";
+      this._multiUserError = e.message || "Failed to process email. Please try again.";
     } finally {
       this._multiUserLoading = false;
     }
   }
 
-  private async handleMultiUserLogin() {
+  private async handleMultiUserPasswordSubmit() {
     try {
       this._multiUserLoading = true;
       this._multiUserError = null;
 
-      // Use the existing connectMultiUser method with credentials
-      this._client.options.userEmail = this._multiUserEmail;
-      this._client.options.userPassword = this._multiUserPassword;
-      this._client.options.backendUrl = this.backendUrl;
+      // Build temporary client
+      const tempClient = this._client.buildTempClient(this.backendUrl);
 
-      const client = await this._client.connectMultiUser();
+      if (this._multiUserVerificationType === "login") {
+        // Existing user - try password login
+        try {
+          const token = await tempClient.agent.loginUser(this._multiUserEmail, this._multiUserPassword);
+          
+          // Success! Store token and authenticate
+          this._client.setToken(token);
+          this._client.setUrl(this.backendUrl);
 
-      // Success! Clear form and close modal
-      this._multiUserEmail = "";
-      this._multiUserPassword = "";
-      this._isOpen = false;
-      this.changeUIState("connected");
+          // Rebuild client with new token to establish authenticated connection
+          await this._client.buildClient();
+          await this._client.checkAuth();
+
+          // Clear form and close modal
+          this._multiUserEmail = "";
+          this._multiUserPassword = "";
+          this._multiUserVerificationCode = "";
+          this._multiUserStep = "email";
+          this._isOpen = false;
+          this.changeUIState("connected");
+          this.handleAuthChange("authenticated");
+        } catch (loginError) {
+          this._multiUserError = loginError.message || "Invalid email or password. Please try again.";
+        }
+      } else {
+        // New user - create account
+        // Build AuthInfo object from app properties
+        const appInfo = {
+          appName: this.appName,
+          appDesc: this.appDesc,
+          appDomain: this.appDomain,
+          appUrl: window.location.origin,
+          appIconPath: this.appIconPath,
+        };
+
+        const result = await tempClient.agent.createUser(this._multiUserEmail, this._multiUserPassword, appInfo);
+
+        if (result.success) {
+          // Check if email verification was sent or if we should proceed directly to login
+          if (result.error && result.error.includes("SMTP is not configured")) {
+            // SMTP not configured - login immediately with password
+            try {
+              const token = await tempClient.agent.loginUser(this._multiUserEmail, this._multiUserPassword);
+              
+              // Success! Store token and authenticate
+              this._client.setToken(token);
+              this._client.setUrl(this.backendUrl);
+
+              // Rebuild client with new token to establish authenticated connection
+              await this._client.buildClient();
+              await this._client.checkAuth();
+
+              // Clear form and close modal
+              this._multiUserEmail = "";
+              this._multiUserPassword = "";
+              this._multiUserVerificationCode = "";
+              this._multiUserStep = "email";
+              this._isOpen = false;
+              this.changeUIState("connected");
+              this.handleAuthChange("authenticated");
+            } catch (loginError) {
+              this._multiUserError = loginError.message || "Account created but login failed. Please try logging in.";
+            }
+          } else if (!result.error) {
+            // User created, verification email sent
+            this._multiUserStep = "code";
+            this._multiUserVerificationType = "signup";
+          } else {
+            // User created but email failed - still allow login
+            this._multiUserError = result.error + " You can try logging in with your password.";
+          }
+        } else {
+          this._multiUserError = result.error || "Failed to create account. Please try again.";
+        }
+      }
     } catch (e) {
-      this._multiUserError = e.message || "Failed to log in. Please check your credentials.";
+      this._multiUserError = e.message || "Failed to process request. Please try again.";
     } finally {
       this._multiUserLoading = false;
     }
+  }
+
+  private async handleMultiUserCodeSubmit() {
+    // Guard against duplicate calls - if already loading, ignore this request
+    if (this._multiUserLoading) {
+      return;
+    }
+
+    // Cancel any pending auto-submit timeout since we're submitting now
+    if (this._codeSubmitTimeout !== null) {
+      clearTimeout(this._codeSubmitTimeout);
+      this._codeSubmitTimeout = null;
+    }
+
+    try {
+      this._multiUserLoading = true;
+      this._multiUserError = null;
+
+      // Build temporary client to call verifyEmailCode
+      const tempClient = this._client.buildTempClient(this.backendUrl);
+      const token = await tempClient.agent.verifyEmailCode(
+        this._multiUserEmail,
+        this._multiUserVerificationCode,
+        this._multiUserVerificationType
+      );
+
+      // Success! Store token and authenticate
+      this._client.setToken(token);
+      this._client.setUrl(this.backendUrl);
+
+      // Rebuild client with new token to establish authenticated connection
+      await this._client.buildClient();
+      await this._client.checkAuth();
+
+      // Clear form and close modal
+      this._multiUserEmail = "";
+      this._multiUserPassword = "";
+      this._multiUserVerificationCode = "";
+      this._multiUserStep = "email";
+      this._isOpen = false;
+      this.changeUIState("connected");
+      this.handleAuthChange("authenticated");
+    } catch (e) {
+      this._multiUserError = "Invalid or expired code. Please try again.";
+      this._multiUserVerificationCode = "";
+    } finally {
+      this._multiUserLoading = false;
+    }
+  }
+
+  private handleMultiUserBackToEmail() {
+    // Cancel any pending auto-submit timeout
+    if (this._codeSubmitTimeout !== null) {
+      clearTimeout(this._codeSubmitTimeout);
+      this._codeSubmitTimeout = null;
+    }
+    this._multiUserStep = "email";
+    this._multiUserPassword = "";
+    this._multiUserVerificationCode = "";
+    this._multiUserError = null;
   }
 
   private changeMultiUserEmail(email: string) {
@@ -710,9 +859,26 @@ export class Ad4mConnectElement extends LitElement {
     this._multiUserError = null; // Clear error when user types
   }
 
-  private setMultiUserTab(tab: "login" | "signup") {
-    this._multiUserTab = tab;
-    this._multiUserError = null; // Clear error when switching tabs
+  private changeMultiUserVerificationCode(code: string) {
+    // Cancel any pending auto-submit timeout
+    if (this._codeSubmitTimeout !== null) {
+      clearTimeout(this._codeSubmitTimeout);
+      this._codeSubmitTimeout = null;
+    }
+
+    this._multiUserVerificationCode = code;
+    this._multiUserError = null; // Clear error when user types
+
+    // Auto-submit when 6 digits entered (with debounce to prevent race conditions)
+    if (code.length === 6 && !this._multiUserLoading) {
+      this._codeSubmitTimeout = setTimeout(() => {
+        this._codeSubmitTimeout = null;
+        // Only submit if still 6 digits and not already loading
+        if (this._multiUserVerificationCode.length === 6 && !this._multiUserLoading) {
+          this.handleMultiUserCodeSubmit();
+        }
+      }, 100);
+    }
   }
 
   private async detectLocal() {
@@ -1089,15 +1255,19 @@ export class Ad4mConnectElement extends LitElement {
       return MultiUserAuth({
         email: this._multiUserEmail,
         password: this._multiUserPassword,
+        verificationCode: this._multiUserVerificationCode,
         error: this._multiUserError,
         isLoading: this._multiUserLoading,
         backendUrl: this.backendUrl,
+        step: this._multiUserStep,
+        verificationType: this._multiUserVerificationType,
         changeEmail: this.changeMultiUserEmail,
         changePassword: this.changeMultiUserPassword,
-        onLogin: this.handleMultiUserLogin,
-        onSignup: this.handleMultiUserSignup,
-        activeTab: this._multiUserTab,
-        setActiveTab: this.setMultiUserTab,
+        changeVerificationCode: this.changeMultiUserVerificationCode,
+        onEmailSubmit: this.handleMultiUserEmailSubmit,
+        onPasswordSubmit: this.handleMultiUserPasswordSubmit,
+        onCodeSubmit: this.handleMultiUserCodeSubmit,
+        onBackToEmail: this.handleMultiUserBackToEmail,
       });
     }
 

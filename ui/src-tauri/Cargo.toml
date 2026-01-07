@@ -37,6 +37,7 @@ remove_dir_all = "0.7.0"
 reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
 ad4m-client = { path = "../../rust-client" }
 ad4m-executor = { path = "../../rust-executor" }
+lettre = "0.11"
 chrono = "0.4"
 env_logger = "0.10.0"
 colored = "2.0"
@@ -53,6 +54,11 @@ tauri-plugin-clipboard-manager = "2.0.0-alpha.2"
 tauri-plugin-shell = "2"
 dirs = "5"
 tauri-plugin-opener = "2.2.6"
+aes-gcm = "0.10"
+keyring = "2.3"
+base64 = "0.21"
+rand = "0.8"
+lazy_static = "1.4"
 
 [features]
 # by default Tauri runs in production mode
