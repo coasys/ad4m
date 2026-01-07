@@ -718,6 +718,9 @@ impl Mutation {
         email: String,
         password: String,
     ) -> FieldResult<String> {
+        // Normalize email: trim whitespace and convert to lowercase
+        let email = email.trim().to_lowercase();
+
         // Check capability (empty tokens get login capability in multi-user mode)
         check_capability(
             &context.capabilities,
