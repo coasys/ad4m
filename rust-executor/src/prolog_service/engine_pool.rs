@@ -42,8 +42,8 @@ pub const EMBEDDING_LANGUAGE_HASH: &str = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg
 pub const FILTERING_THRESHOLD: usize = 6000;
 
 // Pool cleanup configuration
-const POOL_CLEANUP_INTERVAL_SECS: u64 = 300; // Check every 5 minutes
-const POOL_INACTIVE_TIMEOUT_SECS: u64 = 900; // Remove pools inactive for 15 minutes
+const POOL_CLEANUP_INTERVAL_SECS: u64 = 60; // Check every 1 minute (was 5 min)
+const POOL_INACTIVE_TIMEOUT_SECS: u64 = 120; // Remove pools inactive for 2 minutes (was 15 min)
 
 // State logging configuration
 const STATE_LOG_INTERVAL_SECS: u64 = 10; // Log state every 10 seconds
