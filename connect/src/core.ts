@@ -123,6 +123,8 @@ export default class Ad4mConnect {
   setUrl(url: string) {
     if (this.url === url) return;
     this.url = url;
+    // Store URL in localStorage so auto-reconnect uses the correct backend
+    setForVersion('ad4murl', url);
     this.notifyConfigChange("url", url);
   }
 

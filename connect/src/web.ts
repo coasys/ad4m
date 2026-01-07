@@ -633,10 +633,16 @@ export class Ad4mConnectElement extends LitElement {
 
     if (storedToken) {
       // If we have a stored token, try to auto-connect
-      // In multi-user mode, connect to the backend URL; otherwise use default local
-      if (this.multiUser && this.backendUrl) {
-        this._client.connect(this.backendUrl);
+      // First check if there's a stored URL (from previous connection)
+      const storedUrl = getForVersion("ad4murl");
+      
+      if (storedUrl) {
+        // Use the stored URL (preserves local vs remote choice)
+        this._client.connect(storedUrl);
       } else {
+        // No stored URL - this means first time or cleared storage
+        // Default to local connection (user can choose remote from UI if needed)
+        // The backendUrl is only used when explicitly selected from UI, not on auto-connect
         this._client.connect();
       }
     } else {
