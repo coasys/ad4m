@@ -6,7 +6,7 @@ import {
 import { createClient, Client as WSClient } from "graphql-ws";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { Ad4mClient, CapabilityInput } from "@coasys/ad4m";
-import { checkPort, connectWebSocket, DEFAULT_PORT, removeForVersion, setForVersion } from "./utils";
+import { checkPort, connectWebSocket, DEFAULT_PORT, getForVersion, removeForVersion, setForVersion } from "./utils";
 import autoBind from "auto-bind";
 
 export type Ad4mConnectOptions = {
@@ -46,7 +46,7 @@ export type ConnectionStates =
   | "disconnected"
   | "checking_local";
 
-export default class Ad4mConnect {
+export default class Ad4mConnect extends EventTarget {
   activeSocket: WebSocket = null;
   requestedRestart: boolean = false;
   authState: AuthStates = "unauthenticated";
@@ -66,7 +66,9 @@ export default class Ad4mConnect {
   appUrl?: string;
   isHosting: boolean = false;
   options: Ad4mConnectOptions;
-  listeners: Record<Event, Function[]> = {
+  
+  // Legacy listener system (kept for backwards compatibility)
+  private listeners: Record<Event, Function[]> = {
     ["authstatechange"]: [],
     ["configstatechange"]: [],
     ["connectionstatechange"]: [],
@@ -79,6 +81,7 @@ export default class Ad4mConnect {
 
   // @fayeed - params
   constructor(options: Ad4mConnectOptions) {
+    super(); // Call EventTarget constructor
     autoBind(this);
     //! @fayeed - make it support node.js
     this.options = options;
@@ -100,17 +103,16 @@ export default class Ad4mConnect {
       this.token = '';
       this.initializeEmbeddedMode();
     } else {
-      // In standalone mode, use provided options
-      this.port = options.port || this.port;
-      this.url = options.url || `ws://localhost:${this.port}/graphql`;
-      this.token = options.token || this.token;
+      // In standalone mode, use provided options OR fallback to localStorage
+      this.port = options.port || parseInt(getForVersion("ad4mport")) || DEFAULT_PORT;
+      this.url = options.url || getForVersion("ad4murl") || `ws://localhost:${this.port}/graphql`;
+      this.token = options.token || getForVersion("ad4mtoken") || '';
     }
     
     this.isHosting = options.hosting || false;
     // Don't auto-connect - let the UI decide when to connect
     // this.buildClient();
   }
-  
   /**
    * Detect if running in an iframe (embedded mode)
    */
@@ -146,17 +148,10 @@ export default class Ad4mConnect {
           setForVersion('ad4murl', this.url);
           
           // Build the client with received credentials
-          const client = this.buildClient();
-          
-          // Check auth status
-          await this.checkAuth();
-          
-          // Resolve any pending connect() promises
-          if (this.embeddedResolve) {
-            this.embeddedResolve(client);
-            this.embeddedResolve = undefined;
-            this.embeddedReject = undefined;
-          }
+          // The client will connect asynchronously and checkAuth() will be called
+          // by the 'connected' callback in buildClient()
+          // The embeddedResolve will be called when authState changes to 'authenticated'
+          this.ad4mClient = this.buildClient();
         } catch (error) {
           console.error('[Ad4m Connect] Failed to initialize from AD4M_CONFIG:', error);
           if (this.embeddedReject) {
@@ -174,6 +169,12 @@ export default class Ad4mConnect {
   }
 
   private notifyConfigChange(val: ConfigStates, data: string | number) {
+    // Dispatch as DOM CustomEvent (EventTarget API)
+    this.dispatchEvent(new CustomEvent("configstatechange", { 
+      detail: { type: val, data } 
+    }));
+    
+    // Also call legacy listeners for backwards compatibility
     this.listeners["configstatechange"].forEach((listener) => {
       listener(val, data);
     });
@@ -182,6 +183,11 @@ export default class Ad4mConnect {
   private notifyConnectionChange(val: ConnectionStates) {
     if (this.connectionState === val) return;
     this.connectionState = val;
+    
+    // Dispatch as DOM CustomEvent (EventTarget API)
+    this.dispatchEvent(new CustomEvent("connectionstatechange", { detail: val }));
+    
+    // Also call legacy listeners for backwards compatibility
     this.listeners["connectionstatechange"].forEach((listener) => {
       listener(val);
     });
@@ -190,9 +196,21 @@ export default class Ad4mConnect {
   private notifyAuthChange(val: AuthStates) {
     if (this.authState === val) return;
     this.authState = val;
+    
+    // Dispatch as DOM CustomEvent (EventTarget API)
+    this.dispatchEvent(new CustomEvent("authstatechange", { detail: val }));
+    
+    // Also call legacy listeners for backwards compatibility
     this.listeners["authstatechange"].forEach((listener) => {
       listener(val);
     });
+    
+    // In embedded mode, resolve the connect() promise when authenticated
+    if (this.embeddedMode && val === "authenticated" && this.embeddedResolve) {
+      this.embeddedResolve(this.ad4mClient);
+      this.embeddedResolve = undefined;
+      this.embeddedReject = undefined;
+    }
   }
 
   setPort(port: number) {
@@ -280,27 +298,42 @@ export default class Ad4mConnect {
       });
     }
     
-    // Standalone mode - normal connection logic
-    try {
-      if (url) {
-        await connectWebSocket(url);
-        this.setUrl(url);
-        const client = this.buildClient();
-        await this.checkAuth();
-        return client;
-      } else {
-        // Try default local port
-        const localUrl = `ws://localhost:${this.port}/graphql`;
+    // Standalone mode - return a Promise that resolves when authenticated
+    return new Promise(async (resolve, reject) => {
+      try {
+        // Try to connect to local executor
+        const localUrl = url || `ws://localhost:${this.port}/graphql`;
+        console.log('[Ad4m Connect] Attempting connection to:', localUrl);
+        
         await connectWebSocket(localUrl);
         this.setUrl(localUrl);
-        const client = this.buildClient();
+        this.ad4mClient = this.buildClient();
         await this.checkAuth();
-        return client;
+        
+        // If already authenticated (has stored token), resolve immediately
+        if (this.authState === 'authenticated' && this.ad4mClient) {
+          console.log('[Ad4m Connect] Already authenticated, resolving immediately');
+          resolve(this.ad4mClient);
+        } else {
+          // Not authenticated - UI modal will show
+          // Set up listener to resolve when authentication completes
+          console.log('[Ad4m Connect] Waiting for authentication...');
+          const authHandler = (state: AuthStates) => {
+            if (state === 'authenticated' && this.ad4mClient) {
+              console.log('[Ad4m Connect] Authentication completed, resolving client');
+              this.listeners['authstatechange'] = this.listeners['authstatechange'].filter(l => l !== authHandler);
+              resolve(this.ad4mClient);
+            }
+          };
+          this.on('authstatechange', authHandler);
+        }
+      } catch (error) {
+        console.error('[Ad4m Connect] Connection failed:', error);
+        this.notifyConnectionChange("not_connected");
+        this.notifyAuthChange("unauthenticated");
+        reject(error);
       }
-    } catch {
-      this.notifyConnectionChange("not_connected");
-      this.notifyAuthChange("unauthenticated");
-    }
+    });
   }
 
   /**
@@ -620,6 +653,10 @@ export default class Ad4mConnect {
         return false;
       }
     }
+  }
+
+  async isAuthenticated(): Promise<boolean> {
+    return this.authState === "authenticated";
   }
 
   async requestCapability(invalidateToken = false): Promise<string> {

@@ -26,8 +26,6 @@ import Start from "./components/Start";
 import VerifyCode from "./components/VerifyCode";
 import { connectWebSocket, DEFAULT_PORT, getForVersion, removeForVersion, setForVersion } from "./utils";
 
-export { getAd4mClient } from "./utils";
-
 function detectMob() {
   const toMatch = [
     /Android/i,
@@ -582,12 +580,52 @@ export class Ad4mConnectElement extends LitElement {
   @property({ type: String, reflect: true })
   backendUrl = "";
 
+  // Core instance - can be passed in or will be created internally
+  @property({ type: Object })
+  core?: Ad4mConnect;
+
   get authState(): AuthStates {
     return this._client.authState;
   }
 
   get connectionState(): ConnectionStates {
     return this._client.connectionState;
+  }
+
+  /**
+   * Initialize the Ad4mConnect client without mounting UI to DOM
+   * Used for embedded mode where we don't need the visual UI
+   * Returns the Ad4mConnect client instance
+   */
+  public initializeWithoutUI(): Ad4mConnect {
+    autoBind(this);
+
+    // Use provided core instance or create a new one
+    if (this.core) {
+      this._client = this.core;
+    } else {
+      this._client = new Ad4mConnect({
+        appName: this.appName,
+        appDesc: this.appDesc,
+        appDomain: this.appDomain,
+        appUrl: window.location.origin,
+        appIconPath: this.appIconPath,
+        capabilities: Array.isArray(this.capabilities)
+          ? this.capabilities
+          : JSON.parse(this.capabilities),
+        port: this.port || parseInt(getForVersion("ad4mport")) || DEFAULT_PORT,
+        token: this.token || getForVersion("ad4mtoken"),
+        url: this.url || getForVersion("ad4murl"),
+        hosting: this.hosting,
+      });
+    }
+
+    // Set up event listeners for state tracking
+    this._client.on("configstatechange", this.handleConfigChange);
+    this._client.on("authstatechange", this.handleAuthChange);
+    this._client.on("connectionstatechange", this.handleConnectionChange);
+    
+    return this._client;
   }
 
   private injectFont() {
@@ -608,20 +646,25 @@ export class Ad4mConnectElement extends LitElement {
 
     this._isMobile = detectMob();
 
-    this._client = new Ad4mConnect({
-      appName: this.appName,
-      appDesc: this.appDesc,
-      appDomain: this.appDomain,
-      appUrl: window.location.origin,
-      appIconPath: this.appIconPath,
-      capabilities: Array.isArray(this.capabilities)
-        ? this.capabilities
-        : JSON.parse(this.capabilities),
-      port: this.port || parseInt(getForVersion("ad4mport")) || DEFAULT_PORT,
-      token: this.token || getForVersion("ad4mtoken"),
-      url: this.url || getForVersion("ad4murl"),
-      hosting: this.hosting,
-    });
+    // Use provided core instance or create a new one
+    if (this.core) {
+      this._client = this.core;
+    } else {
+      this._client = new Ad4mConnect({
+        appName: this.appName,
+        appDesc: this.appDesc,
+        appDomain: this.appDomain,
+        appUrl: window.location.origin,
+        appIconPath: this.appIconPath,
+        capabilities: Array.isArray(this.capabilities)
+          ? this.capabilities
+          : JSON.parse(this.capabilities),
+        port: this.port || parseInt(getForVersion("ad4mport")) || DEFAULT_PORT,
+        token: this.token || getForVersion("ad4mtoken"),
+        url: this.url || getForVersion("ad4murl"),
+        hosting: this.hosting,
+      });
+    }
 
     // Don't show UI if running in embedded mode - core will handle connection
     if (this._client.isEmbedded()) {
@@ -1187,6 +1230,10 @@ export class Ad4mConnectElement extends LitElement {
     return this._client.ad4mClient;
   }
 
+  getCore() {
+    return this._client;
+  }
+
   async connectRemote(url) {
     try {
       this.changeUrl(url);
@@ -1427,13 +1474,32 @@ export class Ad4mConnectElement extends LitElement {
 }
 
 export default function Ad4mConnectUI(props: Ad4mConnectOptions) {
+  // Create core instance first
+  const core = new Ad4mConnect(props);
+  
+  // Create element and pass the core to it
   const element = new Ad4mConnectElement();
+  element.core = core;
 
+  // Set other properties from props (excluding those already in core)
+  const uiProps = ['appName', 'appDesc', 'appDomain', 'appIconPath', 'capabilities', 'port', 'token', 'url', 'hosting', 'mobile'];
   Object.entries(props).forEach(([key, value]) => {
-    element[key] = value;
+    if (uiProps.includes(key)) {
+      element[key] = value;
+    }
   });
 
-  document.body.appendChild(element);
+  // Check if running in embedded mode
+  const isEmbedded = core.isEmbedded();
+  
+  if (!isEmbedded) {
+    // Standalone mode - append to DOM so connectedCallback fires and UI shows
+    document.body.appendChild(element);
+  } else {
+    // Embedded mode - no UI needed, just return element with core
+    console.log('[Ad4m Connect] Running in embedded mode - UI will not be shown');
+    element.initializeWithoutUI();
+  }
 
   return element;
 }

@@ -69,21 +69,6 @@ export async function checkPort(port: number) {
   }
 }
 
-export function getAd4mClient(): Promise<Ad4mClient> {
-  return new Promise((resolve, reject) => {
-    const el = document.querySelector("ad4m-connect");
-
-    // @ts-ignore
-    const client = el?.getAd4mClient();
-
-    if (client) {
-      resolve(client);
-    } else {
-      reject("No Ad4mClient found");
-    }
-  });
-}
-
 export function onAuthStateChanged(callback) {
   const el = document.querySelector("ad4m-connect");
 
@@ -135,3 +120,6 @@ export function removeForVersion(key: string): void {
     localStorage.removeItem(`${version}/${key}`);
   }
 }
+
+// Re-export getAd4mClient for backwards compatibility
+export { getAd4mClient } from "./index";
