@@ -17,6 +17,7 @@ use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_
 use crate::prolog_service::get_prolog_service;
 use crate::prolog_service::types::{QueryMatch, QueryResolution};
 use crate::prolog_service::PrologService;
+use crate::prolog_service::{PROLOG_MODE, PrologMode};
 use crate::prolog_service::{
     engine_pool::FILTERING_THRESHOLD, DEFAULT_POOL_SIZE, DEFAULT_POOL_SIZE_WITH_FILTERING,
 };
@@ -810,6 +811,13 @@ impl PerspectiveInstance {
 
         // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
         // self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+
+        // Mark Prolog engine dirty for Simple mode (lazy update on next query)
+        if PROLOG_MODE == PrologMode::Simple {
+            let perspective_uuid = self.persisted.lock().await.uuid.clone();
+            get_prolog_service().await.mark_dirty(&perspective_uuid).await;
+        }
+
         self.update_surreal_cache(&decorated_diff).await;
         self.pubsub_publish_diff(decorated_diff).await;
     }
@@ -916,6 +924,13 @@ impl PerspectiveInstance {
 
                 // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
                 // self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+
+                // Mark Prolog engine dirty for Simple mode (lazy update on next query)
+                if PROLOG_MODE == PrologMode::Simple {
+                    let perspective_uuid = self.persisted.lock().await.uuid.clone();
+                    get_prolog_service().await.mark_dirty(&perspective_uuid).await;
+                }
+
                 self.update_surreal_cache(&decorated_diff).await;
                 self.pubsub_publish_diff(decorated_diff.clone()).await;
 
@@ -1040,6 +1055,13 @@ impl PerspectiveInstance {
 
         // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
         // self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
+
+        // Mark Prolog engine dirty for Simple mode (lazy update on next query)
+        if PROLOG_MODE == PrologMode::Simple {
+            let perspective_uuid = self.persisted.lock().await.uuid.clone();
+            get_prolog_service().await.mark_dirty(&perspective_uuid).await;
+        }
+
         self.update_surreal_cache(&decorated_perspective_diff).await;
 
         if status == LinkStatus::Shared {
@@ -1218,6 +1240,13 @@ impl PerspectiveInstance {
 
             // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
             // self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+
+            // Mark Prolog engine dirty for Simple mode (lazy update on next query)
+            if PROLOG_MODE == PrologMode::Simple {
+                let perspective_uuid = self.persisted.lock().await.uuid.clone();
+                get_prolog_service().await.mark_dirty(&perspective_uuid).await;
+            }
+
             self.update_surreal_cache(&decorated_diff).await;
 
             // Publish link updated events - one per owner for proper multi-user isolation
@@ -1323,6 +1352,13 @@ impl PerspectiveInstance {
 
             // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
             // self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+
+            // Mark Prolog engine dirty for Simple mode (lazy update on next query)
+            if PROLOG_MODE == PrologMode::Simple {
+                let perspective_uuid = self.persisted.lock().await.uuid.clone();
+                get_prolog_service().await.mark_dirty(&perspective_uuid).await;
+            }
+
             self.update_surreal_cache(&decorated_diff).await;
             self.pubsub_publish_diff(decorated_diff).await;
 
@@ -1782,21 +1818,43 @@ impl PerspectiveInstance {
         query: String,
         context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
-        let perspective_uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
+        match PROLOG_MODE {
+            PrologMode::Simple => {
+                // Simple mode: One engine per perspective, lazy update on query
+                let service = get_prolog_service().await;
+                let perspective_uuid = {
+                    let persisted_guard = self.persisted.lock().await;
+                    persisted_guard.uuid.clone()
+                };
 
-        // Ensure the user-specific pool exists
-        self.ensure_prolog_engine_pool_for_context(context).await?;
+                // Get all links for lazy update
+                let links = self.get_links_local(&LinkQuery::default()).await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect::<Vec<_>>();
 
-        self.prolog_query_helper(
-            query,
-            true,
-            |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
-            |service, pool, q| async move { service.run_query_smart(pool, q).await },
-        )
-        .await
+                service.run_query_simple(&perspective_uuid, query, &links).await
+                    .map_err(|e| anyhow!("{}", e))
+            }
+            PrologMode::Pooled => {
+                // Pooled mode: Use the old pool-based approach
+                let perspective_uuid = {
+                    let persisted_guard = self.persisted.lock().await;
+                    persisted_guard.uuid.clone()
+                };
+
+                // Ensure the user-specific pool exists
+                self.ensure_prolog_engine_pool_for_context(context).await?;
+
+                self.prolog_query_helper(
+                    query,
+                    true,
+                    |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
+                    |service, pool, q| async move { service.run_query_smart(pool, q).await },
+                )
+                .await
+            }
+        }
     }
 
     /// Executes a Prolog subscription query against the perspective's main pool
@@ -1806,13 +1864,35 @@ impl PerspectiveInstance {
         &self,
         query: String,
     ) -> Result<QueryResolution, AnyError> {
-        self.prolog_query_helper(
-            query,
-            true,
-            |uuid| uuid.clone(),
-            |service, pool, q| async move { service.run_query_subscription(pool, q).await },
-        )
-        .await
+        match PROLOG_MODE {
+            PrologMode::Simple => {
+                // Simple mode: Use separate subscription engine
+                let service = get_prolog_service().await;
+                let perspective_uuid = {
+                    let persisted_guard = self.persisted.lock().await;
+                    persisted_guard.uuid.clone()
+                };
+
+                // Get all links for lazy update
+                let links = self.get_links_local(&LinkQuery::default()).await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect::<Vec<_>>();
+
+                service.run_query_subscription_simple(&perspective_uuid, query, &links).await
+                    .map_err(|e| anyhow!("{}", e))
+            }
+            PrologMode::Pooled => {
+                // Pooled mode: Use the old pool-based approach
+                self.prolog_query_helper(
+                    query,
+                    true,
+                    |uuid| uuid.clone(),
+                    |service, pool, q| async move { service.run_query_subscription(pool, q).await },
+                )
+                .await
+            }
+        }
     }
 
     /// Executes a Prolog subscription query with user context - uses context-specific pool
@@ -1821,20 +1901,42 @@ impl PerspectiveInstance {
     pub async fn prolog_query_subscription_with_context(
         &self,
         query: String,
-        context: &AgentContext,
+        _context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
-        let perspective_uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
+        match PROLOG_MODE {
+            PrologMode::Simple => {
+                // Simple mode: Use separate subscription engine (no context-specific pool)
+                let service = get_prolog_service().await;
+                let perspective_uuid = {
+                    let persisted_guard = self.persisted.lock().await;
+                    persisted_guard.uuid.clone()
+                };
 
-        self.prolog_query_helper(
-            query,
-            true,
-            |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
-            |service, pool, q| async move { service.run_query_subscription(pool, q).await },
-        )
-        .await
+                // Get all links for lazy update
+                let links = self.get_links_local(&LinkQuery::default()).await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect::<Vec<_>>();
+
+                service.run_query_subscription_simple(&perspective_uuid, query, &links).await
+                    .map_err(|e| anyhow!("{}", e))
+            }
+            PrologMode::Pooled => {
+                // Pooled mode: Use the old pool-based approach with context
+                let perspective_uuid = {
+                    let persisted_guard = self.persisted.lock().await;
+                    persisted_guard.uuid.clone()
+                };
+
+                self.prolog_query_helper(
+                    query,
+                    true,
+                    |_uuid| self.get_pool_id_for_context(&perspective_uuid, _context),
+                    |service, pool, q| async move { service.run_query_subscription(pool, q).await },
+                )
+                .await
+            }
+        }
     }
 
     /// Executes a Prolog query directly on the SDNA pool for maximum performance
@@ -3745,6 +3847,13 @@ impl PerspectiveInstance {
             // Update prolog facts once for all changes and wait for completion
             // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
             // self.spawn_prolog_facts_update(combined_diff.clone(), None);
+
+            // Mark Prolog engine dirty for Simple mode (lazy update on next query)
+            if PROLOG_MODE == PrologMode::Simple {
+                let perspective_uuid = self.persisted.lock().await.uuid.clone();
+                get_prolog_service().await.mark_dirty(&perspective_uuid).await;
+            }
+
             self.update_surreal_cache(&combined_diff).await;
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());

@@ -15,24 +15,208 @@ pub mod sdna_pool;
 pub mod source_filtering;
 pub mod types;
 
+use self::embedding_cache::EmbeddingCache;
+use self::engine::PrologEngine;
 use self::engine_pool::PrologEnginePool;
-use self::types::QueryResult;
+use self::types::{QueryResolution, QueryResult};
 
 pub const DEFAULT_POOL_SIZE: usize = 5;
 pub const DEFAULT_POOL_SIZE_WITH_FILTERING: usize = 2;
 const SDNA_POOL_SIZE: usize = 1;
 const FILTERED_POOL_SIZE: usize = 2;
 
+/// Prolog execution mode configuration
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrologMode {
+    /// Simple mode: One engine per perspective, lazy updates on query
+    /// Memory efficient but slower queries (like pre-2024 behavior)
+    Simple,
+    /// Pooled mode: Multiple engines with filtering and caching
+    /// Faster queries but uses more memory
+    Pooled,
+}
+
+// MEMORY OPTIMIZATION: Set to Simple for minimal memory usage (1 engine per perspective)
+// Set to Pooled for maximum query performance (multiple engines with caching)
+pub static PROLOG_MODE: PrologMode = PrologMode::Simple;
+
 #[derive(Clone)]
 pub struct PrologService {
     engine_pools: Arc<RwLock<HashMap<String, PrologEnginePool>>>,
+    // Simple mode: Single engine per perspective with dirty tracking
+    simple_engines: Arc<RwLock<HashMap<String, SimpleEngine>>>,
+}
+
+/// Simple Prolog engine with lazy update tracking
+struct SimpleEngine {
+    /// Engine for regular queries
+    query_engine: PrologEngine,
+    /// Separate engine for subscriptions (to avoid interference)
+    subscription_engine: PrologEngine,
+    /// Track if links have changed since last query
+    dirty: bool,
+    /// Current links loaded in the engines
+    current_links: Vec<DecoratedLinkExpression>,
 }
 
 impl PrologService {
     pub fn new() -> Self {
         PrologService {
             engine_pools: Arc::new(RwLock::new(HashMap::new())),
+            simple_engines: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Mark a perspective's Prolog engine as dirty (needs update before next query)
+    /// Only used in Simple mode
+    pub async fn mark_dirty(&self, perspective_id: &str) {
+        if PROLOG_MODE == PrologMode::Simple {
+            let mut engines = self.simple_engines.write().await;
+            if let Some(simple_engine) = engines.get_mut(perspective_id) {
+                simple_engine.dirty = true;
+                log::debug!("Marked Prolog engine {} as dirty", perspective_id);
+            }
+        }
+    }
+
+    /// Update Prolog engine if dirty (lazy update on query)
+    /// Only used in Simple mode
+    async fn ensure_engine_updated(
+        &self,
+        perspective_id: &str,
+        links: &[DecoratedLinkExpression],
+    ) -> Result<(), Error> {
+        use crate::perspectives::sdna::{get_data_facts, get_static_infrastructure_facts};
+        use pool_trait::PoolUtils;
+
+        if PROLOG_MODE != PrologMode::Simple {
+            return Ok(());
+        }
+
+        let mut engines = self.simple_engines.write().await;
+
+        // Check if we need to update (dirty or links changed or first time)
+        let needs_update = if let Some(simple_engine) = engines.get(perspective_id) {
+            simple_engine.dirty || simple_engine.current_links != links
+        } else {
+            true // First query = needs init
+        };
+
+        if needs_update {
+            log::info!(
+                "Updating Prolog engine {} (Simple mode: lazy update with {} links)",
+                perspective_id,
+                links.len()
+            );
+
+            // Create engines if they don't exist
+            if !engines.contains_key(perspective_id) {
+                let mut query_engine = PrologEngine::new();
+                query_engine.spawn().await?;
+
+                let mut subscription_engine = PrologEngine::new();
+                subscription_engine.spawn().await?;
+
+                engines.insert(
+                    perspective_id.to_string(),
+                    SimpleEngine {
+                        query_engine,
+                        subscription_engine,
+                        dirty: true,
+                        current_links: Vec::new(),
+                    },
+                );
+            }
+
+            let simple_engine = engines.get_mut(perspective_id).unwrap();
+
+            // Prepare facts (infrastructure + link data, no SDNA for Simple mode)
+            let mut facts_to_load = get_static_infrastructure_facts();
+            facts_to_load.extend(get_data_facts(links));
+
+            // Preprocess facts (handle embeddings)
+            let embedding_cache = Arc::new(RwLock::new(EmbeddingCache::new()));
+            let processed_facts =
+                PoolUtils::preprocess_program_lines(facts_to_load, &embedding_cache).await;
+
+            // Load facts into both engines
+            simple_engine
+                .query_engine
+                .load_module_string("facts", &processed_facts)
+                .await?;
+            simple_engine
+                .subscription_engine
+                .load_module_string("facts", &processed_facts)
+                .await?;
+
+            simple_engine.dirty = false;
+            simple_engine.current_links = links.to_vec();
+            log::info!("Prolog engines {} updated successfully (query + subscription)", perspective_id);
+        }
+
+        Ok(())
+    }
+
+    /// Run query in Simple mode
+    pub async fn run_query_simple(
+        &self,
+        perspective_id: &str,
+        query: String,
+        links: &[DecoratedLinkExpression],
+    ) -> Result<QueryResolution, Error> {
+        use deno_core::anyhow::anyhow;
+
+        // Ensure engine is up to date
+        self.ensure_engine_updated(perspective_id, links).await?;
+
+        // Add "." at the end if missing
+        let query = if !query.ends_with('.') {
+            query + "."
+        } else {
+            query
+        };
+
+        let engines = self.simple_engines.read().await;
+        let simple_engine = engines
+            .get(perspective_id)
+            .ok_or_else(|| anyhow!("Prolog engine not found for perspective {}", perspective_id))?;
+
+        // Run query through the query engine
+        let result = simple_engine.query_engine.run_query(query).await?;
+
+        // Convert QueryResult to QueryResolution
+        result.map_err(|e| anyhow!("Prolog query failed: {}", e))
+    }
+
+    /// Run subscription query in Simple mode (uses separate engine)
+    pub async fn run_query_subscription_simple(
+        &self,
+        perspective_id: &str,
+        query: String,
+        links: &[DecoratedLinkExpression],
+    ) -> Result<QueryResolution, Error> {
+        use deno_core::anyhow::anyhow;
+
+        // Ensure engine is up to date
+        self.ensure_engine_updated(perspective_id, links).await?;
+
+        // Add "." at the end if missing
+        let query = if !query.ends_with('.') {
+            query + "."
+        } else {
+            query
+        };
+
+        let engines = self.simple_engines.read().await;
+        let simple_engine = engines
+            .get(perspective_id)
+            .ok_or_else(|| anyhow!("Prolog engine not found for perspective {}", perspective_id))?;
+
+        // Run query through the subscription engine (separate from regular queries)
+        let result = simple_engine.subscription_engine.run_query(query).await?;
+
+        // Convert QueryResult to QueryResolution
+        result.map_err(|e| anyhow!("Prolog subscription query failed: {}", e))
     }
 
     pub async fn ensure_perspective_pool(
