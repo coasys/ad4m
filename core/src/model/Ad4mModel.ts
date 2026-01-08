@@ -614,6 +614,81 @@ export class Ad4mModel {
     return this.#perspective;
   }
 
+  /**
+   * Get property metadata from decorator (Phase 1: Prolog-free refactor)
+   * @private
+   */
+  private getPropertyMetadata(key: string): PropertyOptions | undefined {
+    const proto = Object.getPrototypeOf(this);
+    return proto.__properties?.[key];
+  }
+
+  /**
+   * Get collection metadata from decorator (Phase 1: Prolog-free refactor)
+   * @private
+   */
+  private getCollectionMetadata(key: string): CollectionOptions | undefined {
+    const proto = Object.getPrototypeOf(this);
+    return proto.__collections?.[key];
+  }
+
+  /**
+   * Generate property setter action from metadata (Phase 1: Prolog-free refactor)
+   * Replaces Prolog query: property_setter(C, key, Setter)
+   * @private
+   */
+  private generatePropertySetterAction(key: string, metadata: PropertyOptions): any[] {
+    if (metadata.setter) {
+      // Custom setter - throw error for now (Phase 2)
+      throw new Error(
+        `Custom setter for property "${key}" not yet supported without Prolog. ` +
+        `Use standard @Property decorator or enable Prolog for custom setters.`
+      );
+    }
+
+    if (!metadata.through) {
+      throw new Error(`Property "${key}" has no 'through' predicate defined`);
+    }
+
+    return [{
+      action: "setSingleTarget",
+      source: "this",
+      predicate: metadata.through,
+      target: "value",
+      ...(metadata.local && { local: true })
+    }];
+  }
+
+  /**
+   * Generate collection action from metadata (Phase 1: Prolog-free refactor)
+   * Replaces Prolog queries: collection_adder, collection_remover, collection_setter
+   * @private
+   */
+  private generateCollectionAction(key: string, actionType: 'adder' | 'remover' | 'setter'): any[] {
+    const metadata = this.getCollectionMetadata(key);
+    if (!metadata) {
+      throw new Error(`Collection "${key}" has no metadata defined`);
+    }
+
+    if (!metadata.through) {
+      throw new Error(`Collection "${key}" has no 'through' predicate defined`);
+    }
+
+    const actionMap = {
+      adder: "addLink",
+      remover: "removeLink",
+      setter: "collectionSetter"
+    };
+
+    return [{
+      action: actionMap[actionType],
+      source: "this",
+      predicate: metadata.through,
+      target: "value",
+      ...(metadata.local && { local: true })
+    }];
+  }
+
   public static async assignValuesToInstance(perspective: PerspectiveProxy, instance: Ad4mModel, values: ValueTuple[]) {
     // Map properties to object
     const propsObject = Object.fromEntries(
@@ -1817,90 +1892,95 @@ WHERE ${whereConditions.join(' AND ')}
   }
 
   private async setProperty(key: string, value: any, batchId?: string) {
-    const setters = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), property_setter(C, "${key}", Setter)`
-    );
-    if (setters && setters.length > 0) {
-      const actions = eval(setters[0].Setter);
-      const resolveLanguageResults = await this.#perspective.infer(
-        `subject_class("${this.#subjectClassName}", C), property_resolve_language(C, "${key}", Language)`
-      );
-      let resolveLanguage;
-      if (resolveLanguageResults && resolveLanguageResults.length > 0) {
-        resolveLanguage = resolveLanguageResults[0].Language;
-      }
-
-      if (resolveLanguage) {
-        value = await this.#perspective.createExpression(value, resolveLanguage);
-      }
-      await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
+    // Phase 1: Use metadata instead of Prolog queries
+    const metadata = this.getPropertyMetadata(key);
+    if (!metadata) {
+      console.warn(`Property "${key}" has no metadata, skipping`);
+      return;
     }
+
+    // Generate actions from metadata (replaces Prolog query)
+    const actions = this.generatePropertySetterAction(key, metadata);
+
+    // Get resolve language from metadata (replaces Prolog query)
+    let resolveLanguage = metadata.resolveLanguage;
+
+    if (resolveLanguage) {
+      value = await this.#perspective.createExpression(value, resolveLanguage);
+    }
+
+    await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
   }
 
   private async setCollectionSetter(key: string, value: any, batchId?: string) {
-    let collectionSetters = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), collection_setter(C, "${singularToPlural(key)}", Setter)`
-    );
-    if (!collectionSetters) collectionSetters = [];
+    // Phase 1: Use metadata instead of Prolog queries
+    const metadata = this.getCollectionMetadata(key);
+    if (!metadata) {
+      console.warn(`Collection "${key}" has no metadata, skipping`);
+      return;
+    }
 
-    if (collectionSetters.length > 0) {
-      const actions = eval(collectionSetters[0].Setter);
+    // Generate actions from metadata (replaces Prolog query)
+    const actions = this.generateCollectionAction(key, 'setter');
 
-      if (value) {
-        if (Array.isArray(value)) {
-          await this.#perspective.executeAction(
-            actions,
-            this.#baseExpression,
-            value.map((v) => ({ name: "value", value: v })),
-            batchId
-          );
-        } else {
-          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
-        }
+    if (value) {
+      if (Array.isArray(value)) {
+        await this.#perspective.executeAction(
+          actions,
+          this.#baseExpression,
+          value.map((v) => ({ name: "value", value: v })),
+          batchId
+        );
+      } else {
+        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
       }
     }
   }
 
   private async setCollectionAdder(key: string, value: any, batchId?: string) {
-    let adders = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), collection_adder(C, "${singularToPlural(key)}", Adder)`
-    );
-    if (!adders) adders = [];
+    // Phase 1: Use metadata instead of Prolog queries
+    const metadata = this.getCollectionMetadata(key);
+    if (!metadata) {
+      console.warn(`Collection "${key}" has no metadata, skipping`);
+      return;
+    }
 
-    if (adders.length > 0) {
-      const actions = eval(adders[0].Adder);
-      if (value) {
-        if (Array.isArray(value)) {
-          await Promise.all(
-            value.map((v) =>
-              this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
-            )
-          );
-        } else {
-          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
-        }
+    // Generate actions from metadata (replaces Prolog query)
+    const actions = this.generateCollectionAction(key, 'adder');
+
+    if (value) {
+      if (Array.isArray(value)) {
+        await Promise.all(
+          value.map((v) =>
+            this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
+          )
+        );
+      } else {
+        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
       }
     }
   }
 
   private async setCollectionRemover(key: string, value: any, batchId?: string) {
-    let removers = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), collection_remover(C, "${singularToPlural(key)}", Remover)`
-    );
-    if (!removers) removers = [];
+    // Phase 1: Use metadata instead of Prolog queries
+    const metadata = this.getCollectionMetadata(key);
+    if (!metadata) {
+      console.warn(`Collection "${key}" has no metadata, skipping`);
+      return;
+    }
 
-    if (removers.length > 0) {
-      const actions = eval(removers[0].Remover);
-      if (value) {
-        if (Array.isArray(value)) {
-          await Promise.all(
-            value.map((v) =>
-              this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
-            )
-          );
-        } else {
-          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
-        }
+    // Generate actions from metadata (replaces Prolog query)
+    const actions = this.generateCollectionAction(key, 'remover');
+
+    if (value) {
+      if (Array.isArray(value)) {
+        await Promise.all(
+          value.map((v) =>
+            this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
+          )
+        );
+      } else {
+        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
       }
     }
   }
