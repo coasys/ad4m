@@ -85,8 +85,10 @@ impl PrologService {
         &self,
         perspective_id: &str,
         links: &[DecoratedLinkExpression],
+        neighbourhood_author: Option<String>,
+        owner_did: Option<String>,
     ) -> Result<(), Error> {
-        use crate::perspectives::sdna::{get_data_facts, get_static_infrastructure_facts};
+        use crate::perspectives::sdna::{get_data_facts, get_sdna_facts, get_static_infrastructure_facts};
         use pool_trait::PoolUtils;
 
         if PROLOG_MODE != PrologMode::Simple {
@@ -130,9 +132,14 @@ impl PrologService {
 
             let simple_engine = engines.get_mut(perspective_id).unwrap();
 
-            // Prepare facts (infrastructure + link data, no SDNA for Simple mode)
+            // Prepare facts (infrastructure + link data + SDNA for Simple mode)
             let mut facts_to_load = get_static_infrastructure_facts();
             facts_to_load.extend(get_data_facts(links));
+            facts_to_load.extend(get_sdna_facts(
+                links,
+                neighbourhood_author.clone(),
+                owner_did.clone(),
+            )?);
 
             // Preprocess facts (handle embeddings)
             let embedding_cache = Arc::new(RwLock::new(EmbeddingCache::new()));
@@ -163,11 +170,13 @@ impl PrologService {
         perspective_id: &str,
         query: String,
         links: &[DecoratedLinkExpression],
+        neighbourhood_author: Option<String>,
+        owner_did: Option<String>,
     ) -> Result<QueryResolution, Error> {
         use deno_core::anyhow::anyhow;
 
         // Ensure engine is up to date
-        self.ensure_engine_updated(perspective_id, links).await?;
+        self.ensure_engine_updated(perspective_id, links, neighbourhood_author, owner_did).await?;
 
         // Add "." at the end if missing
         let query = if !query.ends_with('.') {
@@ -194,11 +203,13 @@ impl PrologService {
         perspective_id: &str,
         query: String,
         links: &[DecoratedLinkExpression],
+        neighbourhood_author: Option<String>,
+        owner_did: Option<String>,
     ) -> Result<QueryResolution, Error> {
         use deno_core::anyhow::anyhow;
 
         // Ensure engine is up to date
-        self.ensure_engine_updated(perspective_id, links).await?;
+        self.ensure_engine_updated(perspective_id, links, neighbourhood_author, owner_did).await?;
 
         // Add "." at the end if missing
         let query = if !query.ends_with('.') {

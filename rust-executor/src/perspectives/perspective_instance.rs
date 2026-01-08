@@ -1822,9 +1822,15 @@ impl PerspectiveInstance {
             PrologMode::Simple => {
                 // Simple mode: One engine per perspective, lazy update on query
                 let service = get_prolog_service().await;
-                let perspective_uuid = {
+                let (perspective_uuid, owner_did, neighbourhood_author) = {
                     let persisted_guard = self.persisted.lock().await;
-                    persisted_guard.uuid.clone()
+                    let perspective_uuid = persisted_guard.uuid.clone();
+                    let owner_did = persisted_guard.get_primary_owner();
+                    let neighbourhood_author = persisted_guard
+                        .neighbourhood
+                        .as_ref()
+                        .map(|n| n.author.clone());
+                    (perspective_uuid, owner_did, neighbourhood_author)
                 };
 
                 // Get all links for lazy update
@@ -1833,7 +1839,7 @@ impl PerspectiveInstance {
                     .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
                     .collect::<Vec<_>>();
 
-                service.run_query_simple(&perspective_uuid, query, &links).await
+                service.run_query_simple(&perspective_uuid, query, &links, neighbourhood_author, owner_did).await
                     .map_err(|e| anyhow!("{}", e))
             }
             PrologMode::Pooled => {
@@ -1868,9 +1874,15 @@ impl PerspectiveInstance {
             PrologMode::Simple => {
                 // Simple mode: Use separate subscription engine
                 let service = get_prolog_service().await;
-                let perspective_uuid = {
+                let (perspective_uuid, owner_did, neighbourhood_author) = {
                     let persisted_guard = self.persisted.lock().await;
-                    persisted_guard.uuid.clone()
+                    let perspective_uuid = persisted_guard.uuid.clone();
+                    let owner_did = persisted_guard.get_primary_owner();
+                    let neighbourhood_author = persisted_guard
+                        .neighbourhood
+                        .as_ref()
+                        .map(|n| n.author.clone());
+                    (perspective_uuid, owner_did, neighbourhood_author)
                 };
 
                 // Get all links for lazy update
@@ -1879,7 +1891,7 @@ impl PerspectiveInstance {
                     .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
                     .collect::<Vec<_>>();
 
-                service.run_query_subscription_simple(&perspective_uuid, query, &links).await
+                service.run_query_subscription_simple(&perspective_uuid, query, &links, neighbourhood_author, owner_did).await
                     .map_err(|e| anyhow!("{}", e))
             }
             PrologMode::Pooled => {
@@ -1907,9 +1919,15 @@ impl PerspectiveInstance {
             PrologMode::Simple => {
                 // Simple mode: Use separate subscription engine (no context-specific pool)
                 let service = get_prolog_service().await;
-                let perspective_uuid = {
+                let (perspective_uuid, owner_did, neighbourhood_author) = {
                     let persisted_guard = self.persisted.lock().await;
-                    persisted_guard.uuid.clone()
+                    let perspective_uuid = persisted_guard.uuid.clone();
+                    let owner_did = persisted_guard.get_primary_owner();
+                    let neighbourhood_author = persisted_guard
+                        .neighbourhood
+                        .as_ref()
+                        .map(|n| n.author.clone());
+                    (perspective_uuid, owner_did, neighbourhood_author)
                 };
 
                 // Get all links for lazy update
@@ -1918,7 +1936,7 @@ impl PerspectiveInstance {
                     .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
                     .collect::<Vec<_>>();
 
-                service.run_query_subscription_simple(&perspective_uuid, query, &links).await
+                service.run_query_subscription_simple(&perspective_uuid, query, &links, neighbourhood_author, owner_did).await
                     .map_err(|e| anyhow!("{}", e))
             }
             PrologMode::Pooled => {
