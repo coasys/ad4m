@@ -809,10 +809,10 @@ impl PerspectiveInstance {
                 .collect(),
         };
 
-        // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
-        // self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+        // Update Prolog: subscription engine (immediate) + query engine (lazy)
+        self.spawn_prolog_facts_update(decorated_diff.clone(), None);
 
-        // Mark Prolog engine dirty for Simple mode (lazy update on next query)
+        // Mark query engine dirty for lazy update on next query
         if PROLOG_MODE == PrologMode::Simple {
             let perspective_uuid = self.persisted.lock().await.uuid.clone();
             get_prolog_service().await.mark_dirty(&perspective_uuid).await;
@@ -922,10 +922,10 @@ impl PerspectiveInstance {
                 let decorated_diff =
                     DecoratedPerspectiveDiff::from_removals(vec![decorated_link.clone()]);
 
-                // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
-                // self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+                // Update Prolog: subscription engine (immediate) + query engine (lazy)
+                self.spawn_prolog_facts_update(decorated_diff.clone(), None);
 
-                // Mark Prolog engine dirty for Simple mode (lazy update on next query)
+                // Mark query engine dirty for lazy update on next query
                 if PROLOG_MODE == PrologMode::Simple {
                     let perspective_uuid = self.persisted.lock().await.uuid.clone();
                     get_prolog_service().await.mark_dirty(&perspective_uuid).await;
@@ -1053,10 +1053,10 @@ impl PerspectiveInstance {
         let decorated_perspective_diff =
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
-        // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
-        // self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
+        // Update Prolog: subscription engine (immediate) + query engine (lazy)
+        self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
 
-        // Mark Prolog engine dirty for Simple mode (lazy update on next query)
+        // Mark query engine dirty for lazy update on next query
         if PROLOG_MODE == PrologMode::Simple {
             let perspective_uuid = self.persisted.lock().await.uuid.clone();
             get_prolog_service().await.mark_dirty(&perspective_uuid).await;
@@ -1238,10 +1238,10 @@ impl PerspectiveInstance {
                 vec![decorated_old_link.clone()],
             );
 
-            // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
-            // self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+            // Update Prolog: subscription engine (immediate) + query engine (lazy)
+            self.spawn_prolog_facts_update(decorated_diff.clone(), None);
 
-            // Mark Prolog engine dirty for Simple mode (lazy update on next query)
+            // Mark query engine dirty for lazy update on next query
             if PROLOG_MODE == PrologMode::Simple {
                 let perspective_uuid = self.persisted.lock().await.uuid.clone();
                 get_prolog_service().await.mark_dirty(&perspective_uuid).await;
@@ -1350,10 +1350,10 @@ impl PerspectiveInstance {
                 Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, link))?;
             }
 
-            // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
-            // self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+            // Update Prolog: subscription engine (immediate) + query engine (lazy)
+            self.spawn_prolog_facts_update(decorated_diff.clone(), None);
 
-            // Mark Prolog engine dirty for Simple mode (lazy update on next query)
+            // Mark query engine dirty for lazy update on next query
             if PROLOG_MODE == PrologMode::Simple {
                 let perspective_uuid = self.persisted.lock().await.uuid.clone();
                 get_prolog_service().await.mark_dirty(&perspective_uuid).await;
@@ -2148,6 +2148,22 @@ impl PerspectiveInstance {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
+            // In Simple mode, only update subscription engine and trigger subscription rerun
+            if PROLOG_MODE == PrologMode::Simple {
+                log::debug!("Prolog facts update (Simple mode): marking subscription engine dirty");
+
+                // Trigger subscription check to rerun all subscriptions with updated data
+                *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
+
+                self_clone.pubsub_publish_diff(diff).await;
+
+                if let Some(sender) = completion_sender {
+                    let _ = sender.send(());
+                }
+                return;
+            }
+
+            // Pooled mode: original full update logic
             //let spawn_start = std::time::Instant::now();
             //log::info!("🔧 PROLOG UPDATE: Starting prolog facts update task - {} add, {} rem",
             //    diff.additions.len(), diff.removals.len());
@@ -3599,6 +3615,9 @@ impl PerspectiveInstance {
     }
 
     async fn subscribed_queries_loop(&self) {
+        let mut log_counter = 0;
+        const LOG_INTERVAL: u32 = 300; // Log every ~60 seconds (300 * 200ms)
+
         while !*self.is_teardown.lock().await {
             // Check trigger without holding lock during the operation
             let should_check = { *self.trigger_prolog_subscription_check.lock().await };
@@ -3607,6 +3626,30 @@ impl PerspectiveInstance {
                 self.check_subscribed_queries().await;
                 *self.trigger_prolog_subscription_check.lock().await = false;
             }
+
+            // Periodic subscription logging
+            log_counter += 1;
+            if log_counter >= LOG_INTERVAL {
+                log_counter = 0;
+                let queries = self.subscribed_queries.lock().await;
+                if !queries.is_empty() {
+                    let perspective_uuid = self.persisted.lock().await.uuid.clone();
+                    log::info!(
+                        "📊 Prolog subscriptions [{}]: {} active",
+                        perspective_uuid,
+                        queries.len()
+                    );
+                    for (id, query) in queries.iter() {
+                        let query_preview = if query.query.len() > 100 {
+                            format!("{}...", &query.query[..100])
+                        } else {
+                            query.query.clone()
+                        };
+                        log::info!("   - [{}]: {}", id, query_preview);
+                    }
+                }
+            }
+
             sleep(Duration::from_millis(QUERY_SUBSCRIPTION_CHECK_INTERVAL)).await;
         }
     }
@@ -3845,10 +3888,10 @@ impl PerspectiveInstance {
             //    combined_diff.additions.len(), combined_diff.removals.len());
 
             // Update prolog facts once for all changes and wait for completion
-            // MEMORY OPTIMIZATION: Prolog link updates disabled - only update SurrealDB
-            // self.spawn_prolog_facts_update(combined_diff.clone(), None);
+            // Update Prolog: subscription engine (immediate) + query engine (lazy)
+            self.spawn_prolog_facts_update(combined_diff.clone(), None);
 
-            // Mark Prolog engine dirty for Simple mode (lazy update on next query)
+            // Mark query engine dirty for lazy update on next query
             if PROLOG_MODE == PrologMode::Simple {
                 let perspective_uuid = self.persisted.lock().await.uuid.clone();
                 get_prolog_service().await.mark_dirty(&perspective_uuid).await;
