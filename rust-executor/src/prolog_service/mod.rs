@@ -293,13 +293,26 @@ impl PrologService {
         perspective_id: String,
         pool_size: Option<usize>,
     ) -> Result<(), Error> {
-        // Check if Prolog is disabled
-        if PROLOG_MODE == PrologMode::Disabled {
-            log::warn!(
-                "⚠️ ensure_perspective_pool called but Prolog is DISABLED (perspective: {})",
-                perspective_id
-            );
-            return Ok(()); // Do nothing when disabled
+        // Check if Prolog mode supports pooled mode
+        match PROLOG_MODE {
+            PrologMode::Disabled => {
+                log::warn!(
+                    "⚠️ ensure_perspective_pool called but Prolog is DISABLED (perspective: {})",
+                    perspective_id
+                );
+                return Ok(()); // Do nothing when disabled
+            }
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                // Simple/SdnaOnly modes don't use pools
+                log::trace!(
+                    "⚠️ ensure_perspective_pool called in Simple/SdnaOnly mode (perspective: {}) - ignoring",
+                    perspective_id
+                );
+                return Ok(());
+            }
+            PrologMode::Pooled => {
+                // Continue with pooled mode logic
+            }
         }
 
         // ⚠️ DEADLOCK FIX: Use optimistic locking to avoid race conditions
@@ -363,26 +376,36 @@ impl PrologService {
         perspective_id: String,
         query: String,
     ) -> Result<QueryResult, Error> {
-        // Check if Prolog is disabled
-        if PROLOG_MODE == PrologMode::Disabled {
-            log::warn!(
-                "⚠️ Prolog SDNA query received but Prolog is DISABLED (perspective: {}, query: {})",
-                perspective_id,
-                query
-            );
-            return Err(Error::msg("Prolog is disabled"));
+        // This function should only be called in Pooled mode
+        // Simple/SdnaOnly modes are handled at the perspective layer
+        match PROLOG_MODE {
+            PrologMode::Disabled => {
+                log::warn!(
+                    "⚠️ Prolog SDNA query received but Prolog is DISABLED (perspective: {}, query: {})",
+                    perspective_id,
+                    query
+                );
+                return Err(Error::msg("Prolog is disabled"));
+            }
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                // Should not be called directly in Simple/SdnaOnly - perspective layer handles routing
+                log::warn!(
+                    "⚠️ run_query_sdna called directly in Simple/SdnaOnly mode - this should be handled at perspective layer",
+                );
+                return Err(Error::msg("Direct SDNA pool queries not available in Simple/SdnaOnly mode"));
+            }
+            PrologMode::Pooled => {
+                // In pooled mode, use the dedicated SDNA pool
+                let pool = {
+                    let pools = self.engine_pools.read().await;
+                    pools
+                        .get(&perspective_id)
+                        .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
+                        .clone()
+                };
+                pool.run_query_sdna(query).await
+            }
         }
-
-        // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
-        let pool = {
-            let pools = self.engine_pools.read().await;
-            pools
-                .get(&perspective_id)
-                .ok_or_else(|| Error::msg("No Prolog engine pool found for perspective"))?
-                .clone() // Clone the Arc<> to release the lock
-        }; // Read lock is released here
-
-        pool.run_query_sdna(query).await
     }
 
     /// Run query with subscription optimization - uses filtered pools for subscription queries
@@ -391,14 +414,27 @@ impl PrologService {
         perspective_id: String,
         query: String,
     ) -> Result<QueryResult, Error> {
-        // Check if Prolog is disabled
-        if PROLOG_MODE == PrologMode::Disabled {
-            log::warn!(
-                "⚠️ Prolog query received but Prolog is DISABLED (perspective: {}, query: {})",
-                perspective_id,
-                query
-            );
-            return Err(Error::msg("Prolog is disabled"));
+        // Check if Prolog mode supports pooled queries
+        match PROLOG_MODE {
+            PrologMode::Disabled => {
+                log::warn!(
+                    "⚠️ Prolog query received but Prolog is DISABLED (perspective: {}, query: {})",
+                    perspective_id,
+                    query
+                );
+                return Err(Error::msg("Prolog is disabled"));
+            }
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                // Smart routing is pooled-mode only
+                log::warn!(
+                    "⚠️ run_query_smart called in Simple/SdnaOnly mode (perspective: {}) - pooled-mode only, ignoring",
+                    perspective_id
+                );
+                return Err(Error::msg("Smart routing not available in Simple/SdnaOnly mode"));
+            }
+            PrologMode::Pooled => {
+                // Continue with pooled mode logic
+            }
         }
 
         // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
@@ -433,14 +469,27 @@ impl PrologService {
         perspective_id: String,
         query: String,
     ) -> Result<QueryResult, Error> {
-        // Check if Prolog is disabled
-        if PROLOG_MODE == PrologMode::Disabled {
-            log::warn!(
-                "⚠️ Prolog subscription query received but Prolog is DISABLED (perspective: {}, query: {})",
-                perspective_id,
-                query
-            );
-            return Err(Error::msg("Prolog is disabled"));
+        // Check if Prolog mode supports pooled subscription queries
+        match PROLOG_MODE {
+            PrologMode::Disabled => {
+                log::warn!(
+                    "⚠️ Prolog subscription query received but Prolog is DISABLED (perspective: {}, query: {})",
+                    perspective_id,
+                    query
+                );
+                return Err(Error::msg("Prolog is disabled"));
+            }
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                // Subscription queries with pools are pooled-mode only
+                log::warn!(
+                    "⚠️ run_query_subscription called in Simple/SdnaOnly mode (perspective: {}) - pooled-mode only, ignoring",
+                    perspective_id
+                );
+                return Err(Error::msg("Pooled subscriptions not available in Simple/SdnaOnly mode"));
+            }
+            PrologMode::Pooled => {
+                // Continue with pooled mode logic
+            }
         }
 
         // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
@@ -513,14 +562,27 @@ impl PrologService {
             query.len()
         );
 
-        // Check if Prolog is disabled
-        if PROLOG_MODE == PrologMode::Disabled {
-            log::warn!(
-                "⚠️ run_query_all called but Prolog is DISABLED (perspective: {}, query: {} chars)",
-                perspective_id,
-                query.len()
-            );
-            return Ok(()); // Do nothing when disabled
+        // Check if Prolog mode supports pooled queries
+        match PROLOG_MODE {
+            PrologMode::Disabled => {
+                log::warn!(
+                    "⚠️ run_query_all called but Prolog is DISABLED (perspective: {}, query: {} chars)",
+                    perspective_id,
+                    query.len()
+                );
+                return Ok(()); // Do nothing when disabled
+            }
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                // This is a pooled-mode function - in Simple/SdnaOnly modes, shouldn't be called
+                log::warn!(
+                    "⚠️ run_query_all called in Simple/SdnaOnly mode (perspective: {}) - this is pooled-mode only, ignoring",
+                    perspective_id
+                );
+                return Ok(());
+            }
+            PrologMode::Pooled => {
+                // Continue with pooled mode logic
+            }
         }
 
         // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
@@ -577,14 +639,28 @@ impl PrologService {
         log::debug!("🔗 PROLOG SERVICE: Starting update_perspective_links for perspective '{}' - {} links, module: {}", 
             perspective_id, all_links.len(), module_name);
 
-        // Check if Prolog is disabled
-        if PROLOG_MODE == PrologMode::Disabled {
-            log::warn!(
-                "⚠️ update_perspective_links called but Prolog is DISABLED (perspective: {}, {} links)",
-                perspective_id,
-                all_links.len()
-            );
-            return Ok(()); // Do nothing when disabled
+        // Check if Prolog mode supports pooled updates
+        match PROLOG_MODE {
+            PrologMode::Disabled => {
+                log::warn!(
+                    "⚠️ update_perspective_links called but Prolog is DISABLED (perspective: {}, {} links)",
+                    perspective_id,
+                    all_links.len()
+                );
+                return Ok(()); // Do nothing when disabled
+            }
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                // Simple/SdnaOnly modes use lazy updates in ensure_engine_updated, not proactive pool updates
+                log::trace!(
+                    "⚠️ update_perspective_links called in Simple/SdnaOnly mode (perspective: {}, {} links) - ignoring, using lazy updates instead",
+                    perspective_id,
+                    all_links.len()
+                );
+                return Ok(());
+            }
+            PrologMode::Pooled => {
+                // Continue with pooled mode logic
+            }
         }
 
         // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly

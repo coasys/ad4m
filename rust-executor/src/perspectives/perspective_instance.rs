@@ -1978,13 +1978,44 @@ impl PerspectiveInstance {
     /// does not lock the prolog_update_mutex
     /// uses run_query_sdna
     pub async fn prolog_query_sdna(&self, query: String) -> Result<QueryResolution, AnyError> {
-        self.prolog_query_helper(
-            query,
-            false,
-            |uuid| uuid.clone(),
-            |service, pool, q| async move { service.run_query_sdna(pool, q).await },
-        )
-        .await
+        match PROLOG_MODE {
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                // In Simple/SdnaOnly mode, route to Simple engine which has SDNA facts
+                let service = get_prolog_service().await;
+                let (perspective_uuid, owner_did, neighbourhood_author) = {
+                    let persisted_guard = self.persisted.lock().await;
+                    let perspective_uuid = persisted_guard.uuid.clone();
+                    let owner_did = persisted_guard.get_primary_owner();
+                    let neighbourhood_author = persisted_guard
+                        .neighbourhood
+                        .as_ref()
+                        .map(|n| n.author.clone());
+                    (perspective_uuid, owner_did, neighbourhood_author)
+                };
+
+                // Get links for SDNA fact generation
+                let links = self.get_links_local(&LinkQuery::default()).await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect::<Vec<_>>();
+
+                service.run_query_simple(&perspective_uuid, query, &links, neighbourhood_author, owner_did).await
+                    .map_err(|e| anyhow!("{}", e))
+            }
+            PrologMode::Pooled => {
+                // In pooled mode, use dedicated SDNA pool
+                self.prolog_query_helper(
+                    query,
+                    false,
+                    |uuid| uuid.clone(),
+                    |service, pool, q| async move { service.run_query_sdna(pool, q).await },
+                )
+                .await
+            }
+            PrologMode::Disabled => {
+                Err(anyhow!("Prolog is disabled"))
+            }
+        }
     }
 
     /// Executes a Prolog query directly on the SDNA pool with user context
@@ -1997,21 +2028,61 @@ impl PerspectiveInstance {
         query: String,
         context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
-        let perspective_uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
+        match PROLOG_MODE {
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                // In Simple/SdnaOnly mode, route to Simple engine (no per-context pools)
+                // IMPORTANT: Use context user's DID as owner_did so their SDNA links are included
+                let service = get_prolog_service().await;
+                let (perspective_uuid, neighbourhood_author) = {
+                    let persisted_guard = self.persisted.lock().await;
+                    let perspective_uuid = persisted_guard.uuid.clone();
+                    let neighbourhood_author = persisted_guard
+                        .neighbourhood
+                        .as_ref()
+                        .map(|n| n.author.clone());
+                    (perspective_uuid, neighbourhood_author)
+                };
 
-        // Ensure the user-specific pool exists
-        self.ensure_prolog_engine_pool_for_context(context).await?;
+                // Use context DID as owner_did for SDNA filtering
+                let owner_did = Some(if let Some(user_email) = &context.user_email {
+                    crate::agent::AgentService::get_user_did_by_email(user_email)?
+                } else {
+                    crate::agent::AgentService::with_global_instance(|service| {
+                        service.did.clone().unwrap_or_default()
+                    })
+                });
 
-        self.prolog_query_helper(
-            query,
-            false,
-            |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
-            |service, pool, q| async move { service.run_query_sdna(pool, q).await },
-        )
-        .await
+                // Get links for SDNA fact generation
+                let links = self.get_links_local(&LinkQuery::default()).await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect::<Vec<_>>();
+
+                service.run_query_simple(&perspective_uuid, query, &links, neighbourhood_author, owner_did).await
+                    .map_err(|e| anyhow!("{}", e))
+            }
+            PrologMode::Pooled => {
+                // In pooled mode, use per-context SDNA pool
+                let perspective_uuid = {
+                    let persisted_guard = self.persisted.lock().await;
+                    persisted_guard.uuid.clone()
+                };
+
+                // Ensure the user-specific pool exists
+                self.ensure_prolog_engine_pool_for_context(context).await?;
+
+                self.prolog_query_helper(
+                    query,
+                    false,
+                    |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
+                    |service, pool, q| async move { service.run_query_sdna(pool, q).await },
+                )
+                .await
+            }
+            PrologMode::Disabled => {
+                Err(anyhow!("Prolog is disabled"))
+            }
+        }
     }
 
     /// Ensure prolog engine pool exists for the given context with correct owner_did
