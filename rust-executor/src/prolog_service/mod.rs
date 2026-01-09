@@ -108,7 +108,9 @@ impl PrologService {
         neighbourhood_author: Option<String>,
         owner_did: Option<String>,
     ) -> Result<(), Error> {
-        use crate::perspectives::sdna::{get_data_facts, get_sdna_facts, get_static_infrastructure_facts};
+        use crate::perspectives::sdna::{
+            get_data_facts, get_sdna_facts, get_static_infrastructure_facts,
+        };
         use pool_trait::PoolUtils;
 
         match PROLOG_MODE {
@@ -221,7 +223,10 @@ impl PrologService {
                 simple_engine.current_sdna_links = Some(Self::extract_sdna_links(links));
             }
 
-            log::info!("Prolog engines {} updated successfully (query + subscription)", perspective_id);
+            log::info!(
+                "Prolog engines {} updated successfully (query + subscription)",
+                perspective_id
+            );
         }
 
         Ok(())
@@ -231,7 +236,8 @@ impl PrologService {
     fn extract_sdna_links(links: &[DecoratedLinkExpression]) -> Vec<DecoratedLinkExpression> {
         use crate::perspectives::sdna::is_sdna_link;
 
-        links.iter()
+        links
+            .iter()
             .filter(|link| is_sdna_link(&link.data))
             .cloned()
             .collect()
@@ -259,7 +265,8 @@ impl PrologService {
         }
 
         // Ensure engine is up to date
-        self.ensure_engine_updated(perspective_id, links, neighbourhood_author, owner_did).await?;
+        self.ensure_engine_updated(perspective_id, links, neighbourhood_author, owner_did)
+            .await?;
 
         // Add "." at the end if missing
         let query = if !query.ends_with('.') {
@@ -302,7 +309,8 @@ impl PrologService {
         }
 
         // Ensure engine is up to date
-        self.ensure_engine_updated(perspective_id, links, neighbourhood_author, owner_did).await?;
+        self.ensure_engine_updated(perspective_id, links, neighbourhood_author, owner_did)
+            .await?;
 
         // Add "." at the end if missing
         let query = if !query.ends_with('.') {
@@ -427,7 +435,9 @@ impl PrologService {
                 log::warn!(
                     "⚠️ run_query_sdna called directly in Simple/SdnaOnly mode - this should be handled at perspective layer",
                 );
-                return Err(Error::msg("Direct SDNA pool queries not available in Simple/SdnaOnly mode"));
+                return Err(Error::msg(
+                    "Direct SDNA pool queries not available in Simple/SdnaOnly mode",
+                ));
             }
             PrologMode::Pooled => {
                 // In pooled mode, use the dedicated SDNA pool
@@ -465,7 +475,9 @@ impl PrologService {
                     "⚠️ run_query_smart called in Simple/SdnaOnly mode (perspective: {}) - pooled-mode only, ignoring",
                     perspective_id
                 );
-                return Err(Error::msg("Smart routing not available in Simple/SdnaOnly mode"));
+                return Err(Error::msg(
+                    "Smart routing not available in Simple/SdnaOnly mode",
+                ));
             }
             PrologMode::Pooled => {
                 // Continue with pooled mode logic
@@ -520,7 +532,9 @@ impl PrologService {
                     "⚠️ run_query_subscription called in Simple/SdnaOnly mode (perspective: {}) - pooled-mode only, ignoring",
                     perspective_id
                 );
-                return Err(Error::msg("Pooled subscriptions not available in Simple/SdnaOnly mode"));
+                return Err(Error::msg(
+                    "Pooled subscriptions not available in Simple/SdnaOnly mode",
+                ));
             }
             PrologMode::Pooled => {
                 // Continue with pooled mode logic

@@ -1204,30 +1204,30 @@ impl AIService {
                 let mut word_stream = voice_stream.transcribe(whisper);
 
                 tokio::select! {
-                        _ = drop_rx => {},
-                        _ = async {
-                            while let Some(segment) = word_stream.next().await {
-                                //println!("GOT segment: {}", segment.text());
-                                let stream_id_clone = stream_id_clone.clone();
+                    _ = drop_rx => {},
+                    _ = async {
+                        while let Some(segment) = word_stream.next().await {
+                            //println!("GOT segment: {}", segment.text());
+                            let stream_id_clone = stream_id_clone.clone();
 
-                                rt.spawn(async move {
-                                    let _ = get_global_pubsub()
-                                        .await
-                                        .publish(
-                                            &AI_TRANSCRIPTION_TEXT_TOPIC,
-                                            &serde_json::to_string(&TranscriptionTextFilter {
-                                                stream_id: stream_id_clone.clone(),
-                                                text: segment.text().to_string(),
-                                            })
-                                            .expect("TranscriptionTextFilter must be serializable"),
-                                        )
-                                        .await;
-                                });
+                            rt.spawn(async move {
+                                let _ = get_global_pubsub()
+                                    .await
+                                    .publish(
+                                        &AI_TRANSCRIPTION_TEXT_TOPIC,
+                                        &serde_json::to_string(&TranscriptionTextFilter {
+                                            stream_id: stream_id_clone.clone(),
+                                            text: segment.text().to_string(),
+                                        })
+                                        .expect("TranscriptionTextFilter must be serializable"),
+                                    )
+                                    .await;
+                            });
 
-                                sleep(Duration::from_millis(50)).await;
-                            }
-                        } => {}
-                    }
+                            sleep(Duration::from_millis(50)).await;
+                        }
+                    } => {}
+                }
             });
         });
 

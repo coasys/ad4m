@@ -17,10 +17,10 @@ use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_
 use crate::prolog_service::get_prolog_service;
 use crate::prolog_service::types::{QueryMatch, QueryResolution};
 use crate::prolog_service::PrologService;
-use crate::prolog_service::{PROLOG_MODE, PrologMode};
 use crate::prolog_service::{
     engine_pool::FILTERING_THRESHOLD, DEFAULT_POOL_SIZE, DEFAULT_POOL_SIZE_WITH_FILTERING,
 };
+use crate::prolog_service::{PrologMode, PROLOG_MODE};
 use crate::pubsub::{
     get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC,
     PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
@@ -67,7 +67,10 @@ fn truncate_subscription_result(s: String) -> String {
             s.len(),
             MAX_SUBSCRIPTION_RESULT_SIZE
         );
-        let mut truncated = s.chars().take(MAX_SUBSCRIPTION_RESULT_SIZE).collect::<String>();
+        let mut truncated = s
+            .chars()
+            .take(MAX_SUBSCRIPTION_RESULT_SIZE)
+            .collect::<String>();
         truncated.push_str("...[TRUNCATED]");
         truncated
     } else {
@@ -815,7 +818,10 @@ impl PerspectiveInstance {
         // Mark query engine dirty for lazy update on next query
         if PROLOG_MODE == PrologMode::Simple {
             let perspective_uuid = self.persisted.lock().await.uuid.clone();
-            get_prolog_service().await.mark_dirty(&perspective_uuid).await;
+            get_prolog_service()
+                .await
+                .mark_dirty(&perspective_uuid)
+                .await;
         }
 
         self.update_surreal_cache(&decorated_diff).await;
@@ -928,7 +934,10 @@ impl PerspectiveInstance {
                 // Mark query engine dirty for lazy update on next query
                 if PROLOG_MODE == PrologMode::Simple {
                     let perspective_uuid = self.persisted.lock().await.uuid.clone();
-                    get_prolog_service().await.mark_dirty(&perspective_uuid).await;
+                    get_prolog_service()
+                        .await
+                        .mark_dirty(&perspective_uuid)
+                        .await;
                 }
 
                 self.update_surreal_cache(&decorated_diff).await;
@@ -1059,7 +1068,10 @@ impl PerspectiveInstance {
         // Mark query engine dirty for lazy update on next query
         if PROLOG_MODE == PrologMode::Simple {
             let perspective_uuid = self.persisted.lock().await.uuid.clone();
-            get_prolog_service().await.mark_dirty(&perspective_uuid).await;
+            get_prolog_service()
+                .await
+                .mark_dirty(&perspective_uuid)
+                .await;
         }
 
         self.update_surreal_cache(&decorated_perspective_diff).await;
@@ -1244,7 +1256,10 @@ impl PerspectiveInstance {
             // Mark query engine dirty for lazy update on next query
             if PROLOG_MODE == PrologMode::Simple {
                 let perspective_uuid = self.persisted.lock().await.uuid.clone();
-                get_prolog_service().await.mark_dirty(&perspective_uuid).await;
+                get_prolog_service()
+                    .await
+                    .mark_dirty(&perspective_uuid)
+                    .await;
             }
 
             self.update_surreal_cache(&decorated_diff).await;
@@ -1356,7 +1371,10 @@ impl PerspectiveInstance {
             // Mark query engine dirty for lazy update on next query
             if PROLOG_MODE == PrologMode::Simple {
                 let perspective_uuid = self.persisted.lock().await.uuid.clone();
-                get_prolog_service().await.mark_dirty(&perspective_uuid).await;
+                get_prolog_service()
+                    .await
+                    .mark_dirty(&perspective_uuid)
+                    .await;
             }
 
             self.update_surreal_cache(&decorated_diff).await;
@@ -1834,12 +1852,22 @@ impl PerspectiveInstance {
                 };
 
                 // Get all links for lazy update
-                let links = self.get_links_local(&LinkQuery::default()).await?
+                let links = self
+                    .get_links_local(&LinkQuery::default())
+                    .await?
                     .into_iter()
                     .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
                     .collect::<Vec<_>>();
 
-                service.run_query_simple(&perspective_uuid, query, &links, neighbourhood_author, owner_did).await
+                service
+                    .run_query_simple(
+                        &perspective_uuid,
+                        query,
+                        &links,
+                        neighbourhood_author,
+                        owner_did,
+                    )
+                    .await
                     .map_err(|e| anyhow!("{}", e))
             }
             PrologMode::Pooled => {
@@ -1861,7 +1889,10 @@ impl PerspectiveInstance {
                 .await
             }
             PrologMode::Disabled => {
-                log::warn!("⚠️ Prolog query received but Prolog is DISABLED (query: {})", query);
+                log::warn!(
+                    "⚠️ Prolog query received but Prolog is DISABLED (query: {})",
+                    query
+                );
                 Err(anyhow!("Prolog is disabled"))
             }
         }
@@ -1890,12 +1921,22 @@ impl PerspectiveInstance {
                 };
 
                 // Get all links for lazy update
-                let links = self.get_links_local(&LinkQuery::default()).await?
+                let links = self
+                    .get_links_local(&LinkQuery::default())
+                    .await?
                     .into_iter()
                     .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
                     .collect::<Vec<_>>();
 
-                service.run_query_subscription_simple(&perspective_uuid, query, &links, neighbourhood_author, owner_did).await
+                service
+                    .run_query_subscription_simple(
+                        &perspective_uuid,
+                        query,
+                        &links,
+                        neighbourhood_author,
+                        owner_did,
+                    )
+                    .await
                     .map_err(|e| anyhow!("{}", e))
             }
             PrologMode::Pooled => {
@@ -1909,7 +1950,10 @@ impl PerspectiveInstance {
                 .await
             }
             PrologMode::Disabled => {
-                log::warn!("⚠️ Prolog subscription query received but Prolog is DISABLED (query: {})", query);
+                log::warn!(
+                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {})",
+                    query
+                );
                 Err(anyhow!("Prolog is disabled"))
             }
         }
@@ -1939,12 +1983,22 @@ impl PerspectiveInstance {
                 };
 
                 // Get all links for lazy update
-                let links = self.get_links_local(&LinkQuery::default()).await?
+                let links = self
+                    .get_links_local(&LinkQuery::default())
+                    .await?
                     .into_iter()
                     .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
                     .collect::<Vec<_>>();
 
-                service.run_query_subscription_simple(&perspective_uuid, query, &links, neighbourhood_author, owner_did).await
+                service
+                    .run_query_subscription_simple(
+                        &perspective_uuid,
+                        query,
+                        &links,
+                        neighbourhood_author,
+                        owner_did,
+                    )
+                    .await
                     .map_err(|e| anyhow!("{}", e))
             }
             PrologMode::Pooled => {
@@ -1963,7 +2017,10 @@ impl PerspectiveInstance {
                 .await
             }
             PrologMode::Disabled => {
-                log::warn!("⚠️ Prolog subscription query received but Prolog is DISABLED (query: {})", query);
+                log::warn!(
+                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {})",
+                    query
+                );
                 Err(anyhow!("Prolog is disabled"))
             }
         }
@@ -1994,12 +2051,22 @@ impl PerspectiveInstance {
                 };
 
                 // Get links for SDNA fact generation
-                let links = self.get_links_local(&LinkQuery::default()).await?
+                let links = self
+                    .get_links_local(&LinkQuery::default())
+                    .await?
                     .into_iter()
                     .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
                     .collect::<Vec<_>>();
 
-                service.run_query_simple(&perspective_uuid, query, &links, neighbourhood_author, owner_did).await
+                service
+                    .run_query_simple(
+                        &perspective_uuid,
+                        query,
+                        &links,
+                        neighbourhood_author,
+                        owner_did,
+                    )
+                    .await
                     .map_err(|e| anyhow!("{}", e))
             }
             PrologMode::Pooled => {
@@ -2012,9 +2079,7 @@ impl PerspectiveInstance {
                 )
                 .await
             }
-            PrologMode::Disabled => {
-                Err(anyhow!("Prolog is disabled"))
-            }
+            PrologMode::Disabled => Err(anyhow!("Prolog is disabled")),
         }
     }
 
@@ -2053,12 +2118,22 @@ impl PerspectiveInstance {
                 });
 
                 // Get links for SDNA fact generation
-                let links = self.get_links_local(&LinkQuery::default()).await?
+                let links = self
+                    .get_links_local(&LinkQuery::default())
+                    .await?
                     .into_iter()
                     .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
                     .collect::<Vec<_>>();
 
-                service.run_query_simple(&perspective_uuid, query, &links, neighbourhood_author, owner_did).await
+                service
+                    .run_query_simple(
+                        &perspective_uuid,
+                        query,
+                        &links,
+                        neighbourhood_author,
+                        owner_did,
+                    )
+                    .await
                     .map_err(|e| anyhow!("{}", e))
             }
             PrologMode::Pooled => {
@@ -2079,9 +2154,7 @@ impl PerspectiveInstance {
                 )
                 .await
             }
-            PrologMode::Disabled => {
-                Err(anyhow!("Prolog is disabled"))
-            }
+            PrologMode::Disabled => Err(anyhow!("Prolog is disabled")),
         }
     }
 
@@ -3595,9 +3668,11 @@ impl PerspectiveInstance {
                                         )
                                         .await;
                                     // Re-acquire lock to update and truncate the result to save memory
-                                    let mut queries = self_clone.surreal_subscribed_queries.lock().await;
+                                    let mut queries =
+                                        self_clone.surreal_subscribed_queries.lock().await;
                                     if let Some(stored_query) = queries.get_mut(&id) {
-                                        stored_query.last_result = truncate_subscription_result(result_string);
+                                        stored_query.last_result =
+                                            truncate_subscription_result(result_string);
                                     }
                                 }
                             }
@@ -3656,10 +3731,7 @@ impl PerspectiveInstance {
             let self_clone = self.clone();
             let query_future = async move {
                 //let this_now = Instant::now();
-                if let Ok(result) = self_clone
-                    .prolog_query_subscription(query_string)
-                    .await
-                {
+                if let Ok(result) = self_clone.prolog_query_subscription(query_string).await {
                     let result_string = prolog_resolution_to_string(result);
                     // Compare with stored last_result only now, avoiding the clone earlier
                     let mut queries = self_clone.subscribed_queries.lock().await;
@@ -3674,7 +3746,8 @@ impl PerspectiveInstance {
                             // Re-acquire lock to update and truncate the result to save memory
                             let mut queries = self_clone.subscribed_queries.lock().await;
                             if let Some(stored_query) = queries.get_mut(&id) {
-                                stored_query.last_result = truncate_subscription_result(result_string);
+                                stored_query.last_result =
+                                    truncate_subscription_result(result_string);
                             }
                         }
                     }
@@ -3995,7 +4068,10 @@ impl PerspectiveInstance {
             // Mark query engine dirty for lazy update on next query
             if PROLOG_MODE == PrologMode::Simple {
                 let perspective_uuid = self.persisted.lock().await.uuid.clone();
-                get_prolog_service().await.mark_dirty(&perspective_uuid).await;
+                get_prolog_service()
+                    .await
+                    .mark_dirty(&perspective_uuid)
+                    .await;
             }
 
             self.update_surreal_cache(&combined_diff).await;
