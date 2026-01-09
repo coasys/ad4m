@@ -1,6 +1,7 @@
 import Ad4mConnect, { Ad4mConnectOptions } from './core';
 import Ad4mConnectUI from './web';
 import { Ad4mClient } from '@coasys/ad4m';
+import { isEmbedded } from './utils';
 
 /**
  * Simple API - returns just the authenticated client.
@@ -29,10 +30,8 @@ export async function getAd4mClient(options: Ad4mConnectOptions): Promise<Ad4mCl
 export function getAd4mConnect(options: Ad4mConnectOptions): {
   core: Ad4mConnect;
   client: Promise<Ad4mClient>;
-} {
-  const isEmbedded = typeof window !== 'undefined' && window.self !== window.top;
-  
-  if (isEmbedded) {
+} {  
+  if (isEmbedded()) {
     console.log('[getAd4mConnect] Embedded mode - waiting for AD4M config from parent');
     const core = new Ad4mConnect(options);
     const client = core.connect();
@@ -41,7 +40,18 @@ export function getAd4mConnect(options: Ad4mConnectOptions): {
     console.log('[getAd4mConnect] Standalone mode - initializing with UI');
     const element = Ad4mConnectUI(options);
     const core = element.getCore();
-    const client = core.connect();
+    
+    // In standalone mode, the UI will handle the connection flow
+    // (user chooses local vs remote, then UI calls core.connect())
+    // We return a Promise that resolves when the UI completes auth
+    const client = new Promise<Ad4mClient>((resolve) => {
+      core.addEventListener('authstatechange', (event: any) => {
+        if (event.detail === 'authenticated' && core.ad4mClient) {
+          resolve(core.ad4mClient);
+        }
+      });
+    });
+    
     return { core, client };
   }
 }
