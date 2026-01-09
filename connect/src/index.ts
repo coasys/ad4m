@@ -57,6 +57,7 @@ export {
   detectOS, 
   setForVersion, 
   getForVersion, 
-  removeForVersion, 
+  removeForVersion,
+  isEmbedded,
   DEFAULT_PORT 
 } from './utils';

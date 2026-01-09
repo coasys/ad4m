@@ -24,7 +24,7 @@ import ScanQRCode from "./components/ScanQRCode";
 import Settings from "./components/Settings";
 import Start from "./components/Start";
 import VerifyCode from "./components/VerifyCode";
-import { connectWebSocket, DEFAULT_PORT, getForVersion, removeForVersion, setForVersion } from "./utils";
+import { connectWebSocket, DEFAULT_PORT, getForVersion, removeForVersion, setForVersion, isEmbedded } from "./utils";
 
 function detectMob() {
   const toMatch = [
@@ -667,7 +667,7 @@ export class Ad4mConnectElement extends LitElement {
     }
 
     // Don't show UI if running in embedded mode - core will handle connection
-    if (this._client.isEmbedded()) {
+    if (isEmbedded()) {
       console.log('[Ad4m Connect UI] Running in embedded mode - UI will not be shown');
       this._isOpen = false;
       
@@ -1490,9 +1490,7 @@ export default function Ad4mConnectUI(props: Ad4mConnectOptions) {
   });
 
   // Check if running in embedded mode
-  const isEmbedded = core.isEmbedded();
-  
-  if (!isEmbedded) {
+  if (!isEmbedded()) {
     // Standalone mode - append to DOM so connectedCallback fires and UI shows
     document.body.appendChild(element);
   } else {

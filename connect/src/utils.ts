@@ -121,5 +121,23 @@ export function removeForVersion(key: string): void {
   }
 }
 
+/**
+ * Checks if the app is running in embedded mode (inside an iframe).
+ * 
+ * @returns true if running in an iframe, false if standalone
+ * 
+ * @example
+ * ```typescript
+ * import { isEmbedded } from '@coasys/ad4m-connect';
+ * 
+ * if (!isEmbedded()) {
+ *   // Register service workers, enable PWA features, etc.
+ * }
+ * ```
+ */
+export function isEmbedded(): boolean {
+  return typeof window !== 'undefined' && window.self !== window.top;
+}
+
 // Re-export getAd4mClient for backwards compatibility
 export { getAd4mClient } from "./index";

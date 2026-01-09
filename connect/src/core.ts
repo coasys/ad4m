@@ -6,7 +6,7 @@ import {
 import { createClient, Client as WSClient } from "graphql-ws";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { Ad4mClient, CapabilityInput } from "@coasys/ad4m";
-import { checkPort, connectWebSocket, DEFAULT_PORT, getForVersion, removeForVersion, setForVersion } from "./utils";
+import { checkPort, connectWebSocket, DEFAULT_PORT, getForVersion, setForVersion, isEmbedded } from "./utils";
 import autoBind from "auto-bind";
 
 export type Ad4mConnectOptions = {
@@ -93,7 +93,7 @@ export default class Ad4mConnect extends EventTarget {
     this.capabilities = options.capabilities;
     
     // Check if running in embedded mode first
-    this.embeddedMode = this.isEmbedded();
+    this.embeddedMode = isEmbedded();
     
     if (this.embeddedMode) {
       // In embedded mode, ignore localStorage/options - wait for parent to send config
@@ -112,12 +112,6 @@ export default class Ad4mConnect extends EventTarget {
     this.isHosting = options.hosting || false;
     // Don't auto-connect - let the UI decide when to connect
     // this.buildClient();
-  }
-  /**
-   * Detect if running in an iframe (embedded mode)
-   */
-  isEmbedded(): boolean {
-    return typeof window !== 'undefined' && window.self !== window.top;
   }
   
   /**
