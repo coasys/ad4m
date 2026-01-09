@@ -1860,6 +1860,10 @@ impl PerspectiveInstance {
                 )
                 .await
             }
+            PrologMode::Disabled => {
+                log::warn!("⚠️ Prolog query received but Prolog is DISABLED (query: {})", query);
+                Err(anyhow!("Prolog is disabled"))
+            }
         }
     }
 
@@ -1903,6 +1907,10 @@ impl PerspectiveInstance {
                     |service, pool, q| async move { service.run_query_subscription(pool, q).await },
                 )
                 .await
+            }
+            PrologMode::Disabled => {
+                log::warn!("⚠️ Prolog subscription query received but Prolog is DISABLED (query: {})", query);
+                Err(anyhow!("Prolog is disabled"))
             }
         }
     }
@@ -1953,6 +1961,10 @@ impl PerspectiveInstance {
                     |service, pool, q| async move { service.run_query_subscription(pool, q).await },
                 )
                 .await
+            }
+            PrologMode::Disabled => {
+                log::warn!("⚠️ Prolog subscription query received but Prolog is DISABLED (query: {})", query);
+                Err(anyhow!("Prolog is disabled"))
             }
         }
     }

@@ -34,11 +34,14 @@ pub enum PrologMode {
     /// Pooled mode: Multiple engines with filtering and caching
     /// Faster queries but uses more memory
     Pooled,
+    /// Disabled mode: No Prolog engine is created, all operations are no-ops
+    /// Queries and subscriptions will be logged with warnings
+    Disabled,
 }
 
 // MEMORY OPTIMIZATION: Set to Simple for minimal memory usage (1 engine per perspective)
 // Set to Pooled for maximum query performance (multiple engines with caching)
-pub static PROLOG_MODE: PrologMode = PrologMode::Simple;
+pub static PROLOG_MODE: PrologMode = PrologMode::Disabled;
 
 #[derive(Clone)]
 pub struct PrologService {
@@ -70,11 +73,19 @@ impl PrologService {
     /// Mark a perspective's Prolog engine as dirty (needs update before next query)
     /// Only used in Simple mode
     pub async fn mark_dirty(&self, perspective_id: &str) {
-        if PROLOG_MODE == PrologMode::Simple {
-            let mut engines = self.simple_engines.write().await;
-            if let Some(simple_engine) = engines.get_mut(perspective_id) {
-                simple_engine.dirty = true;
-                log::debug!("Marked Prolog engine {} as dirty", perspective_id);
+        match PROLOG_MODE {
+            PrologMode::Disabled => {
+                // Do nothing when disabled
+            }
+            PrologMode::Simple => {
+                let mut engines = self.simple_engines.write().await;
+                if let Some(simple_engine) = engines.get_mut(perspective_id) {
+                    simple_engine.dirty = true;
+                    log::debug!("Marked Prolog engine {} as dirty", perspective_id);
+                }
+            }
+            PrologMode::Pooled => {
+                // Do nothing in pooled mode
             }
         }
     }
@@ -91,8 +102,18 @@ impl PrologService {
         use crate::perspectives::sdna::{get_data_facts, get_sdna_facts, get_static_infrastructure_facts};
         use pool_trait::PoolUtils;
 
-        if PROLOG_MODE != PrologMode::Simple {
-            return Ok(());
+        match PROLOG_MODE {
+            PrologMode::Disabled => {
+                // Do nothing when disabled
+                return Ok(());
+            }
+            PrologMode::Simple => {
+                // Continue with normal processing
+            }
+            PrologMode::Pooled => {
+                // Not applicable in pooled mode
+                return Ok(());
+            }
         }
 
         let mut engines = self.simple_engines.write().await;
@@ -175,6 +196,16 @@ impl PrologService {
     ) -> Result<QueryResolution, Error> {
         use deno_core::anyhow::anyhow;
 
+        // Check if Prolog is disabled
+        if PROLOG_MODE == PrologMode::Disabled {
+            log::warn!(
+                "⚠️ Prolog query received but Prolog is DISABLED (perspective: {}, query: {})",
+                perspective_id,
+                query
+            );
+            return Err(anyhow!("Prolog is disabled"));
+        }
+
         // Ensure engine is up to date
         self.ensure_engine_updated(perspective_id, links, neighbourhood_author, owner_did).await?;
 
@@ -208,6 +239,16 @@ impl PrologService {
     ) -> Result<QueryResolution, Error> {
         use deno_core::anyhow::anyhow;
 
+        // Check if Prolog is disabled
+        if PROLOG_MODE == PrologMode::Disabled {
+            log::warn!(
+                "⚠️ Prolog subscription query received but Prolog is DISABLED (perspective: {}, query: {})",
+                perspective_id,
+                query
+            );
+            return Err(anyhow!("Prolog is disabled"));
+        }
+
         // Ensure engine is up to date
         self.ensure_engine_updated(perspective_id, links, neighbourhood_author, owner_did).await?;
 
@@ -235,6 +276,15 @@ impl PrologService {
         perspective_id: String,
         pool_size: Option<usize>,
     ) -> Result<(), Error> {
+        // Check if Prolog is disabled
+        if PROLOG_MODE == PrologMode::Disabled {
+            log::warn!(
+                "⚠️ ensure_perspective_pool called but Prolog is DISABLED (perspective: {})",
+                perspective_id
+            );
+            return Ok(()); // Do nothing when disabled
+        }
+
         // ⚠️ DEADLOCK FIX: Use optimistic locking to avoid race conditions
         // First check with read lock (fast path)
         {
@@ -296,6 +346,16 @@ impl PrologService {
         perspective_id: String,
         query: String,
     ) -> Result<QueryResult, Error> {
+        // Check if Prolog is disabled
+        if PROLOG_MODE == PrologMode::Disabled {
+            log::warn!(
+                "⚠️ Prolog SDNA query received but Prolog is DISABLED (perspective: {}, query: {})",
+                perspective_id,
+                query
+            );
+            return Err(Error::msg("Prolog is disabled"));
+        }
+
         // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
         let pool = {
             let pools = self.engine_pools.read().await;
@@ -314,6 +374,16 @@ impl PrologService {
         perspective_id: String,
         query: String,
     ) -> Result<QueryResult, Error> {
+        // Check if Prolog is disabled
+        if PROLOG_MODE == PrologMode::Disabled {
+            log::warn!(
+                "⚠️ Prolog query received but Prolog is DISABLED (perspective: {}, query: {})",
+                perspective_id,
+                query
+            );
+            return Err(Error::msg("Prolog is disabled"));
+        }
+
         // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
         let pool = {
             let pools = self.engine_pools.read().await;
@@ -346,6 +416,16 @@ impl PrologService {
         perspective_id: String,
         query: String,
     ) -> Result<QueryResult, Error> {
+        // Check if Prolog is disabled
+        if PROLOG_MODE == PrologMode::Disabled {
+            log::warn!(
+                "⚠️ Prolog subscription query received but Prolog is DISABLED (perspective: {}, query: {})",
+                perspective_id,
+                query
+            );
+            return Err(Error::msg("Prolog is disabled"));
+        }
+
         // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
         let pool = {
             let pools = self.engine_pools.read().await;
@@ -416,6 +496,16 @@ impl PrologService {
             query.len()
         );
 
+        // Check if Prolog is disabled
+        if PROLOG_MODE == PrologMode::Disabled {
+            log::warn!(
+                "⚠️ run_query_all called but Prolog is DISABLED (perspective: {}, query: {} chars)",
+                perspective_id,
+                query.len()
+            );
+            return Ok(()); // Do nothing when disabled
+        }
+
         // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
         let pool = {
             let pool_lookup_start = std::time::Instant::now();
@@ -469,6 +559,16 @@ impl PrologService {
         let service_start = std::time::Instant::now();
         log::debug!("🔗 PROLOG SERVICE: Starting update_perspective_links for perspective '{}' - {} links, module: {}", 
             perspective_id, all_links.len(), module_name);
+
+        // Check if Prolog is disabled
+        if PROLOG_MODE == PrologMode::Disabled {
+            log::warn!(
+                "⚠️ update_perspective_links called but Prolog is DISABLED (perspective: {}, {} links)",
+                perspective_id,
+                all_links.len()
+            );
+            return Ok(()); // Do nothing when disabled
+        }
 
         // ⚠️ DEADLOCK FIX: Minimize lock duration - get pool reference and release lock quickly
         let pool = {
