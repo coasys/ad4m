@@ -688,7 +688,8 @@ export class Ad4mConnectElement extends LitElement {
     const storedToken = this.token || getForVersion("ad4mtoken");
 
     if (storedToken) {
-      // If we have a stored token, try to auto-connect
+      // If we have a stored token, try to auto-connect without showing UI
+      // UI will only show if authentication fails
       // First check if there's a stored URL (from previous connection)
       const storedUrl = getForVersion("ad4murl");
       
@@ -1491,8 +1492,25 @@ export default function Ad4mConnectUI(props: Ad4mConnectOptions) {
 
   // Check if running in embedded mode
   if (!isEmbedded()) {
-    // Standalone mode - append to DOM so connectedCallback fires and UI shows
-    document.body.appendChild(element);
+    // Check if we have a token - if so, don't show UI initially
+    const storedToken = props.token || getForVersion("ad4mtoken");
+    
+    if (storedToken) {
+      // Has token - will auto-connect, keep UI hidden initially
+      // connectedCallback will handle the connection attempt
+      element.style.display = 'none';
+      document.body.appendChild(element);
+      
+      // Listen for auth state - show UI only if auth fails
+      element.addEventListener('authstatechange', (e: any) => {
+        if (e.detail === 'unauthenticated') {
+          element.style.display = '';
+        }
+      });
+    } else {
+      // No token - show UI immediately for user to connect
+      document.body.appendChild(element);
+    }
   } else {
     // Embedded mode - no UI needed, just return element with core
     console.log('[Ad4m Connect] Running in embedded mode - UI will not be shown');
