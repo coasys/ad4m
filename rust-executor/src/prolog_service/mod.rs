@@ -125,7 +125,12 @@ impl PrologService {
         let mut engines = self.simple_engines.write().await;
 
         // Check if we need to update (dirty or links changed or first time)
-        let needs_update = if let Some(simple_engine) = engines.get(perspective_id) {
+        // In SdnaOnly mode, always update to:
+        // 1. Ensure we catch SDNA changes (link content changes aren't detected by equality check)
+        // 2. Test if fresh engines prevent memory accumulation in Scryer
+        let needs_update = if PROLOG_MODE == PrologMode::SdnaOnly {
+            true // Always update in SdnaOnly mode for testing
+        } else if let Some(simple_engine) = engines.get(perspective_id) {
             simple_engine.dirty || simple_engine.current_links != links
         } else {
             true // First query = needs init
@@ -142,6 +147,11 @@ impl PrologService {
                 mode_desc,
                 links.len()
             );
+
+            // In SDNA-only mode, always create fresh engines to test memory behavior
+            if PROLOG_MODE == PrologMode::SdnaOnly {
+                engines.remove(perspective_id);
+            }
 
             // Create engines if they don't exist
             if !engines.contains_key(perspective_id) {
