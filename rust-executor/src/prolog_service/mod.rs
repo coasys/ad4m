@@ -66,6 +66,9 @@ struct SimpleEngine {
     dirty: bool,
     /// Current links loaded in the engines
     current_links: Vec<DecoratedLinkExpression>,
+    /// In SdnaOnly mode, track SDNA links separately for efficient updates
+    /// Only update engine when SDNA actually changes, not on every data link change
+    current_sdna_links: Option<Vec<DecoratedLinkExpression>>,
 }
 
 impl PrologService {
@@ -125,11 +128,21 @@ impl PrologService {
         let mut engines = self.simple_engines.write().await;
 
         // Check if we need to update (dirty or links changed or first time)
-        // In SdnaOnly mode, always update to:
-        // 1. Ensure we catch SDNA changes (link content changes aren't detected by equality check)
-        // 2. Test if fresh engines prevent memory accumulation in Scryer
         let needs_update = if PROLOG_MODE == PrologMode::SdnaOnly {
-            true // Always update in SdnaOnly mode for testing
+            // In SdnaOnly mode, only update if SDNA links actually changed
+            if let Some(simple_engine) = engines.get(perspective_id) {
+                if simple_engine.dirty {
+                    true
+                } else if let Some(ref current_sdna) = simple_engine.current_sdna_links {
+                    // Extract current SDNA links and compare
+                    let new_sdna_links = Self::extract_sdna_links(links);
+                    current_sdna != &new_sdna_links
+                } else {
+                    true // No SDNA tracking yet, need init
+                }
+            } else {
+                true // First query = needs init
+            }
         } else if let Some(simple_engine) = engines.get(perspective_id) {
             simple_engine.dirty || simple_engine.current_links != links
         } else {
@@ -148,11 +161,6 @@ impl PrologService {
                 links.len()
             );
 
-            // In SDNA-only mode, always create fresh engines to test memory behavior
-            if PROLOG_MODE == PrologMode::SdnaOnly {
-                engines.remove(perspective_id);
-            }
-
             // Create engines if they don't exist
             if !engines.contains_key(perspective_id) {
                 let mut query_engine = PrologEngine::new();
@@ -168,6 +176,7 @@ impl PrologService {
                         subscription_engine,
                         dirty: true,
                         current_links: Vec::new(),
+                        current_sdna_links: None,
                     },
                 );
             }
@@ -206,10 +215,26 @@ impl PrologService {
 
             simple_engine.dirty = false;
             simple_engine.current_links = links.to_vec();
+
+            // In SdnaOnly mode, track SDNA links separately for efficient updates
+            if PROLOG_MODE == PrologMode::SdnaOnly {
+                simple_engine.current_sdna_links = Some(Self::extract_sdna_links(links));
+            }
+
             log::info!("Prolog engines {} updated successfully (query + subscription)", perspective_id);
         }
 
         Ok(())
+    }
+
+    /// Extract only SDNA links from a link list for change tracking
+    fn extract_sdna_links(links: &[DecoratedLinkExpression]) -> Vec<DecoratedLinkExpression> {
+        use crate::perspectives::sdna::is_sdna_link;
+
+        links.iter()
+            .filter(|link| is_sdna_link(&link.data))
+            .cloned()
+            .collect()
     }
 
     /// Run query in Simple or SdnaOnly mode
