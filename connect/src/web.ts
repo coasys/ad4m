@@ -1482,7 +1482,7 @@ export default function Ad4mConnectUI(props: Ad4mConnectOptions) {
   element.core = core;
 
   // Set other properties from props (excluding those already in core)
-  const uiProps = ['appName', 'appDesc', 'appDomain', 'appIconPath', 'capabilities', 'port', 'token', 'url', 'hosting', 'mobile'];
+  const uiProps = ['appName', 'appDesc', 'appDomain', 'appIconPath', 'capabilities', 'port', 'token', 'url', 'hosting', 'mobile', 'multiUser', 'backendUrl'];
   Object.entries(props).forEach(([key, value]) => {
     if (uiProps.includes(key)) {
       element[key] = value;
