@@ -34,6 +34,10 @@ pub enum PrologMode {
     /// Pooled mode: Multiple engines with filtering and caching
     /// Faster queries but uses more memory
     Pooled,
+    /// SDNA-only mode: Lightweight engine with only SDNA facts (no link data)
+    /// Perfect for testing if memory issues are from link data
+    /// All SDNA introspection queries work, but data queries will return empty results
+    SdnaOnly,
     /// Disabled mode: No Prolog engine is created, all operations are no-ops
     /// Queries and subscriptions will be logged with warnings
     Disabled,
@@ -41,7 +45,9 @@ pub enum PrologMode {
 
 // MEMORY OPTIMIZATION: Set to Simple for minimal memory usage (1 engine per perspective)
 // Set to Pooled for maximum query performance (multiple engines with caching)
-pub static PROLOG_MODE: PrologMode = PrologMode::Disabled;
+// Set to SdnaOnly for SDNA introspection without link data (minimal memory + SDNA queries work)
+// Set to Disabled to turn off Prolog completely
+pub static PROLOG_MODE: PrologMode = PrologMode::SdnaOnly;
 
 #[derive(Clone)]
 pub struct PrologService {
@@ -71,13 +77,13 @@ impl PrologService {
     }
 
     /// Mark a perspective's Prolog engine as dirty (needs update before next query)
-    /// Only used in Simple mode
+    /// Only used in Simple and SdnaOnly modes
     pub async fn mark_dirty(&self, perspective_id: &str) {
         match PROLOG_MODE {
             PrologMode::Disabled => {
                 // Do nothing when disabled
             }
-            PrologMode::Simple => {
+            PrologMode::Simple | PrologMode::SdnaOnly => {
                 let mut engines = self.simple_engines.write().await;
                 if let Some(simple_engine) = engines.get_mut(perspective_id) {
                     simple_engine.dirty = true;
@@ -91,7 +97,7 @@ impl PrologService {
     }
 
     /// Update Prolog engine if dirty (lazy update on query)
-    /// Only used in Simple mode
+    /// Only used in Simple and SdnaOnly modes
     async fn ensure_engine_updated(
         &self,
         perspective_id: &str,
@@ -107,7 +113,7 @@ impl PrologService {
                 // Do nothing when disabled
                 return Ok(());
             }
-            PrologMode::Simple => {
+            PrologMode::Simple | PrologMode::SdnaOnly => {
                 // Continue with normal processing
             }
             PrologMode::Pooled => {
@@ -126,9 +132,14 @@ impl PrologService {
         };
 
         if needs_update {
+            let mode_desc = match PROLOG_MODE {
+                PrologMode::SdnaOnly => "SDNA-only mode (no link data)",
+                _ => "Simple mode: lazy update",
+            };
             log::info!(
-                "Updating Prolog engine {} (Simple mode: lazy update with {} links)",
+                "Updating Prolog engine {} ({} with {} links)",
                 perspective_id,
+                mode_desc,
                 links.len()
             );
 
@@ -153,9 +164,15 @@ impl PrologService {
 
             let simple_engine = engines.get_mut(perspective_id).unwrap();
 
-            // Prepare facts (infrastructure + link data + SDNA for Simple mode)
+            // Prepare facts based on mode
             let mut facts_to_load = get_static_infrastructure_facts();
-            facts_to_load.extend(get_data_facts(links));
+
+            // Only load link data if not in SDNA-only mode
+            if PROLOG_MODE != PrologMode::SdnaOnly {
+                facts_to_load.extend(get_data_facts(links));
+            }
+
+            // Always load SDNA facts
             facts_to_load.extend(get_sdna_facts(
                 links,
                 neighbourhood_author.clone(),
@@ -185,7 +202,7 @@ impl PrologService {
         Ok(())
     }
 
-    /// Run query in Simple mode
+    /// Run query in Simple or SdnaOnly mode
     pub async fn run_query_simple(
         &self,
         perspective_id: &str,
@@ -228,7 +245,7 @@ impl PrologService {
         result.map_err(|e| anyhow!("Prolog query failed: {}", e))
     }
 
-    /// Run subscription query in Simple mode (uses separate engine)
+    /// Run subscription query in Simple or SdnaOnly mode (uses separate engine)
     pub async fn run_query_subscription_simple(
         &self,
         perspective_id: &str,

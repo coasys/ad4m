@@ -1819,8 +1819,8 @@ impl PerspectiveInstance {
         context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
-            PrologMode::Simple => {
-                // Simple mode: One engine per perspective, lazy update on query
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                // Simple/SdnaOnly mode: One engine per perspective, lazy update on query
                 let service = get_prolog_service().await;
                 let (perspective_uuid, owner_did, neighbourhood_author) = {
                     let persisted_guard = self.persisted.lock().await;
@@ -1875,8 +1875,8 @@ impl PerspectiveInstance {
         query: String,
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
-            PrologMode::Simple => {
-                // Simple mode: Use separate subscription engine
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                // Simple/SdnaOnly mode: Use separate subscription engine
                 let service = get_prolog_service().await;
                 let (perspective_uuid, owner_did, neighbourhood_author) = {
                     let persisted_guard = self.persisted.lock().await;
@@ -1924,8 +1924,8 @@ impl PerspectiveInstance {
         _context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
-            PrologMode::Simple => {
-                // Simple mode: Use separate subscription engine (no context-specific pool)
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                // Simple/SdnaOnly mode: Use separate subscription engine (no context-specific pool)
                 let service = get_prolog_service().await;
                 let (perspective_uuid, owner_did, neighbourhood_author) = {
                     let persisted_guard = self.persisted.lock().await;
