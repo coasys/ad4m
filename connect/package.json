@@ -3,31 +3,36 @@
   "description": "Lib for handling everything needed to setup a connection to a local or remote ad4m-executor",
   "license": "CAL-1.0",
   "main": "dist/web.js",
+  "types": "dist/index.d.ts",
   "browser": "dist/web.js",
   "files": [
     "dist",
     "public"
   ],
   "exports": {
-    ".": "./dist/index.js",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
     "./electron": {
-      "require": "./dist/electron.js",
-      "type": "commonjs"
+      "types": "./dist/electron.d.ts",
+      "require": "./dist/electron.js"
     },
     "./web": {
+      "types": "./dist/web.d.ts",
       "import": "./dist/web.js",
-      "require": "./dist/web.js",
-      "type": "module"
+      "require": "./dist/web.js"
     },
     "./core": {
+      "types": "./dist/core.d.ts",
       "import": "./dist/core.js",
-      "require": "./dist/core.js",
-      "type": "module"
+      "require": "./dist/core.js"
     },
     "./utils": {
+      "types": "./dist/utils.d.ts",
       "import": "./dist/utils.js",
-      "require": "./dist/utils.js",
-      "type": "module"
+      "require": "./dist/utils.js"
     }
   },
   "scripts": {

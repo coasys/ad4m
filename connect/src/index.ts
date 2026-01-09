@@ -3,51 +3,46 @@ import Ad4mConnectUI from './web';
 import { Ad4mClient } from '@coasys/ad4m';
 
 /**
- * Smart factory function that returns an authenticated Ad4mClient.
- * Handles both embedded (iframe) and standalone (browser) modes automatically.
+ * Simple API - returns just the authenticated client.
  * 
- * - In embedded mode: Waits for parent to send AD4M config via postMessage
- * - In standalone mode: Shows auth UI if needed, or auto-connects with stored token
- * 
- * @param options - Configuration options for ad4m-connect
- * @returns Promise that resolves with authenticated Ad4mClient
+ * @example
+ * ```typescript
+ * const ad4mClient = await getAd4mClient(options);
+ * ```
  */
 export async function getAd4mClient(options: Ad4mConnectOptions): Promise<Ad4mClient> {
-  // Check if we're in embedded mode
-  const isEmbedded = typeof window !== 'undefined' && window.self !== window.top;
-  
-  if (isEmbedded) {
-    // Embedded mode: wait for parent to send config and client to be ready
-    console.log('[getAd4mClient] Embedded mode - waiting for AD4M config from parent');
-    const core = new Ad4mConnect(options);
-    
-    // connect() returns a Promise that resolves when authenticated
-    const client = await core.connect();
-    return client;
-  } else {
-    // Standalone mode: create UI (if needed) and wait for authentication
-    console.log('[getAd4mClient] Standalone mode - initializing with UI');
-    const element = Ad4mConnectUI(options);
-    const core = element.getCore();
-    
-    // connect() returns a Promise that resolves when authenticated
-    // (either immediately if token exists, or after user authenticates via UI)
-    const client = await core.connect();
-    return client;
-  }
+  const { client } = getAd4mConnect(options);
+  return client;
 }
 
-// Legacy export - returns core instance for direct access
-export function getAd4mConnect(options: Ad4mConnectOptions): Ad4mConnect {
+/**
+ * Advanced API - returns core immediately and client as promise.
+ * Allows attaching event listeners before authentication completes.
+ * 
+ * @example
+ * ```typescript
+ * const { core, client } = getAd4mConnect(options);
+ * core.addEventListener('authstatechange', (e) => console.log(e.detail));
+ * const ad4mClient = await client;
+ * ```
+ */
+export function getAd4mConnect(options: Ad4mConnectOptions): {
+  core: Ad4mConnect;
+  client: Promise<Ad4mClient>;
+} {
   const isEmbedded = typeof window !== 'undefined' && window.self !== window.top;
   
   if (isEmbedded) {
-    console.log('[getAd4mConnect] Embedded mode detected - core only, no UI');
-    return new Ad4mConnect(options);
+    console.log('[getAd4mConnect] Embedded mode - waiting for AD4M config from parent');
+    const core = new Ad4mConnect(options);
+    const client = core.connect();
+    return { core, client };
   } else {
-    console.log('[getAd4mConnect] Standalone mode - creating UI');
+    console.log('[getAd4mConnect] Standalone mode - initializing with UI');
     const element = Ad4mConnectUI(options);
-    return element.getCore();
+    const core = element.getCore();
+    const client = core.connect();
+    return { core, client };
   }
 }
 
