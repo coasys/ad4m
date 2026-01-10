@@ -232,6 +232,38 @@ export default class Ad4mConnect extends EventTarget {
     this.listeners[event].push(cb);
   }
 
+  /**
+   * Create Apollo Client with GraphQL WS link and standard configuration
+   */
+  private createApolloClient(wsClient: WSClient): ApolloClient<NormalizedCacheObject> {
+    return new ApolloClient({
+      link: new GraphQLWsLink(wsClient),
+      cache: new InMemoryCache({ 
+        resultCaching: false, 
+        addTypename: false 
+      }),
+      defaultOptions: {
+        watchQuery: {
+          fetchPolicy: "no-cache" as const,
+        },
+        query: {
+          fetchPolicy: "no-cache" as const,
+        },
+        mutate: {
+          fetchPolicy: "no-cache" as const,
+        }
+      },
+    });
+  }
+
+  /**
+   * Notify both connection and auth state changes (common pattern for errors/disconnections)
+   */
+  private notifyDisconnected(connectionState: ConnectionStates = "not_connected") {
+    this.notifyConnectionChange(connectionState);
+    this.notifyAuthChange("unauthenticated");
+  }
+
   // Build a temporary client for detection/queries without changing state
   buildTempClient(url: string): Ad4mClient {
     const wsClient = createClient({
@@ -243,19 +275,7 @@ export default class Ad4mConnect extends EventTarget {
       }),
     });
 
-    const apolloClient = new ApolloClient({
-      link: new GraphQLWsLink(wsClient),
-      cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
-      defaultOptions: {
-        watchQuery: {
-          fetchPolicy: "no-cache",
-        },
-        query: {
-          fetchPolicy: "no-cache",
-        },
-      },
-    });
-
+    const apolloClient = this.createApolloClient(wsClient);
     return new Ad4mClient(apolloClient);
   }
 
@@ -323,21 +343,18 @@ export default class Ad4mConnect extends EventTarget {
         }
       } catch (error) {
         console.error('[Ad4m Connect] Connection failed:', error);
-        this.notifyConnectionChange("not_connected");
-        this.notifyAuthChange("unauthenticated");
+        this.notifyDisconnected();
         reject(error);
       }
     });
   }
 
   /**
-   * @deprecated This method is deprecated in favor of the UI-driven email verification flow.
-   * The new flow uses requestLoginVerification() -> verifyEmailCode() which is handled
-   * automatically by the ad4m-connect web component. This method is kept for backwards
-   * compatibility but will only work if email verification is not enabled on the server.
+   * Connect to a multi-user backend with authentication.
+   * This method handles both password-based and email verification flows.
+   * For UI-driven flows, use the ad4m-connect web component which provides a better UX.
    */
   async connectMultiUser(): Promise<Ad4mClient> {
-    console.warn("[Ad4m Connect] connectMultiUser() is deprecated. The new email verification flow is handled automatically by the UI.");
 
     try {
       // Connect to the multi-user backend
@@ -394,8 +411,7 @@ export default class Ad4mConnect extends EventTarget {
 
       return authenticatedClient;
     } catch (error) {
-      this.notifyConnectionChange("error");
-      this.notifyAuthChange("unauthenticated");
+      this.notifyDisconnected("error");
       throw error;
     }
   }
@@ -491,8 +507,7 @@ export default class Ad4mConnect extends EventTarget {
         }
       }
     } catch (error) {
-      this.notifyConnectionChange("not_connected");
-      this.notifyAuthChange("unauthenticated");
+      this.notifyDisconnected();
     }
   }
 
@@ -562,8 +577,7 @@ export default class Ad4mConnect extends EventTarget {
           this.activeSocket = socket;
         },
         error: (e) => {
-          this.notifyConnectionChange("not_connected");
-          this.notifyAuthChange("unauthenticated");
+          this.notifyDisconnected();
         },
         connected: () => {
           this.notifyConnectionChange("connected");
@@ -584,16 +598,14 @@ export default class Ad4mConnect extends EventTarget {
           }
 
           if (!this.token) {
-            this.notifyConnectionChange(!this.token ? "not_connected" : "disconnected");
-            this.notifyAuthChange("unauthenticated");
+            this.notifyDisconnected(!this.token ? "not_connected" : "disconnected");
             this.requestedRestart = false;
           } else {
             const client = await this.connect();
             if (client) {
               this.ad4mClient = client;
             } else {
-              this.notifyConnectionChange(!this.token ? "not_connected" : "disconnected");
-              this.notifyAuthChange("unauthenticated");
+              this.notifyDisconnected(!this.token ? "not_connected" : "disconnected");
               this.requestedRestart = false;
             }
           }
@@ -601,22 +613,7 @@ export default class Ad4mConnect extends EventTarget {
       },
     });
 
-    this.apolloClient = new ApolloClient({
-      link: new GraphQLWsLink(this.wsClient),
-      cache: new InMemoryCache({ resultCaching: false, addTypename: false }),
-      defaultOptions: {
-        watchQuery: {
-          fetchPolicy: "no-cache",
-        },
-        query: {
-          fetchPolicy: "no-cache",
-        },
-        mutate: {
-          fetchPolicy: "no-cache",
-        }
-      },
-    });
-
+    this.apolloClient = this.createApolloClient(this.wsClient);
     this.ad4mClient = new Ad4mClient(this.apolloClient);
 
     return this.ad4mClient;
@@ -701,7 +698,6 @@ export default class Ad4mConnect extends EventTarget {
   clearState() {
     this.setToken(null);
     this.setPort(DEFAULT_PORT);
-    this.notifyConnectionChange("not_connected");
-    this.notifyAuthChange("unauthenticated");
+    this.notifyDisconnected();
   }
 }

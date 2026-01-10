@@ -511,14 +511,10 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   /**
-   * Initialize the Ad4mConnect client without mounting UI to DOM
-   * Used for embedded mode where we don't need the visual UI
-   * Returns the Ad4mConnect client instance
+   * Initialize the Ad4mConnect client instance
+   * Uses provided core instance or creates a new one from properties
    */
-  public initializeWithoutUI(): Ad4mConnect {
-    autoBind(this);
-
-    // Use provided core instance or create a new one
+  private initializeClient(): void {
     if (this.core) {
       this._client = this.core;
     } else {
@@ -537,12 +533,72 @@ export class Ad4mConnectElement extends LitElement {
         hosting: this.hosting,
       });
     }
+  }
 
-    // Set up event listeners for state tracking
+  /**
+   * Set up event listeners for client state changes
+   */
+  private setupEventListeners(): void {
     this._client.on("configstatechange", this.handleConfigChange);
     this._client.on("authstatechange", this.handleAuthChange);
     this._client.on("connectionstatechange", this.handleConnectionChange);
-    
+  }
+
+  /**
+   * Build app info object from component properties
+   * Used for authentication and authorization requests
+   */
+  private buildAppInfo() {
+    return {
+      appName: this.appName,
+      appDesc: this.appDesc,
+      appDomain: this.appDomain,
+      appUrl: window.location.origin,
+      appIconPath: this.appIconPath,
+    };
+  }
+
+  /**
+   * Complete the authentication flow after receiving a token
+   * Stores token, rebuilds client, and updates UI to authenticated state
+   */
+  private async completeAuthentication(token: string, url?: string): Promise<void> {
+    // Store token and URL
+    this._client.setToken(token);
+    if (url) {
+      this._client.setUrl(url);
+    }
+
+    // Rebuild client with new token to establish authenticated connection
+    await this._client.buildClient();
+    await this._client.checkAuth();
+
+    // Clear form and close modal
+    this.state.resetMultiUserForm();
+    this.state.close();
+    this.changeUIState("connected");
+    this.handleAuthChange("authenticated");
+  }
+
+  /**
+   * Clear any pending auto-submit timeout for verification code
+   */
+  private clearCodeSubmitTimeout(): void {
+    if (this._codeSubmitTimeout !== null) {
+      clearTimeout(this._codeSubmitTimeout);
+      this._codeSubmitTimeout = null;
+    }
+  }
+
+  /**
+   * Initialize the Ad4mConnect client without mounting UI to DOM
+   * Used for embedded mode where we don't need the visual UI
+   * Returns the Ad4mConnect client instance
+   */
+  public initializeWithoutUI(): Ad4mConnect {
+    autoBind(this);
+    this.initializeClient();
+    this.setupEventListeners();
     return this._client;
   }
 
@@ -561,45 +617,21 @@ export class Ad4mConnectElement extends LitElement {
     autoBind(this);
 
     this.injectFont();
-
     this.state.setMobile(detectMob());
 
-    // Use provided core instance or create a new one
-    if (this.core) {
-      this._client = this.core;
-    } else {
-      this._client = new Ad4mConnect({
-        appName: this.appName,
-        appDesc: this.appDesc,
-        appDomain: this.appDomain,
-        appUrl: window.location.origin,
-        appIconPath: this.appIconPath,
-        capabilities: Array.isArray(this.capabilities)
-          ? this.capabilities
-          : JSON.parse(this.capabilities),
-        port: this.port || parseInt(getForVersion("ad4mport")) || DEFAULT_PORT,
-        token: this.token || getForVersion("ad4mtoken"),
-        url: this.url || getForVersion("ad4murl"),
-        hosting: this.hosting,
-      });
-    }
+    // Initialize the client
+    this.initializeClient();
 
     // Don't show UI if running in embedded mode - core will handle connection
     if (isEmbedded()) {
       console.log('[Ad4m Connect UI] Running in embedded mode - UI will not be shown');
       this.state.close();
-      
-      // Still set up event listeners so app can track state
-      this._client.on("configstatechange", this.handleConfigChange);
-      this._client.on("authstatechange", this.handleAuthChange);
-      this._client.on("connectionstatechange", this.handleConnectionChange);
-      
+      this.setupEventListeners();
       return; // Skip rest of UI initialization
     }
 
-    this._client.on("configstatechange", this.handleConfigChange);
-    this._client.on("authstatechange", this.handleAuthChange);
-    this._client.on("connectionstatechange", this.handleConnectionChange);
+    // Set up event listeners
+    this.setupEventListeners();
 
     this.loadFont();
 
@@ -650,16 +682,7 @@ export class Ad4mConnectElement extends LitElement {
       // Build temporary client to call requestLoginVerification
       const tempClient = this._client.buildTempClient(this.backendUrl);
 
-      // Build AuthInfo object from app properties
-      const appInfo = {
-        appName: this.appName,
-        appDesc: this.appDesc,
-        appDomain: this.appDomain,
-        appUrl: window.location.origin,
-        appIconPath: this.appIconPath,
-      };
-
-      const result = await tempClient.agent.requestLoginVerification(this.state.forms.multiUserEmail, appInfo);
+      const result = await tempClient.agent.requestLoginVerification(this.state.forms.multiUserEmail, this.buildAppInfo());
 
       if (result.success && !result.requiresPassword) {
         // User exists, verification email sent
@@ -692,35 +715,13 @@ export class Ad4mConnectElement extends LitElement {
         // Existing user - try password login
         try {
           const token = await tempClient.agent.loginUser(this.state.forms.multiUserEmail, this.state.forms.multiUserPassword);
-          
-          // Success! Store token and authenticate
-          this._client.setToken(token);
-          this._client.setUrl(this.backendUrl);
-
-          // Rebuild client with new token to establish authenticated connection
-          await this._client.buildClient();
-          await this._client.checkAuth();
-
-          // Clear form and close modal
-          this.state.resetMultiUserForm();
-          this.state.close();
-          this.changeUIState("connected");
-          this.handleAuthChange("authenticated");
+          await this.completeAuthentication(token, this.backendUrl);
         } catch (loginError) {
           this.state.setError('multiUser', loginError.message || "Invalid email or password. Please try again.");
         }
       } else {
         // New user - create account
-        // Build AuthInfo object from app properties
-        const appInfo = {
-          appName: this.appName,
-          appDesc: this.appDesc,
-          appDomain: this.appDomain,
-          appUrl: window.location.origin,
-          appIconPath: this.appIconPath,
-        };
-
-        const result = await tempClient.agent.createUser(this.state.forms.multiUserEmail, this.state.forms.multiUserPassword, appInfo);
+        const result = await tempClient.agent.createUser(this.state.forms.multiUserEmail, this.state.forms.multiUserPassword, this.buildAppInfo());
 
         if (result.success) {
           // Check if email verification was sent or if we should proceed directly to login
@@ -728,20 +729,7 @@ export class Ad4mConnectElement extends LitElement {
             // SMTP not configured - login immediately with password
             try {
               const token = await tempClient.agent.loginUser(this.state.forms.multiUserEmail, this.state.forms.multiUserPassword);
-              
-              // Success! Store token and authenticate
-              this._client.setToken(token);
-              this._client.setUrl(this.backendUrl);
-
-              // Rebuild client with new token to establish authenticated connection
-              await this._client.buildClient();
-              await this._client.checkAuth();
-
-              // Clear form and close modal
-              this.state.resetMultiUserForm();
-              this.state.close();
-              this.changeUIState("connected");
-              this.handleAuthChange("authenticated");
+              await this.completeAuthentication(token, this.backendUrl);
             } catch (loginError) {
               this.state.setError('multiUser', loginError.message || "Account created but login failed. Please try logging in.");
             }
@@ -771,10 +759,7 @@ export class Ad4mConnectElement extends LitElement {
     }
 
     // Cancel any pending auto-submit timeout since we're submitting now
-    if (this._codeSubmitTimeout !== null) {
-      clearTimeout(this._codeSubmitTimeout);
-      this._codeSubmitTimeout = null;
-    }
+    this.clearCodeSubmitTimeout();
 
     try {
       this.state.setLoading('multiUser', true);
@@ -788,19 +773,7 @@ export class Ad4mConnectElement extends LitElement {
         this.state.forms.multiUserVerificationType
       );
 
-      // Success! Store token and authenticate
-      this._client.setToken(token);
-      this._client.setUrl(this.backendUrl);
-
-      // Rebuild client with new token to establish authenticated connection
-      await this._client.buildClient();
-      await this._client.checkAuth();
-
-      // Clear form and close modal
-      this.state.resetMultiUserForm();
-      this.state.close();
-      this.changeUIState("connected");
-      this.handleAuthChange("authenticated");
+      await this.completeAuthentication(token, this.backendUrl);
     } catch (e) {
       this.state.setError('multiUser', "Invalid or expired code. Please try again.");
       this.state.updateForm('multiUserVerificationCode', '');
@@ -811,10 +784,7 @@ export class Ad4mConnectElement extends LitElement {
 
   private handleMultiUserBackToEmail() {
     // Cancel any pending auto-submit timeout
-    if (this._codeSubmitTimeout !== null) {
-      clearTimeout(this._codeSubmitTimeout);
-      this._codeSubmitTimeout = null;
-    }
+    this.clearCodeSubmitTimeout();
     this.state.updateForm('multiUserStep', 'email');
     this.state.updateForm('multiUserPassword', '');
     this.state.updateForm('multiUserVerificationCode', '');
@@ -833,10 +803,7 @@ export class Ad4mConnectElement extends LitElement {
 
   private changeMultiUserVerificationCode(code: string) {
     // Cancel any pending auto-submit timeout
-    if (this._codeSubmitTimeout !== null) {
-      clearTimeout(this._codeSubmitTimeout);
-      this._codeSubmitTimeout = null;
-    }
+    this.clearCodeSubmitTimeout();
 
     this.state.updateForm('multiUserVerificationCode', code);
     this.state.clearError('multiUser'); // Clear error when user types
