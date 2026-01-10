@@ -1,6 +1,6 @@
 import { BarcodeDetectorPolyfill } from "@undecaf/barcode-detector-polyfill";
 import { css, html, LitElement } from "lit";
-import { customElement, property, state } from "lit/decorators.js";
+import { customElement, property } from "lit/decorators.js";
 
 import Ad4mConnect, {
   Ad4mConnectOptions,
@@ -25,6 +25,7 @@ import Settings from "./components/Settings";
 import Start from "./components/Start";
 import VerifyCode from "./components/VerifyCode";
 import { connectWebSocket, DEFAULT_PORT, getForVersion, removeForVersion, setForVersion, isEmbedded } from "./utils";
+import { ConnectState } from "./state";
 
 function detectMob() {
   const toMatch = [
@@ -449,97 +450,14 @@ const styles = css`
 export class Ad4mConnectElement extends LitElement {
   static styles = [styles];
 
-  @state()
-  private _code = null;
+  // New centralized state management
+  private state = new ConnectState(this);
 
-  @state()
-  private _isMobile = null;
-
-  @state()
-  private _hasClickedDownload = null;
-
-  @state()
-  private _isRemote = false;
-
-  @state()
+  // Core client instance
   private _client: Ad4mConnect;
-
-  @state()
-  private _isOpen: boolean = false;
-
-  @state()
-  private _hostingStep = 0;
-
-  @state()
-  private _email = "";
-
-  @state()
-  private _passowrd = "";
-
-  @state()
-  private _passwordError = null;
-
-  @state()
-  private _hostingNotRunningError = null;
-
-  @state()
-  private _verifyCodeError = null;
-
-  @state()
-  private _isHostingLoading = false;
-
-  @state()
-  private _multiUserEmail = "";
-
-  @state()
-  private _multiUserPassword = "";
-
-  @state()
-  private _multiUserVerificationCode = "";
-
-  @state()
-  private _multiUserError: string | null = null;
-
-  @state()
-  private _multiUserLoading = false;
 
   // Timeout reference for auto-submit when 6 digits are entered
   private _codeSubmitTimeout: ReturnType<typeof setTimeout> | null = null;
-
-  @state()
-  private _multiUserStep: "email" | "password" | "code" = "email";
-
-  @state()
-  private _multiUserVerificationType: "signup" | "login" = "login";
-
-  @state()
-  private _localDetected = false;
-
-  @state()
-  private _remoteUrl = "";
-
-  @state()
-  private _remoteMultiUserDetected: boolean | null = null;
-
-  @state()
-  private _remoteDetecting = false;
-
-  @state()
-  private _remoteError: string | null = null;
-
-  @state()
-  private uiState:
-    | "connection_overview"
-    | "remote_connection"
-    | "settings"
-    | "start"
-    | "qr"
-    | "requestcap"
-    | "verifycode"
-    | "disconnected"
-    | "hosting"
-    | "agentlocked"
-    | "multiuser_auth" = "connection_overview";
 
   @property({ type: String, reflect: true })
   appName = null;
@@ -644,7 +562,7 @@ export class Ad4mConnectElement extends LitElement {
 
     this.injectFont();
 
-    this._isMobile = detectMob();
+    this.state.setMobile(detectMob());
 
     // Use provided core instance or create a new one
     if (this.core) {
@@ -669,7 +587,7 @@ export class Ad4mConnectElement extends LitElement {
     // Don't show UI if running in embedded mode - core will handle connection
     if (isEmbedded()) {
       console.log('[Ad4m Connect UI] Running in embedded mode - UI will not be shown');
-      this._isOpen = false;
+      this.state.close();
       
       // Still set up event listeners so app can track state
       this._client.on("configstatechange", this.handleConfigChange);
@@ -706,18 +624,18 @@ export class Ad4mConnectElement extends LitElement {
       // No stored token - show connection overview
       this.detectLocal();
       this.changeUIState("connection_overview");
-      this._isOpen = true;
+      this.state.open();
     }
   }
 
   private async checkEmail() {
     try {
-      const exist = await this._client.checkEmail(this._email);
+      const exist = await this._client.checkEmail(this.state.forms.email);
 
       if (exist) {
-        this._hostingStep = 1;
+        this.state.updateForm('hostingStep', 1);
       } else {
-        this._hostingStep = 2;
+        this.state.updateForm('hostingStep', 2);
       }
     } catch (e) {
       console.log(e);
@@ -726,8 +644,8 @@ export class Ad4mConnectElement extends LitElement {
 
   private async handleMultiUserEmailSubmit() {
     try {
-      this._multiUserLoading = true;
-      this._multiUserError = null;
+      this.state.setLoading('multiUser', true);
+      this.state.clearError('multiUser');
 
       // Build temporary client to call requestLoginVerification
       const tempClient = this._client.buildTempClient(this.backendUrl);
@@ -741,39 +659,39 @@ export class Ad4mConnectElement extends LitElement {
         appIconPath: this.appIconPath,
       };
 
-      const result = await tempClient.agent.requestLoginVerification(this._multiUserEmail, appInfo);
+      const result = await tempClient.agent.requestLoginVerification(this.state.forms.multiUserEmail, appInfo);
 
       if (result.success && !result.requiresPassword) {
         // User exists, verification email sent
-        this._multiUserStep = "code";
-        this._multiUserVerificationType = "login";
+        this.state.updateForm('multiUserStep', 'code');
+        this.state.updateForm('multiUserVerificationType', 'login');
       } else if (result.requiresPassword) {
         // Determine if this is login or signup based on whether user exists
         // If isExistingUser is true, show password for login; otherwise for signup
-        this._multiUserStep = "password";
-        this._multiUserVerificationType = result.isExistingUser ? "login" : "signup";
+        this.state.updateForm('multiUserStep', 'password');
+        this.state.updateForm('multiUserVerificationType', result.isExistingUser ? 'login' : 'signup');
       } else {
-        this._multiUserError = result.message || "Failed to send verification email";
+        this.state.setError('multiUser', result.message || "Failed to send verification email");
       }
     } catch (e) {
-      this._multiUserError = e.message || "Failed to process email. Please try again.";
+      this.state.setError('multiUser', e.message || "Failed to process email. Please try again.");
     } finally {
-      this._multiUserLoading = false;
+      this.state.setLoading('multiUser', false);
     }
   }
 
   private async handleMultiUserPasswordSubmit() {
     try {
-      this._multiUserLoading = true;
-      this._multiUserError = null;
+      this.state.setLoading('multiUser', true);
+      this.state.clearError('multiUser');
 
       // Build temporary client
       const tempClient = this._client.buildTempClient(this.backendUrl);
 
-      if (this._multiUserVerificationType === "login") {
+      if (this.state.forms.multiUserVerificationType === "login") {
         // Existing user - try password login
         try {
-          const token = await tempClient.agent.loginUser(this._multiUserEmail, this._multiUserPassword);
+          const token = await tempClient.agent.loginUser(this.state.forms.multiUserEmail, this.state.forms.multiUserPassword);
           
           // Success! Store token and authenticate
           this._client.setToken(token);
@@ -784,15 +702,12 @@ export class Ad4mConnectElement extends LitElement {
           await this._client.checkAuth();
 
           // Clear form and close modal
-          this._multiUserEmail = "";
-          this._multiUserPassword = "";
-          this._multiUserVerificationCode = "";
-          this._multiUserStep = "email";
-          this._isOpen = false;
+          this.state.resetMultiUserForm();
+          this.state.close();
           this.changeUIState("connected");
           this.handleAuthChange("authenticated");
         } catch (loginError) {
-          this._multiUserError = loginError.message || "Invalid email or password. Please try again.";
+          this.state.setError('multiUser', loginError.message || "Invalid email or password. Please try again.");
         }
       } else {
         // New user - create account
@@ -805,14 +720,14 @@ export class Ad4mConnectElement extends LitElement {
           appIconPath: this.appIconPath,
         };
 
-        const result = await tempClient.agent.createUser(this._multiUserEmail, this._multiUserPassword, appInfo);
+        const result = await tempClient.agent.createUser(this.state.forms.multiUserEmail, this.state.forms.multiUserPassword, appInfo);
 
         if (result.success) {
           // Check if email verification was sent or if we should proceed directly to login
           if (result.error && result.error.includes("SMTP is not configured")) {
             // SMTP not configured - login immediately with password
             try {
-              const token = await tempClient.agent.loginUser(this._multiUserEmail, this._multiUserPassword);
+              const token = await tempClient.agent.loginUser(this.state.forms.multiUserEmail, this.state.forms.multiUserPassword);
               
               // Success! Store token and authenticate
               this._client.setToken(token);
@@ -823,38 +738,35 @@ export class Ad4mConnectElement extends LitElement {
               await this._client.checkAuth();
 
               // Clear form and close modal
-              this._multiUserEmail = "";
-              this._multiUserPassword = "";
-              this._multiUserVerificationCode = "";
-              this._multiUserStep = "email";
-              this._isOpen = false;
+              this.state.resetMultiUserForm();
+              this.state.close();
               this.changeUIState("connected");
               this.handleAuthChange("authenticated");
             } catch (loginError) {
-              this._multiUserError = loginError.message || "Account created but login failed. Please try logging in.";
+              this.state.setError('multiUser', loginError.message || "Account created but login failed. Please try logging in.");
             }
           } else if (!result.error) {
             // User created, verification email sent
-            this._multiUserStep = "code";
-            this._multiUserVerificationType = "signup";
+            this.state.updateForm('multiUserStep', 'code');
+            this.state.updateForm('multiUserVerificationType', 'signup');
           } else {
             // User created but email failed - still allow login
-            this._multiUserError = result.error + " You can try logging in with your password.";
+            this.state.setError('multiUser', result.error + " You can try logging in with your password.");
           }
         } else {
-          this._multiUserError = result.error || "Failed to create account. Please try again.";
+          this.state.setError('multiUser', result.error || "Failed to create account. Please try again.");
         }
       }
     } catch (e) {
-      this._multiUserError = e.message || "Failed to process request. Please try again.";
+      this.state.setError('multiUser', e.message || "Failed to process request. Please try again.");
     } finally {
-      this._multiUserLoading = false;
+      this.state.setLoading('multiUser', false);
     }
   }
 
   private async handleMultiUserCodeSubmit() {
     // Guard against duplicate calls - if already loading, ignore this request
-    if (this._multiUserLoading) {
+    if (this.state.loading.multiUser) {
       return;
     }
 
@@ -865,15 +777,15 @@ export class Ad4mConnectElement extends LitElement {
     }
 
     try {
-      this._multiUserLoading = true;
-      this._multiUserError = null;
+      this.state.setLoading('multiUser', true);
+      this.state.clearError('multiUser');
 
       // Build temporary client to call verifyEmailCode
       const tempClient = this._client.buildTempClient(this.backendUrl);
       const token = await tempClient.agent.verifyEmailCode(
-        this._multiUserEmail,
-        this._multiUserVerificationCode,
-        this._multiUserVerificationType
+        this.state.forms.multiUserEmail,
+        this.state.forms.multiUserVerificationCode,
+        this.state.forms.multiUserVerificationType
       );
 
       // Success! Store token and authenticate
@@ -885,18 +797,15 @@ export class Ad4mConnectElement extends LitElement {
       await this._client.checkAuth();
 
       // Clear form and close modal
-      this._multiUserEmail = "";
-      this._multiUserPassword = "";
-      this._multiUserVerificationCode = "";
-      this._multiUserStep = "email";
-      this._isOpen = false;
+      this.state.resetMultiUserForm();
+      this.state.close();
       this.changeUIState("connected");
       this.handleAuthChange("authenticated");
     } catch (e) {
-      this._multiUserError = "Invalid or expired code. Please try again.";
-      this._multiUserVerificationCode = "";
+      this.state.setError('multiUser', "Invalid or expired code. Please try again.");
+      this.state.updateForm('multiUserVerificationCode', '');
     } finally {
-      this._multiUserLoading = false;
+      this.state.setLoading('multiUser', false);
     }
   }
 
@@ -906,20 +815,20 @@ export class Ad4mConnectElement extends LitElement {
       clearTimeout(this._codeSubmitTimeout);
       this._codeSubmitTimeout = null;
     }
-    this._multiUserStep = "email";
-    this._multiUserPassword = "";
-    this._multiUserVerificationCode = "";
-    this._multiUserError = null;
+    this.state.updateForm('multiUserStep', 'email');
+    this.state.updateForm('multiUserPassword', '');
+    this.state.updateForm('multiUserVerificationCode', '');
+    this.state.clearError('multiUser');
   }
 
   private changeMultiUserEmail(email: string) {
-    this._multiUserEmail = email;
-    this._multiUserError = null; // Clear error when user types
+    this.state.updateForm('multiUserEmail', email);
+    this.state.clearError('multiUser'); // Clear error when user types
   }
 
   private changeMultiUserPassword(password: string) {
-    this._multiUserPassword = password;
-    this._multiUserError = null; // Clear error when user types
+    this.state.updateForm('multiUserPassword', password);
+    this.state.clearError('multiUser'); // Clear error when user types
   }
 
   private changeMultiUserVerificationCode(code: string) {
@@ -929,15 +838,15 @@ export class Ad4mConnectElement extends LitElement {
       this._codeSubmitTimeout = null;
     }
 
-    this._multiUserVerificationCode = code;
-    this._multiUserError = null; // Clear error when user types
+    this.state.updateForm('multiUserVerificationCode', code);
+    this.state.clearError('multiUser'); // Clear error when user types
 
     // Auto-submit when 6 digits entered (with debounce to prevent race conditions)
-    if (code.length === 6 && !this._multiUserLoading) {
+    if (code.length === 6 && !this.state.loading.multiUser) {
       this._codeSubmitTimeout = setTimeout(() => {
         this._codeSubmitTimeout = null;
         // Only submit if still 6 digits and not already loading
-        if (this._multiUserVerificationCode.length === 6 && !this._multiUserLoading) {
+        if (this.state.forms.multiUserVerificationCode.length === 6 && !this.state.loading.multiUser) {
           this.handleMultiUserCodeSubmit();
         }
       }, 100);
@@ -947,10 +856,10 @@ export class Ad4mConnectElement extends LitElement {
   private async detectLocal() {
     try {
       await connectWebSocket(`ws://localhost:${this.port}/graphql`, 3000);
-      this._localDetected = true;
+      this.state.setLocalDetected(true);
     } catch (error) {
       console.log("[Ad4m Connect] Local detection failed:", error);
-      this._localDetected = false;
+      this.state.setLocalDetected(false);
     }
   }
 
@@ -995,84 +904,84 @@ export class Ad4mConnectElement extends LitElement {
 
   private handleShowRemoteConnection() {
     // Use configured URL in priority order: backendUrl, url, or empty
-    this._remoteUrl = this.backendUrl || this.url || "";
-    this._remoteMultiUserDetected = null;
-    this._remoteError = null;
+    this.state.updateForm('remoteUrl', this.backendUrl || this.url || '');
+    this.state.setRemoteMultiUserDetected(null);
+    this.state.clearError('remote');
     this.changeUIState("remote_connection");
   }
 
   private handleRemoteUrlChange(url: string) {
-    this._remoteUrl = url;
-    this._remoteError = null;
+    this.state.updateForm('remoteUrl', url);
+    this.state.clearError('remote');
   }
 
   private async handleRemoteConnect() {
-    if (!this._remoteUrl) {
-      this._remoteError = "Please enter a URL";
+    if (!this.state.forms.remoteUrl) {
+      this.state.setError('remote', "Please enter a URL");
       return;
     }
 
-    this._remoteDetecting = true;
-    this._remoteError = null;
-    this._remoteMultiUserDetected = null; // Reset detection state
+    this.state.setLoading('remoteDetecting', true);
+    this.state.clearError('remote');
+    this.state.setRemoteMultiUserDetected(null); // Reset detection state
 
     try {
       // Step 1: Check if the server is reachable at all
-      console.log("[Ad4m Connect] Checking if server is reachable:", this._remoteUrl);
-      await connectWebSocket(this._remoteUrl, 5000);
+      console.log("[Ad4m Connect] Checking if server is reachable:", this.state.forms.remoteUrl);
+      await connectWebSocket(this.state.forms.remoteUrl, 5000);
       console.log("[Ad4m Connect] Server is reachable");
 
       // Step 2: Verify it's actually an AD4M API
-      await this.verifyAd4mApi(this._remoteUrl);
+      await this.verifyAd4mApi(this.state.forms.remoteUrl);
 
       // Step 3: Detect if multi-user is enabled
-      const isMultiUser = await this.detectRemoteMultiUser(this._remoteUrl);
-      this._remoteMultiUserDetected = isMultiUser;
-      this._remoteDetecting = false;
+      const isMultiUser = await this.detectRemoteMultiUser(this.state.forms.remoteUrl);
+      this.state.setRemoteMultiUserDetected(isMultiUser);
+      this.state.setLoading('remoteDetecting', false);
     } catch (error) {
       console.error("[Ad4m Connect] Connection/detection failed:", error);
-      this._remoteError = error.message || "Cannot reach server at this URL. Please check the URL and try again.";
-      this._remoteMultiUserDetected = null; // Keep as null to not show connection options
-      this._remoteDetecting = false;
+      this.state.setError('remote', error.message || "Cannot reach server at this URL. Please check the URL and try again.");
+      this.state.setRemoteMultiUserDetected(null); // Keep as null to not show connection options
+      this.state.setLoading('remoteDetecting', false);
     }
   }
 
   private async handleRemoteMultiUserAuth() {
     // Set the backend URL and show multi-user auth
-    this.backendUrl = this._remoteUrl;
+    this.backendUrl = this.state.forms.remoteUrl;
     this.changeUIState("multiuser_auth");
   }
 
   private async handleRemoteRequestCapability() {
     try {
       this.changeUIState("requestcap");
-      await this._client.connect(this._remoteUrl);
+      await this._client.connect(this.state.forms.remoteUrl);
     } catch (error) {
-      this._remoteError = error.message || "Failed to connect";
+      this.state.setError('remote', error.message || "Failed to connect");
       this.changeUIState("remote_connection");
     }
   }
 
   private async loginToHosting() {
     try {
-      await this._client.loginToHosting(this._email, this._passowrd);
+      await this._client.loginToHosting(this.state.forms.email, this.state.forms.password);
 
       this.changeUIState("connected");
     } catch (e) {
       if (e.message.includes("Passwords did not match")) {
-        this._passwordError = "Passwords did not match";
+        this.state.setError('password', "Passwords did not match");
       } else {
-        this._hostingNotRunningError = "Hosting is not running";
+        this.state.setError('hostingNotRunning', "Hosting is not running");
       }
     }
   }
 
   private changeEmail(email: string) {
-    this._email = email;
+    this.state.updateForm('email', email);
   }
 
-  private changePassword(passowrd: string) {
-    this._passowrd = passowrd;
+  private changePassword(password: string) {
+    this.state.updateForm('password', password);
   }
 
   private async unlockAgent(passcode, holochain = true) {
@@ -1083,8 +992,12 @@ export class Ad4mConnectElement extends LitElement {
     try {
       await this._client.verifyCode(code);
     } catch (e) {
-      this._verifyCodeError = "Invalid code";
+      this.state.setError('verifyCode', "Invalid code");
     }
+  }
+
+  private changeCode(code) {
+    this.state.updateForm('code', code);
   }
 
   private changeUrl(url) {
@@ -1101,23 +1014,19 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private changeUIState(state) {
-    this.uiState = state;
+    this.state.setView(state);
   }
 
   private setIsHostingRunning(val) {
-    this._hostingNotRunningError = val;
+    this.state.setError('hostingNotRunning', val);
   }
 
   private changeIsRemote(bol: boolean) {
-    this._isRemote = bol;
-  }
-
-  private changeCode(code) {
-    this._code = code;
+    this.state.setRemote(bol);
   }
 
   private onDownloaded() {
-    this._hasClickedDownload = true;
+    this.state.setHasClickedDownload(true);
   }
 
   private handleAuthChange(event: AuthStates) {
@@ -1125,10 +1034,10 @@ export class Ad4mConnectElement extends LitElement {
       detail: event,
     });
     if (event === "locked") {
-      this._isOpen = true;
+      this.state.open();
     }
     if (event === "authenticated") {
-      this._isOpen = false;
+      this.state.close();
     }
     this.dispatchEvent(customEvent);
     this.requestUpdate();
@@ -1146,24 +1055,24 @@ export class Ad4mConnectElement extends LitElement {
 
   private handleConnectionChange(event: ConnectionStates) {
     if (event === "checking_local") {
-      this._isOpen = false; // Don't show dialog while checking
+      this.state.close(); // Don't show dialog while checking
       return;
     }
 
     if (event === "connected") {
       if (this.authState !== "authenticated") {
         this.changeUIState("requestcap");
-        this._isOpen = true;
+        this.state.open();
       } else {
         this.changeUIState("connected");
-        this._isOpen = false;
+        this.state.close();
       }
     }
     if (event === "disconnected") {
-      this._isOpen = true;
+      this.state.open();
     }
     if (event === "not_connected") {
-      this._isOpen = true;
+      this.state.open();
       // If multi-user mode is enabled, show multi-user auth instead of start
       if (this.multiUser && this.backendUrl) {
         this.changeUIState("multiuser_auth");
@@ -1213,7 +1122,7 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   async connect() {
-    this._isOpen = true;
+    this.state.open();
     this.requestUpdate();
     const client = await this._client.connect();
     try {
@@ -1248,7 +1157,7 @@ export class Ad4mConnectElement extends LitElement {
       return client;
     } catch (e) {
       this.changeUIState("requestcap");
-      this._isOpen = true;
+      this.state.open();
     }
   }
 
@@ -1266,18 +1175,22 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   setOpen(val: boolean) {
-    this._isOpen = val;
+    if (val) {
+      this.state.open();
+    } else {
+      this.state.close();
+    }
   }
 
   setHostingStep(step: number) {
-    this._hostingStep = step;
+    this.state.updateForm('hostingStep', step);
   }
 
   clearState() {
     this.handleConfigChange("port", null);
     this.handleConfigChange("url", null);
     this.handleConfigChange("token", null);
-    // this._isOpen = false;
+    // this.state.close();
     this.handleConnectionChange("not_connected");
     this.handleAuthChange("unauthenticated");
     this.changeUIState("start");
@@ -1290,13 +1203,13 @@ export class Ad4mConnectElement extends LitElement {
       return Loading();
     }
 
-    if (this.uiState === "connection_overview") {
+    if (this.state.currentView === "connection_overview") {
       return ConnectionOverview({
-        localDetected: this._localDetected,
+        localDetected: this.state.detection.localDetected,
         multiUserConfigured: this.multiUser && !!this.backendUrl,
         backendUrl: this.backendUrl,
         configuredUrl: this.url,
-        isMobile: this._isMobile,
+        isMobile: this.state.isMobile,
         onConnectLocal: this.handleConnectLocal,
         onConnectRemote: this.handleShowRemoteConnection,
         onScanQR: () => { this.startCamera(null); },
@@ -1304,12 +1217,12 @@ export class Ad4mConnectElement extends LitElement {
       });
     }
 
-    if (this.uiState === "remote_connection") {
+    if (this.state.currentView === "remote_connection") {
       return RemoteConnection({
-        initialUrl: this._remoteUrl,
-        detecting: this._remoteDetecting,
-        multiUserDetected: this._remoteMultiUserDetected,
-        error: this._remoteError,
+        initialUrl: this.state.forms.remoteUrl,
+        detecting: this.state.loading.remoteDetecting,
+        multiUserDetected: this.state.detection.remoteMultiUserDetected,
+        error: this.state.errors.remote,
         onBack: () => this.changeUIState("connection_overview"),
         onUrlChange: this.handleRemoteUrlChange,
         onConnect: this.handleRemoteConnect,
@@ -1318,16 +1231,16 @@ export class Ad4mConnectElement extends LitElement {
       });
     }
 
-    if (this.uiState === "multiuser_auth") {
+    if (this.state.currentView === "multiuser_auth") {
       return MultiUserAuth({
-        email: this._multiUserEmail,
-        password: this._multiUserPassword,
-        verificationCode: this._multiUserVerificationCode,
-        error: this._multiUserError,
-        isLoading: this._multiUserLoading,
+        email: this.state.forms.multiUserEmail,
+        password: this.state.forms.multiUserPassword,
+        verificationCode: this.state.forms.multiUserVerificationCode,
+        error: this.state.errors.multiUser,
+        isLoading: this.state.loading.multiUser,
         backendUrl: this.backendUrl,
-        step: this._multiUserStep,
-        verificationType: this._multiUserVerificationType,
+        step: this.state.forms.multiUserStep,
+        verificationType: this.state.forms.multiUserVerificationType,
         changeEmail: this.changeMultiUserEmail,
         changePassword: this.changeMultiUserPassword,
         changeVerificationCode: this.changeMultiUserVerificationCode,
@@ -1338,31 +1251,31 @@ export class Ad4mConnectElement extends LitElement {
       });
     }
 
-    if (this.uiState === "hosting") {
+    if (this.state.currentView === "hosting") {
       return Hosting({
-        email: this._email,
-        password: this._passowrd,
+        email: this.state.forms.email,
+        password: this.state.forms.password,
         changeEmail: this.changeEmail,
         changePassword: this.changePassword,
         changeState: this.changeUIState,
-        step: this._hostingStep,
+        step: this.state.forms.hostingStep,
         setHostingStep: this.setHostingStep,
         login: this.loginToHosting,
         checkEmail: this.checkEmail,
-        passwordError: this._passwordError,
-        isHostingRunning: this._hostingNotRunningError,
+        passwordError: this.state.errors.password,
+        isHostingRunning: this.state.errors.hostingNotRunning,
         setIsHostingRunning: this.setIsHostingRunning,
       });
     }
 
-    if (this.uiState === "qr") {
+    if (this.state.currentView === "qr") {
       return ScanQRCode({
         changeState: this.changeUIState,
         onSuccess: (url) => {
           this.changeUrl(url);
           this._client.connect(url);
         },
-        uiState: this.uiState,
+        uiState: this.state.currentView,
       });
     }
 
@@ -1373,11 +1286,11 @@ export class Ad4mConnectElement extends LitElement {
       });
     }
 
-    if (this.uiState === "settings") {
+    if (this.state.currentView === "settings") {
       return Settings({
         port: this.port,
         changePort: this.changePort,
-        isRemote: this._isRemote,
+        isRemote: this.state.isRemote,
         changeIsRemote: this.changeIsRemote,
         url: this.url,
         changeState: this.changeUIState,
@@ -1392,8 +1305,8 @@ export class Ad4mConnectElement extends LitElement {
       return Start({
         scanQrcode: this.startCamera,
         connect: this.connect,
-        isMobile: this._isMobile,
-        hasClickedDownload: this._hasClickedDownload,
+        isMobile: this.state.isMobile,
+        hasClickedDownload: this.state.hasClickedDownload,
         onDownloaded: this.onDownloaded,
         changeState: this.changeUIState,
         hosting: this.hosting,
@@ -1401,14 +1314,14 @@ export class Ad4mConnectElement extends LitElement {
     }
 
     if (this.connectionState === "connected") {
-      if (this.uiState === "verifycode") {
+      if (this.state.currentView === "verifycode") {
         return VerifyCode({
-          code: this._code,
+          code: this.state.forms.code,
           changeCode: this.changeCode,
           changeState: this.changeUIState,
           verifyCode: this.verifyCode,
           isHosting: this._client.isHosting,
-          verifyCodeError: this._verifyCodeError,
+          verifyCodeError: this.state.errors.verifyCode,
         });
       }
 
@@ -1438,7 +1351,7 @@ export class Ad4mConnectElement extends LitElement {
       return MobileAppLogoButton({
         openModal: () => {
           this.changeUIState("settings");
-          this._isOpen = !this._isOpen;
+          this.state.toggleOpen();
         },
       });
     }
@@ -1450,10 +1363,10 @@ export class Ad4mConnectElement extends LitElement {
     console.log(
       this.authState,
       this.connectionState,
-      this.uiState,
-      this._isOpen
+      this.state.currentView,
+      this.state.isOpen
     );
-    if (this._isOpen === false) {
+    if (!this.state.isOpen) {
       if (this.authState === "authenticated") {
         return this.mobileView();
       }
