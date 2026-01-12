@@ -1080,16 +1080,47 @@ export class PerspectiveProxy {
     */
     async isSubjectInstance<T>(expression: string, subjectClass: T): Promise<boolean> {
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
-        let isInstance = false;
-        const maxAttempts = 5;
-        let attempts = 0;
 
-        while (attempts < maxAttempts && !isInstance) {
-            isInstance = await this.infer(`subject_class("${className}", C), instance(C, "${expression}")`);
-            attempts++;
-          }
+        // Get metadata from SDNA using Prolog metaprogramming
+        const metadata = await this.getSubjectClassMetadataFromSDNA(className);
+        if (!metadata) {
+            return false;
+        }
 
-        return isInstance
+        // If no required predicates, any expression with links is an instance
+        if (metadata.requiredPredicates.length === 0) {
+            //console.log("no required predicates, checking surrealDB");
+            const checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${expression}'`;
+            //console.log("checkQuery", checkQuery);
+            const result = await this.querySurrealDB(checkQuery);
+            //console.log("result", result);
+            const count = result[0]?.count ?? 0;
+            const countValue = typeof count === 'object' && count?.Int !== undefined ? count.Int : count;
+            return countValue > 0;
+        }
+
+        // Check if the expression has all required predicates
+        for (const predicate of metadata.requiredPredicates) {
+            //console.log("checking predicate", predicate);
+            const checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${expression}' AND predicate = '${predicate}'`;
+            //console.log("checkQuery", checkQuery);
+            const result = await this.querySurrealDB(checkQuery);
+            //console.log("result", result);
+
+            if (!result || result.length === 0) {
+                return false;
+            }
+
+            const count = result[0]?.count ?? 0;
+            // Handle potential object response like {Int: 0}
+            const countValue = typeof count === 'object' && count?.Int !== undefined ? count.Int : count;
+
+            if (countValue === 0) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
 
@@ -1112,6 +1143,212 @@ export class PerspectiveProxy {
         return subject as unknown as T
     }
 
+    /**
+     * Extracts subject class metadata from SDNA by parsing the Prolog text.
+     * Parses the instance rule to extract required predicates.
+     * Returns required predicates that define what makes something an instance,
+     * plus a map of property/collection names to their predicates.
+     */
+    private async getSubjectClassMetadataFromSDNA(className: string): Promise<{
+        requiredPredicates: string[],
+        properties: Map<string, { predicate: string, resolveLanguage?: string }>,
+        collections: Map<string, { predicate: string }>
+    } | null> {
+        try {
+            // Get SDNA code from perspective - it's stored as a link
+            const sdnaLinks = await this.get(new LinkQuery({
+                source: `literal://string:${className}`,
+                predicate: "ad4m://sdna"
+            }));
+
+            //console.log(`getSubjectClassMetadataFromSDNA: sdnaLinks for ${className}:`, sdnaLinks);
+
+            if (!sdnaLinks || sdnaLinks.length === 0) {
+                console.warn(`No SDNA found for class ${className}`);
+                return null;
+            }
+
+            if (!sdnaLinks[0].data.target) {
+                console.error(`SDNA link for ${className} has no target:`, sdnaLinks[0]);
+                return null;
+            }
+
+            // Extract SDNA code from the literal
+            const sdnaCode = Literal.fromUrl(sdnaLinks[0].data.target).get();
+            //console.log("sdnaCode for", className, ":", sdnaCode.substring(0, 200));
+
+            const requiredPredicates: string[] = [];
+
+            // Parse the instance rule from the SDNA code
+            // Format: instance(c, Base) :- triple(Base, "pred1", _), triple(Base, "pred2", _).
+            const instanceRuleMatch = sdnaCode.match(/instance\([^,]+,\s*\w+\)\s*:-\s*(.+?)\./s);
+
+            if (instanceRuleMatch) {
+                const ruleBody = instanceRuleMatch[1];
+                //console.log("instance rule body:", ruleBody);
+
+                // Extract all triple(Base, "predicate", ...) patterns
+                const tripleRegex = /triple\([^,]+,\s*"([^"]+)"/g;
+                let match;
+
+                while ((match = tripleRegex.exec(ruleBody)) !== null) {
+                    requiredPredicates.push(match[1]);
+                }
+            } else {
+                console.warn(`No instance rule found in SDNA for ${className}`);
+            }
+
+            //console.log("extracted requiredPredicates:", requiredPredicates);
+
+            // Extract property metadata
+            const properties = new Map<string, { predicate: string, resolveLanguage?: string }>();
+            const propertyResults = await this.infer(`subject_class("${className}", C), property(C, P)`);
+            //console.log("propertyResults", propertyResults);
+
+            if (propertyResults) {
+                for (const result of propertyResults) {
+                    const propName = result.P;
+
+                    // Try to extract predicate from property_setter
+                    const setterResults = await this.infer(`subject_class("${className}", C), property_setter(C, "${propName}", Setter)`);
+                    if (setterResults && setterResults.length > 0) {
+                        const setterString = setterResults[0].Setter;
+                        const predicateMatch = setterString.match(/predicate:\s*"([^"]+)"|predicate:\s*([^,}\]]+)/);
+                        if (predicateMatch) {
+                            const predicate = predicateMatch[1] || predicateMatch[2];
+
+                            // Check if property has resolveLanguage
+                            const resolveResults = await this.infer(`subject_class("${className}", C), property_resolve_language(C, "${propName}", Lang)`);
+                            const resolveLanguage = resolveResults && resolveResults.length > 0 ? resolveResults[0].Lang : undefined;
+
+                            properties.set(propName, { predicate, resolveLanguage });
+                        }
+                    }
+                }
+            }
+            //console.log("properties", properties);
+
+            // Extract collection metadata
+            const collections = new Map<string, { predicate: string }>();
+            const collectionResults = await this.infer(`subject_class("${className}", C), collection(C, Coll)`);
+            //console.log("collectionResults", collectionResults);
+            if (collectionResults) {
+                for (const result of collectionResults) {
+                    const collName = result.Coll;
+
+                    // Try to extract predicate from collection_adder
+                    const adderResults = await this.infer(`subject_class("${className}", C), collection_adder(C, "${collName}", Adder)`);
+                    if (adderResults && adderResults.length > 0) {
+                        const adderString = adderResults[0].Adder;
+                        const predicateMatch = adderString.match(/predicate:\s*"([^"]+)"|predicate:\s*([^,}\]]+)/);
+                        if (predicateMatch) {
+                            const predicate = predicateMatch[1] || predicateMatch[2];
+                            collections.set(collName, { predicate });
+                        }
+                    }
+                }
+            }
+            //console.log("collections", collections);
+            return { requiredPredicates, properties, collections };
+        } catch (e) {
+            console.error(`Error getting metadata for ${className}:`, e);
+            return null;
+        }
+    }
+
+    /**
+     * Generates a SurrealDB query to find instances based on class metadata.
+     */
+    private generateSurrealInstanceQuery(metadata: {
+        requiredPredicates: string[],
+        properties: Map<string, { predicate: string, resolveLanguage?: string }>,
+        collections: Map<string, { predicate: string }>
+    }): string {
+        //console.log("generateSurrealInstanceQuery called with requiredPredicates:", metadata.requiredPredicates);
+
+        if (metadata.requiredPredicates.length === 0) {
+            // No required predicates - any node with links is an instance
+            const query = `SELECT DISTINCT uri AS base FROM node WHERE count(->link) > 0`;
+            console.log("Generated query (no required predicates):", query);
+            return query;
+        }
+
+        // Generate WHERE conditions for each required predicate
+        const whereConditions = metadata.requiredPredicates.map(pred =>
+            `count(->link[WHERE predicate = '${pred}']) > 0`
+        ).join(' AND ');
+
+        const query = `SELECT uri AS base FROM node WHERE ${whereConditions}`;
+        //console.log("Generated query:", query);
+        return query;
+    }
+
+    /**
+     * Gets a property value using SurrealDB when Prolog fails.
+     * This is used as a fallback in SdnaOnly mode where link data isn't in Prolog.
+     */
+    async getPropertyValueViaSurreal(baseExpression: string, className: string, propertyName: string): Promise<any> {
+        const metadata = await this.getSubjectClassMetadataFromSDNA(className);
+        if (!metadata) {
+            return undefined;
+        }
+
+        const propMeta = metadata.properties.get(propertyName);
+        if (!propMeta) {
+            return undefined;
+        }
+
+        const query = `SELECT out.uri AS value FROM link WHERE in.uri = '${baseExpression}' AND predicate = '${propMeta.predicate}' LIMIT 1`;
+        const result = await this.querySurrealDB(query);
+
+        if (!result || result.length === 0) {
+            return undefined;
+        }
+
+        const value = result[0].value;
+
+        // Handle expression resolution if needed
+        if (propMeta.resolveLanguage && value) {
+            try {
+                const expression = await this.getExpression(value);
+                try {
+                    return JSON.parse(expression.data);
+                } catch (e) {
+                    return expression.data;
+                }
+            } catch (err) {
+                return value;
+            }
+        }
+
+        return value;
+    }
+
+    /**
+     * Gets collection values using SurrealDB when Prolog fails.
+     * This is used as a fallback in SdnaOnly mode where link data isn't in Prolog.
+     */
+    async getCollectionValuesViaSurreal(baseExpression: string, className: string, collectionName: string): Promise<any[]> {
+        const metadata = await this.getSubjectClassMetadataFromSDNA(className);
+        if (!metadata) {
+            return [];
+        }
+
+        const collMeta = metadata.collections.get(collectionName);
+        if (!collMeta) {
+            return [];
+        }
+
+        const query = `SELECT out.uri AS value FROM link WHERE in.uri = '${baseExpression}' AND predicate = '${collMeta.predicate}' AND perspective = '${this.uuid}'`;
+        const result = await this.querySurrealDB(query);
+
+        if (!result || result.length === 0) {
+            return [];
+        }
+
+        return result.map(r => r.value).filter(v => v !== "" && v !== '');
+    }
+
     /** Returns all subject instances of the given subject class as proxy objects.
      *  @param subjectClass Either a string with the name of the subject class, or an object
      * with the properties of the subject class. In the latter case, all subject classes
@@ -1127,10 +1364,31 @@ export class PerspectiveProxy {
 
         let instances = []
         for(let className of classes) {
-            let instanceBaseExpressions = await this.infer(`subject_class("${className}", C), instance(C, X)`)
-            let newInstances = await Promise.all(instanceBaseExpressions.map(async x => await this.getSubjectProxy(x.X, className) as unknown as T))
-            instances = instances.concat(newInstances)
+            //console.log(`getAllSubjectInstances: Processing class ${className}`);
+            // Query SDNA for metadata, then query SurrealDB for instances
+            const metadata = await this.getSubjectClassMetadataFromSDNA(className);
+            //console.log(`getAllSubjectInstances: Got metadata for ${className}:`, metadata);
+            if (metadata) {
+                const surrealQuery = this.generateSurrealInstanceQuery(metadata);
+                const results = await this.querySurrealDB(surrealQuery);
+               // console.log(`getAllSubjectInstances: SurrealDB returned ${results?.length || 0} results`);
+
+                for (const result of results || []) {
+                    //console.log(`getAllSubjectInstances: Creating subject for base ${result.base}`);
+                    try {
+                        let subject = new Subject(this, result.base, className);
+                        await subject.init();
+                        instances.push(subject as unknown as T);
+                        //console.log(`getAllSubjectInstances: Successfully created subject for ${result.base}`);
+                    } catch (e) {
+                        //console.warn(`Failed to create subject for ${result.base}:`, e);
+                    }
+                }
+            } else {
+                //console.warn(`getAllSubjectInstances: No metadata found for ${className}`);
+            }
         }
+        //console.log(`getAllSubjectInstances: Returning ${instances.length} instances`);
         return instances
     }
 
@@ -1149,8 +1407,23 @@ export class PerspectiveProxy {
 
         let instances = []
         for(let className of classes) {
-            instances = await this.infer(`subject_class("${className}", C), instance(C, X)`)
+            //console.log(`getAllSubjectProxies: Processing class ${className}`);
+            // Query SDNA for metadata, then query SurrealDB for instances
+            const metadata = await this.getSubjectClassMetadataFromSDNA(className);
+            //console.log(`getAllSubjectProxies: Got metadata for ${className}`);
+            if (metadata) {
+                const surrealQuery = this.generateSurrealInstanceQuery(metadata);
+                console.log("surrealQuery", surrealQuery);
+                const results = await this.querySurrealDB(surrealQuery);
+                console.log(`getAllSubjectProxies: SurrealDB returned ${results?.length || 0} results`);
+                const newInstance = results.map(r => ({ X: r.base }))
+                console.log("newInstance", newInstance);
+                instances = instances.concat(newInstance);
+            } else {
+                console.warn(`getAllSubjectProxies: No metadata found for ${className}`);
+            }
         }
+        //console.log(`getAllSubjectProxies: Returning ${instances.length} proxies`);
         return instances
     }
 

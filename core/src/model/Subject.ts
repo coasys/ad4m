@@ -50,6 +50,7 @@ export class Subject {
             Object.defineProperty(this, p, {
                 configurable: true,
                 get: async () => {
+                    // Try Prolog first
                     let results = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), property_getter(C, "${this.#baseExpression}", "${p}", Value)`)
                     if(results && results.length > 0) {
                         let expressionURI = results[0].Value
@@ -71,10 +72,14 @@ export class Subject {
                         } else {
                             return expressionURI
                         }
-                    } else if(results) {
-                        return results
-                    } else {
-                        return undefined
+                    }
+
+                    // Fallback to SurrealDB if Prolog returned nothing (SdnaOnly mode)
+                    try {
+                        return await this.#perspective.getPropertyValueViaSurreal(this.#baseExpression, this.#subjectClassName, p);
+                    } catch (err) {
+                        console.warn(`Failed to get property ${p} via SurrealDB:`, err);
+                        return undefined;
                     }
                 }
             })
@@ -110,12 +115,19 @@ export class Subject {
             Object.defineProperty(this, c, {
                 configurable: true,
                 get: async () => {
+                    // Try Prolog first
                     let results = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), collection_getter(C, "${this.#baseExpression}", "${c}", Value)`)
                     if(results && results.length > 0 && results[0].Value) {
                         let collectionContent = results[0].Value.filter((v: any) => v !== "" && v !== '')
                         return collectionContent
-                    } else {
-                        return []
+                    }
+
+                    // Fallback to SurrealDB if Prolog returned nothing (SdnaOnly mode)
+                    try {
+                        return await this.#perspective.getCollectionValuesViaSurreal(this.#baseExpression, this.#subjectClassName, c);
+                    } catch (err) {
+                        console.warn(`Failed to get collection ${c} via SurrealDB:`, err);
+                        return [];
                     }
                 }
             })
