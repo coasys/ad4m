@@ -1,6 +1,7 @@
 import { LitElement, html, css } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { getForVersion, DEFAULT_PORT } from "../../utils";
+import { sharedStyles } from "../../styles/shared-styles";
 
 @customElement("start-view")
 export class StartView extends LitElement {
@@ -8,19 +9,32 @@ export class StartView extends LitElement {
   @property({ type: Boolean }) hasClickedDownload = false;
   @property({ type: Boolean }) hosting = false;
 
-  static styles = css`
-    :host {
-      display: block;
+  static styles = [
+    sharedStyles,
+    css`
+    .section {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      align-items: center;
+    }
+
+    h1 {
+      text-align: center;
     }
 
     .info-text {
       color: #b9b9b9;
       font-size: 15px;
       text-align: center;
-      margin: 30px 0;
       line-height: 1.6;
+      padding: 0 10px;
     }
-  `;
+
+    a {
+      text-decoration: none;
+    }
+  `];
 
   private handleConnect() {
     this.dispatchEvent(new CustomEvent("connect", { bubbles: true, composed: true }));
@@ -54,11 +68,11 @@ export class StartView extends LitElement {
     const isLocal = url.includes("localhost");
 
     return html`
-      <j-flex direction="column" gap="600">
+      <div class="container">
         ${!this.hasClickedDownload
           ? html`
-              <j-flex direction="column" gap="400" a="center">
-                <j-text variant="heading-lg">Could not connect to AD4M</j-text>
+              <div class="section">
+                <h1>Could not connect to AD4M</h1>
                 ${isLocal
                   ? html`
                       <div class="info-text">
@@ -82,62 +96,60 @@ export class StartView extends LitElement {
 
                 ${this.isMobile
                   ? html`
-                      <j-button variant="primary" size="lg" @click=${this.handleScanQR}>
+                      <button class="primary" @click=${this.handleScanQR}>
                         Connect with QR
-                      </j-button>
+                      </button>
                     `
                   : html`
                       <a
                         href="https://github.com/coasys/ad4m/releases"
                         @click=${this.handleDownloadClick}
-                        style="text-decoration: none;"
                       >
-                        <j-button variant="primary" size="lg">Download AD4M</j-button>
+                        <button class="primary">Download AD4M</button>
                       </a>
                     `}
 
                 ${this.hosting
                   ? html`
-                      <j-text variant="body">Or</j-text>
-                      <j-button variant="primary" size="lg" @click=${this.handleHosting}>
+                      <p>Or</p>
+                      <button class="primary" @click=${this.handleHosting}>
                         Use hosted AD4M (alpha)
-                      </j-button>
+                      </button>
                     `
                   : ""}
-              </j-flex>
+              </div>
 
-              <j-flex direction="column" gap="400" a="center">
-                <j-text variant="body">or</j-text>
-                <j-button variant="secondary" size="lg" @click=${this.handleConnect}>
+              <div class="section">
+                <p>or</p>
+                <button class="secondary" @click=${this.handleConnect}>
                   Try reconnecting
-                </j-button>
-                <j-text variant="body">or</j-text>
-                <j-button variant="secondary" size="lg" @click=${this.handleSettings}>
+                </button>
+                <p>or</p>
+                <button class="secondary" @click=${this.handleSettings}>
                   Change connection settings
-                </j-button>
-              </j-flex>
+                </button>
+              </div>
             `
           : html`
-              <j-flex direction="column" gap="400" a="center">
-                <j-button variant="primary" size="lg" @click=${this.handleConnect}>
+              <div class="section">
+                <button class="primary" @click=${this.handleConnect}>
                   Connect to ADAM
-                </j-button>
-                <j-text variant="body">
+                </button>
+                <p>
                   Please connect to ADAM once you have downloaded and setup your ADAM agent
-                </j-text>
-              </j-flex>
+                </p>
+              </div>
             `}
 
-        <j-flex j="center">
+        <div class="center">
           <a
             href="https://ad4m.dev"
             target="_blank"
-            style="text-decoration: none;"
           >
-            <j-button variant="secondary">Learn more about ADAM</j-button>
+            <button class="secondary">Learn more about ADAM</button>
           </a>
-        </j-flex>
-      </j-flex>
+        </div>
+      </div>
     `;
   }
 }

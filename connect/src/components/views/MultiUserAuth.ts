@@ -1,5 +1,6 @@
 import { LitElement, html, css } from "lit";
 import { customElement, property } from "lit/decorators.js";
+import { sharedStyles } from "../../styles/shared-styles";
 
 @customElement("multi-user-auth")
 export class MultiUserAuth extends LitElement {
@@ -12,9 +13,25 @@ export class MultiUserAuth extends LitElement {
   @property({ type: String }) step: "email" | "password" | "code" = "email";
   @property({ type: String }) verificationType: "signup" | "login" = "signup";
 
-  static styles = css`
-    :host {
-      display: block;
+  static styles = [
+    sharedStyles,
+    css`
+    .header {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      align-items: center;
+      text-align: center;
+    }
+
+    p.small {
+      font-size: 12px;
+      opacity: 0.7;
+    }
+
+    p strong {
+      color: var(--primary-color);
+      font-weight: 600;
     }
 
     .backend-url {
@@ -24,18 +41,23 @@ export class MultiUserAuth extends LitElement {
       font-family: monospace;
     }
 
-    .code-input {
+    input.code-input {
       text-align: center;
       font-size: 32px;
       letter-spacing: 8px;
       font-weight: 600;
     }
 
+    button.link {
+      padding: 8px 16px;
+    }
+
     .help-text {
       font-size: 12px;
       opacity: 0.8;
+      text-align: center;
     }
-  `;
+  `];
 
   private handleEmailChange(e: Event) {
     const input = e.target as HTMLInputElement;
@@ -99,26 +121,26 @@ export class MultiUserAuth extends LitElement {
     // Email step
     if (this.step === "email") {
       return html`
-        <j-flex direction="column" gap="600">
-          <j-flex direction="column" gap="300" a="center">
-            <j-text variant="heading-lg">Sign in or Sign up</j-text>
-            <j-text variant="body">Enter your email to continue</j-text>
+        <div class="container">
+          <div class="header">
+            <h1>Sign in or Sign up</h1>
+            <p>Enter your email to continue</p>
             ${this.backendUrl
               ? html`<div class="backend-url">${this.backendUrl}</div>`
               : ""}
-          </j-flex>
+          </div>
 
           ${this.error
             ? html`
-                <j-box p="400" bg="danger-100" border="1" radius="200">
-                  <j-text variant="body" color="danger-700">${this.error}</j-text>
-                </j-box>
+                <div class="error-box">
+                  ${this.error}
+                </div>
               `
             : ""}
 
-          <j-box>
-            <j-text variant="label" nomargin>Email</j-text>
-            <j-input
+          <div class="form-group">
+            <label>Email</label>
+            <input
               type="email"
               placeholder="your@email.com"
               .value=${this.email}
@@ -127,54 +149,51 @@ export class MultiUserAuth extends LitElement {
                 this.handleKeyPress(e, () => this.handleEmailSubmit(), !!this.email)}
               ?disabled=${this.isLoading}
               autofocus
-              size="lg"
-            ></j-input>
-          </j-box>
+            />
+          </div>
 
-          <j-button
-            variant="primary"
-            size="lg"
-            full
+          <button
+            class="primary full"
             @click=${this.handleEmailSubmit}
             ?disabled=${this.isLoading || !this.email}
           >
             ${this.isLoading ? "Checking..." : "Continue"}
-          </j-button>
-        </j-flex>
+          </button>
+        </div>
       `;
     }
 
     // Password step
     if (this.step === "password") {
       return html`
-        <j-flex direction="column" gap="600">
-          <j-flex direction="column" gap="300" a="center">
-            <j-text variant="heading-lg">
+        <div class="container">
+          <div class="header">
+            <h1>
               ${this.verificationType === "signup"
                 ? "Create your account"
                 : "Sign in to your account"}
-            </j-text>
-            <j-text variant="body">
+            </h1>
+            <p>
               Email: <strong>${this.email}</strong>
-            </j-text>
-            <j-text variant="body">
+            </p>
+            <p>
               ${this.verificationType === "signup"
                 ? "Choose a password to create your account"
                 : "Enter your password to sign in"}
-            </j-text>
-          </j-flex>
+            </p>
+          </div>
 
           ${this.error
             ? html`
-                <j-box p="400" bg="danger-100" border="1" radius="200">
-                  <j-text variant="body" color="danger-700">${this.error}</j-text>
-                </j-box>
+                <div class="error-box">
+                  ${this.error}
+                </div>
               `
             : ""}
 
-          <j-box>
-            <j-text variant="label" nomargin>Password</j-text>
-            <j-input
+          <div class="form-group">
+            <label>Password</label>
+            <input
               type="password"
               placeholder="${this.verificationType === "signup"
                 ? "Enter a strong password"
@@ -185,14 +204,11 @@ export class MultiUserAuth extends LitElement {
                 this.handleKeyPress(e, () => this.handlePasswordSubmit(), !!this.password)}
               ?disabled=${this.isLoading}
               autofocus
-              size="lg"
-            ></j-input>
-          </j-box>
+            />
+          </div>
 
-          <j-button
-            variant="primary"
-            size="lg"
-            full
+          <button
+            class="primary full"
             @click=${this.handlePasswordSubmit}
             ?disabled=${this.isLoading || !this.password}
           >
@@ -203,46 +219,46 @@ export class MultiUserAuth extends LitElement {
               : this.isLoading
               ? "Signing in..."
               : "Sign In"}
-          </j-button>
+          </button>
 
-          <j-flex j="center">
-            <j-button
-              variant="link"
+          <div class="center">
+            <button
+              class="link"
               @click=${this.handleBackToEmail}
               ?disabled=${this.isLoading}
             >
               ← Back
-            </j-button>
-          </j-flex>
-        </j-flex>
+            </button>
+          </div>
+        </div>
       `;
     }
 
     // Code verification step
     if (this.step === "code") {
       return html`
-        <j-flex direction="column" gap="600">
-          <j-flex direction="column" gap="300" a="center">
-            <j-text variant="heading-lg">Check your email</j-text>
-            <j-text variant="body">
+        <div class="container">
+          <div class="header">
+            <h1>Check your email</h1>
+            <p>
               We've sent a 6-digit verification code to <strong>${this.email}</strong>
-            </j-text>
-            <j-text variant="body-sm" style="opacity: 0.7;">
+            </p>
+            <p class="small">
               The code will expire in 15 minutes
-            </j-text>
-          </j-flex>
+            </p>
+          </div>
 
           ${this.error
             ? html`
-                <j-box p="400" bg="danger-100" border="1" radius="200">
-                  <j-text variant="body" color="danger-700">${this.error}</j-text>
-                </j-box>
+                <div class="error-box">
+                  ${this.error}
+                </div>
               `
             : ""}
 
-          <j-box>
-            <j-text variant="label" nomargin>Verification Code</j-text>
-            <j-input
+          <div class="form-group">
+            <label>Verification Code</label>
+            <input
               type="text"
               inputmode="numeric"
               pattern="[0-9]*"
@@ -253,33 +269,30 @@ export class MultiUserAuth extends LitElement {
               @input=${this.handleCodeChange}
               ?disabled=${this.isLoading}
               autofocus
-              size="lg"
-            ></j-input>
-          </j-box>
+            />
+          </div>
 
-          <j-button
-            variant="primary"
-            size="lg"
-            full
+          <button
+            class="primary full"
             @click=${this.handleCodeSubmit}
             ?disabled=${this.isLoading || this.verificationCode.length !== 6}
           >
             ${this.isLoading ? "Verifying..." : "Verify Code"}
-          </j-button>
+          </button>
 
-          <j-flex direction="column" gap="200" a="center">
-            <j-text variant="body-sm" class="help-text" a="center">
+          <div class="header">
+            <p class="help-text">
               Didn't receive the email? Check your spam folder or
-              <j-button
-                variant="link"
+              <button
+                class="link"
                 @click=${this.handleBackToEmail}
                 ?disabled=${this.isLoading}
               >
                 try again
-              </j-button>
-            </j-text>
-          </j-flex>
-        </j-flex>
+              </button>
+            </p>
+          </div>
+        </div>
       `;
     }
 

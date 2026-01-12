@@ -1,5 +1,6 @@
 import { LitElement, html, css } from "lit";
 import { customElement, property } from "lit/decorators.js";
+import { sharedStyles } from "../../styles/shared-styles";
 
 @customElement("hosting-view")
 export class HostingView extends LitElement {
@@ -9,22 +10,48 @@ export class HostingView extends LitElement {
   @property({ type: String }) passwordError = "";
   @property({ type: Boolean }) isHostingRunning: boolean | null = null;
 
-  static styles = css`
-    :host {
-      display: block;
+  static styles = [
+    sharedStyles,
+    css`
+    .container {
+      gap: 20px;
     }
 
-    .error {
-      color: var(--j-color-danger-500, #ef4444);
+    .section {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      align-items: center;
+    }
+
+    p {
+      text-align: center;
+    }
+
+    .form-group {
+      width: 100%;
+    }
+
+    input.error {
+      border-color: #ef4444;
+      background: rgba(239, 68, 68, 0.05);
+    }
+
+    .error-text {
+      color: #ef4444;
       font-size: 14px;
-      margin-top: 8px;
+      margin-top: 4px;
     }
 
     a {
-      color: var(--j-color-primary-500);
+      color: var(--primary-color);
       text-decoration: underline;
     }
-  `;
+
+    a:hover {
+      filter: brightness(1.2);
+    }
+  `];
 
   private handleBack() {
     this.dispatchEvent(new CustomEvent("back", { bubbles: true, composed: true }));
@@ -71,83 +98,88 @@ export class HostingView extends LitElement {
   render() {
     if (this.isHostingRunning) {
       return html`
-        <j-flex direction="column" gap="500" a="center">
-          <j-text variant="body" a="center">
-            Hosted executor does not seem to be running. Please check the logs in your
-            <a href="https://hosting.ad4m.dev/dashboard" target="_blank"
-              >ADAM hosting dashboard</a
-            >
-            and potentially restart your executor there.
-          </j-text>
-          <j-button variant="secondary" size="lg" full @click=${this.handleClearRunning}>
-            Back
-          </j-button>
-        </j-flex>
+        <div class="container">
+          <div class="section">
+            <p>
+              Hosted executor does not seem to be running. Please check the logs in your
+              <a href="https://hosting.ad4m.dev/dashboard" target="_blank"
+                >ADAM hosting dashboard</a
+              >
+              and potentially restart your executor there.
+            </p>
+            <button class="secondary full" @click=${this.handleClearRunning}>
+              Back
+            </button>
+          </div>
+        </div>
       `;
     }
 
     if (this.step === 0) {
       return html`
-        <j-flex direction="column" gap="500">
-          <j-box>
-            <j-text variant="label" nomargin>EMAIL</j-text>
-            <j-input
+        <div class="container">
+          <div class="form-group">
+            <label>EMAIL</label>
+            <input
+              type="email"
+              placeholder="Enter your email"
               .value=${this.email}
               @input=${this.handleEmailChange}
-              size="lg"
-            ></j-input>
-          </j-box>
-          <j-flex gap="300">
-            <j-button variant="secondary" size="lg" full @click=${this.handleBack}>
+            />
+          </div>
+          <div class="button-row">
+            <button class="secondary full" @click=${this.handleBack}>
               Back
-            </j-button>
-            <j-button variant="primary" size="lg" full @click=${this.handleCheckEmail}>
+            </button>
+            <button class="primary full" @click=${this.handleCheckEmail}>
               Next
-            </j-button>
-          </j-flex>
-        </j-flex>
+            </button>
+          </div>
+        </div>
       `;
     }
 
     if (this.step === 1) {
       return html`
-        <j-flex direction="column" gap="500">
-          <j-box>
-            <j-text variant="label" nomargin>PASSWORD</j-text>
-            <j-input
+        <div class="container">
+          <div class="form-group">
+            <label>PASSWORD</label>
+            <input
               type="password"
+              placeholder="Enter your password"
+              class="${this.passwordError ? "error" : ""}"
               .value=${this.password}
               @input=${this.handlePasswordChange}
-              size="lg"
-              error=${this.passwordError ? true : false}
-            ></j-input>
+            />
             ${this.passwordError
-              ? html`<div class="error">${this.passwordError}</div>`
+              ? html`<div class="error-text">${this.passwordError}</div>`
               : ""}
-          </j-box>
-          <j-flex gap="300">
-            <j-button variant="secondary" size="lg" full @click=${this.handleBack}>
+          </div>
+          <div class="button-row">
+            <button class="secondary full" @click=${this.handleBack}>
               Back
-            </j-button>
-            <j-button variant="primary" size="lg" full @click=${this.handleLogin}>
+            </button>
+            <button class="primary full" @click=${this.handleLogin}>
               Login
-            </j-button>
-          </j-flex>
-        </j-flex>
+            </button>
+          </div>
+        </div>
       `;
     }
 
     if (this.step === 2) {
       return html`
-        <j-flex direction="column" gap="500" a="center">
-          <j-text variant="body" a="center">
-            Email is not registered. Please follow the
-            <a href="https://hosting.ad4m.dev/" target="_blank">link</a> to register.
-          </j-text>
-          <j-button variant="secondary" size="lg" full @click=${this.handleResetHosting}>
-            Back
-          </j-button>
-        </j-flex>
+        <div class="container">
+          <div class="section">
+            <p>
+              Email is not registered. Please follow the
+              <a href="https://hosting.ad4m.dev/" target="_blank">link</a> to register.
+            </p>
+            <button class="secondary full" @click=${this.handleResetHosting}>
+              Back
+            </button>
+          </div>
+        </div>
       `;
     }
 

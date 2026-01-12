@@ -1,6 +1,7 @@
 import { LitElement, html, css } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { capSentence } from "@coasys/ad4m";
+import { sharedStyles } from "../../styles/shared-styles";
 
 @customElement("request-capability")
 export class RequestCapability extends LitElement {
@@ -8,9 +9,20 @@ export class RequestCapability extends LitElement {
   @property({ type: String }) appname = "";
   @property({ type: String }) appiconpath = "";
 
-  static styles = css`
-    :host {
-      display: block;
+  static styles = [
+    sharedStyles,
+    css`
+    .header {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .header p {
+      margin: 0;
+      font-size: 14px;
+      color: rgba(255, 255, 255, 0.8);
     }
 
     .dialog__connect {
@@ -46,10 +58,23 @@ export class RequestCapability extends LitElement {
       transform: translate(-50%, -50%);
     }
 
+    .permissions-box {
+      background: rgba(145, 227, 253, 0.05);
+      border: 1px solid rgba(145, 227, 253, 0.2);
+      border-radius: 8px;
+      padding: 20px;
+    }
+
+    .permissions-title {
+      font-weight: 600;
+      text-align: center;
+      margin-bottom: 16px;
+    }
+
     .check-list {
       list-style: none;
       padding: 0;
-      margin: 20px 0;
+      margin: 0;
     }
 
     .check-list li {
@@ -62,7 +87,11 @@ export class RequestCapability extends LitElement {
     .check-list svg {
       flex-shrink: 0;
     }
-  `;
+
+    button.full {
+      flex: 1;
+    }
+  `];
 
   private handleCancel() {
     this.dispatchEvent(new CustomEvent("cancel", { bubbles: true, composed: true }));
@@ -78,12 +107,12 @@ export class RequestCapability extends LitElement {
 
   render() {
     return html`
-      <j-flex direction="column" gap="600">
-        <j-flex direction="column" gap="200" a="center">
-          <j-text variant="body">An external application</j-text>
-          <j-text variant="heading-lg" nomargin>${this.appname}</j-text>
-          <j-text variant="body">wants to access your AD4M data</j-text>
-        </j-flex>
+      <div class="container">
+        <div class="header">
+          <p>An external application</p>
+          <h1>${this.appname}</h1>
+          <p>wants to access your AD4M data</p>
+        </div>
 
         ${this.appiconpath
           ? html`
@@ -92,13 +121,13 @@ export class RequestCapability extends LitElement {
                 <div class="dialog__connect-check"></div>
                 <div class="dialog__connect-ad4m">
                   <svg viewBox="0 0 100 100" width="60" height="60">
-                    <circle cx="50" cy="50" r="45" fill="var(--j-color-primary-500)" />
+                    <circle cx="50" cy="50" r="45" fill="var(--primary-color)" />
                     <text
                       x="50"
                       y="50"
                       text-anchor="middle"
                       dy=".35em"
-                      fill="white"
+                      fill="black"
                       font-size="40"
                       font-weight="bold"
                     >
@@ -110,10 +139,10 @@ export class RequestCapability extends LitElement {
             `
           : ""}
 
-        <j-box>
-          <j-text variant="body" weight="600" a="center">
+        <div class="permissions-box">
+          <p class="permissions-title">
             This will allow the developer to:
-          </j-text>
+          </p>
           <ul class="check-list">
             ${this.capabilities.map(
               (cap) => html`
@@ -122,33 +151,35 @@ export class RequestCapability extends LitElement {
                     xmlns="http://www.w3.org/2000/svg"
                     width="20"
                     height="20"
-                    fill="var(--j-color-success-500)"
+                    fill="#10b981"
                     viewBox="0 0 16 16"
                   >
                     <path
                       d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"
                     />
                   </svg>
-                  <j-text variant="body">${capSentence(cap)}</j-text>
+                  <p>${capSentence(cap)}</p>
                 </li>
               `
             )}
           </ul>
-        </j-box>
+        </div>
 
-        <j-flex gap="300">
-          <j-button variant="secondary" size="lg" full @click=${this.handleCancel}>
+        <div class="button-row">
+          <button class="secondary full" @click=${this.handleCancel}>
             Cancel
-          </j-button>
-          <j-button variant="primary" size="lg" full @click=${this.handleAuthorize}>
+          </button>
+          <button class="primary full" @click=${this.handleAuthorize}>
             Authorize
-          </j-button>
-        </j-flex>
+          </button>
+        </div>
 
-        <j-button variant="link" full @click=${this.handleSettings}>
-          Connection settings
-        </j-button>
-      </j-flex>
+        <div class="center">
+          <button class="link" @click=${this.handleSettings}>
+            Connection settings
+          </button>
+        </div>
+      </div>
     `;
   }
 }

@@ -40,20 +40,31 @@ function detectMob() {
   });
 }
 
+  // :host {
+  //   --primary-color: #fff;
+  //   --heading-color: #fff;
+  //   --body-color: #ffffff;
+  //   --success-color: #88f3b4;
+  //   --background-color: #131533;
+  //   --start-color: #a4adff;
+  //   --end-color: #d273ff;
+  //   --gradient: #91e3fd;
+  // }
+
+  //     --primary-color: #91e3fd;
+
 const styles = css`
   :host {
-    --primary-color: #fff;
-    --heading-color: #fff;
-    --body-color: #ffffff;
-    --success-color: #88f3b4;
+    --primary-color: #91e3fd;
     --background-color: #131533;
-    --start-color: #a4adff;
-    --end-color: #d273ff;
-    --gradient: #91e3fd;
+    --ac-text-color: #fff;
+  }
+
+  * {
+    box-sizing: border-box;
   }
 
   .wrapper {
-    font-family: "Bricolage Grotesque", sans-serif;
     position: fixed;
     display: grid;
     place-content: center;
@@ -65,125 +76,10 @@ const styles = css`
     z-index: 100;
   }
 
-  .mainlogo {
-    position: fixed;
-    bottom: 30px;
-    right: 30px;
-    height: 20px;
-    width: 20px;
-  }
-
-  * {
-    box-sizing: border-box;
-  }
-
-  .check-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-
-  .check-list li {
-    display: flex;
-    gap: 10px;
-    margin-bottom: 10px;
-  }
-
-  .items {
-    display: flex;
-    flex-direction: column;
-    flex-gap: 50px;
-    gap: 50px;
-  }
-
-  .items--small {
-    flex-gap: 20px;
-    gap: 20px;
-  }
-
-  .button {
-    text-decoration: none;
-    cursor: pointer;
-    border: 0;
-    color: var(--background-color);
-    background: var(--gradient);
-    height: 50px;
-    font-weight: 600;
-    min-width: 100px;
-    padding: 0px 30px;
-    border-radius: 8px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    font-family: inherit;
-    font-size: 15px;
-  }
-
-  @media (min-width: 800px) {
-    .button {
-      min-width: 200px;
-      padding: 0px 40px;
-      font-size: 17px;
-    }
-  }
-
-  .heading {
-    color: var(--heading-color);
-    font-size: 18px;
-    font-weight: 600;
-    margin: 0;
-    margin-bottom: 10px;
-  }
-
-  .heading.nomargin {
-    margin: 0;
-  }
-
-  .body {
-    padding: 0;
-    margin: 0;
-    font-size: 14px;
-    line-height: 1.5;
-  }
-
-  .buttons {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-gap: 10px;
-    gap: 10px;
-  }
-
-  .button--full {
-    width: 100%;
-    display: flex;
-  }
-
-  .button--link {
-    padding: 0;
-    height: auto;
-    background: none;
-    color: var(--primary-color);
-    font-size: inherit;
-    min-width: auto;
-    text-decoration: none;
-  }
-
-  .button--link:hover {
-    text-decoration: underline;
-  }
-
-  .button--secondary {
-    background: var(--background-color);
-    border: 1px solid var(--gradient);
-    color: var(--primary-color);
-  }
-
   .dialog {
     background-color: var(--background-color);
     z-index: 10;
-    border-radius: 8px;
+    border-radius: 12px;
     width: calc(100vw - 10px);
     max-width: 500px;
     max-height: 90vh;
@@ -194,17 +90,13 @@ const styles = css`
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 20px 30px;
-    gap: 10px;
     color: var(--primary-color);
-    margin-bottom: 20px;
-    font-size: 14px;
+    margin: 60px 0 20px 0;
   }
 
-  .dialog__logo {
-    display: flex;
-    text-align: center;
-    width: 25px;
+  .dialog__header > svg {
+    width: 70px;
+    height: 70px;
   }
 
   .dialog__content {
@@ -331,81 +223,6 @@ const styles = css`
     font-family: "Comfortaa", cursive;
   }
 
-  .lds-ring {
-    display: block;
-    position: relative;
-    width: 80px;
-    height: 80px;
-    margin: 0 auto;
-    margin-top: 24px;
-  }
-  .lds-ring div {
-    box-sizing: border-box;
-    display: block;
-    position: absolute;
-    width: 64px;
-    height: 64px;
-    margin: 4px;
-    border: 4px solid var(--primary-color);
-    border-radius: 50%;
-    animation: lds-ring 1.2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
-    border-color: var(--primary-color) transparent transparent transparent;
-  }
-  .lds-ring div:nth-child(1) {
-    animation-delay: -0.45s;
-  }
-  .lds-ring div:nth-child(2) {
-    animation-delay: -0.3s;
-  }
-  .lds-ring div:nth-child(3) {
-    animation-delay: -0.15s;
-  }
-  @keyframes lds-ring {
-    0% {
-      transform: rotate(0deg);
-    }
-    100% {
-      transform: rotate(360deg);
-    }
-  }
-
-  .md-ring {
-    display: block;
-    position: relative;
-    width: 30px;
-    height: 30px;
-    margin-right: 10px;
-  }
-  .md-ring div {
-    box-sizing: border-box;
-    display: block;
-    position: absolute;
-    width: 24px;
-    height: 24px;
-    margin: 4px;
-    border: 2px solid var(--primary-color);
-    border-radius: 50%;
-    animation: md-ring 1.2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
-    border-color: var(--primary-color) transparent transparent transparent;
-  }
-  .md-ring div:nth-child(1) {
-    animation-delay: -0.45s;
-  }
-  .md-ring div:nth-child(2) {
-    animation-delay: -0.3s;
-  }
-  .md-ring div:nth-child(3) {
-    animation-delay: -0.15s;
-  }
-  @keyframes md-ring {
-    0% {
-      transform: rotate(0deg);
-    }
-    100% {
-      transform: rotate(360deg);
-    }
-  }
-
   .disconnected {
     position: fixed;
     top: 0;
@@ -440,6 +257,22 @@ const styles = css`
     height: 100vh;
     width: 100vw;
     object-fit: cover;
+  }
+
+  .spinner {
+    display: inline-block;
+    width: 48px;
+    height: 48px;
+    border: 4px solid rgba(145, 227, 253, 0.2);
+    border-top-color: var(--primary-color);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 `;
 
@@ -1166,95 +999,95 @@ export class Ad4mConnectElement extends LitElement {
     if (this.connectionState === "connecting") {
       return html`
         <div style="display: flex; justify-content: center; padding: 40px;">
-          <j-spinner size="lg"></j-spinner>
+          <div class="spinner"></div>
         </div>
       `;
     }
 
     if (this.state.currentView === "connection_overview") {
-      const element = document.createElement("connection-overview");
-      element.localDetected = this.state.detection.localDetected;
-      element.multiUserConfigured = this.multiUser && !!this.backendUrl;
-      element.backendUrl = this.backendUrl;
-      element.configuredUrl = this.url;
-      element.isMobile = this.state.isMobile;
-      
-      element.addEventListener("connect-local", () => this.handleConnectLocal());
-      element.addEventListener("connect-remote", () => this.handleShowRemoteConnection());
-      element.addEventListener("scan-qr", () => this.startCamera(null));
-      element.addEventListener("download-ad4m", () => window.open("https://github.com/coasys/ad4m/releases"));
-      
-      return element;
+      return html`
+        <connection-overview
+          .localDetected=${this.state.detection.localDetected}
+          .multiUserConfigured=${this.multiUser && !!this.backendUrl}
+          .backendUrl=${this.backendUrl}
+          .configuredUrl=${this.url}
+          .isMobile=${this.state.isMobile}
+          @connect-local=${() => this.handleConnectLocal()}
+          @connect-remote=${() => this.handleShowRemoteConnection()}
+          @scan-qr=${() => this.startCamera(null)}
+          @download-ad4m=${() => window.open("https://github.com/coasys/ad4m/releases")}
+        ></connection-overview>
+      `;
     }
 
     if (this.state.currentView === "remote_connection") {
-      const element = document.createElement("remote-connection");
-      element.initialUrl = this.state.forms.remoteUrl;
-      element.detecting = this.state.loading.remoteDetecting;
-      element.multiUserDetected = this.state.detection.remoteMultiUserDetected;
-      element.error = this.state.errors.remote;
-      
-      element.addEventListener("back", () => this.changeUIState("connection_overview"));
-      element.addEventListener("url-change", (e: CustomEvent) => this.handleRemoteUrlChange(e.detail.url));
-      element.addEventListener("connect", () => this.handleRemoteConnect());
-      element.addEventListener("multi-user-auth", () => this.handleRemoteMultiUserAuth());
-      element.addEventListener("request-capability", () => this.handleRemoteRequestCapability());
-      
-      return element;
+      return html`
+        <remote-connection
+          .initialUrl=${this.state.forms.remoteUrl}
+          .detecting=${this.state.loading.remoteDetecting}
+          .multiUserDetected=${this.state.detection.remoteMultiUserDetected}
+          .error=${this.state.errors.remote}
+          @back=${() => this.changeUIState("connection_overview")}
+          @url-change=${(e: CustomEvent) => this.handleRemoteUrlChange(e.detail.url)}
+          @connect=${() => this.handleRemoteConnect()}
+          @multi-user-auth=${() => this.handleRemoteMultiUserAuth()}
+          @request-capability=${() => this.handleRemoteRequestCapability()}
+        ></remote-connection>
+      `;
     }
 
     if (this.state.currentView === "multiuser_auth") {
-      const element = document.createElement("multi-user-auth");
-      element.email = this.state.forms.multiUserEmail;
-      element.password = this.state.forms.multiUserPassword;
-      element.verificationCode = this.state.forms.multiUserVerificationCode;
-      element.error = this.state.errors.multiUser;
-      element.isLoading = this.state.loading.multiUser;
-      element.backendUrl = this.backendUrl;
-      element.step = this.state.forms.multiUserStep;
-      element.verificationType = this.state.forms.multiUserVerificationType;
-      
-      element.addEventListener("email-change", (e: CustomEvent) => this.changeMultiUserEmail(e.detail.email));
-      element.addEventListener("password-change", (e: CustomEvent) => this.changeMultiUserPassword(e.detail.password));
-      element.addEventListener("code-change", (e: CustomEvent) => this.changeMultiUserVerificationCode(e.detail.code));
-      element.addEventListener("email-submit", () => this.handleMultiUserEmailSubmit());
-      element.addEventListener("password-submit", () => this.handleMultiUserPasswordSubmit());
-      element.addEventListener("code-submit", () => this.handleMultiUserCodeSubmit());
-      element.addEventListener("back-to-email", () => this.handleMultiUserBackToEmail());
-      
-      return element;
+      return html`
+        <multi-user-auth
+          .email=${this.state.forms.multiUserEmail}
+          .password=${this.state.forms.multiUserPassword}
+          .verificationCode=${this.state.forms.multiUserVerificationCode}
+          .error=${this.state.errors.multiUser}
+          .isLoading=${this.state.loading.multiUser}
+          .backendUrl=${this.backendUrl}
+          .step=${this.state.forms.multiUserStep}
+          .verificationType=${this.state.forms.multiUserVerificationType}
+          @email-change=${(e: CustomEvent) => this.changeMultiUserEmail(e.detail.email)}
+          @password-change=${(e: CustomEvent) => this.changeMultiUserPassword(e.detail.password)}
+          @code-change=${(e: CustomEvent) => this.changeMultiUserVerificationCode(e.detail.code)}
+          @email-submit=${() => this.handleMultiUserEmailSubmit()}
+          @password-submit=${() => this.handleMultiUserPasswordSubmit()}
+          @code-submit=${() => this.handleMultiUserCodeSubmit()}
+          @back-to-email=${() => this.handleMultiUserBackToEmail()}
+        ></multi-user-auth>
+      `;
     }
 
     if (this.state.currentView === "hosting") {
-      const element = document.createElement("hosting-view");
-      element.email = this.state.forms.email;
-      element.password = this.state.forms.password;
-      element.step = this.state.forms.hostingStep;
-      element.passwordError = this.state.errors.password;
-      element.isHostingRunning = !!this.state.errors.hostingNotRunning;
-      
-      element.addEventListener("back", () => this.changeUIState("not_connected"));
-      element.addEventListener("email-change", (e: CustomEvent) => this.changeEmail(e.detail.email));
-      element.addEventListener("password-change", (e: CustomEvent) => this.changePassword(e.detail.password));
-      element.addEventListener("check-email", () => this.checkEmail());
-      element.addEventListener("login", () => this.loginToHosting());
-      element.addEventListener("reset-hosting", () => this.setHostingStep(0));
-      element.addEventListener("clear-running", () => this.setIsHostingRunning(false));
-      
-      return element;
+      return html`
+        <hosting-view
+          .email=${this.state.forms.email}
+          .password=${this.state.forms.password}
+          .step=${this.state.forms.hostingStep}
+          .passwordError=${this.state.errors.password}
+          .isHostingRunning=${!!this.state.errors.hostingNotRunning}
+          @back=${() => this.changeUIState("not_connected")}
+          @email-change=${(e: CustomEvent) => this.changeEmail(e.detail.email)}
+          @password-change=${(e: CustomEvent) => this.changePassword(e.detail.password)}
+          @check-email=${() => this.checkEmail()}
+          @login=${() => this.loginToHosting()}
+          @reset-hosting=${() => this.setHostingStep(0)}
+          @clear-running=${() => this.setIsHostingRunning(false)}
+        ></hosting-view>
+      `;
     }
 
     if (this.state.currentView === "qr") {
-      const element = document.createElement("scan-qr-code");
-      element.uiState = this.state.currentView;
-      
-      element.addEventListener("stop", () => this.changeUIState("connection_overview"));
-      element.addEventListener("success", (e: CustomEvent) => {
-        this.changeUrl(e.detail.qrValue);
-        this._client.connect(e.detail.qrValue);
-      });
-      
-      return element;
+      return html`
+        <scan-qr-code
+          .uiState=${this.state.currentView}
+          @stop=${() => this.changeUIState("connection_overview")}
+          @success=${(e: CustomEvent) => {
+            this.changeUrl(e.detail.qrValue);
+            this._client.connect(e.detail.qrValue);
+          }}
+        ></scan-qr-code>
+      `;
     }
 
     if (this.authState === "locked") {
@@ -1265,40 +1098,40 @@ export class Ad4mConnectElement extends LitElement {
     }
 
     if (this.state.currentView === "settings") {
-      const element = document.createElement("connection-settings");
-      element.port = this.port;
-      element.isRemote = this.state.isRemote;
-      element.url = this.url;
-      
-      element.addEventListener("mode-change", (e: CustomEvent) => this.changeIsRemote(e.detail.isRemote));
-      element.addEventListener("port-change", (e: CustomEvent) => this.changePort(e.detail.port));
-      element.addEventListener("url-change", (e: CustomEvent) => this.changeUrl(e.detail.url));
-      element.addEventListener("connect", () => {
-        if (this.state.isRemote) {
-          this.connectRemote(this.url);
-        } else {
-          this._client.connectToPort();
-        }
-      });
-      element.addEventListener("back", () => this.changeUIState("connection_overview"));
-      element.addEventListener("clear-state", () => this.clearState());
-      
-      return element;
+      return html`
+        <connection-settings
+          .port=${this.port}
+          .isRemote=${this.state.isRemote}
+          .url=${this.url}
+          @mode-change=${(e: CustomEvent) => this.changeIsRemote(e.detail.isRemote)}
+          @port-change=${(e: CustomEvent) => this.changePort(e.detail.port)}
+          @url-change=${(e: CustomEvent) => this.changeUrl(e.detail.url)}
+          @connect=${() => {
+            if (this.state.isRemote) {
+              this.connectRemote(this.url);
+            } else {
+              this._client.connectToPort();
+            }
+          }}
+          @back=${() => this.changeUIState("connection_overview")}
+          @clear-state=${() => this.clearState()}
+        ></connection-settings>
+      `;
     }
 
     if (this.connectionState === "not_connected") {
-      const element = document.createElement("start-view");
-      element.isMobile = this.state.isMobile;
-      element.hasClickedDownload = this.state.hasClickedDownload;
-      element.hosting = this.hosting;
-      
-      element.addEventListener("connect", () => this.connect());
-      element.addEventListener("settings", () => this.changeUIState("settings"));
-      element.addEventListener("scan-qr", () => this.startCamera(null));
-      element.addEventListener("hosting", () => this.changeUIState("hosting"));
-      element.addEventListener("downloaded", () => this.onDownloaded());
-      
-      return element;
+      return html`
+        <start-view
+          .isMobile=${this.state.isMobile}
+          .hasClickedDownload=${this.state.hasClickedDownload}
+          .hosting=${this.hosting}
+          @connect=${() => this.connect()}
+          @settings=${() => this.changeUIState("settings")}
+          @scan-qr=${() => this.startCamera(null)}
+          @hosting=${() => this.changeUIState("hosting")}
+          @downloaded=${() => this.onDownloaded()}
+        ></start-view>
+      `;
     }
 
     if (this.connectionState === "connected") {
@@ -1313,19 +1146,19 @@ export class Ad4mConnectElement extends LitElement {
         });
       }
 
-      const element = document.createElement("request-capability");
-      element.capabilities = this.capabilities;
-      element.appname = this.appName;
-      element.appiconpath = this.appIconPath;
-      
-      element.addEventListener("cancel", () => {
-        this.requestCapability(false);
-        this.setOpen(false);
-      });
-      element.addEventListener("authorize", () => this.requestCapability(true));
-      element.addEventListener("settings", () => this.changeUIState("settings"));
-      
-      return element;
+      return html`
+        <request-capability
+          .capabilities=${this.capabilities}
+          .appname=${this.appName}
+          .appiconpath=${this.appIconPath}
+          @cancel=${() => {
+            this.requestCapability(false);
+            this.setOpen(false);
+          }}
+          @authorize=${() => this.requestCapability(true)}
+          @settings=${() => this.changeUIState("settings")}
+        ></request-capability>
+      `;
     }
 
     if (this.connectionState === "disconnected") {

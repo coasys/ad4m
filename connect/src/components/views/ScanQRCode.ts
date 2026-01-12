@@ -1,14 +1,14 @@
 import { LitElement, html, css } from "lit";
 import { customElement, property } from "lit/decorators.js";
+import { sharedStyles } from "../../styles/shared-styles";
 
 @customElement("scan-qr-code")
 export class ScanQRCode extends LitElement {
   @property({ type: String }) uiState = "";
 
-  static styles = css`
-    :host {
-      display: block;
-    }
+  static styles = [
+    sharedStyles,
+    css`
 
     .qr-scanner {
       width: 100%;
@@ -34,7 +34,7 @@ export class ScanQRCode extends LitElement {
       height: 100%;
       object-fit: cover;
     }
-  `;
+  `];
 
   private handleStop() {
     this.dispatchEvent(new CustomEvent("stop", { bubbles: true, composed: true }));
@@ -80,13 +80,12 @@ export class ScanQRCode extends LitElement {
     return html`
       <div class="qr-scanner">
         <div class="qr-content">
-          <j-button
-            variant="primary"
+          <button
             class="stop"
             @click=${this.handleStop}
           >
             Stop scanning
-          </j-button>
+          </button>
           <video
             width="100%"
             height="100%"

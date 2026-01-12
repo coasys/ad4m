@@ -1,5 +1,6 @@
 import { LitElement, html, css } from "lit";
 import { customElement, property } from "lit/decorators.js";
+import { sharedStyles } from "../../styles/shared-styles";
 
 @customElement("connection-settings")
 export class ConnectionSettings extends LitElement {
@@ -7,11 +8,38 @@ export class ConnectionSettings extends LitElement {
   @property({ type: String }) url = "";
   @property({ type: Boolean }) isRemote = false;
 
-  static styles = css`
-    :host {
-      display: block;
+  static styles = [
+    sharedStyles,
+    css`
+    .container {
+      gap: 20px;
     }
-  `;
+
+    .header {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 4px;
+    }
+
+    p {
+      text-align: center;
+    }
+
+    .mode-buttons {
+      display: flex;
+      gap: 12px;
+    }
+
+    input {
+      box-sizing: border-box;
+    }
+
+    .divider {
+      text-align: center;
+    }
+  `];
 
   private handleModeChange(isRemote: boolean) {
     this.dispatchEvent(
@@ -59,69 +87,68 @@ export class ConnectionSettings extends LitElement {
 
   render() {
     return html`
-      <j-flex direction="column" gap="500">
-        <j-flex direction="column" gap="300" a="center">
-          <j-text variant="heading-lg">Connection Settings</j-text>
-          <j-text variant="body">Please choose how you want to connect to AD4M</j-text>
-        </j-flex>
+      <div class="container">
+        <div class="header">
+          <h1>Connection Settings</h1>
+          <p>Please choose how you want to connect to AD4M</p>
+        </div>
 
-        <j-flex gap="300">
-          <j-button
-            variant="${this.isRemote ? "secondary" : "primary"}"
-            full
+        <div class="mode-buttons">
+          <button
+            class="${this.isRemote ? "secondary" : "primary"} full"
             @click=${() => this.handleModeChange(false)}
           >
             Locally
-          </j-button>
-          <j-button
-            variant="${this.isRemote ? "primary" : "secondary"}"
-            full
+          </button>
+          <button
+            class="${this.isRemote ? "primary" : "secondary"} full"
             @click=${() => this.handleModeChange(true)}
           >
             Remotely
-          </j-button>
-        </j-flex>
+          </button>
+        </div>
 
         ${this.isRemote
           ? html`
-              <j-box>
-                <j-text variant="label" nomargin>URL</j-text>
-                <j-input
+              <div class="form-group">
+                <label>URL</label>
+                <input
+                  type="text"
+                  placeholder="Enter remote URL"
                   .value=${this.url}
                   @input=${this.handleUrlChange}
-                  size="lg"
-                ></j-input>
-              </j-box>
-              <j-button variant="primary" size="lg" full @click=${this.handleConnect}>
+                />
+              </div>
+              <button class="primary full" @click=${this.handleConnect}>
                 Connect
-              </j-button>
+              </button>
             `
           : html`
-              <j-box>
-                <j-text variant="label" nomargin>PORT</j-text>
-                <j-input
+              <div class="form-group">
+                <label>PORT</label>
+                <input
                   type="number"
+                  placeholder="12000"
                   .value=${this.port.toString()}
                   @input=${this.handlePortChange}
-                  size="lg"
-                ></j-input>
-              </j-box>
-              <j-button variant="primary" size="lg" full @click=${this.handleConnect}>
+                />
+              </div>
+              <button class="primary full" @click=${this.handleConnect}>
                 Connect
-              </j-button>
+              </button>
             `}
 
-        <j-text variant="body" a="center">or</j-text>
+        <p class="divider">or</p>
 
-        <j-flex gap="300">
-          <j-button variant="secondary" size="lg" full @click=${this.handleBack}>
+        <div class="button-row">
+          <button class="secondary full" @click=${this.handleBack}>
             Back
-          </j-button>
-          <j-button variant="secondary" size="lg" full @click=${this.handleClearState}>
+          </button>
+          <button class="secondary full" @click=${this.handleClearState}>
             Clear state
-          </j-button>
-        </j-flex>
-      </j-flex>
+          </button>
+        </div>
+      </div>
     `;
   }
 }
