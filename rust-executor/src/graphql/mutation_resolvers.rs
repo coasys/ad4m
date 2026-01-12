@@ -2445,7 +2445,7 @@ impl Mutation {
         context: &RequestContext,
         task: AITaskInput,
     ) -> FieldResult<AITask> {
-        check_capability(&context.capabilities, &AI_CREATE_CAPABILITY)?;
+        check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
         Ok(AIService::global_instance()
             .await?
             .add_task(task.clone())
