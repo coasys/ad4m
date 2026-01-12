@@ -156,7 +156,7 @@ impl PrologService {
                 PrologMode::SdnaOnly => "SDNA-only mode (no link data)",
                 _ => "Simple mode: lazy update",
             };
-            log::info!(
+            log::debug!(
                 "Updating Prolog engine {} ({} with {} links)",
                 perspective_id,
                 mode_desc,
@@ -223,7 +223,7 @@ impl PrologService {
                 simple_engine.current_sdna_links = Some(Self::extract_sdna_links(links));
             }
 
-            log::info!(
+            log::debug!(
                 "Prolog engines {} updated successfully (query + subscription)",
                 perspective_id
             );
@@ -614,7 +614,7 @@ impl PrologService {
         // Check if Prolog mode supports pooled queries
         match PROLOG_MODE {
             PrologMode::Disabled => {
-                log::warn!(
+                log::trace!(
                     "⚠️ run_query_all called but Prolog is DISABLED (perspective: {}, query: {} chars)",
                     perspective_id,
                     query.len()
@@ -623,7 +623,7 @@ impl PrologService {
             }
             PrologMode::Simple | PrologMode::SdnaOnly => {
                 // This is a pooled-mode function - in Simple/SdnaOnly modes, shouldn't be called
-                log::warn!(
+                log::trace!(
                     "⚠️ run_query_all called in Simple/SdnaOnly mode (perspective: {}) - this is pooled-mode only, ignoring",
                     perspective_id
                 );
