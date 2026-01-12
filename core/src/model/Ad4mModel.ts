@@ -1395,7 +1395,7 @@ WHERE ${whereConditions.join(' AND ')}
                 let convertedValue = target;
                 
                 // Only process if target has a value
-                if (target !== undefined && target !== null) {
+                if (target !== undefined && target !== null && target !== '') {
                   // Check if we need to resolve a non-literal language expression
                   if (propMeta.resolveLanguage != undefined && propMeta.resolveLanguage !== 'literal' && typeof target === 'string') {
                     // For non-literal languages, resolve the expression via perspective.getExpression()
@@ -1412,7 +1412,8 @@ WHERE ${whereConditions.join(' AND ')}
                         }
                       }
                     } catch (e) {
-                      console.warn(`Failed to resolve expression for ${propName}:`, e);
+                      console.warn(`Failed to resolve expression for ${propName} with target "${target}":`, e);
+                      console.warn("Falling back to raw value");
                       convertedValue = target; // Fall back to raw value
                     }
                   } else if (typeof target === 'string' && target.startsWith('literal://')) {
