@@ -39,8 +39,7 @@ use tokio::sync::{Mutex, RwLock};
 pub const EMBEDDING_LANGUAGE_HASH: &str = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
 
 // Filtering threshold - only use filtered pools for perspectives with more links than this
-// MEMORY OPTIMIZATION: Set to usize::MAX to never create filtered pools (saves memory)
-pub const FILTERING_THRESHOLD: usize = usize::MAX; // was 6000
+pub const FILTERING_THRESHOLD: usize = 6000; // set to usize::MAX to never create filtered pools (saves memory)
 
 // Pool cleanup configuration
 const POOL_CLEANUP_INTERVAL_SECS: u64 = 60; // Check every 1 minute (was 5 min)
