@@ -9,20 +9,17 @@ import Ad4mConnect, {
 } from "./core";
 
 import autoBind from "auto-bind";
-import AgentLocked from "./components/AgentLocked";
-import ConnectionOverview from "./components/ConnectionOverview";
-import CouldNotMakeRequest from "./components/CouldNotMakeRequest";
-import Disconnected from "./components/Disconnected";
-import Header from "./components/Header";
-import Hosting from "./components/Hosting";
-import Loading from "./components/Loading";
-import MobileAppLogoButton from "./components/MobileAppLogoButton";
-import MultiUserAuth from "./components/MultiUserAuth";
-import RemoteConnection from "./components/RemoteConnection";
-import RequestCapability from "./components/RequestCapability";
-import ScanQRCode from "./components/ScanQRCode";
-import Settings from "./components/Settings";
-import Start from "./components/Start";
+import ErrorState from "./components/states/ErrorState";
+import "./components/views/ConnectionOverview";
+import "./components/views/RemoteConnection";
+import "./components/views/ScanQRCode";
+import "./components/views/RequestCapability";
+import "./components/views/Settings";
+import "./components/views/Start";
+import "./components/views/Hosting";
+import "./components/views/MultiUserAuth";
+import Header from "./components/shared/Header";
+import AppLogo from "./components/shared/AppLogo";
 import VerifyCode from "./components/VerifyCode";
 import { connectWebSocket, DEFAULT_PORT, getForVersion, removeForVersion, setForVersion, isEmbedded } from "./utils";
 import { ConnectState } from "./state";
@@ -1167,117 +1164,141 @@ export class Ad4mConnectElement extends LitElement {
 
   renderViews() {
     if (this.connectionState === "connecting") {
-      return Loading();
+      return html`
+        <div style="display: flex; justify-content: center; padding: 40px;">
+          <j-spinner size="lg"></j-spinner>
+        </div>
+      `;
     }
 
     if (this.state.currentView === "connection_overview") {
-      return ConnectionOverview({
-        localDetected: this.state.detection.localDetected,
-        multiUserConfigured: this.multiUser && !!this.backendUrl,
-        backendUrl: this.backendUrl,
-        configuredUrl: this.url,
-        isMobile: this.state.isMobile,
-        onConnectLocal: this.handleConnectLocal,
-        onConnectRemote: this.handleShowRemoteConnection,
-        onScanQR: () => { this.startCamera(null); },
-        onDownloadAd4m: () => { window.open("https://github.com/coasys/ad4m/releases"); },
-      });
+      const element = document.createElement("connection-overview");
+      element.localDetected = this.state.detection.localDetected;
+      element.multiUserConfigured = this.multiUser && !!this.backendUrl;
+      element.backendUrl = this.backendUrl;
+      element.configuredUrl = this.url;
+      element.isMobile = this.state.isMobile;
+      
+      element.addEventListener("connect-local", () => this.handleConnectLocal());
+      element.addEventListener("connect-remote", () => this.handleShowRemoteConnection());
+      element.addEventListener("scan-qr", () => this.startCamera(null));
+      element.addEventListener("download-ad4m", () => window.open("https://github.com/coasys/ad4m/releases"));
+      
+      return element;
     }
 
     if (this.state.currentView === "remote_connection") {
-      return RemoteConnection({
-        initialUrl: this.state.forms.remoteUrl,
-        detecting: this.state.loading.remoteDetecting,
-        multiUserDetected: this.state.detection.remoteMultiUserDetected,
-        error: this.state.errors.remote,
-        onBack: () => this.changeUIState("connection_overview"),
-        onUrlChange: this.handleRemoteUrlChange,
-        onConnect: this.handleRemoteConnect,
-        onMultiUserAuth: this.handleRemoteMultiUserAuth,
-        onRequestCapability: this.handleRemoteRequestCapability,
-      });
+      const element = document.createElement("remote-connection");
+      element.initialUrl = this.state.forms.remoteUrl;
+      element.detecting = this.state.loading.remoteDetecting;
+      element.multiUserDetected = this.state.detection.remoteMultiUserDetected;
+      element.error = this.state.errors.remote;
+      
+      element.addEventListener("back", () => this.changeUIState("connection_overview"));
+      element.addEventListener("url-change", (e: CustomEvent) => this.handleRemoteUrlChange(e.detail.url));
+      element.addEventListener("connect", () => this.handleRemoteConnect());
+      element.addEventListener("multi-user-auth", () => this.handleRemoteMultiUserAuth());
+      element.addEventListener("request-capability", () => this.handleRemoteRequestCapability());
+      
+      return element;
     }
 
     if (this.state.currentView === "multiuser_auth") {
-      return MultiUserAuth({
-        email: this.state.forms.multiUserEmail,
-        password: this.state.forms.multiUserPassword,
-        verificationCode: this.state.forms.multiUserVerificationCode,
-        error: this.state.errors.multiUser,
-        isLoading: this.state.loading.multiUser,
-        backendUrl: this.backendUrl,
-        step: this.state.forms.multiUserStep,
-        verificationType: this.state.forms.multiUserVerificationType,
-        changeEmail: this.changeMultiUserEmail,
-        changePassword: this.changeMultiUserPassword,
-        changeVerificationCode: this.changeMultiUserVerificationCode,
-        onEmailSubmit: this.handleMultiUserEmailSubmit,
-        onPasswordSubmit: this.handleMultiUserPasswordSubmit,
-        onCodeSubmit: this.handleMultiUserCodeSubmit,
-        onBackToEmail: this.handleMultiUserBackToEmail,
-      });
+      const element = document.createElement("multi-user-auth");
+      element.email = this.state.forms.multiUserEmail;
+      element.password = this.state.forms.multiUserPassword;
+      element.verificationCode = this.state.forms.multiUserVerificationCode;
+      element.error = this.state.errors.multiUser;
+      element.isLoading = this.state.loading.multiUser;
+      element.backendUrl = this.backendUrl;
+      element.step = this.state.forms.multiUserStep;
+      element.verificationType = this.state.forms.multiUserVerificationType;
+      
+      element.addEventListener("email-change", (e: CustomEvent) => this.changeMultiUserEmail(e.detail.email));
+      element.addEventListener("password-change", (e: CustomEvent) => this.changeMultiUserPassword(e.detail.password));
+      element.addEventListener("code-change", (e: CustomEvent) => this.changeMultiUserVerificationCode(e.detail.code));
+      element.addEventListener("email-submit", () => this.handleMultiUserEmailSubmit());
+      element.addEventListener("password-submit", () => this.handleMultiUserPasswordSubmit());
+      element.addEventListener("code-submit", () => this.handleMultiUserCodeSubmit());
+      element.addEventListener("back-to-email", () => this.handleMultiUserBackToEmail());
+      
+      return element;
     }
 
     if (this.state.currentView === "hosting") {
-      return Hosting({
-        email: this.state.forms.email,
-        password: this.state.forms.password,
-        changeEmail: this.changeEmail,
-        changePassword: this.changePassword,
-        changeState: this.changeUIState,
-        step: this.state.forms.hostingStep,
-        setHostingStep: this.setHostingStep,
-        login: this.loginToHosting,
-        checkEmail: this.checkEmail,
-        passwordError: this.state.errors.password,
-        isHostingRunning: this.state.errors.hostingNotRunning,
-        setIsHostingRunning: this.setIsHostingRunning,
-      });
+      const element = document.createElement("hosting-view");
+      element.email = this.state.forms.email;
+      element.password = this.state.forms.password;
+      element.step = this.state.forms.hostingStep;
+      element.passwordError = this.state.errors.password;
+      element.isHostingRunning = !!this.state.errors.hostingNotRunning;
+      
+      element.addEventListener("back", () => this.changeUIState("not_connected"));
+      element.addEventListener("email-change", (e: CustomEvent) => this.changeEmail(e.detail.email));
+      element.addEventListener("password-change", (e: CustomEvent) => this.changePassword(e.detail.password));
+      element.addEventListener("check-email", () => this.checkEmail());
+      element.addEventListener("login", () => this.loginToHosting());
+      element.addEventListener("reset-hosting", () => this.setHostingStep(0));
+      element.addEventListener("clear-running", () => this.setIsHostingRunning(false));
+      
+      return element;
     }
 
     if (this.state.currentView === "qr") {
-      return ScanQRCode({
-        changeState: this.changeUIState,
-        onSuccess: (url) => {
-          this.changeUrl(url);
-          this._client.connect(url);
-        },
-        uiState: this.state.currentView,
+      const element = document.createElement("scan-qr-code");
+      element.uiState = this.state.currentView;
+      
+      element.addEventListener("stop", () => this.changeUIState("connection_overview"));
+      element.addEventListener("success", (e: CustomEvent) => {
+        this.changeUrl(e.detail.qrValue);
+        this._client.connect(e.detail.qrValue);
       });
+      
+      return element;
     }
 
     if (this.authState === "locked") {
-      return AgentLocked({
-        unlockAgent: this.unlockAgent,
-        reconnect: this.connect,
+      return ErrorState({
+        type: 'agent-locked',
+        onAction: this.connect,
       });
     }
 
     if (this.state.currentView === "settings") {
-      return Settings({
-        port: this.port,
-        changePort: this.changePort,
-        isRemote: this.state.isRemote,
-        changeIsRemote: this.changeIsRemote,
-        url: this.url,
-        changeState: this.changeUIState,
-        changeUrl: this.changeUrl,
-        connectToPort: this._client.connectToPort,
-        connectRemote: this.connectRemote,
-        clearState: this.clearState,
+      const element = document.createElement("connection-settings");
+      element.port = this.port;
+      element.isRemote = this.state.isRemote;
+      element.url = this.url;
+      
+      element.addEventListener("mode-change", (e: CustomEvent) => this.changeIsRemote(e.detail.isRemote));
+      element.addEventListener("port-change", (e: CustomEvent) => this.changePort(e.detail.port));
+      element.addEventListener("url-change", (e: CustomEvent) => this.changeUrl(e.detail.url));
+      element.addEventListener("connect", () => {
+        if (this.state.isRemote) {
+          this.connectRemote(this.url);
+        } else {
+          this._client.connectToPort();
+        }
       });
+      element.addEventListener("back", () => this.changeUIState("connection_overview"));
+      element.addEventListener("clear-state", () => this.clearState());
+      
+      return element;
     }
 
     if (this.connectionState === "not_connected") {
-      return Start({
-        scanQrcode: this.startCamera,
-        connect: this.connect,
-        isMobile: this.state.isMobile,
-        hasClickedDownload: this.state.hasClickedDownload,
-        onDownloaded: this.onDownloaded,
-        changeState: this.changeUIState,
-        hosting: this.hosting,
-      });
+      const element = document.createElement("start-view");
+      element.isMobile = this.state.isMobile;
+      element.hasClickedDownload = this.state.hasClickedDownload;
+      element.hosting = this.hosting;
+      
+      element.addEventListener("connect", () => this.connect());
+      element.addEventListener("settings", () => this.changeUIState("settings"));
+      element.addEventListener("scan-qr", () => this.startCamera(null));
+      element.addEventListener("hosting", () => this.changeUIState("hosting"));
+      element.addEventListener("downloaded", () => this.onDownloaded());
+      
+      return element;
     }
 
     if (this.connectionState === "connected") {
@@ -1292,37 +1313,47 @@ export class Ad4mConnectElement extends LitElement {
         });
       }
 
-      return RequestCapability({
-        changeState: this.changeUIState,
-        requestCapability: this.requestCapability,
-        capabilities: this.capabilities,
-        appname: this.appName,
-        setOpen: this.setOpen,
-        appiconpath: this.appIconPath,
+      const element = document.createElement("request-capability");
+      element.capabilities = this.capabilities;
+      element.appname = this.appName;
+      element.appiconpath = this.appIconPath;
+      
+      element.addEventListener("cancel", () => {
+        this.requestCapability(false);
+        this.setOpen(false);
       });
+      element.addEventListener("authorize", () => this.requestCapability(true));
+      element.addEventListener("settings", () => this.changeUIState("settings"));
+      
+      return element;
     }
 
     if (this.connectionState === "disconnected") {
-      return Disconnected({
-        reconnect: this.connect,
+      return ErrorState({
+        type: 'disconnected',
+        onAction: this.connect,
       });
     }
 
     if (this.connectionState === "port_not_found") {
-      return CouldNotMakeRequest();
+      return ErrorState({
+        type: 'request-blocked',
+        onAction: () => location.reload(),
+      });
     }
   }
 
   mobileView() {
     if (this.mobile) {
-      return MobileAppLogoButton({
-        openModal: () => {
+      return html`
+        <div class="mainlogo" @click=${() => {
           this.changeUIState("settings");
           this.state.toggleOpen();
-        },
-      });
+        }}>
+          ${AppLogo()}
+        </div>
+      `;
     }
-
     return null;
   }
 
