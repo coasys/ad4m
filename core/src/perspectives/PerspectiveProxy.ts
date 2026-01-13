@@ -1364,7 +1364,7 @@ export class PerspectiveProxy {
             return [];
         }
 
-        const query = `SELECT out.uri AS value FROM link WHERE in.uri = '${baseExpression}' AND predicate = '${collMeta.predicate}'`;
+        const query = `SELECT out.uri AS value, timestamp FROM link WHERE in.uri = '${baseExpression}' AND predicate = '${collMeta.predicate}' ORDER BY timestamp ASC`;
         const result = await this.querySurrealDB(query);
 
         if (!result || result.length === 0) {
