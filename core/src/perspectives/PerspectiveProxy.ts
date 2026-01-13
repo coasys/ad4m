@@ -1087,25 +1087,32 @@ export class PerspectiveProxy {
             return false;
         }
 
-        // If no required predicates, any expression with links is an instance
-        if (metadata.requiredPredicates.length === 0) {
-            //console.log("no required predicates, checking surrealDB");
+        // If no required triples, any expression with links is an instance
+        if (metadata.requiredTriples.length === 0) {
+            console.log("no required triples, checking surrealDB");
             const checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${expression}'`;
-            //console.log("checkQuery", checkQuery);
+            console.log("checkQuery", checkQuery);
             const result = await this.querySurrealDB(checkQuery);
-            //console.log("result", result);
+            console.log("result", result);
             const count = result[0]?.count ?? 0;
             const countValue = typeof count === 'object' && count?.Int !== undefined ? count.Int : count;
             return countValue > 0;
         }
 
-        // Check if the expression has all required predicates
-        for (const predicate of metadata.requiredPredicates) {
-            //console.log("checking predicate", predicate);
-            const checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${expression}' AND predicate = '${predicate}'`;
-            //console.log("checkQuery", checkQuery);
+        // Check if the expression has all required triples (predicate + optional exact target)
+        for (const triple of metadata.requiredTriples) {
+            console.log("checking triple", triple);
+            let checkQuery: string;
+            if (triple.target) {
+                // Flag: must match both predicate AND exact target value
+                checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${expression}' AND predicate = '${triple.predicate}' AND out.uri = '${triple.target}'`;
+            } else {
+                // Property: just check predicate exists
+                checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${expression}' AND predicate = '${triple.predicate}'`;
+            }
+            console.log("checkQuery", checkQuery);
             const result = await this.querySurrealDB(checkQuery);
-            //console.log("result", result);
+            console.log("result", result);
 
             if (!result || result.length === 0) {
                 return false;
@@ -1151,8 +1158,9 @@ export class PerspectiveProxy {
      */
     private async getSubjectClassMetadataFromSDNA(className: string): Promise<{
         requiredPredicates: string[],
+        requiredTriples: Array<{predicate: string, target?: string}>,
         properties: Map<string, { predicate: string, resolveLanguage?: string }>,
-        collections: Map<string, { predicate: string }>
+        collections: Map<string, { predicate: string, instanceFilter?: string }>
     } | null> {
         try {
             // Get SDNA code from perspective - it's stored as a link
@@ -1177,28 +1185,36 @@ export class PerspectiveProxy {
             const sdnaCode = Literal.fromUrl(sdnaLinks[0].data.target).get();
             //console.log("sdnaCode for", className, ":", sdnaCode.substring(0, 200));
 
-            const requiredPredicates: string[] = [];
+            // Store required triples as {predicate, target?}
+            // target is only set for flags (exact matches), otherwise undefined
+            const requiredTriples: Array<{predicate: string, target?: string}> = [];
 
             // Parse the instance rule from the SDNA code
-            // Format: instance(c, Base) :- triple(Base, "pred1", _), triple(Base, "pred2", _).
+            // Format: instance(c, Base) :- triple(Base, "pred1", _), triple(Base, "pred2", "exact_value").
             const instanceRuleMatch = sdnaCode.match(/instance\([^,]+,\s*\w+\)\s*:-\s*(.+?)\./s);
 
             if (instanceRuleMatch) {
                 const ruleBody = instanceRuleMatch[1];
-                //console.log("instance rule body:", ruleBody);
+                console.log("instance rule body:", ruleBody);
 
-                // Extract all triple(Base, "predicate", ...) patterns
-                const tripleRegex = /triple\([^,]+,\s*"([^"]+)"/g;
+                // Extract all triple(Base, "predicate", Target) patterns
+                // Match both: triple(Base, "pred", _) and triple(Base, "pred", "value")
+                const tripleRegex = /triple\([^,]+,\s*"([^"]+)",\s*(?:"([^"]+)"|_)\)/g;
                 let match;
 
                 while ((match = tripleRegex.exec(ruleBody)) !== null) {
-                    requiredPredicates.push(match[1]);
+                    const predicate = match[1];
+                    const target = match[2]; // undefined if matched "_"
+                    requiredTriples.push({ predicate, target });
+                    console.log(`Extracted triple: predicate="${predicate}", target="${target}"`);
                 }
             } else {
                 console.warn(`No instance rule found in SDNA for ${className}`);
             }
 
-            //console.log("extracted requiredPredicates:", requiredPredicates);
+            // For backward compatibility, also maintain requiredPredicates array
+            const requiredPredicates = requiredTriples.map(t => t.predicate);
+            console.log("extracted requiredTriples:", requiredTriples);
 
             // Extract property metadata
             const properties = new Map<string, { predicate: string, resolveLanguage?: string }>();
@@ -1241,13 +1257,14 @@ export class PerspectiveProxy {
             //console.log("properties", properties);
 
             // Extract collection metadata
-            const collections = new Map<string, { predicate: string }>();
+            const collections = new Map<string, { predicate: string, instanceFilter?: string }>();
             const collectionResults = await this.infer(`subject_class("${className}", C), collection(C, Coll)`);
             //console.log("collectionResults", collectionResults);
             if (collectionResults) {
                 for (const result of collectionResults) {
                     const collName = result.Coll;
                     let predicate: string | null = null;
+                    let instanceFilter: string | undefined = undefined;
 
                     // Try to extract predicate from collection_adder first
                     const adderResults = await this.infer(`subject_class("${className}", C), collection_adder(C, "${collName}", Adder)`);
@@ -1259,22 +1276,52 @@ export class PerspectiveProxy {
                         }
                     }
 
-                    // If no adder, try to extract from SDNA collection_getter Prolog code
-                    if (!predicate) {
-                        // Parse the SDNA code for collection_getter definition
-                        const getterMatch = sdnaCode.match(new RegExp(`collection_getter\\([^,]+,\\s*[^,]+,\\s*"${collName}"[^)]*\\)\\s*:-\\s*findall\\([^,]+,\\s*triple\\([^,]+,\\s*"([^"]+)"`));
-                        if (getterMatch) {
-                            predicate = getterMatch[1];
+                    // Parse collection_getter from SDNA to extract predicate and instanceFilter
+                    // Format 1 (findall): collection_getter(c, Base, "comments", List) :- findall(C, triple(Base, "todo://comment", C), List).
+                    // Format 2 (setof): collection_getter(c, Base, "messages", List) :- setof(Target, (triple(Base, "flux://entry_type", Target), ...), List).
+                    // Use a line-based match to avoid capturing multiple collections
+                    const getterLinePattern = new RegExp(`collection_getter\\([^,]+,\\s*[^,]+,\\s*"${collName}"[^)]*\\)\\s*:-[^.]+\\.`);
+                    const getterLineMatch = sdnaCode.match(getterLinePattern);
+
+                    if (getterLineMatch) {
+                        const getterLine = getterLineMatch[0];
+                        // Extract the body between setof/findall and the final ).
+                        // Pattern: findall(Var, Body, List) or setof(Var, (Body), List)
+                        const bodyPattern = /(?:setof|findall)\([^,]+,\s*(.+),\s*\w+\)\./;
+                        const bodyMatch = getterLine.match(bodyPattern);
+
+                        if (bodyMatch) {
+                            let getterBody = bodyMatch[1];
+                            // Remove outer parentheses if present (setof case)
+                            if (getterBody.startsWith('(') && getterBody.endsWith(')')) {
+                                getterBody = getterBody.substring(1, getterBody.length - 1);
+                            }
+                            console.log(`Collection "${collName}" getter body:`, getterBody);
+
+                            // Extract predicate from triple(Base, "predicate", Target)
+                            if (!predicate) {
+                                const tripleMatch = getterBody.match(/triple\([^,]+,\s*"([^"]+)"/);
+                                if (tripleMatch) {
+                                    predicate = tripleMatch[1];
+                                }
+                            }
+
+                            // Check for instance filter: subject_class("ClassName", OtherClass)
+                            const instanceMatch = getterBody.match(/subject_class\("([^"]+)"/);
+                            if (instanceMatch) {
+                                instanceFilter = instanceMatch[1];
+                                console.log(`Collection "${collName}" has instanceFilter: ${instanceFilter}`);
+                            }
                         }
                     }
 
                     if (predicate) {
-                        collections.set(collName, { predicate });
+                        collections.set(collName, { predicate, instanceFilter });
                     }
                 }
             }
             //console.log("collections", collections);
-            return { requiredPredicates, properties, collections };
+            return { requiredPredicates, requiredTriples, properties, collections };
         } catch (e) {
             console.error(`Error getting metadata for ${className}:`, e);
             return null;
@@ -1286,25 +1333,32 @@ export class PerspectiveProxy {
      */
     private generateSurrealInstanceQuery(metadata: {
         requiredPredicates: string[],
+        requiredTriples: Array<{predicate: string, target?: string}>,
         properties: Map<string, { predicate: string, resolveLanguage?: string }>,
         collections: Map<string, { predicate: string }>
     }): string {
-        //console.log("generateSurrealInstanceQuery called with requiredPredicates:", metadata.requiredPredicates);
+        console.log("generateSurrealInstanceQuery called with requiredTriples:", metadata.requiredTriples);
 
-        if (metadata.requiredPredicates.length === 0) {
-            // No required predicates - any node with links is an instance
+        if (metadata.requiredTriples.length === 0) {
+            // No required triples - any node with links is an instance
             const query = `SELECT DISTINCT uri AS base FROM node WHERE count(->link) > 0`;
-            console.log("Generated query (no required predicates):", query);
+            console.log("Generated query (no required triples):", query);
             return query;
         }
 
-        // Generate WHERE conditions for each required predicate
-        const whereConditions = metadata.requiredPredicates.map(pred =>
-            `count(->link[WHERE predicate = '${pred}']) > 0`
-        ).join(' AND ');
+        // Generate WHERE conditions for each required triple (predicate + optional exact target)
+        const whereConditions = metadata.requiredTriples.map(triple => {
+            if (triple.target) {
+                // Flag: must match both predicate AND exact target value
+                return `count(->link[WHERE predicate = '${triple.predicate}' AND out.uri = '${triple.target}']) > 0`;
+            } else {
+                // Property: just check predicate exists
+                return `count(->link[WHERE predicate = '${triple.predicate}']) > 0`;
+            }
+        }).join(' AND ');
 
         const query = `SELECT uri AS base FROM node WHERE ${whereConditions}`;
-        //console.log("Generated query:", query);
+        console.log("Generated query:", query);
         return query;
     }
 
@@ -1371,7 +1425,26 @@ export class PerspectiveProxy {
             return [];
         }
 
-        return result.map(r => r.value).filter(v => v !== "" && v !== '');
+        let values = result.map(r => r.value).filter(v => v !== "" && v !== '');
+
+        console.log(`getCollectionValuesViaSurreal: base="${baseExpression}", collection="${collectionName}", predicate="${collMeta.predicate}", found ${values.length} values:`, values);
+
+        // Apply instance filter if present
+        if (collMeta.instanceFilter) {
+            console.log(`  Applying instance filter "${collMeta.instanceFilter}" to collection "${collectionName}"`);
+            const filteredValues = [];
+            for (const value of values) {
+                const isInstance = await this.isSubjectInstance(value, collMeta.instanceFilter);
+                console.log(`    Checking if "${value}" is instance of "${collMeta.instanceFilter}": ${isInstance}`);
+                if (isInstance) {
+                    filteredValues.push(value);
+                }
+            }
+            console.log(`  After filtering: ${filteredValues.length} values`);
+            return filteredValues;
+        }
+
+        return values;
     }
 
     /** Returns all subject instances of the given subject class as proxy objects.
