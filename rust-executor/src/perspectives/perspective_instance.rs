@@ -53,29 +53,9 @@ static MAX_PENDING_SECONDS: u64 = 3;
 static IMMEDIATE_COMMITS_COUNT: usize = 20;
 static QUERY_SUBSCRIPTION_TIMEOUT: u64 = 60; // 1 minute in seconds (was 5 min)
 static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
-static MAX_SUBSCRIPTION_RESULT_SIZE: usize = 100_000; // Max 100KB per subscription result
 
 fn notification_pool_name(uuid: &str) -> String {
     format!("notification_{}", uuid)
-}
-
-/// Truncate a string to prevent excessive memory usage in subscription results
-fn truncate_subscription_result(s: String) -> String {
-    if s.len() > MAX_SUBSCRIPTION_RESULT_SIZE {
-        log::warn!(
-            "Subscription result truncated from {} to {} bytes",
-            s.len(),
-            MAX_SUBSCRIPTION_RESULT_SIZE
-        );
-        let mut truncated = s
-            .chars()
-            .take(MAX_SUBSCRIPTION_RESULT_SIZE)
-            .collect::<String>();
-        truncated.push_str("...[TRUNCATED]");
-        truncated
-    } else {
-        s
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -3667,12 +3647,11 @@ impl PerspectiveInstance {
                                             None,
                                         )
                                         .await;
-                                    // Re-acquire lock to update and truncate the result to save memory
+                                    // Re-acquire lock to update the result
                                     let mut queries =
                                         self_clone.surreal_subscribed_queries.lock().await;
                                     if let Some(stored_query) = queries.get_mut(&id) {
-                                        stored_query.last_result =
-                                            truncate_subscription_result(result_string);
+                                        stored_query.last_result = result_string;
                                     }
                                 }
                             }
@@ -3743,11 +3722,10 @@ impl PerspectiveInstance {
                             self_clone
                                 .send_subscription_update(id.clone(), result_string.clone(), None)
                                 .await;
-                            // Re-acquire lock to update and truncate the result to save memory
+                            // Re-acquire lock to update the result
                             let mut queries = self_clone.subscribed_queries.lock().await;
                             if let Some(stored_query) = queries.get_mut(&id) {
-                                stored_query.last_result =
-                                    truncate_subscription_result(result_string);
+                                stored_query.last_result = result_string;
                             }
                         }
                     }
