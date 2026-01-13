@@ -509,6 +509,14 @@ describe("Prolog + Literals", () => {
                     await perspective!.addSdna(name, sdna, "subject_class")
                 })
 
+                afterEach(async () => {
+                    // Clean up any Message flags created during tests to prevent data contamination
+                    const links = await perspective!.get(new LinkQuery({predicate: "ad4m://type", target: "ad4m://message"}))
+                    for (const link of links) {
+                        await perspective!.remove(link)
+                    }
+                })
+
                 it("can find instances through the exact flag link", async() => {
                     await perspective!.add(new Link({
                         source: "test://message",
