@@ -1208,21 +1208,33 @@ export class PerspectiveProxy {
             if (propertyResults) {
                 for (const result of propertyResults) {
                     const propName = result.P;
+                    let predicate: string | null = null;
 
-                    // Try to extract predicate from property_setter
+                    // Try to extract predicate from property_setter first
                     const setterResults = await this.infer(`subject_class("${className}", C), property_setter(C, "${propName}", Setter)`);
                     if (setterResults && setterResults.length > 0) {
                         const setterString = setterResults[0].Setter;
                         const predicateMatch = setterString.match(/predicate:\s*"([^"]+)"|predicate:\s*([^,}\]]+)/);
                         if (predicateMatch) {
-                            const predicate = predicateMatch[1] || predicateMatch[2];
-
-                            // Check if property has resolveLanguage
-                            const resolveResults = await this.infer(`subject_class("${className}", C), property_resolve_language(C, "${propName}", Lang)`);
-                            const resolveLanguage = resolveResults && resolveResults.length > 0 ? resolveResults[0].Lang : undefined;
-
-                            properties.set(propName, { predicate, resolveLanguage });
+                            predicate = predicateMatch[1] || predicateMatch[2];
                         }
+                    }
+
+                    // If no setter, try to extract from SDNA property_getter Prolog code
+                    if (!predicate) {
+                        // Parse the SDNA code for property_getter definition
+                        const getterMatch = sdnaCode.match(new RegExp(`property_getter\\([^,]+,\\s*[^,]+,\\s*"${propName}"[^)]*\\)\\s*:-\\s*triple\\([^,]+,\\s*"([^"]+)"`));
+                        if (getterMatch) {
+                            predicate = getterMatch[1];
+                        }
+                    }
+
+                    if (predicate) {
+                        // Check if property has resolveLanguage
+                        const resolveResults = await this.infer(`subject_class("${className}", C), property_resolve_language(C, "${propName}", Lang)`);
+                        const resolveLanguage = resolveResults && resolveResults.length > 0 ? resolveResults[0].Lang : undefined;
+
+                        properties.set(propName, { predicate, resolveLanguage });
                     }
                 }
             }
@@ -1235,16 +1247,29 @@ export class PerspectiveProxy {
             if (collectionResults) {
                 for (const result of collectionResults) {
                     const collName = result.Coll;
+                    let predicate: string | null = null;
 
-                    // Try to extract predicate from collection_adder
+                    // Try to extract predicate from collection_adder first
                     const adderResults = await this.infer(`subject_class("${className}", C), collection_adder(C, "${collName}", Adder)`);
                     if (adderResults && adderResults.length > 0) {
                         const adderString = adderResults[0].Adder;
                         const predicateMatch = adderString.match(/predicate:\s*"([^"]+)"|predicate:\s*([^,}\]]+)/);
                         if (predicateMatch) {
-                            const predicate = predicateMatch[1] || predicateMatch[2];
-                            collections.set(collName, { predicate });
+                            predicate = predicateMatch[1] || predicateMatch[2];
                         }
+                    }
+
+                    // If no adder, try to extract from SDNA collection_getter Prolog code
+                    if (!predicate) {
+                        // Parse the SDNA code for collection_getter definition
+                        const getterMatch = sdnaCode.match(new RegExp(`collection_getter\\([^,]+,\\s*[^,]+,\\s*"${collName}"[^)]*\\)\\s*:-\\s*findall\\([^,]+,\\s*triple\\([^,]+,\\s*"([^"]+)"`));
+                        if (getterMatch) {
+                            predicate = getterMatch[1];
+                        }
+                    }
+
+                    if (predicate) {
+                        collections.set(collName, { predicate });
                     }
                 }
             }
@@ -1339,7 +1364,7 @@ export class PerspectiveProxy {
             return [];
         }
 
-        const query = `SELECT out.uri AS value FROM link WHERE in.uri = '${baseExpression}' AND predicate = '${collMeta.predicate}' AND perspective = '${this.uuid}'`;
+        const query = `SELECT out.uri AS value FROM link WHERE in.uri = '${baseExpression}' AND predicate = '${collMeta.predicate}'`;
         const result = await this.querySurrealDB(query);
 
         if (!result || result.length === 0) {

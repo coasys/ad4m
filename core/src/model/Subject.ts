@@ -51,27 +51,31 @@ export class Subject {
                 configurable: true,
                 get: async () => {
                     // Try Prolog first
-                    let results = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), property_getter(C, "${this.#baseExpression}", "${p}", Value)`)
-                    if(results && results.length > 0) {
-                        let expressionURI = results[0].Value
-                        if(resolveExpressionURI) {
-                            try {
-                                if (expressionURI) {
-                                    const expression = await this.#perspective.getExpression(expressionURI)
-                                    try {
-                                        return JSON.parse(expression.data)
-                                    } catch(e) {
-                                        return expression.data
+                    try {
+                        let results = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), property_getter(C, "${this.#baseExpression}", "${p}", Value)`)
+                        if(results && results.length > 0 && results[0].Value !== undefined && results[0].Value !== null && results[0].Value !== '') {
+                            let expressionURI = results[0].Value
+                            if(resolveExpressionURI) {
+                                try {
+                                    if (expressionURI) {
+                                        const expression = await this.#perspective.getExpression(expressionURI)
+                                        try {
+                                            return JSON.parse(expression.data)
+                                        } catch(e) {
+                                            return expression.data
+                                        }
+                                    } else {
+                                        return expressionURI
                                     }
-                                } else {
+                                } catch (err) {
                                     return expressionURI
                                 }
-                            } catch (err) {
+                            } else {
                                 return expressionURI
                             }
-                        } else {
-                            return expressionURI
                         }
+                    } catch (err) {
+                        // Prolog query failed, fall through to SurrealDB
                     }
 
                     // Fallback to SurrealDB if Prolog returned nothing (SdnaOnly mode)
@@ -116,10 +120,16 @@ export class Subject {
                 configurable: true,
                 get: async () => {
                     // Try Prolog first
-                    let results = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), collection_getter(C, "${this.#baseExpression}", "${c}", Value)`)
-                    if(results && results.length > 0 && results[0].Value) {
-                        let collectionContent = results[0].Value.filter((v: any) => v !== "" && v !== '')
-                        return collectionContent
+                    try {
+                        let results = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), collection_getter(C, "${this.#baseExpression}", "${c}", Value)`)
+                        if(results && results.length > 0 && results[0].Value && Array.isArray(results[0].Value) && results[0].Value.length > 0) {
+                            let collectionContent = results[0].Value.filter((v: any) => v !== "" && v !== '')
+                            if (collectionContent.length > 0) {
+                                return collectionContent
+                            }
+                        }
+                    } catch (err) {
+                        // Prolog query failed, fall through to SurrealDB
                     }
 
                     // Fallback to SurrealDB if Prolog returned nothing (SdnaOnly mode)
