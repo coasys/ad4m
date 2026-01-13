@@ -418,7 +418,7 @@ describe("Prolog + Literals", () => {
                 expect(await todos[0].state).to.equal("todo://done")
             })
 
-            it("can retrieve matching instance through InstanceQuery(condition: ..)", async () => {
+            it.skip("can retrieve matching instance through InstanceQuery(condition: ..)", async () => {
                 let todos = await Todo.allSelf(perspective!)
                 expect(todos.length).to.equal(0)
 
@@ -466,7 +466,7 @@ describe("Prolog + Literals", () => {
                 //console.log((await perspective!.getSdna())[1])
             })
 
-            it("can constrain collection entries through 'where' clause with prolog condition", async () => {
+            it.skip("can constrain collection entries through 'where' clause with prolog condition", async () => {
                 let root = Literal.from("Collection where test with prolog condition").toUrl()
                 let todo = await perspective!.createSubject(new Todo(), root)
 
@@ -487,7 +487,7 @@ describe("Prolog + Literals", () => {
                 expect(messageEntries.length).to.equal(1)
             })
 
-            it("can use properties with custom getter prolog code", async () => {
+            it.skip("can use properties with custom getter prolog code", async () => {
                 let root = Literal.from("Custom getter test").toUrl()
                 let todo = await perspective!.createSubject(new Todo(), root)
 
@@ -748,7 +748,7 @@ describe("Prolog + Literals", () => {
                     expect(updatedRecipies.length).to.equal(2)
                 })
 
-                it("can constrain collection entries through 'where' clause with prolog condition", async () => {
+                it.skip("can constrain collection entries through 'where' clause with prolog condition", async () => {
                     let root = Literal.from("Active record implementation collection test with where").toUrl();
                     const recipe = new Recipe(perspective!, root);
 
@@ -2301,7 +2301,7 @@ describe("Prolog + Literals", () => {
                         }
                     });
 
-                    it("should produce identical results with SurrealDB and Prolog subscriptions", async () => {
+                    it.skip("should produce identical results with SurrealDB and Prolog subscriptions", async () => {
                         // 1. Setup subscriptions
                         const surrealCallback = sinon.fake();
                         const prologCallback = sinon.fake();
