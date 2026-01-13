@@ -750,11 +750,99 @@ export class Ad4mModel {
       ${subQueries.join(", ")}
     `;
 
-    const result = await this.#perspective.infer(fullQuery);
-    if (result?.[0]) {
-      const { Properties, Collections, Timestamp, Author } = result?.[0];
-      const values = [...Properties, ...Collections, ["timestamp", Timestamp], ["author", Author]];
-      await Ad4mModel.assignValuesToInstance(this.#perspective, this, values);
+    // Try Prolog first
+    try {
+      const result = await this.#perspective.infer(fullQuery);
+      if (result?.[0] && result[0].Properties && result[0].Properties.length > 0) {
+        const { Properties, Collections, Timestamp, Author } = result[0];
+        const values = [...Properties, ...Collections, ["timestamp", Timestamp], ["author", Author]];
+        await Ad4mModel.assignValuesToInstance(this.#perspective, this, values);
+        return this;
+      }
+    } catch (e) {
+      console.log(`Prolog getData failed for ${this.#baseExpression}, falling back to SurrealDB`);
+    }
+
+    // Fallback to SurrealDB (SdnaOnly mode)
+    try {
+      const ctor = this.constructor as typeof Ad4mModel;
+      const metadata = ctor.getModelMetadata();
+
+      // Query for all links from this specific node (base expression)
+      const linksQuery = `
+        SELECT id, predicate, out.uri AS target, author, timestamp
+        FROM link
+        WHERE in.uri = '${this.#baseExpression}'
+        ORDER BY timestamp ASC
+      `;
+      const links = await this.#perspective.querySurrealDB(linksQuery);
+
+      if (links && links.length > 0) {
+        let maxTimestamp = null;
+        let latestAuthor = null;
+
+        // Process properties
+        for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+          const matching = links.filter((l: any) => l.predicate === propMeta.predicate);
+          if (matching.length > 0) {
+            const link = matching[0]; // Take first/latest
+            let value = link.target;
+
+            // Track timestamp/author
+            if (link.timestamp && (!maxTimestamp || link.timestamp > maxTimestamp)) {
+              maxTimestamp = link.timestamp;
+              latestAuthor = link.author;
+            }
+
+            // Handle resolveLanguage
+            if (propMeta.resolveLanguage && propMeta.resolveLanguage !== 'literal') {
+              try {
+                const expression = await this.#perspective.getExpression(value);
+                if (expression) {
+                  try {
+                    value = JSON.parse(expression.data);
+                  } catch {
+                    value = expression.data;
+                  }
+                }
+              } catch (e) {
+                console.warn(`Failed to resolve expression for ${propName}:`, e);
+              }
+            } else if (typeof value === 'string' && value.startsWith('literal://')) {
+              // Parse literal URL
+              try {
+                const parsed = Literal.fromUrl(value).get();
+                value = parsed.data !== undefined ? parsed.data : parsed;
+              } catch (e) {
+                // Keep original value
+              }
+            }
+
+            // Apply transform if exists
+            if (propMeta.transform && typeof propMeta.transform === 'function') {
+              value = propMeta.transform(value);
+            }
+
+            (this as any)[propName] = value;
+          }
+        }
+
+        // Process collections
+        for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+          const matching = links.filter((l: any) => l.predicate === collMeta.predicate);
+          (this as any)[collName] = matching.map((l: any) => l.target);
+        }
+
+        // Set author and timestamp
+        if (latestAuthor) {
+          (this as any).author = latestAuthor;
+        }
+        if (maxTimestamp) {
+          (this as any).timestamp = maxTimestamp;
+        }
+      }
+    } catch (e) {
+      console.error(`SurrealDB getData also failed for ${this.#baseExpression}:`, e);
     }
 
     return this;
@@ -2084,10 +2172,20 @@ WHERE ${whereConditions.join(' AND ')}
               await this.setCollectionSetter(key, value.value, batchId);
               break;
           }
-        } else if (Array.isArray(value) && value.length > 0) {
-          await this.setCollectionSetter(key, value, batchId);
+        } else if (Array.isArray(value)) {
+          // Handle all arrays as collections, even empty ones
+          if (value.length > 0) {
+            await this.setCollectionSetter(key, value, batchId);
+          }
+          // Skip empty arrays - don't try to set them as properties
         } else if (value !== undefined && value !== null && value !== "") {
           if (setProperties) {
+            // Check if this is a collection property (has collection metadata)
+            const collMetadata = this.getCollectionMetadata(key);
+            if (collMetadata) {
+              // Skip - it's a collection, not a regular property
+              continue;
+            }
             await this.setProperty(key, value, batchId);
           }
         }
