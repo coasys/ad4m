@@ -18,8 +18,7 @@ import "./components/views/Settings";
 import "./components/views/Start";
 import "./components/views/Hosting";
 import "./components/views/MultiUserAuth";
-import Header from "./components/shared/Header";
-import AppLogo from "./components/shared/AppLogo";
+import Ad4mLogo from "./components/shared/Ad4mLogo";
 import VerifyCode from "./components/VerifyCode";
 import { connectWebSocket, DEFAULT_PORT, getForVersion, removeForVersion, setForVersion, isEmbedded } from "./utils";
 import { ConnectState } from "./state";
@@ -40,24 +39,13 @@ function detectMob() {
   });
 }
 
-  // :host {
-  //   --primary-color: #fff;
-  //   --heading-color: #fff;
-  //   --body-color: #ffffff;
-  //   --success-color: #88f3b4;
-  //   --background-color: #131533;
-  //   --start-color: #a4adff;
-  //   --end-color: #d273ff;
-  //   --gradient: #91e3fd;
-  // }
-
-  //     --primary-color: #91e3fd;
-
 const styles = css`
   :host {
-    --primary-color: #91e3fd;
-    --background-color: #131533;
+    --ac-primary-color: #91e3fd;
     --ac-text-color: #fff;
+    --ac-background-color: #191c3fe0;
+    --ac-border-color-dark: #91d4fd2b;
+    --ac-border-color-light: #91d4fd69;
   }
 
   * {
@@ -70,137 +58,12 @@ const styles = css`
     place-content: center;
     top: 0;
     left: 0;
-    color: var(--body-color);
     height: 100vh;
     width: 100vw;
     z-index: 100;
   }
 
-  .dialog {
-    background-color: var(--background-color);
-    z-index: 10;
-    border-radius: 12px;
-    width: calc(100vw - 10px);
-    max-width: 500px;
-    max-height: 90vh;
-    overflow-y: auto;
-  }
-
-  .dialog__header {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--primary-color);
-    margin: 60px 0 20px 0;
-  }
-
-  .dialog__header > svg {
-    width: 70px;
-    height: 70px;
-  }
-
-  .dialog__content {
-    min-height: 300px;
-    display: grid;
-    place-content: center;
-    padding-top: 0;
-    padding-left: 30px;
-    padding-right: 30px;
-    padding-bottom: 30px;
-  }
-
-  .dialog__connect {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    flex-gap: 50px;
-    gap: 50px;
-    position: relative;
-  }
-
-  .dialog__logo svg {
-    width: 100%;
-  }
-
-  .dialog__connect-ad4m {
-    width: 80px;
-    height: 80px;
-    background: var(--background-color);
-    padding: 20px;
-    box-shadow: 0px 4px 7px 0px rgb(0 0 0 / 8%);
-    border-radius: 50%;
-    position: relative;
-  }
-
-  .dialog__connect-ad4m:before {
-    content: "";
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    left: 0;
-    z-index: -1;
-    margin: -2px;
-    border-radius: inherit;
-    background: var(--gradient);
-  }
-
-  .dialog__connect-app {
-    width: 80px;
-    height: 80px;
-  }
-
-  .dialog__connect-check:before {
-    content: "";
-    display: block;
-    width: 40px;
-    border-bottom: 2px dashed var(--body-color);
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    transform: translateY(-50%) translateX(-50%);
-  }
-
-  .dialog__connect-check svg {
-    position: relative;
-  }
-
-  .text-center {
-    text-align: center;
-  }
-
-  .uppercase {
-    text-transform: uppercase;
-  }
-
-  .input {
-    display: flex;
-    flex-direction: column;
-    flex-gap: 10px;
-    gap: 10px;
-  }
-
-  .input__label {
-    font-size: 12px;
-  }
-
-  .input__field {
-    border-radius: 8px;
-    outline: 0;
-    height: 60px;
-    color: var(--heading-color);
-    background-color: var(--background-color);
-    padding: 0px 30px;
-    font-size: 20px;
-    border: 1px solid var(--body-color);
-  }
-
-  .input__field:focus {
-    border: 1px solid var(--primary-color);
-    box-shadow: 0px 0px 0px 1px var(--primary-color);
-  }
-
-  .ad4mConnect__backdrop {
+  .backdrop {
     position: absolute;
     top: 0;
     left: 0;
@@ -209,72 +72,212 @@ const styles = css`
     background-color: rgba(0, 0, 0, 0.5);
   }
 
-  .ad4mConnect__locked {
-    position: fixed;
-    top: 0;
-    left: 0;
-    background: var(--background-color);
-    height: 100vh;
-    width: 100vw;
-    padding: 36px;
+  .modal {
+    z-index: 10;
+    background-color: var(--ac-background-color);
+    border: 1px solid var(--ac-border-color-dark);
+    border-radius: 12px;
+    padding: 30px;
+    width: calc(100vw - 10px);
+    max-width: 480px;
+    max-height: 90vh;
+    overflow-y: auto;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px); /* Safari */
+  }
+
+  .modal-header {
     display: flex;
     align-items: center;
+    justify-content: center;
+    color: var(--ac-primary-color);
+    margin: 10px 0 30px 0;
+  }
+
+  .modal-header > svg {
+    width: 70px;
+    height: 70px;
+  }
+
+  .modal-content {
+    display: flex;
     flex-direction: column;
-    font-family: "Comfortaa", cursive;
+    justify-content: center;
   }
 
-  .disconnected {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100vw;
-    padding: 10px 0;
-    text-align: center;
-    background: red;
-  }
-
-  .qr-scanner {
-    background: black;
-    position: fixed;
-    left: 0;
-    top: 0;
-    width: 100%;
-    height: 100%;
-    display: grid;
-    grid-template-columns: 1fr;
-    place-content: center;
-  }
-
-  .qr-scanner .stop {
+  .settings-button {
     position: absolute;
-    z-index: 10;
-    left: 50%;
-    bottom: 10px;
-    transform: translateX(-50%);
-  }
-
-  .qr-scanner video {
-    height: 100vh;
-    width: 100vw;
-    object-fit: cover;
-  }
-
-  .spinner {
-    display: inline-block;
-    width: 48px;
-    height: 48px;
-    border: 4px solid rgba(145, 227, 253, 0.2);
-    border-top-color: var(--primary-color);
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
+    bottom: 20px;
+    right: 20px;
+    color: var(--ac-primary-color);
   }
 `;
+
+  // .spinner {
+  //   display: inline-block;
+  //   width: 48px;
+  //   height: 48px;
+  //   border: 4px solid rgba(145, 227, 253, 0.2);
+  //   border-top-color: var(--ac-primary-color);
+  //   border-radius: 50%;
+  //   animation: spin 1s linear infinite;
+  // }
+
+  // @keyframes spin {
+  //   to {
+  //     transform: rotate(360deg);
+  //   }
+  // }
+
+  // .dialog__connect {
+  //   display: flex;
+  //   justify-content: center;
+  //   align-items: center;
+  //   flex-gap: 50px;
+  //   gap: 50px;
+  //   position: relative;
+  // }
+
+  // .dialog__logo svg {
+  //   width: 100%;
+  // }
+
+  // .dialog__connect-ad4m {
+  //   width: 80px;
+  //   height: 80px;
+  //   background: var(--ac-modal-background-color);
+  //   padding: 20px;
+  //   box-shadow: 0px 4px 7px 0px rgb(0 0 0 / 8%);
+  //   border-radius: 50%;
+  //   position: relative;
+  // }
+
+  // .dialog__connect-ad4m:before {
+  //   content: "";
+  //   position: absolute;
+  //   top: 0;
+  //   right: 0;
+  //   bottom: 0;
+  //   left: 0;
+  //   z-index: -1;
+  //   margin: -2px;
+  //   border-radius: inherit;
+  //   background: var(--gradient);
+  // }
+
+  // .dialog__connect-app {
+  //   width: 80px;
+  //   height: 80px;
+  // }
+
+  // .dialog__connect-check:before {
+  //   content: "";
+  //   display: block;
+  //   width: 40px;
+  //   border-bottom: 2px dashed var(--body-color);
+  //   position: absolute;
+  //   left: 50%;
+  //   top: 50%;
+  //   transform: translateY(-50%) translateX(-50%);
+  // }
+
+  // .dialog__connect-check svg {
+  //   position: relative;
+  // }
+
+  // .text-center {
+  //   text-align: center;
+  // }
+
+  // .uppercase {
+  //   text-transform: uppercase;
+  // }
+
+  // .input {
+  //   display: flex;
+  //   flex-direction: column;
+  //   flex-gap: 10px;
+  //   gap: 10px;
+  // }
+
+  // .input__label {
+  //   font-size: 12px;
+  // }
+
+  // .input__field {
+  //   border-radius: 8px;
+  //   outline: 0;
+  //   height: 60px;
+  //   color: var(--heading-color);
+  //   background-color: var(--ac-modal-background-color);
+  //   padding: 0px 30px;
+  //   font-size: 20px;
+  //   border: 1px solid var(--body-color);
+  // }
+
+  // .input__field:focus {
+  //   border: 1px solid var(--ac-primary-color);
+  //   box-shadow: 0px 0px 0px 1px var(--ac-primary-color);
+  // }
+
+  // .ad4mConnect__backdrop {
+  //   position: absolute;
+  //   top: 0;
+  //   left: 0;
+  //   height: 100vh;
+  //   width: 100vw;
+  //   background-color: rgba(0, 0, 0, 0.5);
+  // }
+
+  // .ad4mConnect__locked {
+  //   position: fixed;
+  //   top: 0;
+  //   left: 0;
+  //   background: var(--ac-modal-background-color);
+  //   height: 100vh;
+  //   width: 100vw;
+  //   padding: 36px;
+  //   display: flex;
+  //   align-items: center;
+  //   flex-direction: column;
+  //   font-family: "Comfortaa", cursive;
+  // }
+
+  // .disconnected {
+  //   position: fixed;
+  //   top: 0;
+  //   left: 0;
+  //   width: 100vw;
+  //   padding: 10px 0;
+  //   text-align: center;
+  //   background: red;
+  // }
+
+  // .qr-scanner {
+  //   background: black;
+  //   position: fixed;
+  //   left: 0;
+  //   top: 0;
+  //   width: 100%;
+  //   height: 100%;
+  //   display: grid;
+  //   grid-template-columns: 1fr;
+  //   place-content: center;
+  // }
+
+  // .qr-scanner .stop {
+  //   position: absolute;
+  //   z-index: 10;
+  //   left: 50%;
+  //   bottom: 10px;
+  //   transform: translateX(-50%);
+  // }
+
+  // .qr-scanner video {
+  //   height: 100vh;
+  //   width: 100vw;
+  //   object-fit: cover;
+  // }
 
 @customElement("ad4m-connect")
 export class Ad4mConnectElement extends LitElement {
@@ -310,15 +313,12 @@ export class Ad4mConnectElement extends LitElement {
   @property({ type: Boolean, reflect: true })
   hosting = getForVersion("ad4mhosting") === "true" || false;
 
-  // TODO: localstorage doesnt work here
   @property({ type: String })
   token = getForVersion("ad4mToken") || "";
 
-  // TODO: localstorage doesnt work here
   @property({ type: String, reflect: true })
   port = parseInt(getForVersion("ad4mport")) || DEFAULT_PORT;
 
-  // TODO: localstorage doesnt work here
   @property({ type: String, reflect: true })
   url = getForVersion("ad4murl") || "";
 
@@ -439,6 +439,16 @@ export class Ad4mConnectElement extends LitElement {
       "href",
       `https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,200..800&display=swap`
     );
+    document.head.appendChild(link);
+  }
+
+  private loadFont() {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.type = "text/css";
+    link.crossOrigin = "anonymous";
+    link.href =
+      "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap";
     document.head.appendChild(link);
   }
 
@@ -884,16 +894,6 @@ export class Ad4mConnectElement extends LitElement {
     this.requestUpdate();
   }
 
-  private loadFont() {
-    const link = document.createElement("link");
-    link.rel = "stylesheet";
-    link.type = "text/css";
-    link.crossOrigin = "anonymous";
-    link.href =
-      "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap";
-    document.head.appendChild(link);
-  }
-
   private async startCamera(e) {
     try {
       window["BarcodeDetector"].getSupportedFormats();
@@ -1107,11 +1107,8 @@ export class Ad4mConnectElement extends LitElement {
           @port-change=${(e: CustomEvent) => this.changePort(e.detail.port)}
           @url-change=${(e: CustomEvent) => this.changeUrl(e.detail.url)}
           @connect=${() => {
-            if (this.state.isRemote) {
-              this.connectRemote(this.url);
-            } else {
-              this._client.connectToPort();
-            }
+            if (this.state.isRemote) this.connectRemote(this.url);
+            else this._client.connectToPort();
           }}
           @back=${() => this.changeUIState("connection_overview")}
           @clear-state=${() => this.clearState()}
@@ -1162,28 +1159,22 @@ export class Ad4mConnectElement extends LitElement {
     }
 
     if (this.connectionState === "disconnected") {
-      return ErrorState({
-        type: 'disconnected',
-        onAction: this.connect,
-      });
+      return ErrorState({ type: 'disconnected', onAction: this.connect });
     }
 
     if (this.connectionState === "port_not_found") {
-      return ErrorState({
-        type: 'request-blocked',
-        onAction: () => location.reload(),
-      });
+      return ErrorState({ type: 'request-blocked', onAction: () => location.reload() });
     }
   }
 
-  mobileView() {
-    if (this.mobile) {
+  settingsButton() {
+    if (this.authState === "authenticated") {
       return html`
-        <div class="mainlogo" @click=${() => {
+        <div class="settings-button" @click=${() => {
           this.changeUIState("settings");
           this.state.toggleOpen();
         }}>
-          ${AppLogo()}
+          ${Ad4mLogo()}
         </div>
       `;
     }
@@ -1191,28 +1182,19 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   render() {
-    console.log(
-      this.authState,
-      this.connectionState,
-      this.state.currentView,
-      this.state.isOpen
-    );
-    if (!this.state.isOpen) {
-      if (this.authState === "authenticated") {
-        return this.mobileView();
-      }
-
-      return null;
-    }
+    if (!this.state.isOpen) return this.settingsButton();
 
     return html`
       <div class="wrapper">
-        <div class="dialog">
-          ${Header()}
-          <main class="dialog__content">${this.renderViews()}</main>
-          ${this.mobileView()}
+        <div class="modal">
+          <header class="modal-header">
+            ${Ad4mLogo()}
+          </header>
+          <main class="modal-content">
+            ${this.renderViews()}
+          </main>
         </div>
-        <div class="ad4mConnect__backdrop" />
+        <div class="backdrop" />
       </div>
     `;
   }

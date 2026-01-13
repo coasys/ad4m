@@ -5,38 +5,36 @@ import { css } from "lit";
  * Includes typography, buttons, inputs, and common utilities
  */
 export const sharedStyles = css`
-  :host {
-    --primary-color: #91e3fd;
-    --background-color: #131533;
-    --success-color: #10b981;
-    --danger-color: #ef4444;
-    color: #ffffff;
-  }
-
   /* Typography */
   h1, h2, h3 {
-    margin: 0;
     color: #ffffff;
+    margin: 0;
   }
 
   h1 {
     font-size: 28px;
+    line-height: 1;
     font-weight: 700;
+    margin-bottom: 20px;
   }
 
   h2 {
-    font-size: 24px;
+    font-size: 22px;
+    line-height: 1;
     font-weight: 700;
+    margin-bottom: 20px;
   }
 
   h3 {
-    font-size: 16px;
-    font-weight: 600;
+    font-size: 18px;
+    line-height: 1;
+    font-weight: 400;
+    color: #f0f0f0;
   }
 
   p {
     margin: 0;
-    font-size: 14px;
+    font-size: 16px;
     line-height: 1.5;
     color: rgba(255, 255, 255, 0.8);
   }
@@ -61,7 +59,7 @@ export const sharedStyles = css`
   }
 
   button.primary {
-    background: var(--primary-color);
+    background: var(--ac-primary-color);
     color: #000000;
   }
 
@@ -71,7 +69,7 @@ export const sharedStyles = css`
 
   button.secondary {
     background: rgba(145, 227, 253, 0.15);
-    color: var(--primary-color);
+    color: var(--ac-primary-color);
     border: 1px solid rgba(145, 227, 253, 0.3);
   }
 
@@ -91,7 +89,7 @@ export const sharedStyles = css`
 
   button.link {
     background: transparent;
-    color: var(--primary-color);
+    color: var(--ac-primary-color);
     text-decoration: none;
     height: auto;
     padding: 12px 24px;
@@ -125,7 +123,7 @@ export const sharedStyles = css`
   }
 
   input:focus {
-    border-color: var(--primary-color);
+    border-color: var(--ac-primary-color);
     background: rgba(145, 227, 253, 0.1);
   }
 
@@ -142,7 +140,7 @@ export const sharedStyles = css`
   .container {
     display: flex;
     flex-direction: column;
-    gap: 24px;
+    gap: 30px;
   }
 
   .button-row {

@@ -44,7 +44,7 @@ export class HostingView extends LitElement {
     }
 
     a {
-      color: var(--primary-color);
+      color: var(--ac-primary-color);
       text-decoration: underline;
     }
 

@@ -121,7 +121,7 @@ export class RequestCapability extends LitElement {
                 <div class="dialog__connect-check"></div>
                 <div class="dialog__connect-ad4m">
                   <svg viewBox="0 0 100 100" width="60" height="60">
-                    <circle cx="50" cy="50" r="45" fill="var(--primary-color)" />
+                    <circle cx="50" cy="50" r="45" fill="var(--ac-primary-color)" />
                     <text
                       x="50"
                       y="50"

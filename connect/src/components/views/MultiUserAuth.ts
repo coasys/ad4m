@@ -30,7 +30,7 @@ export class MultiUserAuth extends LitElement {
     }
 
     p strong {
-      color: var(--primary-color);
+      color: var(--ac-primary-color);
       font-weight: 600;
     }
 
