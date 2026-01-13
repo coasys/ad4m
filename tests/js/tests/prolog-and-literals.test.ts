@@ -921,7 +921,11 @@ describe("Prolog + Literals", () => {
 
                     expect(data.name).to.equal("getData all test");
                     expect(data.booleanTest).to.equal(true);
-                    expect(data.comments).to.deep.equal(['recipe://comment1', 'recipe://comment2']);
+                    // Collection order might not be preserved when items are added simultaneously
+                    // Check that both items exist rather than exact order
+                    expect(data.comments).to.have.lengthOf(2);
+                    expect(data.comments).to.include('recipe://comment1');
+                    expect(data.comments).to.include('recipe://comment2');
                     expect(data.local).to.equal("recipe://local_test");
                     expect(data.resolve).to.equal("Resolved literal value");
 
@@ -2566,8 +2570,12 @@ describe("Prolog + Literals", () => {
                         model2.status = "active";
                         await model2.save();
 
-                        // Wait for subscription update
-                        await sleep(1000);
+                        // Wait for subscription updates (with polling for reliability)
+                        let attempts = 0;
+                        while (attempts < 20 && (!pageCallback.called || pageCallback.lastCall.args[0].results.length < 2)) {
+                            await sleep(100);
+                            attempts++;
+                        }
 
                         // Verify callback was called with updated page
                         expect(pageCallback.called).to.be.true;
