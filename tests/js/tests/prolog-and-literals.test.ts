@@ -2820,7 +2820,8 @@ describe("Prolog + Literals", () => {
 
     })
 
-    describe('Embedding cache', () => {
+    // skipped because only applies to prolog-pooled moded
+    describe.skip('Embedding cache', () => {
         let perspective: PerspectiveProxy | null = null;
         const EMBEDDING_LANG = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
 
