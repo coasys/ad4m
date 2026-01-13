@@ -433,7 +433,26 @@ describe("Prolog + Literals", () => {
 
             it("can deal with properties that resolve the URI and create Expressions", async () => {
                 let todos = await Todo.all(perspective!)
-                let todo = todos[0]
+                // Find a todo without a title (to avoid data contamination from other tests)
+                let todo = null;
+                for (const t of todos) {
+                    const title = await t.title
+                    if (title === undefined || title === null || title === "") {
+                        todo = t;
+                        break;
+                    }
+                }
+
+                if (!todo) {
+                    // If all todos have titles, use the first one and clear its title
+                    todo = todos[0]
+                    // @ts-ignore
+                    const existingLinks = await perspective!.get(new LinkQuery({source: todo.baseExpression, predicate: "todo://has_title"}))
+                    for (const link of existingLinks) {
+                        await perspective!.remove(link)
+                    }
+                }
+
                 expect(await todo.title).to.be.undefined
 
                 // @ts-ignore
