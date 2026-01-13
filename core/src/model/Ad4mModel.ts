@@ -830,6 +830,7 @@ export class Ad4mModel {
         // Process collections
         for (const [collName, collMeta] of Object.entries(metadata.collections)) {
           const matching = links.filter((l: any) => l.predicate === collMeta.predicate);
+          // Links are already sorted by timestamp ASC from the query, so map preserves order
           (this as any)[collName] = matching.map((l: any) => l.target);
         }
 
