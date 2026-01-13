@@ -64,6 +64,7 @@ pub struct LocalConductorConfig {
     pub use_mdns: bool,
     pub proxy_url: String,
     pub bootstrap_url: String,
+    pub relay_url: Option<String>,
     pub app_port: u16,
 }
 
@@ -433,6 +434,10 @@ impl HolochainService {
                 network_config.signal_url = Url2::parse(local_config.proxy_url.as_str());
             } else {
                 network_config.signal_url = Url2::parse("ws://relay.ad4m.dev:4433");
+            }
+
+            if let Some(relay_url) = local_config.relay_url {
+                network_config.relay_url = Url2::parse(relay_url.as_str());
             }
 
             //if local_config.use_local_proxy {

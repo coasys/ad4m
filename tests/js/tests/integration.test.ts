@@ -89,6 +89,7 @@ describe("Integration tests", function () {
     let proxyUrl: string | null = null;
     let bootstrapUrl: string | null = null;
     let localServicesProcess: ChildProcess | null = null;
+    let relayUrl: string | null = null;
 
     before(async () => {    
         if(!fs.existsSync(TEST_DIR)) {
@@ -103,9 +104,10 @@ describe("Integration tests", function () {
         proxyUrl = localServices.proxyUrl;
         bootstrapUrl = localServices.bootstrapUrl;
         localServicesProcess = localServices.process;
+        relayUrl = localServices.relayUrl;
 
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
-          gqlPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!);
+          gqlPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!, relayUrl!);
 
         testContext.alice = new Ad4mClient(apolloClient(gqlPort))
         testContext.aliceCore = executorProcess
@@ -150,7 +152,7 @@ describe("Integration tests", function () {
             fs.mkdirSync(bobAppDataPath)
 
           bobExecutorProcess = await startExecutor(bobAppDataPath, bobBootstrapSeedPath,
-            bobGqlPort, bobHcAdminPort, bobHcAppPort, false, undefined, proxyUrl!, bootstrapUrl!);
+            bobGqlPort, bobHcAdminPort, bobHcAppPort, false, undefined, proxyUrl!, bootstrapUrl!, relayUrl!);
 
           testContext.bob = new Ad4mClient(apolloClient(bobGqlPort))
           testContext.bobCore = bobExecutorProcess
