@@ -71,7 +71,7 @@ export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bo
                     const address = match[1];
                     relayPort = address.split(':')[1];
                     console.log("Iroh Relay Port: ", relayPort);
-                    relayUrl = `https://127.0.0.1:${relayPort}`;
+                    relayUrl = `http://127.0.0.1:${relayPort}`;
                     console.log("Relay URL: ", relayUrl);
                 }
             }
