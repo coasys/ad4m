@@ -13,6 +13,7 @@ import { AIClient } from "../ai/AIClient";
 import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
 import { gql } from "@apollo/client/core";
 import { AllInstancesResult } from "../model/Ad4mModel";
+import { escapeSurrealString } from "../utils";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
@@ -1084,16 +1085,24 @@ export class PerspectiveProxy {
         // Get metadata from SDNA using Prolog metaprogramming
         const metadata = await this.getSubjectClassMetadataFromSDNA(className);
         if (!metadata) {
-            return false;
+            // Fallback to Prolog check if SDNA metadata isn't available
+            // This handles cases where classes exist in Prolog but not in SDNA
+            try {
+                const escapedClassName = className.replace(/"/g, '\\"');
+                const escapedExpression = expression.replace(/"/g, '\\"');
+                const result = await this.infer(`subject_class("${escapedClassName}", C), instance(C, "${escapedExpression}")`);
+                return result && result.length > 0;
+            } catch (e) {
+                console.warn(`Failed to check instance via Prolog for class ${className}:`, e);
+                return false;
+            }
         }
 
         // If no required triples, any expression with links is an instance
         if (metadata.requiredTriples.length === 0) {
-            console.log("no required triples, checking surrealDB");
-            const checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${expression}'`;
-            console.log("checkQuery", checkQuery);
+            const escapedExpression = escapeSurrealString(expression);
+            const checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${escapedExpression}'`;
             const result = await this.querySurrealDB(checkQuery);
-            console.log("result", result);
             const count = result[0]?.count ?? 0;
             const countValue = typeof count === 'object' && count?.Int !== undefined ? count.Int : count;
             return countValue > 0;
@@ -1101,18 +1110,18 @@ export class PerspectiveProxy {
 
         // Check if the expression has all required triples (predicate + optional exact target)
         for (const triple of metadata.requiredTriples) {
-            console.log("checking triple", triple);
+            const escapedExpression = escapeSurrealString(expression);
+            const escapedPredicate = escapeSurrealString(triple.predicate);
             let checkQuery: string;
             if (triple.target) {
                 // Flag: must match both predicate AND exact target value
-                checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${expression}' AND predicate = '${triple.predicate}' AND out.uri = '${triple.target}'`;
+                const escapedTarget = escapeSurrealString(triple.target);
+                checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${escapedExpression}' AND predicate = '${escapedPredicate}' AND out.uri = '${escapedTarget}'`;
             } else {
                 // Property: just check predicate exists
-                checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${expression}' AND predicate = '${triple.predicate}'`;
+                checkQuery = `SELECT count() AS count FROM link WHERE in.uri = '${escapedExpression}' AND predicate = '${escapedPredicate}'`;
             }
-            console.log("checkQuery", checkQuery);
             const result = await this.querySurrealDB(checkQuery);
-            console.log("result", result);
 
             if (!result || result.length === 0) {
                 return false;
@@ -1337,29 +1346,25 @@ export class PerspectiveProxy {
         properties: Map<string, { predicate: string, resolveLanguage?: string }>,
         collections: Map<string, { predicate: string }>
     }): string {
-        console.log("generateSurrealInstanceQuery called with requiredTriples:", metadata.requiredTriples);
-
         if (metadata.requiredTriples.length === 0) {
             // No required triples - any node with links is an instance
-            const query = `SELECT DISTINCT uri AS base FROM node WHERE count(->link) > 0`;
-            console.log("Generated query (no required triples):", query);
-            return query;
+            return `SELECT DISTINCT uri AS base FROM node WHERE count(->link) > 0`;
         }
 
         // Generate WHERE conditions for each required triple (predicate + optional exact target)
         const whereConditions = metadata.requiredTriples.map(triple => {
+            const escapedPredicate = escapeSurrealString(triple.predicate);
             if (triple.target) {
                 // Flag: must match both predicate AND exact target value
-                return `count(->link[WHERE predicate = '${triple.predicate}' AND out.uri = '${triple.target}']) > 0`;
+                const escapedTarget = escapeSurrealString(triple.target);
+                return `count(->link[WHERE predicate = '${escapedPredicate}' AND out.uri = '${escapedTarget}']) > 0`;
             } else {
                 // Property: just check predicate exists
-                return `count(->link[WHERE predicate = '${triple.predicate}']) > 0`;
+                return `count(->link[WHERE predicate = '${escapedPredicate}']) > 0`;
             }
         }).join(' AND ');
 
-        const query = `SELECT uri AS base FROM node WHERE ${whereConditions}`;
-        console.log("Generated query:", query);
-        return query;
+        return `SELECT uri AS base FROM node WHERE ${whereConditions}`;
     }
 
     /**
@@ -1377,7 +1382,9 @@ export class PerspectiveProxy {
             return undefined;
         }
 
-        const query = `SELECT out.uri AS value FROM link WHERE in.uri = '${baseExpression}' AND predicate = '${propMeta.predicate}' LIMIT 1`;
+        const escapedBaseExpression = escapeSurrealString(baseExpression);
+        const escapedPredicate = escapeSurrealString(propMeta.predicate);
+        const query = `SELECT out.uri AS value FROM link WHERE in.uri = '${escapedBaseExpression}' AND predicate = '${escapedPredicate}' LIMIT 1`;
         const result = await this.querySurrealDB(query);
 
         if (!result || result.length === 0) {
@@ -1418,7 +1425,9 @@ export class PerspectiveProxy {
             return [];
         }
 
-        const query = `SELECT out.uri AS value, timestamp FROM link WHERE in.uri = '${baseExpression}' AND predicate = '${collMeta.predicate}' ORDER BY timestamp ASC`;
+        const escapedBaseExpression = escapeSurrealString(baseExpression);
+        const escapedPredicate = escapeSurrealString(collMeta.predicate);
+        const query = `SELECT out.uri AS value, timestamp FROM link WHERE in.uri = '${escapedBaseExpression}' AND predicate = '${escapedPredicate}' ORDER BY timestamp ASC`;
         const result = await this.querySurrealDB(query);
 
         if (!result || result.length === 0) {
@@ -1427,20 +1436,15 @@ export class PerspectiveProxy {
 
         let values = result.map(r => r.value).filter(v => v !== "" && v !== '');
 
-        console.log(`getCollectionValuesViaSurreal: base="${baseExpression}", collection="${collectionName}", predicate="${collMeta.predicate}", found ${values.length} values:`, values);
-
         // Apply instance filter if present
         if (collMeta.instanceFilter) {
-            console.log(`  Applying instance filter "${collMeta.instanceFilter}" to collection "${collectionName}"`);
             const filteredValues = [];
             for (const value of values) {
                 const isInstance = await this.isSubjectInstance(value, collMeta.instanceFilter);
-                console.log(`    Checking if "${value}" is instance of "${collMeta.instanceFilter}": ${isInstance}`);
                 if (isInstance) {
                     filteredValues.push(value);
                 }
             }
-            console.log(`  After filtering: ${filteredValues.length} values`);
             return filteredValues;
         }
 

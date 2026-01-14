@@ -3,6 +3,7 @@ import { Link } from "../links/Links";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomPrologAtom, PropertyOptions, CollectionOptions, ModelOptions } from "./decorators";
 import { singularToPlural, pluralToSingular, propertyNameToSetterName, collectionToAdderName, collectionToRemoverName, collectionToSetterName } from "./util";
+import { escapeSurrealString } from "../utils";
 
 // JSON Schema type definitions
 interface JSONSchemaProperty {
@@ -435,29 +436,6 @@ export class Ad4mModel {
     }
 
     return classCache[perspectiveID];
-  }
-
-  /**
-   * Escapes a string for safe insertion within single-quoted SurrealQL strings.
-   * 
-   * @description
-   * Used when building query strings where the value needs to be placed inside
-   * existing single quotes. Prevents SQL injection by escaping special characters.
-   * Unlike formatSurrealValue(), this does NOT add surrounding quotes.
-   * 
-   * @param value - The string to escape
-   * @returns The escaped string (without surrounding quotes)
-   * 
-   * @private
-   */
-  private static escapeSurrealString(value: string): string {
-    return value
-      .replace(/\\/g, '\\\\')   // Backslash -> \\
-      .replace(/'/g, "\\'")      // Single quote -> \'
-      .replace(/"/g, '\\"')      // Double quote -> \"
-      .replace(/\n/g, '\\n')     // Newline -> \n
-      .replace(/\r/g, '\\r')     // Carriage return -> \r
-      .replace(/\t/g, '\\t');    // Tab -> \t
   }
 
   /**
@@ -959,11 +937,11 @@ export class Ad4mModel {
         // For flag properties, also filter by the target value
         if (propMeta.flag && propMeta.initial) {
           graphTraversalFilters.push(
-            `count(->link[WHERE perspective = $perspective AND predicate = '${this.escapeSurrealString(propMeta.predicate)}' AND out.uri = '${this.escapeSurrealString(propMeta.initial)}']) > 0`
+            `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
           );
         } else {
           graphTraversalFilters.push(
-            `count(->link[WHERE perspective = $perspective AND predicate = '${this.escapeSurrealString(propMeta.predicate)}']) > 0`
+            `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
           );
         }
       }
@@ -977,11 +955,11 @@ export class Ad4mModel {
           // For flag properties, also filter by the target value
           if (propMeta.flag) {
             graphTraversalFilters.push(
-              `count(->link[WHERE perspective = $perspective AND predicate = '${this.escapeSurrealString(propMeta.predicate)}' AND out.uri = '${this.escapeSurrealString(propMeta.initial)}']) > 0`
+              `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
             );
           } else {
             graphTraversalFilters.push(
-              `count(->link[WHERE perspective = $perspective AND predicate = '${this.escapeSurrealString(propMeta.predicate)}']) > 0`
+              `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
             );
           }
           break; // Just need one defining property
@@ -1102,7 +1080,7 @@ WHERE ${whereConditions.join(' AND ')}
         const propMeta = metadata.properties[propertyName];
         if (!propMeta) continue; // Skip if property not found in metadata
 
-        const predicate = this.escapeSurrealString(propMeta.predicate);
+        const predicate = escapeSurrealString(propMeta.predicate);
         // Use fn::parse_literal() for properties with resolveLanguage
         const targetField = propMeta.resolveLanguage === 'literal' ? 'fn::parse_literal(out.uri)' : 'out.uri';
 
@@ -1234,7 +1212,7 @@ WHERE ${whereConditions.join(' AND ')}
         const propMeta = metadata.properties[propertyName];
         if (!propMeta) continue; // Skip if property not found in metadata
         
-        const predicate = this.escapeSurrealString(propMeta.predicate);
+        const predicate = escapeSurrealString(propMeta.predicate);
         // Use fn::parse_literal() for properties with resolveLanguage
         const targetField = propMeta.resolveLanguage === 'literal' ? 'fn::parse_literal(target)' : 'target';
         
@@ -1310,7 +1288,7 @@ WHERE ${whereConditions.join(' AND ')}
       if (!propMeta) continue; // Skip if not found
       
       // Reference source directly since we're selecting from link table
-      const escapedPredicate = this.escapeSurrealString(propMeta.predicate);
+      const escapedPredicate = escapeSurrealString(propMeta.predicate);
       fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}' LIMIT 1) AS ${propName}`);
     }
     
@@ -1321,7 +1299,7 @@ WHERE ${whereConditions.join(' AND ')}
       if (!collMeta) continue; // Skip if not found
       
       // Reference source directly since we're selecting from link table
-      const escapedPredicate = this.escapeSurrealString(collMeta.predicate);
+      const escapedPredicate = escapeSurrealString(collMeta.predicate);
       fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}') AS ${collName}`);
     }
     
@@ -1348,7 +1326,7 @@ WHERE ${whereConditions.join(' AND ')}
       if (!propMeta) continue; // Skip if not found
       
       // Use array::first to get the first target value for this predicate
-      const escapedPredicate = this.escapeSurrealString(propMeta.predicate);
+      const escapedPredicate = escapeSurrealString(propMeta.predicate);
       fields.push(`array::first(target[WHERE predicate = '${escapedPredicate}']) AS ${propName}`);
     }
     
@@ -1359,7 +1337,7 @@ WHERE ${whereConditions.join(' AND ')}
       if (!collMeta) continue; // Skip if not found
       
       // Use array filtering to get all target values for this predicate
-      const escapedPredicate = this.escapeSurrealString(collMeta.predicate);
+      const escapedPredicate = escapeSurrealString(collMeta.predicate);
       fields.push(`target[WHERE predicate = '${escapedPredicate}'] AS ${collName}`);
     }
     
