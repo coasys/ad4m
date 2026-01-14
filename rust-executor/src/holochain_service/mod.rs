@@ -427,17 +427,18 @@ impl HolochainService {
             //if local_config.use_bootstrap {
             //    network_config.bootstrap_url = Url2::parse(local_config.bootstrap_url.as_str());
             //} else {
-            //    network_config.bootstrap_url = Url2::parse("http://relay.ad4m.dev:4433");
+                network_config.bootstrap_url = Url2::parse("http://relay.ad4m.dev:4444");
             //}
 
             //if local_config.use_proxy {
             //    network_config.signal_url = Url2::parse(local_config.proxy_url.as_str());
             //} else {
-            //    network_config.signal_url = Url2::parse("ws://relay.ad4m.dev:4433");
+                network_config.signal_url = Url2::parse("ws://relay.ad4m.dev:4444");
             //}
 
             //if let Some(relay_url) = local_config.relay_url {
-            //    network_config.relay_url = Url2::parse(relay_url.as_str());
+                network_config.relay_url = Url2::parse("http://relay.ad4m.dev:4444/relay");
+
             //}
 
             //network_config.relay_url = Url2::parse("https://dev-test-bootstrap2-iroh-relay.holochain.org");
