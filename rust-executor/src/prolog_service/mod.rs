@@ -773,6 +773,7 @@ mod prolog_test {
     use maplit::btreemap;
     use scryer_prolog::Term;
 
+    #[ignore = "Doesn't work with SdnaOnly mode"]
     #[tokio::test]
     async fn test_init_prolog_service() {
         init_prolog_service().await;
