@@ -440,29 +440,29 @@ impl HolochainService {
             //    network_config.relay_url = Url2::parse(relay_url.as_str());
             //}
 
-            network_config.relay_url = Url2::parse("https://dev-test-bootstrap2-iroh-relay.holochain.org");
+            //network_config.relay_url = Url2::parse("https://dev-test-bootstrap2-iroh-relay.holochain.org");
 
             //if local_config.use_local_proxy {
-            network_config.advanced = Some(serde_json::json!({
-                "tx5Transport": {
-                    "signalAllowPlainText": true,
-                }
-            }));
-            //}
+            // network_config.advanced = Some(serde_json::json!({
+            //     "tx5Transport": {
+            //         "signalAllowPlainText": true,
+            //     }
+            // }));
+            // //}
 
-            network_config.webrtc_config = Some(serde_json::json!({
-                "iceServers": [
-                    {"urls": ["stun:stun.cloudflare.com:3478"]},
-                    {"urls": ["stun:stun.l.google.com:19302"]},
-                    {
-                        "urls": [
-                            "stun:relay.ad4m.dev:3478",
-                        ],
-                        "username": "openrelay",
-                        "credential": "openrelay",
-                    }
-                ]
-            }));
+            // network_config.webrtc_config = Some(serde_json::json!({
+            //     "iceServers": [
+            //         {"urls": ["stun:stun.cloudflare.com:3478"]},
+            //         {"urls": ["stun:stun.l.google.com:19302"]},
+            //         {
+            //             "urls": [
+            //                 "stun:relay.ad4m.dev:3478",
+            //             ],
+            //             "username": "openrelay",
+            //             "credential": "openrelay",
+            //         }
+            //     ]
+            // }));
 
             log::info!("Network config: {:#?}", network_config);
 
