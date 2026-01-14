@@ -11500,8 +11500,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_api"
 version = "0.4.0-dev.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d238cf93e1df4e89016ed527cc7f5cb0e3394c6a6a125d2057aa6b3561d084b3"
+source = "git+https://github.com/lucksus/kitsune2.git?branch=debug-logs#a95bd211406c83dde702cfa9979aa2bef98f66fc"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -11616,8 +11615,7 @@ dependencies = [
 [[package]]
 name = "kitsune2_transport_iroh"
 version = "0.4.0-dev.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83152c8c69f2038ce39710bb15e4e779cd69dcb93a9226f3b703d7aa780c20c2"
+source = "git+https://github.com/lucksus/kitsune2.git?branch=debug-logs#a95bd211406c83dde702cfa9979aa2bef98f66fc"
 dependencies = [
  "bytes",
  "iroh",
