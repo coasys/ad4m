@@ -440,6 +440,8 @@ impl HolochainService {
             //    network_config.relay_url = Url2::parse(relay_url.as_str());
             //}
 
+            network_config.relay_url = Url2::parse("https://dev-test-bootstrap2-iroh-relay.holochain.org");
+
             //if local_config.use_local_proxy {
             network_config.advanced = Some(serde_json::json!({
                 "tx5Transport": {
