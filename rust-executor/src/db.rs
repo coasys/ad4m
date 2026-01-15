@@ -1173,6 +1173,43 @@ impl Ad4mDb {
         Ok(links?)
     }
 
+    pub fn get_links_by_predicate(
+        &self,
+        perspective_uuid: &str,
+        predicate: &str,
+    ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND predicate = ?2 ORDER BY timestamp, source, target, author",
+        )?;
+        let link_iter = stmt.query_map(params![perspective_uuid, predicate], |row| {
+            let status: LinkStatus =
+                serde_json::from_str(&row.get::<_, String>(8)?).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+            let link_expression = LinkExpression {
+                data: Link {
+                    source: row.get(1)?,
+                    predicate: row.get(2)?,
+                    target: row.get(3)?,
+                },
+                proof: ExpressionProof {
+                    signature: row.get(6)?,
+                    key: row.get(7)?,
+                },
+                author: row.get(4)?,
+                timestamp: row.get(5)?,
+                status: Some(status.clone()),
+            };
+            Ok((link_expression, status))
+        })?;
+        let links: Result<Vec<_>, _> = link_iter.collect();
+        Ok(links?)
+    }
+
     pub fn add_pending_diff(
         &self,
         perspective_uuid: &str,
@@ -3039,6 +3076,29 @@ mod tests {
 
         let result = db.get_links_by_target(&p_uuid, &link1.data.target).unwrap();
         assert_eq!(result, vec![(link1, LinkStatus::Shared)]);
+    }
+
+    #[test]
+    fn can_get_links_by_predicate() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let p_uuid = Uuid::new_v4().to_string();
+
+        // Create two links with different predicates
+        let mut link1 = construct_dummy_link_expression(LinkStatus::Shared);
+        link1.data.predicate = Some("predicate1".to_string());
+        db.add_link(&p_uuid, &link1, &LinkStatus::Shared).unwrap();
+
+        let mut link2 = construct_dummy_link_expression(LinkStatus::Shared);
+        link2.data.predicate = Some("predicate2".to_string());
+        db.add_link(&p_uuid, &link2, &LinkStatus::Shared).unwrap();
+
+        // Query by predicate1 should only return link1
+        let result = db.get_links_by_predicate(&p_uuid, "predicate1").unwrap();
+        assert_eq!(result, vec![(link1, LinkStatus::Shared)]);
+
+        // Query by predicate2 should only return link2
+        let result = db.get_links_by_predicate(&p_uuid, "predicate2").unwrap();
+        assert_eq!(result, vec![(link2, LinkStatus::Shared)]);
     }
 
     #[test]

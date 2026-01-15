@@ -1432,14 +1432,7 @@ impl PerspectiveInstance {
             } else if let Some(target) = &query.target {
                 Ad4mDb::with_global_instance(|db| db.get_links_by_target(&uuid, target))?
             } else if let Some(predicate) = &query.predicate {
-                Ad4mDb::with_global_instance(|db| {
-                    Ok::<Vec<(LinkExpression, LinkStatus)>, AnyError>(
-                        db.get_all_links(&uuid)?
-                            .into_iter()
-                            .filter(|(link, _)| link.data.predicate.as_ref() == Some(predicate))
-                            .collect::<Vec<(LinkExpression, LinkStatus)>>(),
-                    )
-                })?
+                Ad4mDb::with_global_instance(|db| db.get_links_by_predicate(&uuid, predicate))?
             } else {
                 vec![]
             };
