@@ -414,6 +414,19 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Escapes special regex characters in a string to prevent ReDoS attacks
+     * and regex injection when building dynamic regular expressions.
+     * 
+     * @param str - The string to escape
+     * @returns The escaped string safe for use in RegExp constructor
+     * 
+     * @private
+     */
+    private escapeRegExp(str: string): string {
+        return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    /**
      * Executes a set of actions on an expression with optional parameters.
      * Used internally by Social DNA flows and subject class operations.
      * 
@@ -1173,8 +1186,9 @@ export class PerspectiveProxy {
     } | null> {
         try {
             // Get SDNA code from perspective - it's stored as a link
+            // Use canonical Literal.from() to construct the source URL
             const sdnaLinks = await this.get(new LinkQuery({
-                source: `literal://string:${className}`,
+                source: Literal.from(className).toUrl(),
                 predicate: "ad4m://sdna"
             }));
 
@@ -1200,11 +1214,15 @@ export class PerspectiveProxy {
 
             // Parse the instance rule from the SDNA code
             // Format: instance(c, Base) :- triple(Base, "pred1", _), triple(Base, "pred2", "exact_value").
-            const instanceRuleMatch = sdnaCode.match(/instance\([^,]+,\s*\w+\)\s*:-\s*(.+?)\./s);
+            // Use a more robust pattern that handles complex rule bodies
+            // Match from "instance(" to the closing "." using non-greedy matching
+            const instanceRulePattern = /instance\([^)]+\)\s*:-\s*([^.]+)\./g;
+            let instanceRuleMatch;
+            let foundInstanceRule = false;
 
-            if (instanceRuleMatch) {
+            while ((instanceRuleMatch = instanceRulePattern.exec(sdnaCode)) !== null) {
+                foundInstanceRule = true;
                 const ruleBody = instanceRuleMatch[1];
-                console.log("instance rule body:", ruleBody);
 
                 // Extract all triple(Base, "predicate", Target) patterns
                 // Match both: triple(Base, "pred", _) and triple(Base, "pred", "value")
@@ -1215,15 +1233,15 @@ export class PerspectiveProxy {
                     const predicate = match[1];
                     const target = match[2]; // undefined if matched "_"
                     requiredTriples.push({ predicate, target });
-                    console.log(`Extracted triple: predicate="${predicate}", target="${target}"`);
                 }
-            } else {
+            }
+
+            if (!foundInstanceRule) {
                 console.warn(`No instance rule found in SDNA for ${className}`);
             }
 
             // For backward compatibility, also maintain requiredPredicates array
             const requiredPredicates = requiredTriples.map(t => t.predicate);
-            console.log("extracted requiredTriples:", requiredTriples);
 
             // Extract property metadata
             const properties = new Map<string, { predicate: string, resolveLanguage?: string }>();
@@ -1248,7 +1266,9 @@ export class PerspectiveProxy {
                     // If no setter, try to extract from SDNA property_getter Prolog code
                     if (!predicate) {
                         // Parse the SDNA code for property_getter definition
-                        const getterMatch = sdnaCode.match(new RegExp(`property_getter\\([^,]+,\\s*[^,]+,\\s*"${propName}"[^)]*\\)\\s*:-\\s*triple\\([^,]+,\\s*"([^"]+)"`));
+                        // Escape propName to prevent regex injection and ReDoS attacks
+                        const escapedPropName = this.escapeRegExp(propName);
+                        const getterMatch = sdnaCode.match(new RegExp(`property_getter\\([^,]+,\\s*[^,]+,\\s*"${escapedPropName}"[^)]*\\)\\s*:-\\s*triple\\([^,]+,\\s*"([^"]+)"`));
                         if (getterMatch) {
                             predicate = getterMatch[1];
                         }
@@ -1289,7 +1309,9 @@ export class PerspectiveProxy {
                     // Format 1 (findall): collection_getter(c, Base, "comments", List) :- findall(C, triple(Base, "todo://comment", C), List).
                     // Format 2 (setof): collection_getter(c, Base, "messages", List) :- setof(Target, (triple(Base, "flux://entry_type", Target), ...), List).
                     // Use a line-based match to avoid capturing multiple collections
-                    const getterLinePattern = new RegExp(`collection_getter\\([^,]+,\\s*[^,]+,\\s*"${collName}"[^)]*\\)\\s*:-[^.]+\\.`);
+                    // Escape collName to prevent regex injection and ReDoS attacks
+                    const escapedCollName = this.escapeRegExp(collName);
+                    const getterLinePattern = new RegExp(`collection_getter\\([^,]+,\\s*[^,]+,\\s*"${escapedCollName}"[^)]*\\)\\s*:-[^.]+\\.`);
                     const getterLineMatch = sdnaCode.match(getterLinePattern);
 
                     if (getterLineMatch) {
@@ -1305,7 +1327,6 @@ export class PerspectiveProxy {
                             if (getterBody.startsWith('(') && getterBody.endsWith(')')) {
                                 getterBody = getterBody.substring(1, getterBody.length - 1);
                             }
-                            console.log(`Collection "${collName}" getter body:`, getterBody);
 
                             // Extract predicate from triple(Base, "predicate", Target)
                             if (!predicate) {
@@ -1319,7 +1340,6 @@ export class PerspectiveProxy {
                             const instanceMatch = getterBody.match(/subject_class\("([^"]+)"/);
                             if (instanceMatch) {
                                 instanceFilter = instanceMatch[1];
-                                console.log(`Collection "${collName}" has instanceFilter: ${instanceFilter}`);
                             }
                         }
                     }
