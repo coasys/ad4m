@@ -424,50 +424,26 @@ impl HolochainService {
 
             let mut network_config = NetworkConfig::default();
 
-            //if local_config.use_bootstrap {
-            //    network_config.bootstrap_url = Url2::parse(local_config.bootstrap_url.as_str());
-            //} else {
+            if local_config.use_bootstrap {
+                network_config.bootstrap_url = Url2::parse(local_config.bootstrap_url.as_str());
+            } else {
                 network_config.bootstrap_url = Url2::parse("http://relay.ad4m.dev:4433");
-            //}
+            }
 
-            //if local_config.use_proxy {
-            //    network_config.signal_url = Url2::parse(local_config.proxy_url.as_str());
-            //} else {
+            if local_config.use_proxy {
+                network_config.signal_url = Url2::parse(local_config.proxy_url.as_str());
+            } else {
                 network_config.signal_url = Url2::parse("ws://relay.ad4m.dev:4433");
-            //}
+            }
 
-            //if let Some(relay_url) = local_config.relay_url {
-                network_config.relay_url = Url2::parse("https://use1-1.relay.n0.iroh-canary.iroh.link./");
-
-            //}
+            if let Some(relay_url) = local_config.relay_url {
+                network_config.relay_url = Url2::parse(relay_url.as_str());
+            } else {
+                network_config.relay_url =
+                    Url2::parse("https://use1-1.relay.n0.iroh-canary.iroh.link./");
+            }
 
             network_config.mem_bootstrap = false;
-
-            //network_config.relay_url = Url2::parse("https://dev-test-bootstrap2-iroh-relay.holochain.org");
-
-            //if local_config.use_local_proxy {
-            // network_config.advanced = Some(serde_json::json!({
-            //     "tx5Transport": {
-            //         "signalAllowPlainText": true,
-            //     }
-            // }));
-            // //}
-
-            // network_config.webrtc_config = Some(serde_json::json!({
-            //     "iceServers": [
-            //         {"urls": ["stun:stun.cloudflare.com:3478"]},
-            //         {"urls": ["stun:stun.l.google.com:19302"]},
-            //         {
-            //             "urls": [
-            //                 "stun:relay.ad4m.dev:3478",
-            //             ],
-            //             "username": "openrelay",
-            //             "credential": "openrelay",
-            //         }
-            //     ]
-            // }));
-
-            log::info!("Network config: {:#?}", network_config);
 
             config.network = network_config;
 
