@@ -110,6 +110,12 @@ pub fn is_sdna_link(link: &Link) -> bool {
         .contains(&link.predicate.as_deref().unwrap_or(""))
 }
 
+/// Returns true if the link is SDNA-related (either a declaration or code link)
+/// This includes both `is_sdna_link` (declarations) and links with predicate "ad4m://sdna" (code)
+pub fn is_sdna_related_link(link: &Link) -> bool {
+    is_sdna_link(link) || link.predicate.as_deref() == Some("ad4m://sdna")
+}
+
 /// Returns the JSON parser Prolog code as a string
 /// This is used both in production (get_static_infrastructure_facts) and in tests
 pub fn get_json_parser_code() -> &'static str {

@@ -1379,6 +1379,46 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Helper function to efficiently fetch only SDNA-related links from the database
+    /// This makes two targeted queries instead of fetching all links:
+    /// 1. Links with source == "ad4m://self" (SDNA declarations)
+    /// 2. Links with predicate == "ad4m://sdna" (SDNA code)
+    async fn get_sdna_links_local(&self) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
+        // Query 1: Get all links from ad4m://self (SDNA declarations)
+        let self_links = self
+            .get_links_local(&LinkQuery {
+                source: Some("ad4m://self".to_string()),
+                ..Default::default()
+            })
+            .await?;
+
+        // Query 2: Get all links with predicate ad4m://sdna (SDNA code)
+        let sdna_code_links = self
+            .get_links_local(&LinkQuery {
+                predicate: Some("ad4m://sdna".to_string()),
+                ..Default::default()
+            })
+            .await?;
+
+        // Combine both result sets (using a HashSet to avoid duplicates)
+        let mut seen = std::collections::HashSet::new();
+        let mut all_sdna_links = Vec::new();
+
+        for link in self_links.into_iter().chain(sdna_code_links) {
+            let key = (
+                link.0.data.source.clone(),
+                link.0.data.predicate.clone(),
+                link.0.data.target.clone(),
+                link.0.author.clone(),
+            );
+            if seen.insert(key) {
+                all_sdna_links.push(link);
+            }
+        }
+
+        Ok(all_sdna_links)
+    }
+
     async fn get_links_local(
         &self,
         query: &LinkQuery,
@@ -1817,8 +1857,8 @@ impl PerspectiveInstance {
         context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
-            PrologMode::Simple | PrologMode::SdnaOnly => {
-                // Simple/SdnaOnly mode: One engine per perspective, lazy update on query
+            PrologMode::Simple => {
+                // Simple mode: One engine per perspective, lazy update on query
                 let service = get_prolog_service().await;
                 let (perspective_uuid, owner_did, neighbourhood_author) = {
                     let persisted_guard = self.persisted.lock().await;
@@ -1834,6 +1874,39 @@ impl PerspectiveInstance {
                 // Get all links for lazy update
                 let links = self
                     .get_links_local(&LinkQuery::default())
+                    .await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect::<Vec<_>>();
+
+                service
+                    .run_query_simple(
+                        &perspective_uuid,
+                        query,
+                        &links,
+                        neighbourhood_author,
+                        owner_did,
+                    )
+                    .await
+                    .map_err(|e| anyhow!("{}", e))
+            }
+            PrologMode::SdnaOnly => {
+                // SdnaOnly mode: One engine per perspective, only SDNA links
+                let service = get_prolog_service().await;
+                let (perspective_uuid, owner_did, neighbourhood_author) = {
+                    let persisted_guard = self.persisted.lock().await;
+                    let perspective_uuid = persisted_guard.uuid.clone();
+                    let owner_did = persisted_guard.get_primary_owner();
+                    let neighbourhood_author = persisted_guard
+                        .neighbourhood
+                        .as_ref()
+                        .map(|n| n.author.clone());
+                    (perspective_uuid, owner_did, neighbourhood_author)
+                };
+
+                // Get only SDNA-related links from database (efficient query)
+                let links = self
+                    .get_sdna_links_local()
                     .await?
                     .into_iter()
                     .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
@@ -1886,8 +1959,8 @@ impl PerspectiveInstance {
         query: String,
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
-            PrologMode::Simple | PrologMode::SdnaOnly => {
-                // Simple/SdnaOnly mode: Use separate subscription engine
+            PrologMode::Simple => {
+                // Simple mode: Use separate subscription engine
                 let service = get_prolog_service().await;
                 let (perspective_uuid, owner_did, neighbourhood_author) = {
                     let persisted_guard = self.persisted.lock().await;
@@ -1903,6 +1976,39 @@ impl PerspectiveInstance {
                 // Get all links for lazy update
                 let links = self
                     .get_links_local(&LinkQuery::default())
+                    .await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect::<Vec<_>>();
+
+                service
+                    .run_query_subscription_simple(
+                        &perspective_uuid,
+                        query,
+                        &links,
+                        neighbourhood_author,
+                        owner_did,
+                    )
+                    .await
+                    .map_err(|e| anyhow!("{}", e))
+            }
+            PrologMode::SdnaOnly => {
+                // SdnaOnly mode: Use separate subscription engine, only SDNA links
+                let service = get_prolog_service().await;
+                let (perspective_uuid, owner_did, neighbourhood_author) = {
+                    let persisted_guard = self.persisted.lock().await;
+                    let perspective_uuid = persisted_guard.uuid.clone();
+                    let owner_did = persisted_guard.get_primary_owner();
+                    let neighbourhood_author = persisted_guard
+                        .neighbourhood
+                        .as_ref()
+                        .map(|n| n.author.clone());
+                    (perspective_uuid, owner_did, neighbourhood_author)
+                };
+
+                // Get only SDNA-related links from database (efficient query)
+                let links = self
+                    .get_sdna_links_local()
                     .await?
                     .into_iter()
                     .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
@@ -1948,8 +2054,8 @@ impl PerspectiveInstance {
         _context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
-            PrologMode::Simple | PrologMode::SdnaOnly => {
-                // Simple/SdnaOnly mode: Use separate subscription engine (no context-specific pool)
+            PrologMode::Simple => {
+                // Simple mode: Use separate subscription engine (no context-specific pool)
                 let service = get_prolog_service().await;
                 let (perspective_uuid, owner_did, neighbourhood_author) = {
                     let persisted_guard = self.persisted.lock().await;
@@ -1965,6 +2071,39 @@ impl PerspectiveInstance {
                 // Get all links for lazy update
                 let links = self
                     .get_links_local(&LinkQuery::default())
+                    .await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect::<Vec<_>>();
+
+                service
+                    .run_query_subscription_simple(
+                        &perspective_uuid,
+                        query,
+                        &links,
+                        neighbourhood_author,
+                        owner_did,
+                    )
+                    .await
+                    .map_err(|e| anyhow!("{}", e))
+            }
+            PrologMode::SdnaOnly => {
+                // SdnaOnly mode: Use separate subscription engine (no context-specific pool), only SDNA links
+                let service = get_prolog_service().await;
+                let (perspective_uuid, owner_did, neighbourhood_author) = {
+                    let persisted_guard = self.persisted.lock().await;
+                    let perspective_uuid = persisted_guard.uuid.clone();
+                    let owner_did = persisted_guard.get_primary_owner();
+                    let neighbourhood_author = persisted_guard
+                        .neighbourhood
+                        .as_ref()
+                        .map(|n| n.author.clone());
+                    (perspective_uuid, owner_did, neighbourhood_author)
+                };
+
+                // Get only SDNA-related links from database (efficient query)
+                let links = self
+                    .get_sdna_links_local()
                     .await?
                     .into_iter()
                     .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
@@ -2016,8 +2155,8 @@ impl PerspectiveInstance {
     /// uses run_query_sdna
     pub async fn prolog_query_sdna(&self, query: String) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
-            PrologMode::Simple | PrologMode::SdnaOnly => {
-                // In Simple/SdnaOnly mode, route to Simple engine which has SDNA facts
+            PrologMode::Simple => {
+                // In Simple mode, route to Simple engine which has SDNA facts
                 let service = get_prolog_service().await;
                 let (perspective_uuid, owner_did, neighbourhood_author) = {
                     let persisted_guard = self.persisted.lock().await;
@@ -2033,6 +2172,39 @@ impl PerspectiveInstance {
                 // Get links for SDNA fact generation
                 let links = self
                     .get_links_local(&LinkQuery::default())
+                    .await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect::<Vec<_>>();
+
+                service
+                    .run_query_simple(
+                        &perspective_uuid,
+                        query,
+                        &links,
+                        neighbourhood_author,
+                        owner_did,
+                    )
+                    .await
+                    .map_err(|e| anyhow!("{}", e))
+            }
+            PrologMode::SdnaOnly => {
+                // In SdnaOnly mode, route to Simple engine with only SDNA links
+                let service = get_prolog_service().await;
+                let (perspective_uuid, owner_did, neighbourhood_author) = {
+                    let persisted_guard = self.persisted.lock().await;
+                    let perspective_uuid = persisted_guard.uuid.clone();
+                    let owner_did = persisted_guard.get_primary_owner();
+                    let neighbourhood_author = persisted_guard
+                        .neighbourhood
+                        .as_ref()
+                        .map(|n| n.author.clone());
+                    (perspective_uuid, owner_did, neighbourhood_author)
+                };
+
+                // Get only SDNA-related links from database (efficient query)
+                let links = self
+                    .get_sdna_links_local()
                     .await?
                     .into_iter()
                     .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
@@ -2074,8 +2246,8 @@ impl PerspectiveInstance {
         context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
-            PrologMode::Simple | PrologMode::SdnaOnly => {
-                // In Simple/SdnaOnly mode, route to Simple engine (no per-context pools)
+            PrologMode::Simple => {
+                // In Simple mode, route to Simple engine (no per-context pools)
                 // IMPORTANT: Use context user's DID as owner_did so their SDNA links are included
                 let service = get_prolog_service().await;
                 let (perspective_uuid, neighbourhood_author) = {
@@ -2100,6 +2272,48 @@ impl PerspectiveInstance {
                 // Get links for SDNA fact generation
                 let links = self
                     .get_links_local(&LinkQuery::default())
+                    .await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect::<Vec<_>>();
+
+                service
+                    .run_query_simple(
+                        &perspective_uuid,
+                        query,
+                        &links,
+                        neighbourhood_author,
+                        owner_did,
+                    )
+                    .await
+                    .map_err(|e| anyhow!("{}", e))
+            }
+            PrologMode::SdnaOnly => {
+                // In SdnaOnly mode, route to Simple engine (no per-context pools), only SDNA links
+                // IMPORTANT: Use context user's DID as owner_did so their SDNA links are included
+                let service = get_prolog_service().await;
+                let (perspective_uuid, neighbourhood_author) = {
+                    let persisted_guard = self.persisted.lock().await;
+                    let perspective_uuid = persisted_guard.uuid.clone();
+                    let neighbourhood_author = persisted_guard
+                        .neighbourhood
+                        .as_ref()
+                        .map(|n| n.author.clone());
+                    (perspective_uuid, neighbourhood_author)
+                };
+
+                // Use context DID as owner_did for SDNA filtering
+                let owner_did = Some(if let Some(user_email) = &context.user_email {
+                    crate::agent::AgentService::get_user_did_by_email(user_email)?
+                } else {
+                    crate::agent::AgentService::with_global_instance(|service| {
+                        service.did.clone().unwrap_or_default()
+                    })
+                });
+
+                // Get only SDNA-related links from database (efficient query)
+                let links = self
+                    .get_sdna_links_local()
                     .await?
                     .into_iter()
                     .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
