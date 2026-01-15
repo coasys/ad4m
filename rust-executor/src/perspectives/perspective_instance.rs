@@ -792,17 +792,8 @@ impl PerspectiveInstance {
                 .collect(),
         };
 
-        // Update Prolog: subscription engine (immediate) + query engine (lazy)
-        self.spawn_prolog_facts_update(decorated_diff.clone(), None);
-
-        // Mark query engine dirty for lazy update on next query
-        if PROLOG_MODE == PrologMode::Simple {
-            let perspective_uuid = self.persisted.lock().await.uuid.clone();
-            get_prolog_service()
-                .await
-                .mark_dirty(&perspective_uuid)
-                .await;
-        }
+        // Update both Prolog engines: subscription (immediate) + query (lazy)
+        self.update_prolog_engines(decorated_diff.clone()).await;
 
         self.update_surreal_cache(&decorated_diff).await;
         self.pubsub_publish_diff(decorated_diff).await;
@@ -908,17 +899,8 @@ impl PerspectiveInstance {
                 let decorated_diff =
                     DecoratedPerspectiveDiff::from_removals(vec![decorated_link.clone()]);
 
-                // Update Prolog: subscription engine (immediate) + query engine (lazy)
-                self.spawn_prolog_facts_update(decorated_diff.clone(), None);
-
-                // Mark query engine dirty for lazy update on next query
-                if PROLOG_MODE == PrologMode::Simple {
-                    let perspective_uuid = self.persisted.lock().await.uuid.clone();
-                    get_prolog_service()
-                        .await
-                        .mark_dirty(&perspective_uuid)
-                        .await;
-                }
+                // Update both Prolog engines: subscription (immediate) + query (lazy)
+                self.update_prolog_engines(decorated_diff.clone()).await;
 
                 self.update_surreal_cache(&decorated_diff).await;
                 self.pubsub_publish_diff(decorated_diff.clone()).await;
@@ -1042,17 +1024,9 @@ impl PerspectiveInstance {
         let decorated_perspective_diff =
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
-        // Update Prolog: subscription engine (immediate) + query engine (lazy)
-        self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
-
-        // Mark query engine dirty for lazy update on next query
-        if PROLOG_MODE == PrologMode::Simple {
-            let perspective_uuid = self.persisted.lock().await.uuid.clone();
-            get_prolog_service()
-                .await
-                .mark_dirty(&perspective_uuid)
-                .await;
-        }
+        // Update both Prolog engines: subscription (immediate) + query (lazy)
+        self.update_prolog_engines(decorated_perspective_diff.clone())
+            .await;
 
         self.update_surreal_cache(&decorated_perspective_diff).await;
 
@@ -1230,17 +1204,8 @@ impl PerspectiveInstance {
                 vec![decorated_old_link.clone()],
             );
 
-            // Update Prolog: subscription engine (immediate) + query engine (lazy)
-            self.spawn_prolog_facts_update(decorated_diff.clone(), None);
-
-            // Mark query engine dirty for lazy update on next query
-            if PROLOG_MODE == PrologMode::Simple {
-                let perspective_uuid = self.persisted.lock().await.uuid.clone();
-                get_prolog_service()
-                    .await
-                    .mark_dirty(&perspective_uuid)
-                    .await;
-            }
+            // Update both Prolog engines: subscription (immediate) + query (lazy)
+            self.update_prolog_engines(decorated_diff.clone()).await;
 
             self.update_surreal_cache(&decorated_diff).await;
 
@@ -1345,17 +1310,8 @@ impl PerspectiveInstance {
                 Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, link))?;
             }
 
-            // Update Prolog: subscription engine (immediate) + query engine (lazy)
-            self.spawn_prolog_facts_update(decorated_diff.clone(), None);
-
-            // Mark query engine dirty for lazy update on next query
-            if PROLOG_MODE == PrologMode::Simple {
-                let perspective_uuid = self.persisted.lock().await.uuid.clone();
-                get_prolog_service()
-                    .await
-                    .mark_dirty(&perspective_uuid)
-                    .await;
-            }
+            // Update both Prolog engines: subscription (immediate) + query (lazy)
+            self.update_prolog_engines(decorated_diff.clone()).await;
 
             self.update_surreal_cache(&decorated_diff).await;
             self.pubsub_publish_diff(decorated_diff).await;
@@ -1841,6 +1797,97 @@ impl PerspectiveInstance {
     //     .await
     // }
 
+    /// Helper to mark the Prolog engine as dirty (needs update before next query)
+    /// Only applies to Simple/SdnaOnly modes
+    async fn mark_prolog_engine_dirty(&self) {
+        if PROLOG_MODE == PrologMode::Simple {
+            let perspective_uuid = self.persisted.lock().await.uuid.clone();
+            get_prolog_service()
+                .await
+                .mark_dirty(&perspective_uuid)
+                .await;
+        }
+    }
+
+    /// Combined helper: spawns Prolog facts update AND marks query engine as dirty
+    /// This is the common pattern throughout the codebase
+    async fn update_prolog_engines(&self, diff: DecoratedPerspectiveDiff) {
+        // Update subscription engine (immediate via spawned task)
+        self.spawn_prolog_facts_update(diff, None);
+
+        // Mark query engine dirty for lazy update on next query
+        self.mark_prolog_engine_dirty().await;
+    }
+
+    /// Helper for Simple/SdnaOnly modes: extracts perspective metadata, fetches appropriate links,
+    /// and calls the appropriate service method
+    async fn execute_simple_mode_query(
+        &self,
+        query: String,
+        use_subscription_engine: bool,
+    ) -> Result<QueryResolution, AnyError> {
+        let service = get_prolog_service().await;
+
+        // Extract perspective metadata (same for Simple and SdnaOnly)
+        let (perspective_uuid, owner_did, neighbourhood_author) = {
+            let persisted_guard = self.persisted.lock().await;
+            (
+                persisted_guard.uuid.clone(),
+                persisted_guard.get_primary_owner(),
+                persisted_guard
+                    .neighbourhood
+                    .as_ref()
+                    .map(|n| n.author.clone()),
+            )
+        };
+
+        // Fetch links based on mode
+        let links = match PROLOG_MODE {
+            PrologMode::Simple => {
+                // Get all links for Simple mode
+                self.get_links_local(&LinkQuery::default())
+                    .await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect()
+            }
+            PrologMode::SdnaOnly => {
+                // Get only SDNA links for SdnaOnly mode (efficient query)
+                self.get_sdna_links_local()
+                    .await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect()
+            }
+            _ => Vec::new(), // Should never reach here given the callers
+        };
+
+        // Execute the query using the appropriate engine
+        let result = if use_subscription_engine {
+            service
+                .run_query_subscription_simple(
+                    &perspective_uuid,
+                    query,
+                    &links,
+                    neighbourhood_author,
+                    owner_did,
+                )
+                .await
+        } else {
+            service
+                .run_query_simple(
+                    &perspective_uuid,
+                    query,
+                    &links,
+                    neighbourhood_author,
+                    owner_did,
+                )
+                .await
+        };
+
+        result.map_err(|e| anyhow!("{}", e))
+    }
+
     /// Executes a Prolog query with user context - uses context-specific pool
     /// locks the prolog_update_mutex
     /// uses run_query_smart
@@ -1850,71 +1897,8 @@ impl PerspectiveInstance {
         context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
-            PrologMode::Simple => {
-                // Simple mode: One engine per perspective, lazy update on query
-                let service = get_prolog_service().await;
-                let (perspective_uuid, owner_did, neighbourhood_author) = {
-                    let persisted_guard = self.persisted.lock().await;
-                    let perspective_uuid = persisted_guard.uuid.clone();
-                    let owner_did = persisted_guard.get_primary_owner();
-                    let neighbourhood_author = persisted_guard
-                        .neighbourhood
-                        .as_ref()
-                        .map(|n| n.author.clone());
-                    (perspective_uuid, owner_did, neighbourhood_author)
-                };
-
-                // Get all links for lazy update
-                let links = self
-                    .get_links_local(&LinkQuery::default())
-                    .await?
-                    .into_iter()
-                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
-                    .collect::<Vec<_>>();
-
-                service
-                    .run_query_simple(
-                        &perspective_uuid,
-                        query,
-                        &links,
-                        neighbourhood_author,
-                        owner_did,
-                    )
-                    .await
-                    .map_err(|e| anyhow!("{}", e))
-            }
-            PrologMode::SdnaOnly => {
-                // SdnaOnly mode: One engine per perspective, only SDNA links
-                let service = get_prolog_service().await;
-                let (perspective_uuid, owner_did, neighbourhood_author) = {
-                    let persisted_guard = self.persisted.lock().await;
-                    let perspective_uuid = persisted_guard.uuid.clone();
-                    let owner_did = persisted_guard.get_primary_owner();
-                    let neighbourhood_author = persisted_guard
-                        .neighbourhood
-                        .as_ref()
-                        .map(|n| n.author.clone());
-                    (perspective_uuid, owner_did, neighbourhood_author)
-                };
-
-                // Get only SDNA-related links from database (efficient query)
-                let links = self
-                    .get_sdna_links_local()
-                    .await?
-                    .into_iter()
-                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
-                    .collect::<Vec<_>>();
-
-                service
-                    .run_query_simple(
-                        &perspective_uuid,
-                        query,
-                        &links,
-                        neighbourhood_author,
-                        owner_did,
-                    )
-                    .await
-                    .map_err(|e| anyhow!("{}", e))
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                self.execute_simple_mode_query(query, false).await
             }
             PrologMode::Pooled => {
                 // Pooled mode: Use the old pool-based approach
@@ -1952,71 +1936,8 @@ impl PerspectiveInstance {
         query: String,
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
-            PrologMode::Simple => {
-                // Simple mode: Use separate subscription engine
-                let service = get_prolog_service().await;
-                let (perspective_uuid, owner_did, neighbourhood_author) = {
-                    let persisted_guard = self.persisted.lock().await;
-                    let perspective_uuid = persisted_guard.uuid.clone();
-                    let owner_did = persisted_guard.get_primary_owner();
-                    let neighbourhood_author = persisted_guard
-                        .neighbourhood
-                        .as_ref()
-                        .map(|n| n.author.clone());
-                    (perspective_uuid, owner_did, neighbourhood_author)
-                };
-
-                // Get all links for lazy update
-                let links = self
-                    .get_links_local(&LinkQuery::default())
-                    .await?
-                    .into_iter()
-                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
-                    .collect::<Vec<_>>();
-
-                service
-                    .run_query_subscription_simple(
-                        &perspective_uuid,
-                        query,
-                        &links,
-                        neighbourhood_author,
-                        owner_did,
-                    )
-                    .await
-                    .map_err(|e| anyhow!("{}", e))
-            }
-            PrologMode::SdnaOnly => {
-                // SdnaOnly mode: Use separate subscription engine, only SDNA links
-                let service = get_prolog_service().await;
-                let (perspective_uuid, owner_did, neighbourhood_author) = {
-                    let persisted_guard = self.persisted.lock().await;
-                    let perspective_uuid = persisted_guard.uuid.clone();
-                    let owner_did = persisted_guard.get_primary_owner();
-                    let neighbourhood_author = persisted_guard
-                        .neighbourhood
-                        .as_ref()
-                        .map(|n| n.author.clone());
-                    (perspective_uuid, owner_did, neighbourhood_author)
-                };
-
-                // Get only SDNA-related links from database (efficient query)
-                let links = self
-                    .get_sdna_links_local()
-                    .await?
-                    .into_iter()
-                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
-                    .collect::<Vec<_>>();
-
-                service
-                    .run_query_subscription_simple(
-                        &perspective_uuid,
-                        query,
-                        &links,
-                        neighbourhood_author,
-                        owner_did,
-                    )
-                    .await
-                    .map_err(|e| anyhow!("{}", e))
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                self.execute_simple_mode_query(query, true).await
             }
             PrologMode::Pooled => {
                 // Pooled mode: Use the old pool-based approach
@@ -2047,71 +1968,9 @@ impl PerspectiveInstance {
         _context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
-            PrologMode::Simple => {
-                // Simple mode: Use separate subscription engine (no context-specific pool)
-                let service = get_prolog_service().await;
-                let (perspective_uuid, owner_did, neighbourhood_author) = {
-                    let persisted_guard = self.persisted.lock().await;
-                    let perspective_uuid = persisted_guard.uuid.clone();
-                    let owner_did = persisted_guard.get_primary_owner();
-                    let neighbourhood_author = persisted_guard
-                        .neighbourhood
-                        .as_ref()
-                        .map(|n| n.author.clone());
-                    (perspective_uuid, owner_did, neighbourhood_author)
-                };
-
-                // Get all links for lazy update
-                let links = self
-                    .get_links_local(&LinkQuery::default())
-                    .await?
-                    .into_iter()
-                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
-                    .collect::<Vec<_>>();
-
-                service
-                    .run_query_subscription_simple(
-                        &perspective_uuid,
-                        query,
-                        &links,
-                        neighbourhood_author,
-                        owner_did,
-                    )
-                    .await
-                    .map_err(|e| anyhow!("{}", e))
-            }
-            PrologMode::SdnaOnly => {
-                // SdnaOnly mode: Use separate subscription engine (no context-specific pool), only SDNA links
-                let service = get_prolog_service().await;
-                let (perspective_uuid, owner_did, neighbourhood_author) = {
-                    let persisted_guard = self.persisted.lock().await;
-                    let perspective_uuid = persisted_guard.uuid.clone();
-                    let owner_did = persisted_guard.get_primary_owner();
-                    let neighbourhood_author = persisted_guard
-                        .neighbourhood
-                        .as_ref()
-                        .map(|n| n.author.clone());
-                    (perspective_uuid, owner_did, neighbourhood_author)
-                };
-
-                // Get only SDNA-related links from database (efficient query)
-                let links = self
-                    .get_sdna_links_local()
-                    .await?
-                    .into_iter()
-                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
-                    .collect::<Vec<_>>();
-
-                service
-                    .run_query_subscription_simple(
-                        &perspective_uuid,
-                        query,
-                        &links,
-                        neighbourhood_author,
-                        owner_did,
-                    )
-                    .await
-                    .map_err(|e| anyhow!("{}", e))
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                // Note: In Simple/SdnaOnly modes, context is ignored (no context-specific pools)
+                self.execute_simple_mode_query(query, true).await
             }
             PrologMode::Pooled => {
                 // Pooled mode: Use the old pool-based approach with context
@@ -4248,16 +4107,8 @@ impl PerspectiveInstance {
 
             // Update prolog facts once for all changes and wait for completion
             // Update Prolog: subscription engine (immediate) + query engine (lazy)
-            self.spawn_prolog_facts_update(combined_diff.clone(), None);
-
-            // Mark query engine dirty for lazy update on next query
-            if PROLOG_MODE == PrologMode::Simple {
-                let perspective_uuid = self.persisted.lock().await.uuid.clone();
-                get_prolog_service()
-                    .await
-                    .mark_dirty(&perspective_uuid)
-                    .await;
-            }
+            // Update both Prolog engines: subscription (immediate) + query (lazy)
+            self.update_prolog_engines(combined_diff.clone()).await;
 
             self.update_surreal_cache(&combined_diff).await;
 
