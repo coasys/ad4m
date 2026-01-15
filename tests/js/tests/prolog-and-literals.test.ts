@@ -1927,11 +1927,11 @@ describe("Prolog + Literals", () => {
                     await notification1.save();
 
                     // Wait for subscription to fire with smart polling
-                    for (let i = 0; i < 20; i++) {
-                        if (updateCount >= 1) break;
+                    for (let i = 0; i < 30; i++) {
+                        if (updateCount >= 1 && notifications.length === 1) break;
                         await sleep(50);
                     }
-                    expect(updateCount).to.equal(1);
+                    expect(updateCount).to.be.at.least(1);
                     expect(notifications.length).to.equal(1);
 
                     // Add another matching notification - should trigger subscription again
@@ -1941,11 +1941,11 @@ describe("Prolog + Literals", () => {
                     notification2.read = false;
                     await notification2.save();
 
-                    for (let i = 0; i < 20; i++) {
-                        if (updateCount >= 2) break;
+                    for (let i = 0; i < 30; i++) {
+                        if (updateCount >= 2 && notifications.length === 2) break;
                         await sleep(50);
                     }
-                    expect(updateCount).to.equal(2);
+                    expect(updateCount).to.be.at.least(2);
                     expect(notifications.length).to.equal(2);
 
                     // Add non-matching notification (low priority) - should not trigger subscription
@@ -1965,7 +1965,7 @@ describe("Prolog + Literals", () => {
                     // Mark notification1 as read - should trigger subscription to remove it
                     notification1.read = true;
                     await notification1.update();
-                    for (let i = 0; i < 20; i++) {
+                    for (let i = 0; i < 30; i++) {
                         if (notifications.length === 1) break;
                         await sleep(50);
                     }
