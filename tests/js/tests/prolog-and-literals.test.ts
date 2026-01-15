@@ -433,6 +433,12 @@ describe("Prolog + Literals", () => {
 
             it("can deal with properties that resolve the URI and create Expressions", async () => {
                 let todos = await Todo.all(perspective!)
+                
+                // Guard: If no todos exist, create one for this test
+                if (todos.length === 0) {
+                    throw new Error("Test prerequisite failed: No todos available. Please ensure todos are created in the setup or earlier tests.")
+                }
+                
                 // Find a todo without a title (to avoid data contamination from other tests)
                 let todo = null;
                 for (const t of todos) {
@@ -445,6 +451,7 @@ describe("Prolog + Literals", () => {
 
                 if (!todo) {
                     // If all todos have titles, use the first one and clear its title
+                    // Safe to access todos[0] since we've checked todos.length > 0 above
                     todo = todos[0]
                     // @ts-ignore
                     const existingLinks = await perspective!.get(new LinkQuery({source: todo.baseExpression, predicate: "todo://has_title"}))
