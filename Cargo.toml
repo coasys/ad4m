@@ -11,10 +11,15 @@ members = [
 # DEBUG: Using forked kitsune2 with debugging instrumentation and fixed default behavior
 # These patches ensure ad4m uses the fixed kitsune2 that doesn't default to blocking
 kitsune2_api = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
-#kitsune2_core = { git = "https://github.com/lucksus/kitsune2.git", branch = "fix/unexpected-blocked-messages" }
+kitsune2_core = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
+#kitsune2_api = { path = "../../kitsune2/crates/api" }
+#kitsune2_core = { path = "../../kitsune2/crates/core" }
 #kitsune2 = { git = "https://github.com/lucksus/kitsune2.git", branch = "fix/unexpected-blocked-messages" }
 #kitsune2_dht = { git = "https://github.com/lucksus/kitsune2.git", branch = "fix/unexpected-blocked-messages" }
 #kitsune2_gossip = { git = "https://github.com/lucksus/kitsune2.git", branch = "fix/unexpected-blocked-messages" }
 #kitsune2_bootstrap_srv = { git = "https://github.com/lucksus/kitsune2.git", branch = "fix/unexpected-blocked-messages" }
 #kitsune2_bootstrap_client = { git = "https://github.com/lucksus/kitsune2.git", branch = "fix/unexpected-blocked-messages" }
 kitsune2_transport_iroh = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
+#kitsune2_transport_iroh = { path = "../../kitsune2/crates/transport_iroh" }
+kitsune2_bootstrap_client = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
+#kitsune2_bootstrap_client = { path = "../../kitsune2/crates/bootstrap_client" }
