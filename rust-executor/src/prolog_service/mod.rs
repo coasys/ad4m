@@ -131,7 +131,7 @@ impl PrologService {
         // LOCK SCOPE OPTIMIZATION: Acquire write lock ONLY to check state, then release
         let (needs_update, engine_exists) = {
             let engines = self.simple_engines.read().await;
-            
+
             // Check if we need to update (dirty or links changed or first time)
             let needs_update = if PROLOG_MODE == PrologMode::SdnaOnly {
                 // In SdnaOnly mode, only update if SDNA links actually changed
@@ -153,7 +153,7 @@ impl PrologService {
             } else {
                 true // First query = needs init
             };
-            
+
             let engine_exists = engines.contains_key(perspective_id);
             (needs_update, engine_exists)
         }; // Read lock released here
@@ -178,7 +178,7 @@ impl PrologService {
 
                 let mut se = PrologEngine::new();
                 se.spawn().await?; // Expensive async operation - no lock held
-                
+
                 (qe, se)
             } else {
                 // Engines exist, we'll update them - create placeholders for now
@@ -207,7 +207,7 @@ impl PrologService {
 
             // LOCK SCOPE: Acquire write lock ONLY to get mutable engine references
             let mut engines = self.simple_engines.write().await;
-            
+
             // Insert new engines if needed
             if !engine_exists {
                 engines.insert(
@@ -224,17 +224,13 @@ impl PrologService {
 
             // Get mutable reference and move engines out temporarily
             let simple_engine = engines.get_mut(perspective_id).unwrap();
-            
+
             // Move engines out of the struct temporarily
-            let query_engine_to_update = std::mem::replace(
-                &mut simple_engine.query_engine,
-                PrologEngine::new()
-            );
-            let subscription_engine_to_update = std::mem::replace(
-                &mut simple_engine.subscription_engine,
-                PrologEngine::new()
-            );
-            
+            let query_engine_to_update =
+                std::mem::replace(&mut simple_engine.query_engine, PrologEngine::new());
+            let subscription_engine_to_update =
+                std::mem::replace(&mut simple_engine.subscription_engine, PrologEngine::new());
+
             // Release write lock before expensive load operations
             drop(engines);
 
@@ -250,13 +246,13 @@ impl PrologService {
             // LOCK SCOPE: Reacquire write lock to update final state
             let mut engines = self.simple_engines.write().await;
             let simple_engine = engines.get_mut(perspective_id).unwrap();
-            
+
             // Move engines back
             simple_engine.query_engine = query_engine_to_update;
             simple_engine.subscription_engine = subscription_engine_to_update;
-            
+
             simple_engine.dirty = false;
-            
+
             // MEMORY OPTIMIZATION: In SdnaOnly mode, don't store full links
             if PROLOG_MODE == PrologMode::SdnaOnly {
                 simple_engine.current_links = Vec::new(); // Empty - not needed in SdnaOnly mode
