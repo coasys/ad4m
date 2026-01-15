@@ -12,6 +12,7 @@ export interface HolochainConfiguration {
     resourcePath: string
     hcProxyUrl: string,
     hcBootstrapUrl: string,
+    hcRelayUrl?: string,
     adminPort?: number;
     appPort?: number;
     useBootstrap?: boolean,
@@ -113,6 +114,7 @@ export default class HolochainService {
             useMdns: config.useMdns!,
             proxyUrl: config.hcProxyUrl,
             bootstrapUrl: config.hcBootstrapUrl,
+            relayUrl: config.hcRelayUrl,
             appPort: config.appPort!
         } as ConductorConfig);
 

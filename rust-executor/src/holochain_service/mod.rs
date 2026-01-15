@@ -64,6 +64,7 @@ pub struct LocalConductorConfig {
     pub use_mdns: bool,
     pub proxy_url: String,
     pub bootstrap_url: String,
+    pub relay_url: Option<String>,
     pub app_port: u16,
 }
 
@@ -435,27 +436,14 @@ impl HolochainService {
                 network_config.signal_url = Url2::parse("ws://relay.ad4m.dev:4433");
             }
 
-            //if local_config.use_local_proxy {
-            network_config.advanced = Some(serde_json::json!({
-                "tx5Transport": {
-                    "signalAllowPlainText": true,
-                }
-            }));
-            //}
+            if let Some(relay_url) = local_config.relay_url {
+                network_config.relay_url = Url2::parse(relay_url.as_str());
+            } else {
+                network_config.relay_url =
+                    Url2::parse("https://use1-1.relay.n0.iroh-canary.iroh.link./");
+            }
 
-            network_config.webrtc_config = Some(serde_json::json!({
-                "iceServers": [
-                    {"urls": ["stun:stun.cloudflare.com:3478"]},
-                    {"urls": ["stun:stun.l.google.com:19302"]},
-                    {
-                        "urls": [
-                            "stun:relay.ad4m.dev:3478",
-                        ],
-                        "username": "openrelay",
-                        "credential": "openrelay",
-                    }
-                ]
-            }));
+            network_config.mem_bootstrap = false;
 
             config.network = network_config;
 
