@@ -744,27 +744,7 @@ export class Ad4mModel {
 
   private async getData() {
     // Builds an object with the author, timestamp, all properties, & all collections on the Ad4mModel and saves it to the instance
-    const subQueries = [buildAuthorAndTimestampQuery(), buildPropertiesQuery(), buildCollectionsQuery()];
-    const fullQuery = `
-      Base = "${this.#baseExpression}",
-      subject_class("${this.#subjectClassName}", SubjectClass),
-      ${subQueries.join(", ")}
-    `;
-
-    // Try Prolog first
-    try {
-      const result = await this.#perspective.infer(fullQuery);
-      if (result?.[0] && result[0].Properties && result[0].Properties.length > 0) {
-        const { Properties, Collections, Timestamp, Author } = result[0];
-        const values = [...Properties, ...Collections, ["timestamp", Timestamp], ["author", Author]];
-        await Ad4mModel.assignValuesToInstance(this.#perspective, this, values);
-        return this;
-      }
-    } catch (e) {
-      console.log(`Prolog getData failed for ${this.#baseExpression}, falling back to SurrealDB`);
-    }
-
-    // Fallback to SurrealDB (SdnaOnly mode)
+    // Use SurrealDB for data queries
     try {
       const ctor = this.constructor as typeof Ad4mModel;
       const metadata = ctor.getModelMetadata();
