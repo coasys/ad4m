@@ -1596,7 +1596,7 @@ export class PerspectiveProxy {
         return instances
     }
 
-    /** Returns all subject proxies of the given subject class.
+    /** Returns all subject proxies of the given subject class as proxy objects.
      *  @param subjectClass Either a string with the name of the subject class, or an object
      * with the properties of the subject class. In the latter case, all subject classes
      * that match the given properties will be used.
@@ -1611,23 +1611,23 @@ export class PerspectiveProxy {
 
         let instances = []
         for(let className of classes) {
-            //console.log(`getAllSubjectProxies: Processing class ${className}`);
             // Query SDNA for metadata, then query SurrealDB for instances
             const metadata = await this.getSubjectClassMetadataFromSDNA(className);
-            //console.log(`getAllSubjectProxies: Got metadata for ${className}`);
             if (metadata) {
                 const surrealQuery = this.generateSurrealInstanceQuery(metadata);
-                console.log("surrealQuery", surrealQuery);
                 const results = await this.querySurrealDB(surrealQuery);
-                console.log(`getAllSubjectProxies: SurrealDB returned ${results?.length || 0} results`);
-                const newInstance = results.map(r => ({ X: r.base }))
-                console.log("newInstance", newInstance);
-                instances = instances.concat(newInstance);
-            } else {
-                console.warn(`getAllSubjectProxies: No metadata found for ${className}`);
+
+                for (const result of results || []) {
+                    try {
+                        let subject = new Subject(this, result.base, className);
+                        await subject.init();
+                        instances.push(subject as unknown as T);
+                    } catch (e) {
+                        // Skip subjects that fail to initialize
+                    }
+                }
             }
         }
-        //console.log(`getAllSubjectProxies: Returning ${instances.length} proxies`);
         return instances
     }
 
