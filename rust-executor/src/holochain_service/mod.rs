@@ -441,6 +441,8 @@ impl HolochainService {
 
             //}
 
+            network_config.mem_bootstrap = false;
+
             //network_config.relay_url = Url2::parse("https://dev-test-bootstrap2-iroh-relay.holochain.org");
 
             //if local_config.use_local_proxy {
