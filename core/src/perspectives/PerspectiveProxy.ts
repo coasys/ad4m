@@ -1456,19 +1456,101 @@ export class PerspectiveProxy {
 
         let values = result.map(r => r.value).filter(v => v !== "" && v !== '');
 
-        // Apply instance filter if present
+        // Apply instance filter if present - batch-check all values at once
         if (collMeta.instanceFilter) {
-            const filteredValues = [];
-            for (const value of values) {
-                const isInstance = await this.isSubjectInstance(value, collMeta.instanceFilter);
-                if (isInstance) {
-                    filteredValues.push(value);
+            try {
+                const filterMetadata = await this.getSubjectClassMetadataFromSDNA(collMeta.instanceFilter);
+                if (!filterMetadata) {
+                    // Fallback to sequential checks if metadata isn't available
+                    return this.filterInstancesSequential(values, collMeta.instanceFilter);
                 }
+
+                return await this.batchCheckSubjectInstances(values, filterMetadata);
+            } catch (err) {
+                // Fallback to sequential checks on error
+                return this.filterInstancesSequential(values, collMeta.instanceFilter);
             }
-            return filteredValues;
         }
 
         return values;
+    }
+
+    /**
+     * Batch-checks multiple expressions against subject class metadata using a single or limited SurrealDB queries.
+     * This avoids N+1 query problems by checking all values at once.
+     */
+    private async batchCheckSubjectInstances(
+        expressions: string[],
+        metadata: {
+            requiredPredicates: string[],
+            requiredTriples: Array<{predicate: string, target?: string}>,
+            properties: Map<string, { predicate: string, resolveLanguage?: string }>,
+            collections: Map<string, { predicate: string, instanceFilter?: string }>
+        }
+    ): Promise<string[]> {
+        if (expressions.length === 0) {
+            return [];
+        }
+
+        // If no required triples, check which expressions have any links
+        if (metadata.requiredTriples.length === 0) {
+            const escapedExpressions = expressions.map(e => `'${escapeSurrealString(e)}'`).join(', ');
+            const checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] GROUP BY in.uri HAVING count() > 0`;
+            const result = await this.querySurrealDB(checkQuery);
+            return result.map(r => r.uri);
+        }
+
+        // For each required triple, build a query that finds matching expressions
+        const validExpressionSets: Set<string>[] = [];
+        
+        for (const triple of metadata.requiredTriples) {
+            const escapedExpressions = expressions.map(e => `'${escapeSurrealString(e)}'`).join(', ');
+            const escapedPredicate = escapeSurrealString(triple.predicate);
+            
+            let checkQuery: string;
+            if (triple.target) {
+                // Flag: must match both predicate AND exact target value
+                const escapedTarget = escapeSurrealString(triple.target);
+                checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] AND predicate = '${escapedPredicate}' AND out.uri = '${escapedTarget}' GROUP BY in.uri`;
+            } else {
+                // Property: just check predicate exists
+                checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] AND predicate = '${escapedPredicate}' GROUP BY in.uri`;
+            }
+            
+            const result = await this.querySurrealDB(checkQuery);
+            validExpressionSets.push(new Set(result.map(r => r.uri)));
+        }
+
+        // Find intersection: expressions that passed ALL required triple checks
+        if (validExpressionSets.length === 0) {
+            return expressions;
+        }
+
+        const firstSet = validExpressionSets[0];
+        const validExpressions = expressions.filter(expr => {
+            return validExpressionSets.every(set => set.has(expr));
+        });
+
+        return validExpressions;
+    }
+
+    /**
+     * Fallback sequential instance checking when batch checking isn't available.
+     */
+    private async filterInstancesSequential(values: string[], instanceFilter: string): Promise<string[]> {
+        const filteredValues = [];
+        for (const value of values) {
+            try {
+                const isInstance = await this.isSubjectInstance(value, instanceFilter);
+                if (isInstance) {
+                    filteredValues.push(value);
+                }
+            } catch (err) {
+                // Skip values that fail instance check
+                continue;
+            }
+        }
+        return filteredValues;
     }
 
     /** Returns all subject instances of the given subject class as proxy objects.
