@@ -33,6 +33,7 @@ pub enum PrologMode {
     Simple,
     /// Pooled mode: Multiple engines with filtering and caching
     /// Faster queries but uses more memory
+    #[allow(dead_code)]
     Pooled,
     /// SDNA-only mode: Lightweight engine with only SDNA facts (no link data)
     /// Perfect for testing if memory issues are from link data
