@@ -128,29 +128,35 @@ impl PrologService {
             }
         }
 
-        let mut engines = self.simple_engines.write().await;
-
-        // Check if we need to update (dirty or links changed or first time)
-        let needs_update = if PROLOG_MODE == PrologMode::SdnaOnly {
-            // In SdnaOnly mode, only update if SDNA links actually changed
-            if let Some(simple_engine) = engines.get(perspective_id) {
-                if simple_engine.dirty {
-                    true
-                } else if let Some(ref current_sdna) = simple_engine.current_sdna_links {
-                    // Extract current SDNA links and compare
-                    let new_sdna_links = Self::extract_sdna_links(links);
-                    current_sdna != &new_sdna_links
+        // LOCK SCOPE OPTIMIZATION: Acquire write lock ONLY to check state, then release
+        let (needs_update, engine_exists) = {
+            let engines = self.simple_engines.read().await;
+            
+            // Check if we need to update (dirty or links changed or first time)
+            let needs_update = if PROLOG_MODE == PrologMode::SdnaOnly {
+                // In SdnaOnly mode, only update if SDNA links actually changed
+                if let Some(simple_engine) = engines.get(perspective_id) {
+                    if simple_engine.dirty {
+                        true
+                    } else if let Some(ref current_sdna) = simple_engine.current_sdna_links {
+                        // Extract current SDNA links and compare
+                        let new_sdna_links = Self::extract_sdna_links(links);
+                        current_sdna != &new_sdna_links
+                    } else {
+                        true // No SDNA tracking yet, need init
+                    }
                 } else {
-                    true // No SDNA tracking yet, need init
+                    true // First query = needs init
                 }
+            } else if let Some(simple_engine) = engines.get(perspective_id) {
+                simple_engine.dirty || simple_engine.current_links != links
             } else {
                 true // First query = needs init
-            }
-        } else if let Some(simple_engine) = engines.get(perspective_id) {
-            simple_engine.dirty || simple_engine.current_links != links
-        } else {
-            true // First query = needs init
-        };
+            };
+            
+            let engine_exists = engines.contains_key(perspective_id);
+            (needs_update, engine_exists)
+        }; // Read lock released here
 
         if needs_update {
             let mode_desc = match PROLOG_MODE {
@@ -164,29 +170,22 @@ impl PrologService {
                 links.len()
             );
 
-            // Create engines if they don't exist
-            if !engines.contains_key(perspective_id) {
-                let mut query_engine = PrologEngine::new();
-                query_engine.spawn().await?;
+            // EXPENSIVE OPERATIONS OUTSIDE THE LOCK:
+            // Create and spawn engines if they don't exist (BEFORE acquiring write lock)
+            let (query_engine, subscription_engine) = if !engine_exists {
+                let mut qe = PrologEngine::new();
+                qe.spawn().await?; // Expensive async operation - no lock held
 
-                let mut subscription_engine = PrologEngine::new();
-                subscription_engine.spawn().await?;
+                let mut se = PrologEngine::new();
+                se.spawn().await?; // Expensive async operation - no lock held
+                
+                (qe, se)
+            } else {
+                // Engines exist, we'll update them - create placeholders for now
+                (PrologEngine::new(), PrologEngine::new())
+            };
 
-                engines.insert(
-                    perspective_id.to_string(),
-                    SimpleEngine {
-                        query_engine,
-                        subscription_engine,
-                        dirty: true,
-                        current_links: Vec::new(),
-                        current_sdna_links: None,
-                    },
-                );
-            }
-
-            let simple_engine = engines.get_mut(perspective_id).unwrap();
-
-            // Prepare facts based on mode
+            // Prepare facts based on mode (no lock needed - just data preparation)
             let mut facts_to_load = get_static_infrastructure_facts();
 
             // Only load link data if not in SDNA-only mode
@@ -201,27 +200,69 @@ impl PrologService {
                 owner_did.clone(),
             )?);
 
-            // Preprocess facts (handle embeddings)
+            // Preprocess facts (handle embeddings) - EXPENSIVE, no lock held
             let embedding_cache = Arc::new(RwLock::new(EmbeddingCache::new()));
             let processed_facts =
                 PoolUtils::preprocess_program_lines(facts_to_load, &embedding_cache).await;
 
+            // LOCK SCOPE: Acquire write lock ONLY to get mutable engine references
+            let mut engines = self.simple_engines.write().await;
+            
+            // Insert new engines if needed
+            if !engine_exists {
+                engines.insert(
+                    perspective_id.to_string(),
+                    SimpleEngine {
+                        query_engine,
+                        subscription_engine,
+                        dirty: true,
+                        current_links: Vec::new(),
+                        current_sdna_links: None,
+                    },
+                );
+            }
+
+            // Get mutable reference and move engines out temporarily
+            let simple_engine = engines.get_mut(perspective_id).unwrap();
+            
+            // Move engines out of the struct temporarily
+            let query_engine_to_update = std::mem::replace(
+                &mut simple_engine.query_engine,
+                PrologEngine::new()
+            );
+            let subscription_engine_to_update = std::mem::replace(
+                &mut simple_engine.subscription_engine,
+                PrologEngine::new()
+            );
+            
+            // Release write lock before expensive load operations
+            drop(engines);
+
+            // EXPENSIVE OPERATIONS OUTSIDE THE LOCK:
             // Load facts into both engines
-            simple_engine
-                .query_engine
+            query_engine_to_update
                 .load_module_string("facts", &processed_facts)
                 .await?;
-            simple_engine
-                .subscription_engine
+            subscription_engine_to_update
                 .load_module_string("facts", &processed_facts)
                 .await?;
 
+            // LOCK SCOPE: Reacquire write lock to update final state
+            let mut engines = self.simple_engines.write().await;
+            let simple_engine = engines.get_mut(perspective_id).unwrap();
+            
+            // Move engines back
+            simple_engine.query_engine = query_engine_to_update;
+            simple_engine.subscription_engine = subscription_engine_to_update;
+            
             simple_engine.dirty = false;
-            simple_engine.current_links = links.to_vec();
-
-            // In SdnaOnly mode, track SDNA links separately for efficient updates
+            
+            // MEMORY OPTIMIZATION: In SdnaOnly mode, don't store full links
             if PROLOG_MODE == PrologMode::SdnaOnly {
+                simple_engine.current_links = Vec::new(); // Empty - not needed in SdnaOnly mode
                 simple_engine.current_sdna_links = Some(Self::extract_sdna_links(links));
+            } else {
+                simple_engine.current_links = links.to_vec();
             }
 
             log::debug!(
