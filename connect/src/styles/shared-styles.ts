@@ -5,10 +5,14 @@ import { css } from "lit";
  * Includes typography, buttons, inputs, and common utilities
  */
 export const sharedStyles = css`
+  * {
+    box-sizing: border-box;
+  }
+
   /* Typography */
-  h1, h2, h3 {
-    color: #ffffff;
+  h1, h2, h3, p {
     margin: 0;
+    text-align: center;
   }
 
   h1 {
@@ -16,6 +20,7 @@ export const sharedStyles = css`
     line-height: 1;
     font-weight: 700;
     margin-bottom: 20px;
+    color: #ffffff;
   }
 
   h2 {
@@ -23,6 +28,7 @@ export const sharedStyles = css`
     line-height: 1;
     font-weight: 700;
     margin-bottom: 20px;
+    color: #ffffff;
   }
 
   h3 {
@@ -47,6 +53,10 @@ export const sharedStyles = css`
 
   /* Buttons */
   button {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 12px;
     height: 48px;
     padding: 0 24px;
     border-radius: 8px;
@@ -58,23 +68,29 @@ export const sharedStyles = css`
     outline: none;
   }
 
+  button svg {
+    width: 25px;
+    height: 25px;
+  }
+
   button.primary {
     background: var(--ac-primary-color);
     color: #000000;
   }
 
   button.primary:hover:not(:disabled) {
-    filter: brightness(1.1);
+    background: var(--ac-primary-color-light);
   }
 
   button.secondary {
-    background: rgba(145, 227, 253, 0.15);
+    background: #00091e5c;
     color: var(--ac-primary-color);
-    border: 1px solid rgba(145, 227, 253, 0.3);
+    border: 1px solid var(--ac-primary-color);
   }
 
   button.secondary:hover:not(:disabled) {
-    background: rgba(145, 227, 253, 0.25);
+    background: #00091e73;
+    color: var(--ac-primary-color-light);
   }
 
   button.ghost {
@@ -114,17 +130,18 @@ export const sharedStyles = css`
     height: 48px;
     padding: 0 16px;
     border-radius: 8px;
-    border: 1px solid rgba(145, 227, 253, 0.3);
-    background: rgba(145, 227, 253, 0.05);
+    box-shadow: 0 0 0 1px var(--ac-border-color-light);
+    background: #00091e5c;
     color: #ffffff;
-    font-size: 14px;
+    font-size: 18px;
+    border: none;
     outline: none;
     transition: all 0.2s ease;
   }
 
-  input:focus {
-    border-color: var(--ac-primary-color);
-    background: rgba(145, 227, 253, 0.1);
+  input:focus, input:hover {
+    box-shadow: 0 0 0 1px var(--ac-primary-color);
+    background: #00091e73;
   }
 
   input:disabled {
@@ -136,11 +153,43 @@ export const sharedStyles = css`
     color: rgba(255, 255, 255, 0.4);
   }
 
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  input[type="number"] {
+    -moz-appearance: textfield;
+  }
+
   /* Common layout utilities */
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+    
+  .header {
+    text-align: center;
+  }
+
   .container {
     display: flex;
     flex-direction: column;
     gap: 30px;
+  }
+
+  .box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background: rgba(128, 178, 201, 0.14);
+    box-shadow: 0 0 0 1px var(--ac-border-color-light);
+    border-radius: 8px;
+    padding: 20px;
+    gap: 25px;
+    transition: all 0.3s ease;
   }
 
   .button-row {

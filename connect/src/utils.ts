@@ -1,15 +1,33 @@
-import { Ad4mClient } from "@coasys/ad4m";
-import { AuthStates } from "./core";
+//@ts-ignore
+import { version } from "../../package.json";
 
-// @ts-ignore
-import { version } from "../package.json";
+import { getAd4mConnect, getAd4mClient } from './index';
 
-export const DEFAULT_PORT = 12000;
+export function isEmbedded(): boolean {
+  return typeof window !== 'undefined' && window.self !== window.top;
+}
 
-function Timeout() {
-  const controller = new AbortController();
-  setTimeout(() => controller.abort(), 20);
-  return controller;
+function localStorageSupported(): boolean {
+  try {
+    localStorage.setItem("test", "");
+    localStorage.removeItem("test");
+  } catch (e) {
+    return false;
+  }
+  return true;
+}
+
+export function setLocal(key: string, value: string): void {
+  if (localStorageSupported()) localStorage.setItem(`${version}/${key}`, value);
+}
+
+export function getLocal(key: string): string | null {
+  if (localStorageSupported()) return localStorage.getItem(`${version}/${key}`);
+  return null;
+}
+
+export function removeLocal(key: string): void {
+  if (localStorageSupported()) localStorage.removeItem(`${version}/${key}`);
 }
 
 export async function connectWebSocket(url, timeout = 10000) {
@@ -52,92 +70,5 @@ export async function connectWebSocket(url, timeout = 10000) {
   ]);
 }
 
-export async function checkPort(port: number) {
-  try {
-    const res = await fetch(`http://localhost:${port}/graphql/`, {
-      signal: Timeout().signal,
-      mode: "cors",
-    });
-
-    if (res.status === 400 || res.status === 0 || res.status === 200) {
-      return port;
-    } else {
-      throw new Error(`Could not connect to port ${port}`);
-    }
-  } catch (e) {
-    throw new Error(`Could not connect to port ${port}`);
-  }
-}
-
-export function onAuthStateChanged(callback) {
-  const el = document.querySelector("ad4m-connect");
-
-  el?.addEventListener("authstatechange", (e: CustomEvent) => {
-    callback(e.detail as AuthStates);
-  });
-}
-
-export function detectOS(): string {
-  let os = navigator.userAgent;
-  let finalOs = "";
-  if (os.search("Windows") !== -1) {
-    finalOs = "Windows";
-  } else if (os.search("Mac") !== -1) {
-    finalOs = "MacOS";
-  } else if (os.search("X11") !== -1 && !(os.search("Linux") !== -1)) {
-    finalOs = "UNIX";
-  } else if (os.search("Linux") !== -1 && os.search("X11") !== -1) {
-    finalOs = "Linux";
-  }
-  return finalOs;
-}
-
-function isSupported(): boolean {
-  try {
-    localStorage.setItem("test", "");
-    localStorage.removeItem("test");
-  } catch (e) {
-    return false;
-  }
-  return true;
-}
-
-export function setForVersion(key: string, value: string): void {
-  if (isSupported()) {
-    localStorage.setItem(`${version}/${key}`, value);
-  }
-}
-
-export function getForVersion(key: string): string | null {
-  if (isSupported()) {
-    return localStorage.getItem(`${version}/${key}`);
-  }
-  return null;
-}
-
-export function removeForVersion(key: string): void {
-  if (isSupported()) {
-    localStorage.removeItem(`${version}/${key}`);
-  }
-}
-
-/**
- * Checks if the app is running in embedded mode (inside an iframe).
- * 
- * @returns true if running in an iframe, false if standalone
- * 
- * @example
- * ```typescript
- * import { isEmbedded } from '@coasys/ad4m-connect';
- * 
- * if (!isEmbedded()) {
- *   // Register service workers, enable PWA features, etc.
- * }
- * ```
- */
-export function isEmbedded(): boolean {
-  return typeof window !== 'undefined' && window.self !== window.top;
-}
-
-// Re-export getAd4mClient for backwards compatibility
-export { getAd4mClient } from "./index";
+// TODO: remove (supports old imports)
+export { getAd4mClient, getAd4mConnect };

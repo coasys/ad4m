@@ -15,10 +15,6 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
-    "./electron": {
-      "types": "./dist/electron.d.ts",
-      "require": "./dist/electron.js"
-    },
     "./web": {
       "types": "./dist/web.d.ts",
       "import": "./dist/web.js",
@@ -40,12 +36,11 @@
     "release:beta": "np --no-2fa --no-tests --tag=beta --any-branch",
     "dev": "NODE_ENV=dev && vite dev",
     "serve": "npx serve",
-    "build": "pnpm run build:index && pnpm run build:core && pnpm run build:web && pnpm run build:electron && pnpm run build:utils && tsc",
+    "build": "pnpm run build:index && pnpm run build:core && pnpm run build:web && pnpm run build:utils && tsc",
     "build:index": "tsc --project tsconfig.json && node scripts/esbuild_index.js",
     "build:core": "tsc --project tsconfig.json && node scripts/esbuild.js",
     "build:web": "tsc --project tsconfig.json && node scripts/esbuild_web.js",
-    "build:utils": "tsc --project tsconfig.json && node scripts/esbuild_utils.js",
-    "build:electron": "tsc --project tsconfig.json && node scripts/esbuild_electron.js"
+    "build:utils": "tsc --project tsconfig.json && node scripts/esbuild_utils.js"
   },
   "author": {
     "name": "Nicolas Luck",
