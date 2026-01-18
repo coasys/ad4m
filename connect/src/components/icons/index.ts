@@ -7,3 +7,4 @@ export { default as QRCodeIcon } from "./QRCodeIcon";
 export { default as CrossIcon } from "./CrossIcon";
 export { default as RefreshIcon } from "./RefreshIcon";
 export { default as ArrowLeftRightIcon } from "./ArrowLeftRightIcon";
+export { default as ArrowLeftIcon } from "./ArrowLeftIcon";

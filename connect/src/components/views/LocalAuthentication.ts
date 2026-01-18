@@ -2,13 +2,14 @@ import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { capSentence } from "@coasys/ad4m";
 import { sharedStyles } from "../../styles/shared-styles";
-import { Ad4mLogo, ArrowLeftRightIcon, CheckIcon } from "../icons";
+import { Ad4mLogo, ArrowLeftIcon, ArrowLeftRightIcon, CheckIcon, CrossIcon } from "../icons";
 
 @customElement("local-authentication")
 export class LocalAuthentication extends LitElement {
   @property({ type: Array }) capabilities: string[] = [];
   @property({ type: String }) appname = "";
   @property({ type: String }) appiconpath = "";
+  @property({ type: Boolean }) verificationError = false;
 
   @state() private requestSent = false;
   @state() private securityCode: string = "";
@@ -16,6 +17,20 @@ export class LocalAuthentication extends LitElement {
   static styles = [
     sharedStyles,
     css`
+      .back-button {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        cursor: pointer;
+      }
+
+      .back-button svg {
+        width: 28px;
+        height: 28px;
+        color: white;
+        opacity: 0.5;
+      }
+      
       h1 {
         font-size: 34px;
       }
@@ -77,6 +92,11 @@ export class LocalAuthentication extends LitElement {
         flex-shrink: 0;
       }
 
+      .button-row {
+        display: flex;
+        justify-content: center;
+      }
+
       .security-code {
         width: 100%;
         display: flex;
@@ -85,7 +105,7 @@ export class LocalAuthentication extends LitElement {
       }
 
       .security-code input {
-        width: 202px;
+        width: 194px;
         font-size: 36px;
         letter-spacing: 8px;
         height: 60px;
@@ -93,16 +113,15 @@ export class LocalAuthentication extends LitElement {
         font-variant-numeric: tabular-nums;
         padding: 0 0 0 16px;
       }
+
+      .state {
+        justify-content: center;
+      }
     `
   ];
 
-  private cancel() {
-    this.dispatchEvent(new CustomEvent("cancel", { bubbles: true, composed: true }));
-  }
-
   private back() {
-    this.requestSent = false;
-    this.securityCode = "";
+    this.dispatchEvent(new CustomEvent("back", { bubbles: true, composed: true }));
   }
 
   private requestCapability() {
@@ -114,9 +133,27 @@ export class LocalAuthentication extends LitElement {
     this.dispatchEvent(new CustomEvent("verify-code", { detail: { code: this.securityCode }, bubbles: true, composed: true }));
   }
 
+  private onInputChange(e: Event) {
+    // Clear any previous error when user starts typing
+    this.dispatchEvent(new CustomEvent("clear-verification-error", { bubbles: true, composed: true }));
+
+    // Allow only digits and limit to 6 characters
+    const input = e.target as HTMLInputElement;
+    const cleaned = input.value.replace(/\D/g, '').slice(0, 6);
+    input.value = cleaned;
+    this.securityCode = cleaned;
+
+    // Auto-verify when 6 digits entered
+    if (this.securityCode.length === 6) this.verifyCode();
+  }
+
   render() {
     return html`
       <div class="container">
+        <div class="back-button" @click=${this.back}>
+          ${ArrowLeftIcon()}
+        </div>
+
         <div class="header">
           <h1>${this.appname}</h1>
           <h3>wants to access your AD4M data</h3>
@@ -139,16 +176,18 @@ export class LocalAuthentication extends LitElement {
               ${this.capabilities.map((cap) => html`<li>${CheckIcon()}<p>${capSentence(cap)}</p></li>`)}
             </ul>
 
-            <div class="row">
-              <button class="secondary full" @click=${this.cancel}>
-                Cancel
-              </button>
-              <button class="primary full" @click=${this.requestCapability}>
+            <div class="button-row">
+              <button class="primary" @click=${this.requestCapability}>
                 Authorize
               </button>
             </div>
           `
           : html`
+            <div class="state success" style="margin-bottom: -12px">
+              ${CheckIcon()}
+              <p>Auth request sent to AD4M node</p>
+            </div>
+
             <p>Enter the security code from your AD4M launcher</p>
 
             <div class="security-code">
@@ -159,21 +198,19 @@ export class LocalAuthentication extends LitElement {
                 pattern="[0-9]{6}"
                 placeholder="000000"
                 .value=${this.securityCode || ""}
-                @input=${(e: Event) => {
-                  const input = e.target as HTMLInputElement;
-                  this.securityCode = input.value.replace(/\D/g, '').slice(0, 6);
-                }}
+                @input=${this.onInputChange}
               />
             </div>
 
-            <div class="row">
-              <button class="secondary full" @click=${this.back}>
-                Back
-              </button>
-              <button class="primary full" @click=${this.verifyCode}>
-                Connect
-              </button>
-            </div>
+            ${this.verificationError
+              ? html`
+                  <div class="state danger" style="margin-top: -32px; margin-bottom: 20px;">
+                    ${CrossIcon()}
+                    <p>Verification failed. Please try again.</p>
+                  </div>
+                `
+              : ''
+            }
           `
         }
       </div>

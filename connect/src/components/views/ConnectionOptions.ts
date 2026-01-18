@@ -43,38 +43,9 @@ export class ConnectionOptions extends LitElement {
         color: var(--ac-primary-color);
       }
 
-      .option-state {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-
-      .option-state.danger {
-        margin-bottom: -8px;
-      }
-
-      .option-state.success svg {
-        width: 26px;
-        height: 26px;
-      }
-
-      .option-state.danger svg {
-        width: 30px;
-        height: 30px;
-      }
-
-      .option-state.success p,
-      .option-state.success svg {
-        color: var(--ac-success-color);
-      }
-
-      .option-state.danger p,
-      .option-state.danger svg {
-        color: var(--ac-danger-color);
-      }
-
       .port-input {
         display: flex;
+        justify-content: center;
         gap: 8px;
         width: 100%;
       }
@@ -155,7 +126,7 @@ export class ConnectionOptions extends LitElement {
 
             ${this.localNodeDetected
               ? html`
-                  <div class="option-state success">
+                  <div class="state success">
                     ${CheckIcon()}
                     <p>Local node detected on port ${this.port}</p>
                   </div>
@@ -165,7 +136,7 @@ export class ConnectionOptions extends LitElement {
                   </button>
                 `
               : html`
-                  <div class="option-state danger">
+                  <div class="state danger">
                     ${CrossIcon()}
                     <p>No local node detected on port ${this.port}</p>
                   </div>
@@ -202,7 +173,7 @@ export class ConnectionOptions extends LitElement {
 
             ${this.url
               ? html`
-                  <div class="option-state success">
+                  <div class="state success">
                     ${CheckIcon()}
                     <p>Remote configuration detected</p>
                   </div>

@@ -192,6 +192,36 @@ export const sharedStyles = css`
     transition: all 0.3s ease;
   }
 
+  .state {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .state.danger {
+    margin-bottom: -8px;
+  }
+
+  .state.success svg {
+    width: 26px;
+    height: 26px;
+  }
+
+  .state.danger svg {
+    width: 30px;
+    height: 30px;
+  }
+
+  .state.success p,
+  .state.success svg {
+    color: var(--ac-success-color);
+  }
+
+  .state.danger p,
+  .state.danger svg {
+    color: var(--ac-danger-color);
+  }
+
   .button-row {
     display: flex;
     gap: 12px;
