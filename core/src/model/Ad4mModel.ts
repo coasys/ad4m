@@ -2011,7 +2011,7 @@ WHERE ${whereConditions.join(' AND ')}
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generateCollectionAction(key, 'setter');
 
-    if (value) {
+    if (value != null) {
       if (Array.isArray(value)) {
         await this.#perspective.executeAction(
           actions,
@@ -2036,7 +2036,7 @@ WHERE ${whereConditions.join(' AND ')}
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generateCollectionAction(key, 'adder');
 
-    if (value) {
+    if (value != null) {
       if (Array.isArray(value)) {
         await Promise.all(
           value.map((v) =>
@@ -2060,7 +2060,7 @@ WHERE ${whereConditions.join(' AND ')}
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generateCollectionAction(key, 'remover');
 
-    if (value) {
+    if (value != null) {
       if (Array.isArray(value)) {
         await Promise.all(
           value.map((v) =>
