@@ -919,7 +919,7 @@ impl Ad4mDb {
 
     /// Helper function to normalize predicate values from the database.
     /// Converts empty strings to None to maintain consistency with the Link type.
-    /// 
+    ///
     /// In the database, None predicates are stored as empty strings ("").
     /// This function ensures that when reading from the database, empty strings
     /// are converted back to None, maintaining consistency across all link operations.
