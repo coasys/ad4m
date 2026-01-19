@@ -2172,11 +2172,8 @@ WHERE ${whereConditions.join(' AND ')}
               break;
           }
         } else if (Array.isArray(value)) {
-          // Handle all arrays as collections, even empty ones
-          if (value.length > 0) {
-            await this.setCollectionSetter(key, value, batchId);
-          }
-          // Skip empty arrays - don't try to set them as properties
+          // Handle all arrays as collections, including empty ones (which clears the collection)
+          await this.setCollectionSetter(key, value, batchId);
         } else if (value !== undefined && value !== null && value !== "") {
           if (setProperties) {
             // Check if this is a collection property (has collection metadata)
