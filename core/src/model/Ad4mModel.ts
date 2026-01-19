@@ -639,6 +639,11 @@ export class Ad4mModel {
    * @private
    */
   private generatePropertySetterAction(key: string, metadata: PropertyOptions): any[] {
+    // Check if property is read-only
+    if (metadata.writable === false) {
+      throw new Error(`Property "${key}" is read-only and cannot be written`);
+    }
+
     if (metadata.setter) {
       // Custom setter - throw error for now (Phase 2)
       throw new Error(
