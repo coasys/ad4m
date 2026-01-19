@@ -1798,7 +1798,8 @@ impl PerspectiveInstance {
     // }
 
     /// Helper to mark the Prolog engine as dirty (needs update before next query)
-    /// Only applies to Simple/SdnaOnly modes
+    /// Only applies to Simple mode
+    /// Note: SdnaOnly mode doesn't use dirty flag - it compares SDNA links directly to avoid rebuilding on non-SDNA changes
     async fn mark_prolog_engine_dirty(&self) {
         if PROLOG_MODE == PrologMode::Simple {
             let perspective_uuid = self.persisted.lock().await.uuid.clone();
