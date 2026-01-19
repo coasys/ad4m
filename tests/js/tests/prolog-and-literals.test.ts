@@ -1704,8 +1704,14 @@ describe("Prolog + Literals", () => {
                     recipe4.name = "Recipe 4";
                     await recipe4.save();
 
-                    // Give time for subscription to process
-                    await sleep(1000);
+                    // Wait for subscription to process with proper condition checking
+                    await waitForCondition(
+                        () => lastCount === 4,
+                        { 
+                            timeoutMs: 5000, 
+                            errorMessage: 'Count subscription did not update after recipe save' 
+                        }
+                    );
                     expect(lastCount).to.equal(4);
 
                     // Dispose the subscription to prevent cross-test interference
@@ -2107,8 +2113,14 @@ describe("Prolog + Literals", () => {
                     
                     await task1.get();
 
-                    // Wait for subscription to fire
-                    await sleep(1000);
+                    // Wait for subscription to fire with proper condition checking
+                    await waitForCondition(
+                        () => updateCount === 1 && tasks.length === 1,
+                        { 
+                            timeoutMs: 5000, 
+                            errorMessage: 'Subscription did not fire after first task save' 
+                        }
+                    );
 
                     expect(updateCount).to.equal(1);
                     expect(tasks.length).to.equal(1);
@@ -2121,7 +2133,14 @@ describe("Prolog + Literals", () => {
                     task2.assignee = "alice";
                     await task2.save();
 
-                    await sleep(1000);
+                    // Wait for subscription to fire with proper condition checking
+                    await waitForCondition(
+                        () => updateCount === 2 && tasks.length === 2,
+                        { 
+                            timeoutMs: 5000, 
+                            errorMessage: 'Subscription did not fire after second task save' 
+                        }
+                    );
                     expect(updateCount).to.equal(2);
                     expect(tasks.length).to.equal(2);
 
@@ -2140,7 +2159,15 @@ describe("Prolog + Literals", () => {
                     // Mark task1 as completed - should trigger subscription to remove it
                     task1.completed = true;
                     await task1.update();
-                    await sleep(1000);
+                    
+                    // Wait for subscription to fire with proper condition checking
+                    await waitForCondition(
+                        () => tasks.length === 1,
+                        { 
+                            timeoutMs: 5000, 
+                            errorMessage: 'Subscription did not fire after task update' 
+                        }
+                    );
 
                     expect(tasks.length).to.equal(1);   
 
@@ -2473,8 +2500,14 @@ describe("Prolog + Literals", () => {
                         model1.status = "active";
                         await model1.save();
 
-                        // Wait for subscription update
-                        await sleep(1000);
+                        // Wait for subscription update with proper condition checking
+                        await waitForCondition(
+                            () => callback1.called,
+                            { 
+                                timeoutMs: 5000, 
+                                errorMessage: 'First callback was not called after model save' 
+                            }
+                        );
 
                         // Verify callback was called
                         expect(callback1.called).to.be.true;
@@ -2493,8 +2526,14 @@ describe("Prolog + Literals", () => {
                         model2.status = "active";
                         await model2.save();
 
-                        // Wait for subscription update
-                        await sleep(1000);
+                        // Wait for subscription update with proper condition checking
+                        await waitForCondition(
+                            () => callback2.called,
+                            { 
+                                timeoutMs: 5000, 
+                                errorMessage: 'Second callback was not called after model save' 
+                            }
+                        );
 
                         // Verify only second callback was called
                         expect(callback1.callCount).to.equal(1); // No new calls
@@ -2533,8 +2572,14 @@ describe("Prolog + Literals", () => {
                         model.status = "active";
                         await model.save();
 
-                        // Wait for subscription update
-                        await sleep(1000);
+                        // Wait for subscription update with proper condition checking
+                        await waitForCondition(
+                            () => countCallback.called,
+                            { 
+                                timeoutMs: 5000, 
+                                errorMessage: 'Count callback was not called after model save' 
+                            }
+                        );
 
                         // Verify callback was called with new count
                         expect(countCallback.called).to.be.true;
@@ -2550,7 +2595,7 @@ describe("Prolog + Literals", () => {
                         model2.status = "active";
                         await model2.save();
 
-                        // Wait to ensure no callback
+                        // Wait to ensure no callback (still using sleep since we're verifying no change)
                         await sleep(1000);
 
                         // Verify no new callbacks
@@ -2749,8 +2794,14 @@ describe("Prolog + Literals", () => {
                         subscriptionMessage.body = "Subscription test with emoji: 🎯✅";
                         await subscriptionMessage.save();
 
-                        // Give time for subscription to process
-                        await sleep(1000);
+                        // Wait for subscription to process with proper condition checking
+                        await waitForCondition(
+                            () => updateCount === 1,
+                            { 
+                                timeoutMs: 5000, 
+                                errorMessage: 'Subscription did not fire after first message save' 
+                            }
+                        );
 
                         // Verify subscription callback was called
                         expect(updateCount).to.equal(1);
@@ -2762,7 +2813,14 @@ describe("Prolog + Literals", () => {
                         secondMessage.body = "Another emoji message: 🚀💯";
                         await secondMessage.save();
 
-                        await sleep(1000);
+                        // Wait for subscription to process with proper condition checking
+                        await waitForCondition(
+                            () => updateCount === 2,
+                            { 
+                                timeoutMs: 5000, 
+                                errorMessage: 'Subscription did not fire after second message save' 
+                            }
+                        );
 
                         // Verify subscription was called again
                         expect(updateCount).to.equal(2);
@@ -3510,4 +3568,32 @@ describe("Prolog + Literals", () => {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Wait for a condition to become true with exponential backoff.
+ * This is more reliable than fixed sleep() for async operations.
+ */
+async function waitForCondition(
+  condition: () => boolean,
+  options: { 
+    timeoutMs?: number, 
+    checkIntervalMs?: number,
+    errorMessage?: string 
+  } = {}
+): Promise<void> {
+  const { 
+    timeoutMs = 5000, 
+    checkIntervalMs = 50,
+    errorMessage = 'Condition was not met within timeout'
+  } = options;
+  
+  const startTime = Date.now();
+  
+  while (!condition()) {
+    if (Date.now() - startTime > timeoutMs) {
+      throw new Error(`${errorMessage} (timeout: ${timeoutMs}ms)`);
+    }
+    await sleep(checkIntervalMs);
+  }
 }
