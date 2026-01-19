@@ -917,6 +917,19 @@ impl Ad4mDb {
         Ok(())
     }
 
+    /// Helper function to normalize predicate values from the database.
+    /// Converts empty strings to None to maintain consistency with the Link type.
+    /// 
+    /// In the database, None predicates are stored as empty strings ("").
+    /// This function ensures that when reading from the database, empty strings
+    /// are converted back to None, maintaining consistency across all link operations.
+    fn normalize_predicate(predicate: Option<String>) -> Option<String> {
+        match predicate.as_deref() {
+            Some("") => None,
+            _ => predicate,
+        }
+    }
+
     pub fn add_link(
         &self,
         perspective_uuid: &str,
@@ -1041,10 +1054,7 @@ impl Ad4mDb {
                     let link = LinkExpression {
                         data: Link {
                             source: row.get(1)?,
-                            predicate: row.get(2).map(|p: Option<String>| match p.as_deref() {
-                                Some("") => None,
-                                _ => p,
-                            })?,
+                            predicate: Self::normalize_predicate(row.get(2)?),
                             target: row.get(3)?,
                         },
                         proof: ExpressionProof {
@@ -1082,7 +1092,7 @@ impl Ad4mDb {
             let link_expression = LinkExpression {
                 data: Link {
                     source: row.get(1)?,
-                    predicate: row.get(2)?,
+                    predicate: Self::normalize_predicate(row.get(2)?),
                     target: row.get(3)?,
                 },
                 proof: ExpressionProof {
@@ -1119,7 +1129,7 @@ impl Ad4mDb {
             let link_expression = LinkExpression {
                 data: Link {
                     source: row.get(1)?,
-                    predicate: row.get(2)?,
+                    predicate: Self::normalize_predicate(row.get(2)?),
                     target: row.get(3)?,
                 },
                 proof: ExpressionProof {
@@ -1156,7 +1166,7 @@ impl Ad4mDb {
             let link_expression = LinkExpression {
                 data: Link {
                     source: row.get(1)?,
-                    predicate: row.get(2)?,
+                    predicate: Self::normalize_predicate(row.get(2)?),
                     target: row.get(3)?,
                 },
                 proof: ExpressionProof {
@@ -1193,7 +1203,7 @@ impl Ad4mDb {
             let link_expression = LinkExpression {
                 data: Link {
                     source: row.get(1)?,
-                    predicate: row.get(2)?,
+                    predicate: Self::normalize_predicate(row.get(2)?),
                     target: row.get(3)?,
                 },
                 proof: ExpressionProof {
