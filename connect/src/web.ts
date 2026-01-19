@@ -197,31 +197,40 @@ export class Ad4mConnectElement extends LitElement {
 
   private async verifyEmailCode(event: CustomEvent) {
     try {
+      this.remoteAuthLoading = true;
       const success = await this.core.verifyEmailCode(event.detail.email, event.detail.code);
       this.emailCodeError = !success;
       if (success) this.modalOpen = false;
     } catch (error) {
       this.emailCodeError = true;
+    } finally {
+      this.remoteAuthLoading = false;
     }
   }
 
   private async passwordLogin(event: CustomEvent) {
     try {
+      this.remoteAuthLoading = true;
       const success = await this.core.loginWithPassword(event.detail.email, event.detail.password);
       this.passwordError = !success;
       if (success) this.modalOpen = false;
     } catch (error) {
       this.passwordError = true;
+    } finally {
+      this.remoteAuthLoading = false;
     }
   }
 
   private async createAccount(event: CustomEvent) {
     try {
+      this.remoteAuthLoading = true;
       const success = await this.core.createAccount(event.detail.email, event.detail.password);
       this.accountCreationError = !success;
       if (success) this.modalOpen = false;
     } catch (error) {
       this.accountCreationError = true;
+    } finally {
+      this.remoteAuthLoading = false;
     }
   }
 
