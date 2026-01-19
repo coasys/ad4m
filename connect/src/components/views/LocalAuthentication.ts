@@ -16,21 +16,7 @@ export class LocalAuthentication extends LitElement {
 
   static styles = [
     sharedStyles,
-    css`
-      .back-button {
-        position: absolute;
-        top: 20px;
-        left: 20px;
-        cursor: pointer;
-      }
-
-      .back-button svg {
-        width: 28px;
-        height: 28px;
-        color: white;
-        opacity: 0.5;
-      }
-      
+    css`      
       h1 {
         font-size: 34px;
       }
@@ -122,6 +108,7 @@ export class LocalAuthentication extends LitElement {
 
   private back() {
     this.dispatchEvent(new CustomEvent("back", { bubbles: true, composed: true }));
+    this.dispatchEvent(new CustomEvent("clear-verification-error", { bubbles: true, composed: true }));
   }
 
   private requestCapability() {
@@ -185,7 +172,7 @@ export class LocalAuthentication extends LitElement {
           : html`
             <div class="state success" style="margin-bottom: -12px">
               ${CheckIcon()}
-              <p>Auth request sent to AD4M node</p>
+              <p>Auth request sent to local AD4M node</p>
             </div>
 
             <p>Enter the security code from your AD4M launcher</p>

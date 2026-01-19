@@ -222,6 +222,20 @@ export const sharedStyles = css`
     color: var(--ac-danger-color);
   }
 
+  .back-button {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    cursor: pointer;
+  }
+
+  .back-button svg {
+    width: 28px;
+    height: 28px;
+    color: white;
+    opacity: 0.5;
+  }
+
   .button-row {
     display: flex;
     gap: 12px;

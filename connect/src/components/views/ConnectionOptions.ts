@@ -8,12 +8,14 @@ import { connectWebSocket } from "../../utils";
 @customElement("connection-options")
 export class ConnectionOptions extends LitElement {
   @property({ type: String }) port: number;
-  @property({ type: String }) url?: string;
+  @property({ type: String }) remoteUrl?: string;
+  @property({ type: Boolean }) connectingToRemoteNode: boolean = false;
+  @property({ type: Boolean }) remoteNodeError: boolean = false;
 
   @state() private loading = true;
   @state() private localNodeDetected = false;
   @state() private newPort = 0;
-  @state() private newUrl = "";
+  @state() private newRemoteUrl = "";
 
   static styles = [
     sharedStyles,
@@ -82,29 +84,29 @@ export class ConnectionOptions extends LitElement {
     this.dispatchEvent(new CustomEvent("change-port", { detail: { port: this.newPort }, bubbles: true, composed: true }));
   }
 
-  private async changeUrl() {
-    this.dispatchEvent(new CustomEvent("change-url", { detail: { url: this.newUrl }, bubbles: true, composed: true }));
-  }
-
   private async connectLocalNode() {
     this.dispatchEvent(new CustomEvent("connect-local-node", { bubbles: true, composed: true }));
   }
 
   private async connectRemoteNode() {
-    this.dispatchEvent(new CustomEvent("connect-remote-node", { bubbles: true, composed: true }));
+    this.dispatchEvent(new CustomEvent("connect-remote-node", { detail: { remoteUrl: this.newRemoteUrl }, bubbles: true, composed: true }));
+  }
+
+  private clearRemoteNodeError() {
+    this.dispatchEvent(new CustomEvent("clear-remote-node-error", { bubbles: true, composed: true }));
   }
 
   async connectedCallback() {
     super.connectedCallback();
     this.newPort = this.port;
-    this.newUrl = this.url || "";
+    this.newRemoteUrl = this.remoteUrl || "";
     await this.detectLocalNode();
     this.loading = false;
   }
 
   willUpdate(changedProps: PropertyValues) {
     if (changedProps.has('port')) this.newPort = this.port;
-    if (changedProps.has('url')) this.newUrl = this.url || "";
+    if (changedProps.has('remoteUrl')) this.newRemoteUrl = this.remoteUrl || "";
   }
 
   render() {
@@ -171,7 +173,7 @@ export class ConnectionOptions extends LitElement {
               <h3>Remote Node</h3>
             </div>
 
-            ${this.url
+            ${this.remoteUrl
               ? html`
                   <div class="state success">
                     ${CheckIcon()}
@@ -184,19 +186,32 @@ export class ConnectionOptions extends LitElement {
             <input
               type="text"
               placeholder="https://ad4m-node:12000/graphql"
-              .value=${this.newUrl}
+              .value=${this.newRemoteUrl}
               @input=${(e: Event) => {
                 const input = e.target as HTMLInputElement;
-                this.newUrl = input.value;
+                this.newRemoteUrl = input.value;
+
+                if (this.remoteNodeError) this.clearRemoteNodeError();
               }}
               style= "font-size: 16px;"
             />
 
+            ${this.remoteNodeError
+              ? html`
+                  <div class="state danger">
+                    ${CrossIcon()}
+                    <p>Unable to connect to remote node</p>
+                  </div>
+                `
+              : ''
+            }
+
             <button 
-              class="primary" 
-              @click=${() => { this.changeUrl(); this.connectRemoteNode(); }}
+              class="primary"
+              ?disabled=${this.connectingToRemoteNode}
+              @click=${this.connectRemoteNode}
             >
-              Connect to Remote Node
+              ${this.connectingToRemoteNode ? "Connecting..." : "Connect to Remote Node"}
             </button>
           </div>
         </div>

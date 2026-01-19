@@ -7,11 +7,11 @@ import { Ad4mLogo } from "./components/icons";
 
 import "./components/views/ConnectionOptions";
 import "./components/views/LocalAuthentication";
-
+import "./components/views/RemoteAuthentication";
+import { VerificationRequestResult } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
+import { connectWebSocket, setLocal } from "./utils";
 
 type Views = 'connection-options' | 'local-authentication' | 'remote-authentication';
-
-// TODO: update text color vars when decided on
 
 const styles = css`
   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap');
@@ -96,37 +96,40 @@ const styles = css`
 export class Ad4mConnectElement extends LitElement {
   static styles = [styles];
 
-  @state() private currentView: Views = "connection-options";
-  @state() private modalOpen = false;
-  @state() private verificationError = false;
-
   core: Ad4mConnect;
 
-  // Timeout reference for auto-submit when 6 digits are entered
-  private _codeSubmitTimeout: ReturnType<typeof setTimeout> | null = null;
-
-  private detectMobile() {
-    const toMatch = [
-      /Android/i,
-      /webOS/i,
-      /iPhone/i,
-      /iPad/i,
-      /iPod/i,
-      /BlackBerry/i,
-      /Windows Phone/i,
-    ];
-
-    return toMatch.some((toMatchItem) => navigator.userAgent.match(toMatchItem));
-  }
+  @state() modalOpen = false;
+  @state() private currentView: Views = "connection-options";
+  @state() private verificationError = false;
+  @state() private connectingToRemoteNode = false;
+  @state() private remoteNodeError = false;
+  @state() private remoteAuthLoading = false;
+  @state() private remoteAuthState: VerificationRequestResult | null = null;
+  @state() private emailCodeError = false;
+  @state() private passwordError = false;
+  @state() private accountCreationError = false;
 
   connectedCallback() {
     super.connectedCallback();
-    autoBind(this); // needed if 'this' used in callbacks 
+    autoBind(this);
 
-    console.log('[Ad4m Connect UI] Initializing Ad4m Connect UI component', this.core);
+    // Set up auth listener before attempting connection
+    this.core.addEventListener('authstatechange', (e: any) => {
+      if (e.detail === 'unauthenticated') {
+        // Token expired or invalid - show UI
+        this.currentView = "connection-options";
+        this.modalOpen = true;
+      }
+    });
 
     if (this.core.token) {
-      this.core.connect()
+      // Try to auto-connect with stored token
+      this.core.connect().catch((error) => {
+        // Connection failed - show UI
+        console.error('[Ad4m Connect UI] Auto-connect failed:', error);
+        this.currentView = "connection-options";
+        this.modalOpen = true;
+      });
     } else {
       this.currentView = "connection-options";
       this.modalOpen = true;
@@ -134,39 +137,92 @@ export class Ad4mConnectElement extends LitElement {
   }
 
   private async changePort(event: CustomEvent) {
-    console.log('Port changed to', event.detail.port);
-    this.core.port = event.detail.port
-    this.requestUpdate();
-  }
-
-  private async changeUrl(event: CustomEvent) {
-    console.log('URL changed to', event.detail.url);
-    this.core.url = event.detail.url
+    this.core.port = event.detail.port;
+    setLocal("ad4m-port", this.core.port.toString());
     this.requestUpdate();
   }
 
   private async connectLocalNode() {
-    console.log('[Ad4m Connect UI] Connecting to local node on port');
+    // Update URL to local and persist
+    this.core.url = `ws://localhost:${this.core.port}/graphql`;
+    setLocal("ad4m-url", this.core.url);
     await this.core.connect();
     this.currentView = "local-authentication";
   }
 
-  private async connectRemoteNode() {
-    console.log('[Ad4m Connect UI] Connecting to remote node at URL');
-    await this.core.connect();
-    this.currentView = "remote-authentication";
-  }
-
-  private async verifyCode(event: CustomEvent) {
-    console.log('[Ad4m Connect UI] Verifying code', event.detail.code);
-    const success = await this.core.verifyCode(event.detail.code);
-    console.log('[Ad4m Connect UI] Code verified successfully: ', success);
+  private async verifyLocalAd4mCode(event: CustomEvent) {
+    const success = await this.core.verifyLocalAd4mCode(event.detail.code);
     this.verificationError = !success;
     if (success) this.modalOpen = false;
   }
 
-  private clearVerificationError() {
-    this.verificationError = false;
+  private async connectRemoteNode(e: CustomEvent) {
+    this.remoteNodeError = false;
+    this.connectingToRemoteNode = true;
+    this.core.url = e.detail.remoteUrl;
+    // Persist URL immediately so it's remembered even if validation fails
+    setLocal("ad4m-url", this.core.url);
+
+    try {
+      // Check if the server is reachable
+      await connectWebSocket(e.detail.remoteUrl);
+      console.log('[Ad4m Connect UI] Remote connection successful');
+      // Verify it's actually an AD4M API
+      const isValidAd4mApi = await this.core.isValidAd4mAPI();
+      if (!isValidAd4mApi) {
+        throw new Error("Server is reachable but doesn't appear to be an AD4M executor");
+      }
+      console.log('[Ad4m Connect UI] Remote AD4M API verified');
+      // Detect if multi-user is enabled
+      const isMultiUser = await this.core.isMultiUser();
+      console.log('[Ad4m Connect UI] Remote multi-user detected:', isMultiUser);
+
+      this.currentView = "remote-authentication";
+    } catch (error) {
+      console.error('[Ad4m Connect UI] Remote connection failed:', error);
+      this.remoteNodeError = true;
+    } finally {
+      this.connectingToRemoteNode = false;
+    }
+  }
+
+  private async emailLogin(e: CustomEvent) {
+    try {
+      this.remoteAuthLoading = true;
+      this.remoteAuthState = await this.core.submitEmail(e.detail.email);
+    } finally {
+      this.remoteAuthLoading = false;
+    }
+  }
+
+  private async verifyEmailCode(event: CustomEvent) {
+    try {
+      const success = await this.core.verifyEmailCode(event.detail.email, event.detail.code);
+      this.emailCodeError = !success;
+      if (success) this.modalOpen = false;
+    } catch (error) {
+      this.emailCodeError = true;
+    }
+  }
+
+  private async passwordLogin(event: CustomEvent) {
+    try {
+      const success = await this.core.loginWithPassword(event.detail.email, event.detail.password);
+      this.passwordError = !success;
+      if (success) this.modalOpen = false;
+    } catch (error) {
+      this.passwordError = true;
+    }
+  }
+
+  private async createAccount(event: CustomEvent) {
+    try {
+      const success = await this.core.createAccount(event.detail.email, event.detail.password);
+      this.accountCreationError = !success;
+      if (success) this.modalOpen = false;
+    } catch (error) {
+      this.accountCreationError = true;
+    }
   }
 
   renderViews() {
@@ -174,11 +230,13 @@ export class Ad4mConnectElement extends LitElement {
       return html`
         <connection-options
           .port=${this.core.port}
-          .url=${this.core.url}
+          .remoteUrl=${this.core.options.remoteUrl}
+          .connectingToRemoteNode=${this.connectingToRemoteNode}
+          .remoteNodeError=${this.remoteNodeError}
           @change-port=${this.changePort}
-          @change-url=${this.changeUrl}
           @connect-local-node=${this.connectLocalNode}
           @connect-remote-node=${this.connectRemoteNode}
+          @clear-remote-node-error=${() => { this.remoteNodeError = false; }}
         ></connection-options>
       `;
     }
@@ -192,33 +250,29 @@ export class Ad4mConnectElement extends LitElement {
           .verificationError=${this.verificationError}
           @back=${() => { this.currentView = "connection-options" }}
           @request-capability=${() => this.core.requestCapability(true)}
-          @verify-code=${this.verifyCode}
-          @clear-verification-error=${this.clearVerificationError}
+          @verify-code=${this.verifyLocalAd4mCode}
+          @clear-verification-error=${() => { this.verificationError = false; }}
         ></local-authentication>
       `;
     }
 
-    // if (this.state.currentView === "multiuser_auth") {
-    //   return html`
-    //     <multi-user-auth
-    //       .email=${this.state.forms.multiUserEmail}
-    //       .password=${this.state.forms.multiUserPassword}
-    //       .verificationCode=${this.state.forms.multiUserVerificationCode}
-    //       .error=${this.state.errors.multiUser}
-    //       .isLoading=${this.state.loading.multiUser}
-    //       .backendUrl=${this.remoteUrl}
-    //       .step=${this.state.forms.multiUserStep}
-    //       .verificationType=${this.state.forms.multiUserVerificationType}
-    //       @email-change=${(e: CustomEvent) => this.changeMultiUserEmail(e.detail.email)}
-    //       @password-change=${(e: CustomEvent) => this.changeMultiUserPassword(e.detail.password)}
-    //       @code-change=${(e: CustomEvent) => this.changeMultiUserVerificationCode(e.detail.code)}
-    //       @email-submit=${() => this.handleMultiUserEmailSubmit()}
-    //       @password-submit=${() => this.handleMultiUserPasswordSubmit()}
-    //       @code-submit=${() => this.handleMultiUserCodeSubmit()}
-    //       @back-to-email=${() => this.handleMultiUserBackToEmail()}
-    //     ></multi-user-auth>
-    //   `;
-    // }
+    if (this.currentView === "remote-authentication") {
+      return html`
+        <remote-authentication
+          .remoteAuthLoading=${this.remoteAuthLoading}
+          .remoteAuthState=${this.remoteAuthState}
+          .emailCodeError=${this.emailCodeError}
+          .passwordError=${this.passwordError}
+          .accountCreationError=${this.accountCreationError}
+          @back=${() => { this.currentView = "connection-options" }}
+          @email-login=${this.emailLogin}
+          @verify-email-code=${this.verifyEmailCode}
+          @password-login=${this.passwordLogin}
+          @create-account=${this.createAccount}
+          @clear-email-code-error=${() => { this.emailCodeError = false; }}
+        ></remote-authentication>
+      `;
+    }
   }
 
   render() {
@@ -263,23 +317,22 @@ export default function Ad4mConnectUI(core: Ad4mConnect): Ad4mConnectElement {
     // Not embedded - mount UI to DOM
     console.log('[Ad4m Connect UI] Mounting UI to DOM');
     
-    // Check if we have a token - if so, don't show UI initially
-    const storedToken = core.token;
-    
-    if (storedToken) {
-      // Has token - will auto-connect, keep UI hidden initially
-      // connectedCallback will handle the connection attempt
+    // Check if we have a token - if so, hide UI initially and try auto-connect
+    if (core.token) {
       element.style.display = 'none';
-      document.body.appendChild(element);
       
-      // Listen for auth state - show UI only if auth fails
-      core.addEventListener('authstatechange', (e: any) => {
-        if (e.detail === 'unauthenticated') {
+      // Listen for when modal opens (connection/auth failed)
+      const observer = new MutationObserver(() => {
+        if (element.modalOpen) {
           element.style.display = '';
+          observer.disconnect();
         }
       });
+      
+      document.body.appendChild(element);
+      observer.observe(element, { attributes: true });
     } else {
-      // No token - show UI immediately for user to connect
+      // No token - show UI immediately
       document.body.appendChild(element);
     }
   }

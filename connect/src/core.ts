@@ -2,56 +2,10 @@ import { ApolloClient, InMemoryCache, NormalizedCacheObject } from "@apollo/clie
 import { createClient, Client as WSClient } from "graphql-ws";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { isEmbedded, setLocal, getLocal, removeLocal, connectWebSocket } from './utils';
-import { Ad4mClient, CapabilityInput } from "@coasys/ad4m";
+import { Ad4mClient, CapabilityInput, VerificationRequestResult } from "@coasys/ad4m";
 import autoBind from "auto-bind";
 
 import { Ad4mConnectOptions, ConnectionStates, AuthStates, ConfigStates } from './types';
-
-
-// export type AppInfo = {
-//   name: string;
-//   description: string;
-//   domain: string;
-//   // url?: string;
-//   iconPath?: string;
-// };
-
-// export type Ad4mConnectOptions = {
-//   appName: string;
-//   appDesc: string;
-//   appDomain: string;
-//   appUrl?: string;
-//   appIconPath?: string;
-//   capabilities: CapabilityInput[];
-//   dataPath?: string;
-//   port?: number;
-//   token?: string;
-//   url?: string;
-//   hosting?: boolean;
-//   mobile?: boolean;
-//   // Multi-user options
-//   multiUser?: boolean;
-//   remoteUrl?: string;
-//   userEmail?: string;
-//   userPassword?: string;
-// };
-
-// export type AuthStates = "authenticated" | "locked" | "unauthenticated";
-
-// export type Event =
-//   | "authstatechange"
-//   | "connectionstatechange"
-//   | "configstatechange";
-
-// export type ConfigStates = "port" | "url" | "token";
-// export type ConnectionStates =
-//   | "connecting"
-//   | "connected"
-//   | "error"
-//   | "port_not_found"
-//   | "not_connected"
-//   | "disconnected"
-//   | "checking_local";
 
 const DEFAULT_PORT = 12000;
 
@@ -73,39 +27,8 @@ export default class Ad4mConnect extends EventTarget {
   requestId?: string;
   requestedRestart: boolean = false;
 
-  // capabilities: CapabilityInput[] = [];
-
-  // activeSocket: WebSocket = null;
-  // requestedRestart: boolean = false;
-  // authState: AuthStates = "unauthenticated";
-  // connectionState: ConnectionStates = "not_connected";
-  // wsClient?: WSClient;
-  // apolloClient?: ApolloClient<NormalizedCacheObject>;
-  // ad4mClient?: Ad4mClient;
-  // requestId?: string;
-  // url: string;
-  // token: string;
-  // port = DEFAULT_PORT;
-  // capabilities: CapabilityInput[] = [];
-  // appName: string;
-  // appDesc: string;
-  // appDomain: string;
-  // appIconPath: string;
-  // appUrl?: string;
-  // isHosting: boolean = false;
-  // options: Ad4mConnectOptions;
-  
-  // // Legacy listener system (kept for backwards compatibility)
-  // private listeners: Record<Event, Function[]> = {
-  //   ["authstatechange"]: [],
-  //   ["configstatechange"]: [],
-  //   ["connectionstatechange"]: [],
-  // };
-  
-  // // Embedded mode support
-  // private embeddedMode: boolean = false;
-  // private embeddedResolve?: (client: Ad4mClient) => void;
-  // private embeddedReject?: (error: Error) => void;
+  private embeddedResolve?: (client: Ad4mClient) => void;
+  private embeddedReject?: (error: Error) => void;
 
   constructor(options: Ad4mConnectOptions) {
     super();
@@ -118,30 +41,12 @@ export default class Ad4mConnect extends EventTarget {
       this.port = options.port || DEFAULT_PORT;
       this.url = options.url || `ws://localhost:${this.port}/graphql`;
       this.token = '';
-      // this.initializeEmbeddedMode();
+      this.initializeEmbeddedMode();
     } else {
       this.port = options.port || parseInt(getLocal("ad4m-port")) || DEFAULT_PORT
       this.url = options.url || getLocal("ad4m-url") || `ws://localhost:${this.port}/graphql`;
       this.token = getLocal("ad4m-token") || '';
     }
-    
-    // if (this.embeddedMode) {
-    //   // In embedded mode, ignore localStorage/options - wait for parent to send config
-    //   // This prevents using stale tokens from previous sessions
-    //   this.port = DEFAULT_PORT;
-    //   this.url = '';
-    //   this.token = '';
-    //   this.initializeEmbeddedMode();
-    // } else {
-    //   // In standalone mode, use provided options OR fallback to localStorage
-    //   this.port = options.port || parseInt(getForVersion("ad4mport")) || DEFAULT_PORT;
-    //   this.url = options.url || getForVersion("ad4murl") || `ws://localhost:${this.port}/graphql`; // TODO: change
-    //   this.token = options.token || getForVersion("ad4mtoken") || '';
-    // }
-    
-    // this.isHosting = options.hosting || false;
-    // // Don't auto-connect - let the UI decide when to connect
-    // // this.buildClient();
   }
 
   // on(event: Event, cb: Function) {
@@ -159,17 +64,59 @@ export default class Ad4mConnect extends EventTarget {
     this.authState = val;
     this.dispatchEvent(new CustomEvent("authstatechange", { detail: val }));
 
-    
-    // // In embedded mode, resolve the connect() promise when authenticated
-    // if (this.embeddedMode && val === "authenticated" && this.embeddedResolve) {
-    //   this.embeddedResolve(this.ad4mClient);
-    //   this.embeddedResolve = undefined;
-    //   this.embeddedReject = undefined;
-    // }
+    // In embedded mode, resolve the connect() promise when authenticated
+    if (this.embedded && val === "authenticated" && this.embeddedResolve) {
+      this.embeddedResolve(this.ad4mClient);
+      this.embeddedResolve = undefined;
+      this.embeddedReject = undefined;
+    }
   }
 
   private notifyConfigChange(type: ConfigStates, val: string) {
     this.dispatchEvent(new CustomEvent("configstatechange", { detail: { type, val } }));
+  }
+
+  private initializeEmbeddedMode(): void {
+    console.log('[Ad4m Connect] Running in embedded mode - waiting for AD4M config from parent');
+    
+    // Set up listener for AD4M_CONFIG from parent window
+    window.addEventListener('message', async (event: MessageEvent) => {
+      if (event.data?.type === 'AD4M_CONFIG') {
+        console.log('[Ad4m Connect] Received AD4M_CONFIG from parent:', { 
+          port: event.data.port,
+          hasToken: !!event.data.token 
+        });
+        
+        try {
+          const { port, token } = event.data;
+          
+          // Set connection details from parent
+          this.port = port;
+          this.token = token;
+          this.url = `ws://localhost:${port}/graphql`;
+          
+          // Store in localStorage for persistence
+          setLocal('ad4m-port', port.toString());
+          setLocal('ad4m-token', token);
+          setLocal('ad4m-url', this.url);
+          
+          // Build the client with received credentials
+          this.ad4mClient = await this.buildClient();
+          await this.checkAuth();
+        } catch (error) {
+          console.error('[Ad4m Connect] Failed to initialize from AD4M_CONFIG:', error);
+          if (this.embeddedReject) {
+            this.embeddedReject(error as Error);
+            this.embeddedResolve = undefined;
+            this.embeddedReject = undefined;
+          }
+        }
+      }
+    });
+    
+    // Request AD4M config from parent window
+    console.log('[Ad4m Connect] Requesting AD4M config from parent window');
+    window.parent.postMessage({ type: 'REQUEST_AD4M_CONFIG' }, '*');
   }
 
   async checkAuth(): Promise<boolean> {
@@ -199,22 +146,6 @@ export default class Ad4mConnect extends EventTarget {
         this.notifyAuthChange("unauthenticated");
         return false;
       }
-    }
-  }
-
-  async verifyCode(code: string): Promise<boolean> {
-    try {
-      const jwt = await this.ad4mClient.agent.generateJwt(this.requestId!, code);
-      console.log('[Ad4m Connect] Code verified, received JWT:', jwt);
-      this.token = jwt;
-      setLocal("ad4m-token", this.token);
-      // await this.buildClient();
-      // await this.checkAuth();
-      await this.connect();
-      return true;
-    } catch (error) {
-      console.error('[Ad4m Connect] Code verification failed:', error);
-      return false;
     }
   }
 
@@ -279,39 +210,16 @@ export default class Ad4mConnect extends EventTarget {
     return this.ad4mClient;
   }
 
-  async connect(): Promise<Ad4mClient> {
-    //  if (this.embedded) {
-
-    //  }
-
-    console.log('*** connect called');
-
-    return new Promise(async (resolve, reject) => {
-      try {
-        // Try to connect to local executor
-        console.log('[Ad4m Connect] Attempting connection to:', this.url);
-        
-        await connectWebSocket(this.url);
-        setLocal("ad4m-url", this.url);
-        this.ad4mClient = await this.buildClient();
-        console.log('*** new client built', this.ad4mClient);
-        await this.checkAuth();
-        console.log('*** auth checked', this.authState);
-
-        resolve(this.ad4mClient);
-      } catch (error) {
-        console.error('[Ad4m Connect] Connection failed:', error);
-        this.notifyConnectionChange("error");
-        reject(error);
-      }
-    });
+  async buildTempClient(url: string): Promise<Ad4mClient> {
+    const wsClient = createClient({ url, connectionParams: async () => ({ headers: { authorization: "" } }) });
+    const apolloClient = this.createApolloClient(wsClient);
+    return new Ad4mClient(apolloClient);
   }
 
   async requestCapability(invalidateToken = false): Promise<string> {
-    console.log('[Ad4m Connect] Requesting capability...');
     if (invalidateToken) {
-        this.token = null;
-        this.notifyConfigChange("token", this.token);
+      this.token = null;
+      this.notifyConfigChange("token", this.token);
     }
 
     this.requestId = await this.ad4mClient.agent.requestCapability({
@@ -324,6 +232,157 @@ export default class Ad4mConnect extends EventTarget {
     });
 
     return this.requestId;
+  }
+
+  async connect(): Promise<Ad4mClient> {
+    // In embedded mode, wait for postMessage from parent instead of connecting
+    if (this.embedded) {
+      console.log('[Ad4m Connect] Embedded mode - waiting for AD4M config via postMessage');
+      
+      return new Promise((resolve, reject) => {
+        // Set up timeout
+        const timeout = setTimeout(() => {
+          reject(new Error('Timeout waiting for AD4M config from parent window'));
+        }, 30000); // 30 second timeout
+        
+        // Store resolvers to call when AD4M_CONFIG arrives
+        this.embeddedResolve = (client: Ad4mClient) => {
+          clearTimeout(timeout);
+          console.log('[Ad4m Connect] Successfully connected in embedded mode');
+          resolve(client);
+        };
+        
+        this.embeddedReject = (error: Error) => {
+          clearTimeout(timeout);
+          reject(error);
+        };
+        
+        // If we already have a client (message arrived before connect() was called)
+        if (this.ad4mClient && this.authState === 'authenticated') {
+          clearTimeout(timeout);
+          console.log('[Ad4m Connect] Client already initialized in embedded mode');
+          resolve(this.ad4mClient);
+        }
+      });
+    }
+
+    // Standalone mode - connect directly
+    return new Promise(async (resolve, reject) => {
+      try {
+        await connectWebSocket(this.url);
+        setLocal("ad4m-url", this.url);
+        this.ad4mClient = await this.buildClient();
+        await this.checkAuth();
+        resolve(this.ad4mClient);
+      } catch (error) {
+        console.error('[Ad4m Connect] Connection failed:', error);
+        this.notifyConnectionChange("error");
+        reject(error);
+      }
+    });
+  }
+
+  async verifyLocalAd4mCode(code: string): Promise<boolean> {
+    try {
+      const jwt = await this.ad4mClient.agent.generateJwt(this.requestId!, code);
+      this.token = jwt;
+      setLocal("ad4m-token", this.token);
+      await this.connect();
+      return true;
+    } catch (error) {
+      console.error('[Ad4m Connect] Code verification failed:', error);
+      return false;
+    }
+  }
+
+  async isValidAd4mAPI(): Promise<boolean> {
+    const tempClient = await this.buildTempClient(this.url);
+
+    try {
+      await tempClient.runtime.info();
+      return true;
+    } catch (error) {
+      console.error("[Ad4m Connect] Failed to verify AD4M API:", error);
+      return false;
+    }
+  }
+
+  async isMultiUser(): Promise<boolean> {
+    const tempClient = await this.buildTempClient(this.url);
+
+    try {
+      return await tempClient.runtime.multiUserEnabled();
+    } catch (error) {
+      console.error("[Ad4m Connect] Failed to detect multi-user mode:", error);
+      // If multi-user query fails, assume single-user mode
+      return false;
+    }
+  }
+
+  async submitEmail(email: string): Promise<VerificationRequestResult> {
+    try {
+      const tempClient = await this.buildTempClient(this.url);
+      const appInfo = {
+        appName: this.options.appInfo.name,
+        appDesc: this.options.appInfo.description,
+        appDomain: this.options.appInfo.url,
+        appUrl: window.location.origin,
+        appIconPath: this.options.appInfo.iconPath,
+      }
+
+      return await tempClient.agent.requestLoginVerification(email, appInfo);
+    } catch (e) {
+      return { success: false, message: e.message || "Failed to process email. Please try again.", requiresPassword: false, isExistingUser: false };
+    }
+  }
+
+  async verifyEmailCode(email: string, code: string): Promise<boolean> {
+    try {
+      const tempClient = await this.buildTempClient(this.url);
+      const token = await tempClient.agent.verifyEmailCode(email, code, "login");
+
+      this.token = token;
+      setLocal("ad4m-token", this.token);
+      await this.connect();
+      return true;
+    } catch (e) {
+      console.error('[Ad4m Connect] Email code verification failed:', e);
+      return false;
+    }
+  }
+
+  async loginWithPassword(email: string, password: string): Promise<boolean> {
+    try {
+      const tempClient = await this.buildTempClient(this.url);
+      const token = await tempClient.agent.loginUser(email, password);
+      this.token = token;
+      setLocal("ad4m-token", this.token);
+      await this.connect();
+      return true;
+    } catch (e) {
+      console.error('[Ad4m Connect] Password login failed:', e);
+      return false;
+    }
+  }
+
+  async createAccount(email: string, password: string): Promise<boolean> {
+    try {
+      const tempClient = await this.buildTempClient(this.url);
+      const result = await tempClient.agent.createUser(email, password);
+      if (result.success) {
+        const token = await tempClient.agent.loginUser(email, password);
+        this.token = token;
+        setLocal("ad4m-token", this.token);
+        await this.connect();
+        return true;
+      } else {
+        console.error('[Ad4m Connect] Account creation failed:', result.error);
+        return false;
+      }
+    } catch (e) {
+      console.error('[Ad4m Connect] Account creation error:', e);
+      return false;
+    }
   }
 
 }
