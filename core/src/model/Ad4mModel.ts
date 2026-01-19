@@ -752,6 +752,9 @@ export class Ad4mModel {
       // Query for all links from this specific node (base expression)
       // Using formatSurrealValue to prevent SQL injection by properly escaping the value
       const safeBaseExpression = ctor.formatSurrealValue(this.#baseExpression);
+      // Note: We use ORDER BY timestamp ASC because:
+      // - For collections: we want chronological order (oldest to newest)
+      // - For properties: we select the LAST element to get "latest wins" semantics
       const linksQuery = `
         SELECT id, predicate, out.uri AS target, author, timestamp
         FROM link
@@ -768,7 +771,9 @@ export class Ad4mModel {
         for (const [propName, propMeta] of Object.entries(metadata.properties)) {
           const matching = links.filter((l: any) => l.predicate === propMeta.predicate);
           if (matching.length > 0) {
-            const link = matching[0]; // Take first/latest
+            // "Latest wins" semantics: select the last element since links are ordered ASC.
+            // The last element has the most recent timestamp and represents the current property value.
+            const link = matching[matching.length - 1];
             let value = link.target;
 
             // Track timestamp/author
@@ -813,7 +818,8 @@ export class Ad4mModel {
         // Process collections
         for (const [collName, collMeta] of Object.entries(metadata.collections)) {
           const matching = links.filter((l: any) => l.predicate === collMeta.predicate);
-          // Links are already sorted by timestamp ASC from the query, so map preserves order
+          // Collections preserve chronological order: links are sorted ASC by timestamp,
+          // so the collection reflects the order in which items were added (oldest to newest).
           (this as any)[collName] = matching.map((l: any) => l.target);
         }
 
