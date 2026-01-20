@@ -244,18 +244,23 @@ impl PrologService {
             // LOCK SCOPE: Acquire write lock ONLY to get mutable engine references
             let mut engines = self.simple_engines.write().await;
 
-            // Insert new engines if needed
-            if !engine_exists {
-                engines.insert(
-                    perspective_id.to_string(),
-                    SimpleEngine {
+            // Use Entry API to avoid race condition between check and insert
+            use std::collections::hash_map::Entry;
+            match engines.entry(perspective_id.to_string()) {
+                Entry::Vacant(entry) => {
+                    // Insert new engines
+                    entry.insert(SimpleEngine {
                         query_engine,
                         subscription_engine,
                         dirty: true,
                         current_links: Vec::new(),
                         current_sdna_links: None,
-                    },
-                );
+                    });
+                }
+                Entry::Occupied(_) => {
+                    // Engine was inserted concurrently; clean up the unused spawned engines
+                    // (they will be dropped automatically, no explicit stop needed)
+                }
             }
 
             // Get mutable reference and move engines out temporarily
