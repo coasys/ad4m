@@ -3,6 +3,7 @@ import { Link } from "../links/Links";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { makeRandomPrologAtom, PropertyOptions, CollectionOptions, ModelOptions } from "./decorators";
 import { singularToPlural, pluralToSingular, propertyNameToSetterName, collectionToAdderName, collectionToRemoverName, collectionToSetterName } from "./util";
+import { escapeSurrealString } from "../utils";
 
 // JSON Schema type definitions
 interface JSONSchemaProperty {
@@ -614,6 +615,86 @@ export class Ad4mModel {
     return this.#perspective;
   }
 
+  /**
+   * Get property metadata from decorator (Phase 1: Prolog-free refactor)
+   * @private
+   */
+  private getPropertyMetadata(key: string): PropertyOptions | undefined {
+    const proto = Object.getPrototypeOf(this);
+    return proto.__properties?.[key];
+  }
+
+  /**
+   * Get collection metadata from decorator (Phase 1: Prolog-free refactor)
+   * @private
+   */
+  private getCollectionMetadata(key: string): CollectionOptions | undefined {
+    const proto = Object.getPrototypeOf(this);
+    return proto.__collections?.[key];
+  }
+
+  /**
+   * Generate property setter action from metadata (Phase 1: Prolog-free refactor)
+   * Replaces Prolog query: property_setter(C, key, Setter)
+   * @private
+   */
+  private generatePropertySetterAction(key: string, metadata: PropertyOptions): any[] {
+    // Check if property is read-only
+    if (metadata.writable === false) {
+      throw new Error(`Property "${key}" is read-only and cannot be written`);
+    }
+
+    if (metadata.setter) {
+      // Custom setter - throw error for now (Phase 2)
+      throw new Error(
+        `Custom setter for property "${key}" not yet supported without Prolog. ` +
+        `Use standard @Property decorator or enable Prolog for custom setters.`
+      );
+    }
+
+    if (!metadata.through) {
+      throw new Error(`Property "${key}" has no 'through' predicate defined`);
+    }
+
+    return [{
+      action: "setSingleTarget",
+      source: "this",
+      predicate: metadata.through,
+      target: "value",
+      ...(metadata.local && { local: true })
+    }];
+  }
+
+  /**
+   * Generate collection action from metadata (Phase 1: Prolog-free refactor)
+   * Replaces Prolog queries: collection_adder, collection_remover, collection_setter
+   * @private
+   */
+  private generateCollectionAction(key: string, actionType: 'adder' | 'remover' | 'setter'): any[] {
+    const metadata = this.getCollectionMetadata(key);
+    if (!metadata) {
+      throw new Error(`Collection "${key}" has no metadata defined`);
+    }
+
+    if (!metadata.through) {
+      throw new Error(`Collection "${key}" has no 'through' predicate defined`);
+    }
+
+    const actionMap = {
+      adder: "addLink",
+      remover: "removeLink",
+      setter: "collectionSetter"
+    };
+
+    return [{
+      action: actionMap[actionType],
+      source: "this",
+      predicate: metadata.through,
+      target: "value",
+      ...(metadata.local && { local: true })
+    }];
+  }
+
   public static async assignValuesToInstance(perspective: PerspectiveProxy, instance: Ad4mModel, values: ValueTuple[]) {
     // Map properties to object
     const propsObject = Object.fromEntries(
@@ -668,18 +749,95 @@ export class Ad4mModel {
 
   private async getData() {
     // Builds an object with the author, timestamp, all properties, & all collections on the Ad4mModel and saves it to the instance
-    const subQueries = [buildAuthorAndTimestampQuery(), buildPropertiesQuery(), buildCollectionsQuery()];
-    const fullQuery = `
-      Base = "${this.#baseExpression}",
-      subject_class("${this.#subjectClassName}", SubjectClass),
-      ${subQueries.join(", ")}
-    `;
+    // Use SurrealDB for data queries
+    try {
+      const ctor = this.constructor as typeof Ad4mModel;
+      const metadata = ctor.getModelMetadata();
 
-    const result = await this.#perspective.infer(fullQuery);
-    if (result?.[0]) {
-      const { Properties, Collections, Timestamp, Author } = result?.[0];
-      const values = [...Properties, ...Collections, ["timestamp", Timestamp], ["author", Author]];
-      await Ad4mModel.assignValuesToInstance(this.#perspective, this, values);
+      // Query for all links from this specific node (base expression)
+      // Using formatSurrealValue to prevent SQL injection by properly escaping the value
+      const safeBaseExpression = ctor.formatSurrealValue(this.#baseExpression);
+      // Note: We use ORDER BY timestamp ASC because:
+      // - For collections: we want chronological order (oldest to newest)
+      // - For properties: we select the LAST element to get "latest wins" semantics
+      const linksQuery = `
+        SELECT id, predicate, out.uri AS target, author, timestamp
+        FROM link
+        WHERE in.uri = ${safeBaseExpression}
+        ORDER BY timestamp ASC
+      `;
+      const links = await this.#perspective.querySurrealDB(linksQuery);
+
+      if (links && links.length > 0) {
+        let maxTimestamp = null;
+        let latestAuthor = null;
+
+        // Process properties
+        for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+          const matching = links.filter((l: any) => l.predicate === propMeta.predicate);
+          if (matching.length > 0) {
+            // "Latest wins" semantics: select the last element since links are ordered ASC.
+            // The last element has the most recent timestamp and represents the current property value.
+            const link = matching[matching.length - 1];
+            let value = link.target;
+
+            // Track timestamp/author
+            if (link.timestamp && (!maxTimestamp || link.timestamp > maxTimestamp)) {
+              maxTimestamp = link.timestamp;
+              latestAuthor = link.author;
+            }
+
+            // Handle resolveLanguage
+            if (propMeta.resolveLanguage && propMeta.resolveLanguage !== 'literal') {
+              try {
+                const expression = await this.#perspective.getExpression(value);
+                if (expression) {
+                  try {
+                    value = JSON.parse(expression.data);
+                  } catch {
+                    value = expression.data;
+                  }
+                }
+              } catch (e) {
+                console.warn(`Failed to resolve expression for ${propName}:`, e);
+              }
+            } else if (typeof value === 'string' && value.startsWith('literal://')) {
+              // Parse literal URL
+              try {
+                const parsed = Literal.fromUrl(value).get();
+                value = parsed.data !== undefined ? parsed.data : parsed;
+              } catch (e) {
+                // Keep original value
+              }
+            }
+
+            // Apply transform if exists
+            if (propMeta.transform && typeof propMeta.transform === 'function') {
+              value = propMeta.transform(value);
+            }
+
+            (this as any)[propName] = value;
+          }
+        }
+
+        // Process collections
+        for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+          const matching = links.filter((l: any) => l.predicate === collMeta.predicate);
+          // Collections preserve chronological order: links are sorted ASC by timestamp,
+          // so the collection reflects the order in which items were added (oldest to newest).
+          (this as any)[collName] = matching.map((l: any) => l.target);
+        }
+
+        // Set author and timestamp
+        if (latestAuthor) {
+          (this as any).author = latestAuthor;
+        }
+        if (maxTimestamp) {
+          (this as any).timestamp = maxTimestamp;
+        }
+      }
+    } catch (e) {
+      console.error(`SurrealDB getData also failed for ${this.#baseExpression}:`, e);
     }
 
     return this;
@@ -770,11 +928,11 @@ export class Ad4mModel {
         // For flag properties, also filter by the target value
         if (propMeta.flag && propMeta.initial) {
           graphTraversalFilters.push(
-            `count(->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}' AND out.uri = '${propMeta.initial}']) > 0`
+            `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
           );
         } else {
           graphTraversalFilters.push(
-            `count(->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}']) > 0`
+            `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
           );
         }
       }
@@ -788,11 +946,11 @@ export class Ad4mModel {
           // For flag properties, also filter by the target value
           if (propMeta.flag) {
             graphTraversalFilters.push(
-              `count(->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}' AND out.uri = '${propMeta.initial}']) > 0`
+              `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}' AND out.uri = '${escapeSurrealString(propMeta.initial)}']) > 0`
             );
           } else {
             graphTraversalFilters.push(
-              `count(->link[WHERE perspective = $perspective AND predicate = '${propMeta.predicate}']) > 0`
+              `count(->link[WHERE perspective = $perspective AND predicate = '${escapeSurrealString(propMeta.predicate)}']) > 0`
             );
           }
           break; // Just need one defining property
@@ -913,7 +1071,7 @@ WHERE ${whereConditions.join(' AND ')}
         const propMeta = metadata.properties[propertyName];
         if (!propMeta) continue; // Skip if property not found in metadata
 
-        const predicate = propMeta.predicate;
+        const predicate = escapeSurrealString(propMeta.predicate);
         // Use fn::parse_literal() for properties with resolveLanguage
         const targetField = propMeta.resolveLanguage === 'literal' ? 'fn::parse_literal(out.uri)' : 'out.uri';
 
@@ -1045,7 +1203,7 @@ WHERE ${whereConditions.join(' AND ')}
         const propMeta = metadata.properties[propertyName];
         if (!propMeta) continue; // Skip if property not found in metadata
         
-        const predicate = propMeta.predicate;
+        const predicate = escapeSurrealString(propMeta.predicate);
         // Use fn::parse_literal() for properties with resolveLanguage
         const targetField = propMeta.resolveLanguage === 'literal' ? 'fn::parse_literal(target)' : 'target';
         
@@ -1121,7 +1279,8 @@ WHERE ${whereConditions.join(' AND ')}
       if (!propMeta) continue; // Skip if not found
       
       // Reference source directly since we're selecting from link table
-      fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${propMeta.predicate}' LIMIT 1) AS ${propName}`);
+      const escapedPredicate = escapeSurrealString(propMeta.predicate);
+      fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}' LIMIT 1) AS ${propName}`);
     }
     
     // Determine collections to fetch
@@ -1131,7 +1290,8 @@ WHERE ${whereConditions.join(' AND ')}
       if (!collMeta) continue; // Skip if not found
       
       // Reference source directly since we're selecting from link table
-      fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${collMeta.predicate}') AS ${collName}`);
+      const escapedPredicate = escapeSurrealString(collMeta.predicate);
+      fields.push(`(SELECT VALUE target FROM link WHERE source = source AND predicate = '${escapedPredicate}') AS ${collName}`);
     }
     
     // Always add author and timestamp fields
@@ -1157,7 +1317,8 @@ WHERE ${whereConditions.join(' AND ')}
       if (!propMeta) continue; // Skip if not found
       
       // Use array::first to get the first target value for this predicate
-      fields.push(`array::first(target[WHERE predicate = '${propMeta.predicate}']) AS ${propName}`);
+      const escapedPredicate = escapeSurrealString(propMeta.predicate);
+      fields.push(`array::first(target[WHERE predicate = '${escapedPredicate}']) AS ${propName}`);
     }
     
     // Determine collections to fetch
@@ -1167,7 +1328,8 @@ WHERE ${whereConditions.join(' AND ')}
       if (!collMeta) continue; // Skip if not found
       
       // Use array filtering to get all target values for this predicate
-      fields.push(`target[WHERE predicate = '${collMeta.predicate}'] AS ${collName}`);
+      const escapedPredicate = escapeSurrealString(collMeta.predicate);
+      fields.push(`target[WHERE predicate = '${escapedPredicate}'] AS ${collName}`);
     }
     
     // Always add author and timestamp fields using array::first
@@ -1320,7 +1482,7 @@ WHERE ${whereConditions.join(' AND ')}
                 let convertedValue = target;
                 
                 // Only process if target has a value
-                if (target !== undefined && target !== null) {
+                if (target !== undefined && target !== null && target !== '') {
                   // Check if we need to resolve a non-literal language expression
                   if (propMeta.resolveLanguage != undefined && propMeta.resolveLanguage !== 'literal' && typeof target === 'string') {
                     // For non-literal languages, resolve the expression via perspective.getExpression()
@@ -1337,7 +1499,8 @@ WHERE ${whereConditions.join(' AND ')}
                         }
                       }
                     } catch (e) {
-                      console.warn(`Failed to resolve expression for ${propName}:`, e);
+                      console.warn(`Failed to resolve expression for ${propName} with target "${target}":`, e);
+                      console.warn("Falling back to raw value");
                       convertedValue = target; // Fall back to raw value
                     }
                   } else if (typeof target === 'string' && target.startsWith('literal://')) {
@@ -1817,90 +1980,95 @@ WHERE ${whereConditions.join(' AND ')}
   }
 
   private async setProperty(key: string, value: any, batchId?: string) {
-    const setters = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), property_setter(C, "${key}", Setter)`
-    );
-    if (setters && setters.length > 0) {
-      const actions = eval(setters[0].Setter);
-      const resolveLanguageResults = await this.#perspective.infer(
-        `subject_class("${this.#subjectClassName}", C), property_resolve_language(C, "${key}", Language)`
-      );
-      let resolveLanguage;
-      if (resolveLanguageResults && resolveLanguageResults.length > 0) {
-        resolveLanguage = resolveLanguageResults[0].Language;
-      }
-
-      if (resolveLanguage) {
-        value = await this.#perspective.createExpression(value, resolveLanguage);
-      }
-      await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
+    // Phase 1: Use metadata instead of Prolog queries
+    const metadata = this.getPropertyMetadata(key);
+    if (!metadata) {
+      console.warn(`Property "${key}" has no metadata, skipping`);
+      return;
     }
+
+    // Generate actions from metadata (replaces Prolog query)
+    const actions = this.generatePropertySetterAction(key, metadata);
+
+    // Get resolve language from metadata (replaces Prolog query)
+    let resolveLanguage = metadata.resolveLanguage;
+
+    if (resolveLanguage) {
+      value = await this.#perspective.createExpression(value, resolveLanguage);
+    }
+
+    await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
   }
 
   private async setCollectionSetter(key: string, value: any, batchId?: string) {
-    let collectionSetters = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), collection_setter(C, "${singularToPlural(key)}", Setter)`
-    );
-    if (!collectionSetters) collectionSetters = [];
+    // Phase 1: Use metadata instead of Prolog queries
+    const metadata = this.getCollectionMetadata(key);
+    if (!metadata) {
+      console.warn(`Collection "${key}" has no metadata, skipping`);
+      return;
+    }
 
-    if (collectionSetters.length > 0) {
-      const actions = eval(collectionSetters[0].Setter);
+    // Generate actions from metadata (replaces Prolog query)
+    const actions = this.generateCollectionAction(key, 'setter');
 
-      if (value) {
-        if (Array.isArray(value)) {
-          await this.#perspective.executeAction(
-            actions,
-            this.#baseExpression,
-            value.map((v) => ({ name: "value", value: v })),
-            batchId
-          );
-        } else {
-          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
-        }
+    if (value != null) {
+      if (Array.isArray(value)) {
+        await this.#perspective.executeAction(
+          actions,
+          this.#baseExpression,
+          value.map((v) => ({ name: "value", value: v })),
+          batchId
+        );
+      } else {
+        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
       }
     }
   }
 
   private async setCollectionAdder(key: string, value: any, batchId?: string) {
-    let adders = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), collection_adder(C, "${singularToPlural(key)}", Adder)`
-    );
-    if (!adders) adders = [];
+    // Phase 1: Use metadata instead of Prolog queries
+    const metadata = this.getCollectionMetadata(key);
+    if (!metadata) {
+      console.warn(`Collection "${key}" has no metadata, skipping`);
+      return;
+    }
 
-    if (adders.length > 0) {
-      const actions = eval(adders[0].Adder);
-      if (value) {
-        if (Array.isArray(value)) {
-          await Promise.all(
-            value.map((v) =>
-              this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
-            )
-          );
-        } else {
-          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
-        }
+    // Generate actions from metadata (replaces Prolog query)
+    const actions = this.generateCollectionAction(key, 'adder');
+
+    if (value != null) {
+      if (Array.isArray(value)) {
+        await Promise.all(
+          value.map((v) =>
+            this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
+          )
+        );
+      } else {
+        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
       }
     }
   }
 
   private async setCollectionRemover(key: string, value: any, batchId?: string) {
-    let removers = await this.#perspective.infer(
-      `subject_class("${this.#subjectClassName}", C), collection_remover(C, "${singularToPlural(key)}", Remover)`
-    );
-    if (!removers) removers = [];
+    // Phase 1: Use metadata instead of Prolog queries
+    const metadata = this.getCollectionMetadata(key);
+    if (!metadata) {
+      console.warn(`Collection "${key}" has no metadata, skipping`);
+      return;
+    }
 
-    if (removers.length > 0) {
-      const actions = eval(removers[0].Remover);
-      if (value) {
-        if (Array.isArray(value)) {
-          await Promise.all(
-            value.map((v) =>
-              this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
-            )
-          );
-        } else {
-          await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
-        }
+    // Generate actions from metadata (replaces Prolog query)
+    const actions = this.generateCollectionAction(key, 'remover');
+
+    if (value != null) {
+      if (Array.isArray(value)) {
+        await Promise.all(
+          value.map((v) =>
+            this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value: v }], batchId)
+          )
+        );
+      } else {
+        await this.#perspective.executeAction(actions, this.#baseExpression, [{ name: "value", value }], batchId);
       }
     }
   }
@@ -2003,10 +2171,17 @@ WHERE ${whereConditions.join(' AND ')}
               await this.setCollectionSetter(key, value.value, batchId);
               break;
           }
-        } else if (Array.isArray(value) && value.length > 0) {
+        } else if (Array.isArray(value)) {
+          // Handle all arrays as collections, including empty ones (which clears the collection)
           await this.setCollectionSetter(key, value, batchId);
         } else if (value !== undefined && value !== null && value !== "") {
           if (setProperties) {
+            // Check if this is a collection property (has collection metadata)
+            const collMetadata = this.getCollectionMetadata(key);
+            if (collMetadata) {
+              // Skip - it's a collection, not a regular property
+              continue;
+            }
             await this.setProperty(key, value, batchId);
           }
         }
