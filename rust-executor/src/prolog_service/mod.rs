@@ -271,13 +271,32 @@ impl PrologService {
             drop(engines);
 
             // EXPENSIVE OPERATIONS OUTSIDE THE LOCK:
-            // Load facts into both engines
-            query_engine_to_update
-                .load_module_string("facts", &processed_facts)
-                .await?;
-            subscription_engine_to_update
-                .load_module_string("facts", &processed_facts)
-                .await?;
+            // Load facts into both engines - wrap in error handling to restore on failure
+            let load_result = async {
+                query_engine_to_update
+                    .load_module_string("facts", &processed_facts)
+                    .await?;
+                subscription_engine_to_update
+                    .load_module_string("facts", &processed_facts)
+                    .await?;
+                Ok::<_, Error>(())
+            }
+            .await;
+
+            // Handle load failure by restoring original engines
+            if let Err(e) = load_result {
+                let mut engines = self.simple_engines.write().await;
+                let simple_engine = engines.get_mut(perspective_id).unwrap();
+
+                // Restore the original engines
+                simple_engine.query_engine = query_engine_to_update;
+                simple_engine.subscription_engine = subscription_engine_to_update;
+
+                // Mark dirty so update will be retried
+                simple_engine.dirty = true;
+
+                return Err(e);
+            }
 
             // LOCK SCOPE: Reacquire write lock to update final state
             let mut engines = self.simple_engines.write().await;
