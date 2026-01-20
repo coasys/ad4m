@@ -1366,6 +1366,8 @@ impl PerspectiveInstance {
                 link.0.data.predicate.clone(),
                 link.0.data.target.clone(),
                 link.0.author.clone(),
+                link.0.timestamp.clone(),
+                link.1.clone(), // Include LinkStatus
             );
             if seen.insert(key) {
                 all_sdna_links.push(link);
