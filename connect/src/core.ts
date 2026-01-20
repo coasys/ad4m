@@ -150,10 +150,17 @@ export default class Ad4mConnect extends EventTarget {
     });
   }
 
-  async buildTempClient(url: string): Promise<Ad4mClient> {
+  private async withTempClient<T>(url: string, callback: (client: Ad4mClient) => Promise<T>): Promise<T> {
+    // Create a temporary client for the duration of the callback
     const wsClient = createClient({ url, connectionParams: async () => ({ headers: { authorization: "" } }) });
     const apolloClient = this.createApolloClient(wsClient);
-    return new Ad4mClient(apolloClient);
+    const client = new Ad4mClient(apolloClient);
+
+    try {
+      return await callback(client);
+    } finally {
+      wsClient.dispose();
+    }
   }
 
   async checkAuth(): Promise<boolean> {
@@ -165,7 +172,6 @@ export default class Ad4mConnect extends EventTarget {
         console.log('[Ad4m Connect] Agent wallet is locked');
         this.notifyAuthChange("locked");
       } else {
-        console.log('[Ad4m Connect] Agent wallet is unlocked, verifying status...');
         await this.ad4mClient.agent.status();
         this.notifyAuthChange("authenticated");
       }
@@ -231,6 +237,16 @@ export default class Ad4mConnect extends EventTarget {
   }
 
   // Local authentication
+  private buildAppInfo() {
+    return {
+      appName: this.options.appInfo.name,
+      appDesc: this.options.appInfo.description,
+      appDomain: this.options.appInfo.url,
+      appUrl: window.location.origin,
+      appIconPath: this.options.appInfo.iconPath,
+    };
+  }
+
   async requestCapability(invalidateToken = false): Promise<string> {
     if (invalidateToken) {
       this.token = null;
@@ -264,10 +280,8 @@ export default class Ad4mConnect extends EventTarget {
 
   // Remote authentication
   async isValidAd4mAPI(): Promise<boolean> {
-    const tempClient = await this.buildTempClient(this.url);
-
     try {
-      await tempClient.runtime.info();
+      await this.withTempClient(this.url, async (client) => await client.runtime.info());
       return true;
     } catch (error) {
       console.error("[Ad4m Connect] Failed to verify AD4M API:", error);
@@ -276,10 +290,8 @@ export default class Ad4mConnect extends EventTarget {
   }
 
   async isMultiUser(): Promise<boolean> {
-    const tempClient = await this.buildTempClient(this.url);
-
     try {
-      return await tempClient.runtime.multiUserEnabled();
+      return await this.withTempClient(this.url, async (client) => await client.runtime.multiUserEnabled());
     } catch (error) {
       console.error("[Ad4m Connect] Failed to detect multi-user mode:", error);
       // If multi-user query fails, assume single-user mode
@@ -289,66 +301,55 @@ export default class Ad4mConnect extends EventTarget {
 
   async submitEmail(email: string): Promise<VerificationRequestResult> {
     try {
-      const tempClient = await this.buildTempClient(this.url);
-      const appInfo = {
-        appName: this.options.appInfo.name,
-        appDesc: this.options.appInfo.description,
-        appDomain: this.options.appInfo.url,
-        appUrl: window.location.origin,
-        appIconPath: this.options.appInfo.iconPath,
-      }
-
-      return await tempClient.agent.requestLoginVerification(email, appInfo);
+      return await this.withTempClient(this.url, async (client) => await client.agent.requestLoginVerification(email, this.buildAppInfo()));
     } catch (e) {
-      return { success: false, message: e.message || "Failed to process email. Please try again.", requiresPassword: false, isExistingUser: false };
+      const errorMessage = (e as Error).message || "Failed to process email. Please try again.";
+      return { success: false, message: errorMessage, requiresPassword: false, isExistingUser: false };
     }
   }
 
   async verifyEmailCode(email: string, code: string): Promise<boolean> {
     try {
-      const tempClient = await this.buildTempClient(this.url);
-      const token = await tempClient.agent.verifyEmailCode(email, code, "login");
-
+      const token = await this.withTempClient(this.url, async (client) => await client.agent.verifyEmailCode(email, code, "login"));
       this.token = token;
       setLocal("ad4m-token", this.token);
       await this.connect();
       return true;
     } catch (e) {
-      console.error('[Ad4m Connect] Email code verification failed:', e);
+      console.error("[Ad4m Connect] Email code verification failed:", e);
       return false;
     }
   }
 
   async loginWithPassword(email: string, password: string): Promise<boolean> {
     try {
-      const tempClient = await this.buildTempClient(this.url);
-      const token = await tempClient.agent.loginUser(email, password);
+      const token = await this.withTempClient(this.url, async (client) => await client.agent.loginUser(email, password));
       this.token = token;
       setLocal("ad4m-token", this.token);
       await this.connect();
       return true;
     } catch (e) {
-      console.error('[Ad4m Connect] Password login failed:', e);
+      console.error("[Ad4m Connect] Password login failed:", e);
       return false;
     }
   }
 
   async createAccount(email: string, password: string): Promise<boolean> {
     try {
-      const tempClient = await this.buildTempClient(this.url);
-      const result = await tempClient.agent.createUser(email, password);
-      if (result.success) {
-        const token = await tempClient.agent.loginUser(email, password);
-        this.token = token;
-        setLocal("ad4m-token", this.token);
-        await this.connect();
-        return true;
-      } else {
-        console.error('[Ad4m Connect] Account creation failed:', result.error);
-        return false;
-      }
+      const token = await this.withTempClient(this.url, async (client) => {
+        const result = await client.agent.createUser(email, password);
+        // If creation successful, log in the new user
+        if (result.success) return await client.agent.loginUser(email, password);
+        // Otherwise, throw an error with the failure message
+        else throw new Error(result.error || "Failed to create account");
+      });
+
+      this.token = token;
+      setLocal("ad4m-token", this.token);
+      await this.connect();
+      return true;
     } catch (e) {
-      console.error('[Ad4m Connect] Account creation error:', e);
+      console.error("[Ad4m Connect] Account creation error:", e);
       return false;
     }
   }

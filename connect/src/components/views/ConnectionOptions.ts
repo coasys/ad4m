@@ -70,16 +70,6 @@ export class ConnectionOptions extends LitElement {
     `
   ];
 
-  private async detectLocalNode() {
-    try {
-      await connectWebSocket(`ws://localhost:${this.newPort}/graphql`, 3000);
-      this.localNodeDetected = true;
-    } catch (error) {
-      console.log("[Ad4m Connect] Local detection failed:", error);
-      this.localNodeDetected = false;
-    }
-  }
-
   private async changePort() {
     this.dispatchEvent(new CustomEvent("change-port", { detail: { port: this.newPort }, bubbles: true, composed: true }));
   }
@@ -94,6 +84,21 @@ export class ConnectionOptions extends LitElement {
 
   private clearRemoteNodeError() {
     this.dispatchEvent(new CustomEvent("clear-remote-node-error", { bubbles: true, composed: true }));
+  }
+
+  private async detectLocalNode() {
+    try {
+      await connectWebSocket(`ws://localhost:${this.newPort}/graphql`, 3000);
+      this.localNodeDetected = true;
+    } catch (error) {
+      console.log("[Ad4m Connect] Local detection failed:", error);
+      this.localNodeDetected = false;
+    }
+  }
+
+  private refreshPort() {
+    this.changePort();
+    this.detectLocalNode();
   }
 
   async connectedCallback() {
@@ -160,8 +165,11 @@ export class ConnectionOptions extends LitElement {
                   const input = e.target as HTMLInputElement;
                   this.newPort = parseInt(input.value);
                 }}
+                @keydown=${(e: KeyboardEvent) => {
+                  if (e.key === 'Enter') this.refreshPort();
+                }}
               />
-              <button class="primary" @click=${() => { this.changePort(); this.detectLocalNode(); }}>
+              <button class="primary" @click=${this.refreshPort}>
                 ${RefreshIcon()}
               </button>
             </div>
@@ -192,6 +200,9 @@ export class ConnectionOptions extends LitElement {
                 this.newRemoteUrl = input.value;
 
                 if (this.remoteNodeError) this.clearRemoteNodeError();
+              }}
+              @keydown=${(e: KeyboardEvent) => {
+                if (e.key === 'Enter') this.connectRemoteNode();
               }}
               style= "font-size: 16px;"
             />

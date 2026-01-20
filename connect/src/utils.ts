@@ -1,6 +1,5 @@
 //@ts-ignore
 import { version } from "../../package.json";
-
 import { getAd4mConnect, getAd4mClient } from './index';
 
 export function isEmbedded(): boolean {

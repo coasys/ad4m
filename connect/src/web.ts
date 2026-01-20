@@ -98,11 +98,18 @@ export class Ad4mConnectElement extends LitElement {
 
   core: Ad4mConnect;
 
+  // Global state
   @state() modalOpen = false;
   @state() private currentView: Views = "connection-options";
-  @state() private verificationError = false;
+
+  // Connection options state
   @state() private connectingToRemoteNode = false;
   @state() private remoteNodeError = false;
+
+  // Local authentication state
+  @state() private verificationError = false;
+
+  // Remote authentication state
   @state() private remoteAuthLoading = false;
   @state() private remoteAuthState: VerificationRequestResult | null = null;
   @state() private emailCodeError = false;
@@ -167,16 +174,17 @@ export class Ad4mConnectElement extends LitElement {
       // Check if the server is reachable
       await connectWebSocket(e.detail.remoteUrl);
       console.log('[Ad4m Connect UI] Remote connection successful');
+  
       // Verify it's actually an AD4M API
       const isValidAd4mApi = await this.core.isValidAd4mAPI();
-      if (!isValidAd4mApi) {
-        throw new Error("Server is reachable but doesn't appear to be an AD4M executor");
-      }
+      if (!isValidAd4mApi) throw new Error("Server is reachable but doesn't appear to be an AD4M executor");
       console.log('[Ad4m Connect UI] Remote AD4M API verified');
-      // Detect if multi-user is enabled
+  
+      // TODO: Handle multi-user flow differently if needed
       const isMultiUser = await this.core.isMultiUser();
       console.log('[Ad4m Connect UI] Remote multi-user detected:', isMultiUser);
 
+      // Navigate to remote authentication view
       this.currentView = "remote-authentication";
     } catch (error) {
       console.error('[Ad4m Connect UI] Remote connection failed:', error);
@@ -227,6 +235,13 @@ export class Ad4mConnectElement extends LitElement {
       const success = await this.core.createAccount(event.detail.email, event.detail.password);
       this.accountCreationError = !success;
       if (success) this.modalOpen = false;
+      // TODO: request verification instead of auto-login when testing complete
+      // const result = await this.core.createAccount(event.detail.email, event.detail.password);
+      // console.log('*** create account result', result);
+      // this.accountCreationError = !result.success;
+      // if (result.success) {
+      //   await this.emailLogin(new CustomEvent("", { detail: { email: event.detail.email }}));
+      // }
     } catch (error) {
       this.accountCreationError = true;
     } finally {

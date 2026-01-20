@@ -2,7 +2,7 @@ import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { VerificationRequestResult } from "@coasys/ad4m";
 import { sharedStyles } from "../../styles/shared-styles";
-import { ArrowLeftIcon, CrossIcon } from "../icons";
+import { ArrowLeftIcon, CheckIcon, CrossIcon } from "../icons";
 
 @customElement("remote-authentication")
 export class RemoteAuthentication extends LitElement {
@@ -19,22 +19,23 @@ export class RemoteAuthentication extends LitElement {
   static styles = [
     sharedStyles,
     css`
+      .header h1 {
+        font-size: 32px;
+        margin-bottom: 0;
+      }
+  
       .input-row {
         display: flex;
         justify-content: center;
       }
 
       .input-row input {
-        width: 200px;
+        width: 280px;
       }
 
       .login-button {
         display: flex;
         justify-content: center;
-      }
-
-      .login-button button {
-        width: 200px;
       }
 
       .security-code {
@@ -60,10 +61,6 @@ export class RemoteAuthentication extends LitElement {
         margin-bottom: 20px;
       }
 
-      .password-input input {
-        width: 200px;
-      }
-
       .state {
         justify-content: center;
       }
@@ -72,6 +69,7 @@ export class RemoteAuthentication extends LitElement {
 
   private back() {
     this.dispatchEvent(new CustomEvent("back", { bubbles: true, composed: true }));
+    this.remoteAuthState = null;
   }
 
   private emailLogin() {
@@ -100,27 +98,14 @@ export class RemoteAuthentication extends LitElement {
     input.value = cleaned;
     this.emailSecurityCode = cleaned;
 
-    // verifyEmailCode(email: string, code: string, verificationType: string): Promise<string>;
-
     // Auto-verify when 6 digits entered
     if (this.emailSecurityCode.length === 6) this.verifyEmailCode();
   }
 
-  // if (success) {
-  //   if (requiresPassword) {
-  //     if (isExistingUser) {
-  //       // User exists, show password for login
-  //     } else {
-  //       // New user, show password for signup
-  //     }
-  //   } else {
-  //     // User exists, verification email sent (display code entry)
-  //   }
-  // } else {
-  //   // Show error message
-  // }
-
-  // <h3>Enter your email to access <br/> the remote AD4M node</h3>
+  private isValidEmail(): boolean {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(this.email.trim());
+  }
 
   render() {
     const showEmailInput = !this.remoteAuthState;
@@ -136,11 +121,13 @@ export class RemoteAuthentication extends LitElement {
         </div>
 
         <div class="header">
-          <h1>Login to remote node</h1>
+          <h1>Login</h1>
         </div>
 
         ${showEmailInput ? 
           html`
+            <h3>Enter your email to login to the remote node</h3>
+
             <div class="input-row">
               <input
                 type="email"
@@ -153,8 +140,8 @@ export class RemoteAuthentication extends LitElement {
               />
             </div>
 
-            <div class="login-button">
-              <button class="primary" @click=${this.emailLogin} .disabled=${this.remoteAuthLoading}>
+            <div class="login-button" style="margin-top: 10px;">
+              <button class="primary" @click=${this.emailLogin} .disabled=${this.remoteAuthLoading || !this.isValidEmail()}>
                 ${this.remoteAuthLoading ? "Loading..." : "Login"}
               </button>
             </div>
@@ -180,6 +167,13 @@ export class RemoteAuthentication extends LitElement {
 
         ${showEmailCodeInput ? 
           html`
+            <div class="state success" style="margin-bottom: -12px">
+              ${CheckIcon()}
+              <p>Email verification code sent</p>
+            </div>
+
+            <h3>Check your emails and paste the code below</h3>
+
             <div class="security-code">
               <input
                 type="text"
@@ -207,7 +201,14 @@ export class RemoteAuthentication extends LitElement {
 
         ${showLoginPasswordInput ? 
           html`
-            <div class="password-input">
+            <div class="state success" style="margin-bottom: -12px">
+              ${CheckIcon()}
+              <p>Account found</p>
+            </div>
+                      
+            <h3>Enter your password to login</h3>
+
+            <div class="input-row">
               <input
                 type="password"
                 placeholder="Password..."
@@ -220,7 +221,7 @@ export class RemoteAuthentication extends LitElement {
             </div>
 
             <div class="login-button">
-              <button class="primary" @click=${this.passwordLogin} .disabled=${this.remoteAuthLoading}>
+              <button class="primary" @click=${this.passwordLogin} .disabled=${this.remoteAuthLoading || !this.password.length}>
                 ${this.remoteAuthLoading ? "Loading..." : "Login"}
               </button>
             </div>
@@ -240,7 +241,14 @@ export class RemoteAuthentication extends LitElement {
 
         ${showSignUpPasswordInput ? 
           html`
-            <div class="password-input">
+            <div class="state danger">
+              ${CrossIcon()}
+              <p>Email not found</p>
+            </div>
+
+            <h3>Enter a password to create a new account</h3>
+
+            <div class="input-row">
               <input
                 type="password"
                 placeholder="Password..."
@@ -253,7 +261,7 @@ export class RemoteAuthentication extends LitElement {
             </div>
 
             <div class="login-button">
-              <button class="primary" @click=${this.createAccount} .disabled=${this.remoteAuthLoading}>
+              <button class="primary" @click=${this.createAccount} .disabled=${this.remoteAuthLoading || !this.password.length}>
                 ${this.remoteAuthLoading ? "Loading..." : "Create Account"}
               </button>
             </div>
