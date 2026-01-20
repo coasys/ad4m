@@ -14,9 +14,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@coasys/ad4m": "workspace:0.11.2-dev",
-    "@coasys/ad4m-connect": "*",
-    "@coasys/hooks-helpers": "*",
+    "@coasys/ad4m": "workspace:*",
+    "@coasys/hooks-helpers": "workspace:*",
     "@types/react": "^18.2.55",
     "@types/react-dom": "^18.2.19"
   },

@@ -1,6 +1,5 @@
 //@ts-ignore
 import { version } from "../../package.json";
-import { getAd4mConnect, getAd4mClient } from './index';
 
 export function isEmbedded(): boolean {
   return typeof window !== 'undefined' && window.self !== window.top;
@@ -68,6 +67,3 @@ export async function connectWebSocket(url, timeout = 10000) {
     }),
   ]);
 }
-
-// TODO: remove (supports old imports)
-export { getAd4mClient, getAd4mConnect };

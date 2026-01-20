@@ -51,5 +51,5 @@ export async function getAd4mClient(options: Ad4mConnectOptions): Promise<Ad4mCl
   return client;
 }
 
-// TODO: remove (supports old imports)
+// Re-export isEmbedded utility
 export { isEmbedded };

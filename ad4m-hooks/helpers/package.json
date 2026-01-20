@@ -14,9 +14,11 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@coasys/ad4m": "*",
-    "@coasys/ad4m-connect": "*",
+    "@coasys/ad4m": "workspace:*",
     "uuid": "*"
+  },
+  "devDependencies": {
+    "@types/uuid": "^9.0.0"
   },
   "version": "0.11.2-dev"
 }

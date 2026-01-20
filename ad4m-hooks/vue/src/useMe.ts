@@ -1,6 +1,5 @@
 import { computed, effect, ref, shallowRef, watch } from "vue";
-import { Agent, AgentStatus, LinkExpression } from "@coasys/ad4m";
-import { AgentClient } from "@coasys/ad4m";
+import { Agent, AgentStatus, LinkExpression, AgentClient } from "@coasys/ad4m";
 
 const status = shallowRef<AgentStatus>({ isInitialized: false, isUnlocked: false });
 const agent = shallowRef<Agent | undefined>();
@@ -29,8 +28,8 @@ export function useMe<T>(client: AgentClient, formatter: (links: LinkExpression[
     () => agent.value,
     (newAgent) => {
       if (agent.value?.perspective) {
-        const perspective = newAgent.perspective;
-  
+        const perspective = newAgent?.perspective;
+        if (!perspective) return;
         profile.value = formatter(perspective.links);
       } else {
         profile.value = null;
