@@ -387,11 +387,24 @@ export default class Ad4mConnect extends EventTarget {
     this.authState = value;
     this.dispatchEvent(new CustomEvent("authstatechange", { detail: value }));
 
-    // In embedded mode, resolve the connect() promise when authenticated
-    if (this.embedded && value === "authenticated" && this.embeddedResolve) {
-      this.embeddedResolve(this.ad4mClient);
-      this.embeddedResolve = undefined;
-      this.embeddedReject = undefined;
+    // In embedded mode, handle connect() promise resolution/rejection
+    if (this.embedded) {
+      // Resolve when authenticated
+      if (value === "authenticated" && this.embeddedResolve) {
+        this.embeddedResolve(this.ad4mClient);
+        this.embeddedResolve = undefined;
+        this.embeddedReject = undefined;
+      }
+      
+      // Reject on failing auth states
+      if ((value === "unauthenticated" || value === "locked") && this.embeddedReject) {
+        const errorMessage = value === "locked" 
+          ? "Authentication failed: Agent is locked"
+          : "Authentication failed: Unauthenticated";
+        this.embeddedReject(new Error(errorMessage));
+        this.embeddedResolve = undefined;
+        this.embeddedReject = undefined;
+      }
     }
   }
 

@@ -70,6 +70,9 @@ export class RemoteAuthentication extends LitElement {
   private back() {
     this.dispatchEvent(new CustomEvent("back", { bubbles: true, composed: true }));
     this.remoteAuthState = null;
+    // Clear sensitive fields when navigating back
+    this.password = "";
+    this.emailSecurityCode = "";
   }
 
   private emailLogin() {
