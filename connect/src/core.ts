@@ -69,6 +69,10 @@ export default class Ad4mConnect extends EventTarget {
           clearTimeout(timeout);
           console.log('[Ad4m Connect] Client already initialized in embedded mode');
           resolve(this.ad4mClient);
+        } else if (this.ad4mClient && this.authState !== 'authenticated') {
+          // Auth already failed before connect() was called
+          clearTimeout(timeout);
+          reject(new Error(`Embedded auth state: ${this.authState}`));
         }
       });
     }
