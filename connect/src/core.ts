@@ -74,19 +74,17 @@ export default class Ad4mConnect extends EventTarget {
     }
 
     // Standalone mode - connect directly
-    return new Promise(async (resolve, reject) => {
-      try {
-        await connectWebSocket(this.url);
-        setLocal("ad4m-url", this.url);
-        this.ad4mClient = await this.buildClient();
-        await this.checkAuth();
-        resolve(this.ad4mClient);
-      } catch (error) {
-        console.error('[Ad4m Connect] Connection failed:', error);
-        this.notifyConnectionChange("error");
-        reject(error);
-      }
-    });
+    try {
+      await connectWebSocket(this.url);
+      setLocal("ad4m-url", this.url);
+      this.ad4mClient = await this.buildClient();
+      await this.checkAuth();
+      return this.ad4mClient;
+    } catch (error) {
+      console.error('[Ad4m Connect] Connection failed:', error);
+      this.notifyConnectionChange("error");
+      throw error;
+    }
   }
 
   private async buildClient(): Promise<Ad4mClient> {
@@ -120,10 +118,13 @@ export default class Ad4mConnect extends EventTarget {
           if (!this.token) {
             this.notifyConnectionChange("error");
           } else {
-            const client = await this.connect();
-            if (client) {
-              this.ad4mClient = client;
-            } else {
+            try {
+              // Force a fresh connection by rebuilding the client
+              // instead of potentially reusing a dead embedded client
+              this.ad4mClient = await this.buildClient();
+              await this.checkAuth();
+            } catch (error) {
+              console.error('[Ad4m Connect] Reconnection failed:', error);
               this.notifyConnectionChange("error");
             }
           }

@@ -101,8 +101,10 @@ export class RemoteAuthentication extends LitElement {
     input.value = cleaned;
     this.emailSecurityCode = cleaned;
 
-    // Auto-verify when 6 digits entered
-    if (this.emailSecurityCode.length === 6) this.verifyEmailCode();
+    // Auto-verify when 6 digits entered (only if not already verifying)
+    if (this.emailSecurityCode.length === 6 && !this.remoteAuthLoading) {
+      this.verifyEmailCode();
+    }
   }
 
   private isValidEmail(): boolean {
