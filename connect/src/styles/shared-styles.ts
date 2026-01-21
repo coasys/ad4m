@@ -68,6 +68,11 @@ export const sharedStyles = css`
     outline: none;
   }
 
+  button:focus-visible {
+    outline: 2px solid var(--ac-primary-color);
+    outline-offset: 2px;
+  }
+
   button svg {
     width: 25px;
     height: 25px;
@@ -82,6 +87,12 @@ export const sharedStyles = css`
     background: var(--ac-primary-color-light);
   }
 
+  button.primary:focus-visible:not(:disabled) {
+    outline: 2px solid var(--ac-primary-color-light);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.2);
+  }
+
   button.secondary {
     background: #00091e5c;
     color: var(--ac-primary-color);
@@ -91,6 +102,12 @@ export const sharedStyles = css`
   button.secondary:hover:not(:disabled) {
     background: #00091e73;
     color: var(--ac-primary-color-light);
+  }
+
+  button.secondary:focus-visible:not(:disabled) {
+    outline: 2px solid var(--ac-primary-color-light);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.2);
   }
 
   button.ghost {
@@ -103,6 +120,12 @@ export const sharedStyles = css`
     background: rgba(255, 255, 255, 0.05);
   }
 
+  button.ghost:focus-visible:not(:disabled) {
+    outline: 2px solid rgba(255, 255, 255, 0.7);
+    outline-offset: 2px;
+    background: rgba(255, 255, 255, 0.05);
+  }
+
   button.link {
     background: transparent;
     color: var(--ac-primary-color);
@@ -112,6 +135,12 @@ export const sharedStyles = css`
   }
 
   button.link:hover {
+    text-decoration: underline;
+  }
+
+  button.link:focus-visible {
+    outline: 2px solid var(--ac-primary-color);
+    outline-offset: 2px;
     text-decoration: underline;
   }
 

@@ -21,6 +21,8 @@ export type Ad4mConnectOptions = {
   remoteUrl?: string;
   userEmail?: string;
   userPassword?: string;
+  // Security options for embedded mode
+  allowedOrigins?: string[];
 };
 
 export type ConfigStates = "port" | "url" | "token";

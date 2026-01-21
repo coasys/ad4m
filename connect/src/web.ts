@@ -85,6 +85,11 @@ const styles = css`
   }
 
   .settings-button {
+    appearance: none;
+    border: none;
+    background: transparent;
+    padding: 0;
+    cursor: pointer;
     position: absolute;
     bottom: 20px;
     right: 20px;
@@ -126,6 +131,8 @@ export class Ad4mConnectElement extends LitElement {
         // Token expired or invalid - show UI
         this.currentView = "connection-options";
         this.modalOpen = true;
+        // Ensure element is visible
+        this.style.display = '';
       }
     });
 
@@ -136,6 +143,8 @@ export class Ad4mConnectElement extends LitElement {
         console.error('[Ad4m Connect UI] Auto-connect failed:', error);
         this.currentView = "connection-options";
         this.modalOpen = true;
+        // Ensure element is visible
+        this.style.display = '';
       });
     } else {
       this.currentView = "connection-options";
@@ -153,8 +162,14 @@ export class Ad4mConnectElement extends LitElement {
     // Update URL to local and persist
     this.core.url = `ws://localhost:${this.core.port}/graphql`;
     setLocal("ad4m-url", this.core.url);
-    await this.core.connect();
-    this.currentView = "local-authentication";
+    
+    try {
+      await this.core.connect();
+      this.currentView = "local-authentication";
+    } catch (error) {
+      console.error('[Ad4m Connect UI] Local node connection failed:', error);
+      this.currentView = "connection-options";
+    }
   }
 
   private async verifyLocalAd4mCode(event: CustomEvent) {
@@ -303,12 +318,17 @@ export class Ad4mConnectElement extends LitElement {
     // Show settings button when authenticated and modal is closed
     if (!this.modalOpen && this.core.authState === "authenticated") {
       return html`
-        <div class="settings-button" @click=${() => {
-          this.currentView = "connection-options";
-          this.modalOpen = true;
-        }}>
+        <button
+          type="button"
+          class="settings-button"
+          aria-label="Open settings"
+          @click=${() => {
+            this.currentView = "connection-options";
+            this.modalOpen = true;
+          }}
+        >
           ${Ad4mLogo()}
-        </div>
+        </button>
       `;
     }
 
@@ -342,23 +362,12 @@ export default function Ad4mConnectUI(core: Ad4mConnect): Ad4mConnectElement {
     console.log('[Ad4m Connect UI] Mounting UI to DOM');
     
     // Check if we have a token - if so, hide UI initially and try auto-connect
+    // The authstatechange listener will show it if connection fails
     if (core.token) {
       element.style.display = 'none';
-      
-      // Listen for when modal opens (connection/auth failed)
-      const observer = new MutationObserver(() => {
-        if (element.modalOpen) {
-          element.style.display = '';
-          observer.disconnect();
-        }
-      });
-      
-      document.body.appendChild(element);
-      observer.observe(element, { attributes: true });
-    } else {
-      // No token - show UI immediately
-      document.body.appendChild(element);
     }
+    
+    document.body.appendChild(element);
   }
 
   return element;

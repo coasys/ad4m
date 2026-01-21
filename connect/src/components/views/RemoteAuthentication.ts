@@ -73,19 +73,19 @@ export class RemoteAuthentication extends LitElement {
   }
 
   private emailLogin() {
-    this.dispatchEvent(new CustomEvent("email-login", { detail: { email: this.email }, bubbles: true, composed: true }));
+    this.dispatchEvent(new CustomEvent("email-login", { detail: { email: this.email.trim() }, bubbles: true, composed: true }));
   }
 
   private verifyEmailCode() {
-    this.dispatchEvent(new CustomEvent("verify-email-code", { detail: { email: this.email, code: this.emailSecurityCode }, bubbles: true, composed: true }));
+    this.dispatchEvent(new CustomEvent("verify-email-code", { detail: { email: this.email.trim(), code: this.emailSecurityCode }, bubbles: true, composed: true }));
   }
 
   private passwordLogin() {
-    this.dispatchEvent(new CustomEvent("password-login", { detail: { email: this.email, password: this.password }, bubbles: true, composed: true }));
+    this.dispatchEvent(new CustomEvent("password-login", { detail: { email: this.email.trim(), password: this.password }, bubbles: true, composed: true }));
   }
 
   private createAccount() {
-    this.dispatchEvent(new CustomEvent("create-account", { detail: { email: this.email, password: this.password }, bubbles: true, composed: true }));
+    this.dispatchEvent(new CustomEvent("create-account", { detail: { email: this.email.trim(), password: this.password }, bubbles: true, composed: true }));
   }
 
   private onEmailSecurityCodeChange(e: Event) {

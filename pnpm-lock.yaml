@@ -107,26 +107,24 @@ importers:
   ad4m-hooks/helpers:
     dependencies:
       '@coasys/ad4m':
-        specifier: '*'
-        version: 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
-      '@coasys/ad4m-connect':
-        specifier: '*'
-        version: 0.8.1(esbuild@0.19.12)
+        specifier: workspace:*
+        version: link:../../core
       uuid:
         specifier: '*'
+        version: 9.0.1
+    devDependencies:
+      '@types/uuid':
+        specifier: ^9.0.0
         version: 9.0.1
 
   ad4m-hooks/react:
     dependencies:
       '@coasys/ad4m':
-        specifier: workspace:0.11.2-dev
+        specifier: workspace:*
         version: link:../../core
-      '@coasys/ad4m-connect':
-        specifier: '*'
-        version: 0.8.1(esbuild@0.19.12)
       '@coasys/hooks-helpers':
-        specifier: '*'
-        version: 0.9.0(esbuild@0.19.12)(react@18.2.0)
+        specifier: workspace:*
+        version: link:../helpers
       '@types/react':
         specifier: ^18.2.55
         version: 18.2.55
@@ -15667,19 +15665,6 @@ snapshots:
       exec-sh: 0.3.6
       minimist: 1.2.8
 
-  '@coasys/ad4m-connect@0.8.1':
-    dependencies:
-      '@undecaf/barcode-detector-polyfill': 0.9.20
-      '@undecaf/zbar-wasm': 0.9.16
-      auto-bind: 5.0.1
-      electron: 20.3.12
-      esbuild-plugin-copy: 2.1.1(esbuild@0.15.18)
-      esbuild-plugin-replace: 1.4.0
-      lit: 2.8.0
-    transitivePeerDependencies:
-      - esbuild
-      - supports-color
-
   '@coasys/ad4m-connect@0.8.1(esbuild@0.19.12)':
     dependencies:
       '@undecaf/barcode-detector-polyfill': 0.9.20
@@ -15799,21 +15784,6 @@ snapshots:
   '@coasys/hooks-helpers@0.9.0':
     dependencies:
       '@coasys/ad4m': 0.8.1
-      '@coasys/ad4m-connect': 0.8.1
-      uuid: 9.0.1
-    transitivePeerDependencies:
-      - bufferutil
-      - esbuild
-      - graphql-ws
-      - react
-      - react-dom
-      - subscriptions-transport-ws
-      - supports-color
-      - utf-8-validate
-
-  '@coasys/hooks-helpers@0.9.0(esbuild@0.19.12)(react@18.2.0)':
-    dependencies:
-      '@coasys/ad4m': 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
       '@coasys/ad4m-connect': 0.8.1(esbuild@0.19.12)
       uuid: 9.0.1
     transitivePeerDependencies:

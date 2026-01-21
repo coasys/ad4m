@@ -7,7 +7,7 @@ import { connectWebSocket } from "../../utils";
 
 @customElement("connection-options")
 export class ConnectionOptions extends LitElement {
-  @property({ type: String }) port: number;
+  @property({ type: Number }) port: number;
   @property({ type: String }) remoteUrl?: string;
   @property({ type: Boolean }) connectingToRemoteNode: boolean = false;
   @property({ type: Boolean }) remoteNodeError: boolean = false;
@@ -160,10 +160,11 @@ export class ConnectionOptions extends LitElement {
               <input
                 type="number"
                 placeholder="Port number..."
-                .value=${this.newPort.toString()}
+                .value=${this.newPort != null ? this.newPort.toString() : ''}
                 @input=${(e: Event) => {
                   const input = e.target as HTMLInputElement;
-                  this.newPort = parseInt(input.value);
+                  const next = Number.parseInt(input.value, 10);
+                  if (Number.isFinite(next)) this.newPort = next;
                 }}
                 @keydown=${(e: KeyboardEvent) => {
                   if (e.key === 'Enter') this.refreshPort();

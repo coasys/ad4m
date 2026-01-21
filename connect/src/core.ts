@@ -199,6 +199,26 @@ export default class Ad4mConnect extends EventTarget {
     // Set up listener for AD4M_CONFIG from parent window
     window.addEventListener('message', async (event: MessageEvent) => {
       if (event.data?.type === 'AD4M_CONFIG') {
+        // Security checks: verify sender
+        if (event.source !== window.parent) {
+          console.warn('[Ad4m Connect] Rejected AD4M_CONFIG from invalid source (not parent window)');
+          return;
+        }
+
+        // Verify origin is in allowlist (if configured)
+        if (this.options.allowedOrigins && this.options.allowedOrigins.length > 0) {
+          if (!event.origin || !this.options.allowedOrigins.includes(event.origin)) {
+            console.warn('[Ad4m Connect] Rejected AD4M_CONFIG from unauthorized origin:', event.origin);
+            const error = new Error(`Unauthorized origin: ${event.origin}`);
+            if (this.embeddedReject) {
+              this.embeddedReject(error);
+              this.embeddedResolve = undefined;
+              this.embeddedReject = undefined;
+            }
+            return;
+          }
+        }
+
         console.log('[Ad4m Connect] Received AD4M_CONFIG from parent:', { 
           port: event.data.port,
           hasToken: !!event.data.token 
@@ -249,7 +269,8 @@ export default class Ad4mConnect extends EventTarget {
 
   async requestCapability(invalidateToken = false): Promise<string> {
     if (invalidateToken) {
-      this.token = null;
+      this.token = '';
+      removeLocal('ad4m-token');
       this.notifyConfigChange("token", this.token);
     }
 
