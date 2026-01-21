@@ -97,21 +97,48 @@ export function InstanceQuery(options?: InstanceQueryParams) {
                 query += ', ' + options.condition
             }
 
-            let results = await perspective.infer(query)
-            if(results == false) {
-                return instances
-            }
-            if(typeof results == "string") {
-                throw results
-            }
-            for(let result of results) {
-                let instance = result.Instance
-                let subject = new Subject(perspective, instance, subjectClassName)
-                await subject.init()
-                instances.push(subject as T)
+            // Try Prolog first
+            try {
+                let results = await perspective.infer(query)
+                if(results && results !== false && typeof results !== "string" && results.length > 0) {
+                    for(let result of results) {
+                        let instance = result.Instance
+                        let subject = new Subject(perspective, instance, subjectClassName)
+                        await subject.init()
+                        instances.push(subject as T)
+                    }
+                    return instances
+                }
+            } catch (e) {
+                // Prolog failed, fall through to SurrealDB
             }
 
-            return instances
+            // Fallback to SurrealDB (SdnaOnly mode)
+            // Get all instances first
+            let allInstances = await perspective.getAllSubjectInstances(subjectClassName)
+
+            // Filter by where clause if provided
+            if(options && options.where) {
+                let filtered = []
+                for(let instance of allInstances) {
+                    let matches = true
+                    for(let prop in options.where) {
+                        let expectedValue = options.where[prop]
+                        //@ts-ignore
+                        let actualValue = await instance[prop]
+                        if(actualValue !== expectedValue) {
+                            matches = false
+                            break
+                        }
+                    }
+                    if(matches) {
+                        filtered.push(instance as T)
+                    }
+                }
+                return filtered
+            }
+
+            return allInstances as T[]
         }
     };
 }

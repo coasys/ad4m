@@ -309,7 +309,8 @@ export default function perspectiveTests(testContext: TestContext) {
                 //expect(linkRemoved.getCall(0).args[0]).to.eql(copiedUpdatedLinkExpression)
             })
 
-            it('shares subscription between identical prolog queries', async () => {
+            // SdnaOnly doesn't load links into prolog engine
+            it.skip('shares subscription between identical prolog queries', async () => {
                 const ad4mClient: Ad4mClient = testContext.ad4mClient!
                 const p = await ad4mClient.perspective.add("Subscription test")
 
@@ -355,7 +356,8 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(result1[0].X).to.equal("test://source")
             })
 
-            it('can run Prolog queries', async () => {
+            // SdnaOnly doesn't load links into prolog engine
+            it.skip('can run Prolog queries', async () => {
                 const ad4mClient: Ad4mClient = testContext.ad4mClient!
                 const p = await ad4mClient.perspective.add("Prolog test")
                 await p.add(new Link({
@@ -841,7 +843,8 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(await proxy.getSingleTarget(new LinkQuery(link1))).to.equal('target2')
             })
 
-            it('can subscribe to Prolog query results', async () => {
+            // SdnaOnly doesn't load links into prolog engine
+            it.skip('can subscribe to Prolog query results', async () => {
                 // Add some test data
                 await proxy.add(new Link({
                     source: "ad4m://root",

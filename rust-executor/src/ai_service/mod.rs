@@ -33,8 +33,8 @@ use log::error;
 pub type Result<T> = std::result::Result<T, AnyError>;
 
 static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
-static TRANSCRIPTION_TIMEOUT_SECS: u64 = 120; // 2 minutes
-static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 10;
+static TRANSCRIPTION_TIMEOUT_SECS: u64 = 30; // 30 seconds (was 2 minutes)
+static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 5; // 5 seconds (was 10)
 
 lazy_static! {
     static ref AI_SERVICE: Arc<Mutex<Option<AIService>>> = Arc::new(Mutex::new(None));
@@ -54,6 +54,11 @@ pub struct AIService {
     llm_channel: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<LLMTaskRequest>>>>,
     transcription_streams: Arc<Mutex<HashMap<String, TranscriptionSession>>>,
     cleanup_task_shutdown: Arc<std::sync::Mutex<Option<oneshot::Sender<()>>>>,
+    /// Shared Whisper models - ONE model per size, shared across ALL streams using that size
+    /// Key = WhisperSource (Tiny/Small/Medium/Large), Value = Arc<Whisper>
+    /// Cloning Arc is cheap (just increments ref count), model weights stay in memory once
+    /// Saves 500MB-1.5GB per stream!
+    shared_whisper_models: Arc<Mutex<HashMap<String, Arc<Whisper>>>>,
 }
 
 impl Drop for AIService {
@@ -222,6 +227,7 @@ impl AIService {
             llm_channel: Arc::new(Mutex::new(HashMap::new())),
             transcription_streams: Arc::new(Mutex::new(HashMap::new())),
             cleanup_task_shutdown: Arc::new(std::sync::Mutex::new(None)),
+            shared_whisper_models: Arc::new(Mutex::new(HashMap::new())), // Models loaded on demand per size
         };
 
         let clone = service.clone();
@@ -1108,95 +1114,122 @@ impl AIService {
         model_id: String,
         params: Option<VoiceActivityParams>,
     ) -> Result<String> {
-        let model_size = Self::get_whisper_model_size(model_id)?;
+        let model_size = Self::get_whisper_model_size(model_id.clone())?;
+
+        // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
+        // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
+        let whisper_model = {
+            let mut shared_models = self.shared_whisper_models.lock().await;
+            let model_key = format!("{:?}", model_size); // Use Debug format as key (e.g., "Small", "Medium")
+
+            if !shared_models.contains_key(&model_key) {
+                log::info!(
+                    "Loading shared Whisper model {} ({:?}) (ONE model per size, ~500MB-1.5GB)...",
+                    model_id,
+                    model_size
+                );
+
+                let model = WhisperBuilder::default()
+                    .with_source(model_size)
+                    .with_device(Self::new_candle_device())
+                    .build()
+                    .await?;
+
+                log::info!(
+                    "Shared Whisper model {:?} loaded! All streams using this size will reuse this model.",
+                    model_size
+                );
+                shared_models.insert(model_key.clone(), Arc::new(model));
+            } else {
+                log::info!(
+                    "Reusing existing shared Whisper model {:?} for new stream",
+                    model_size
+                );
+            }
+
+            // Clone the Arc - this is CHEAP! Just increments a reference count
+            shared_models.get(&model_key).unwrap().clone()
+        };
+
+        log::info!("Opening transcription stream with model {:?}", model_size);
+
         let stream_id = uuid::Uuid::new_v4().to_string();
         let stream_id_clone = stream_id.clone();
         let (samples_tx, samples_rx) = futures_channel::mpsc::unbounded::<Vec<f32>>();
         let (drop_tx, drop_rx) = oneshot::channel();
-        let (done_tx, done_rx) = oneshot::channel();
         let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
 
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
 
             rt.block_on(async {
-                let maybe_model = WhisperBuilder::default()
-                    .with_source(model_size)
-                    .with_device(Self::new_candle_device())
-                    .build()
-                    .await;
+                // Dereference the Arc to get the Whisper model
+                // The model weights stay shared in memory!
+                let whisper = (*whisper_model).clone();
 
-                if let Ok(whisper) = maybe_model {
-                    let audio_stream = AudioStream {
-                        read_data: Vec::new(),
-                        receiver: Box::pin(samples_rx.map(futures_util::stream::iter).flatten()),
-                    };
+                let audio_stream = AudioStream {
+                    read_data: Vec::new(),
+                    receiver: Box::pin(samples_rx.map(futures_util::stream::iter).flatten()),
+                };
 
-                    let mut voice_stream = audio_stream
-                        .voice_activity_stream()
-                        .rechunk_voice_activity();
+                let mut voice_stream = audio_stream
+                    .voice_activity_stream()
+                    .rechunk_voice_activity();
 
-                    // Apply voice activity parameters if provided
-                    if let Some(params) = params {
-                        if let Some(start_threshold) = params.start_threshold {
-                            voice_stream = voice_stream.with_start_threshold(start_threshold);
-                        }
-                        if let Some(start_window) = params.start_window {
-                            voice_stream =
-                                voice_stream.with_start_window(Duration::from_millis(start_window));
-                        }
-                        if let Some(end_threshold) = params.end_threshold {
-                            voice_stream = voice_stream.with_end_threshold(end_threshold);
-                        }
-                        if let Some(end_window) = params.end_window {
-                            voice_stream =
-                                voice_stream.with_end_window(Duration::from_millis(end_window));
-                        }
-                        if let Some(time_before_speech) = params.time_before_speech {
-                            voice_stream = voice_stream
-                                .with_time_before_speech(Duration::from_millis(time_before_speech));
-                        }
-                    } else {
-                        // Set default end window if no params provided
-                        voice_stream = voice_stream.with_end_window(Duration::from_millis(500));
+                // Apply voice activity parameters if provided
+                if let Some(params) = params {
+                    if let Some(start_threshold) = params.start_threshold {
+                        voice_stream = voice_stream.with_start_threshold(start_threshold);
                     }
-
-                    let mut word_stream = voice_stream.transcribe(whisper);
-
-                    let _ = done_tx.send(Ok(()));
-
-                    tokio::select! {
-                        _ = drop_rx => {},
-                        _ = async {
-                            while let Some(segment) = word_stream.next().await {
-                                //println!("GOT segment: {}", segment.text());
-                                let stream_id_clone = stream_id_clone.clone();
-
-                                rt.spawn(async move {
-                                    let _ = get_global_pubsub()
-                                        .await
-                                        .publish(
-                                            &AI_TRANSCRIPTION_TEXT_TOPIC,
-                                            &serde_json::to_string(&TranscriptionTextFilter {
-                                                stream_id: stream_id_clone.clone(),
-                                                text: segment.text().to_string(),
-                                            })
-                                            .expect("TranscriptionTextFilter must be serializable"),
-                                        )
-                                        .await;
-                                });
-
-                                sleep(Duration::from_millis(50)).await;
-                            }
-                        } => {}
+                    if let Some(start_window) = params.start_window {
+                        voice_stream =
+                            voice_stream.with_start_window(Duration::from_millis(start_window));
+                    }
+                    if let Some(end_threshold) = params.end_threshold {
+                        voice_stream = voice_stream.with_end_threshold(end_threshold);
+                    }
+                    if let Some(end_window) = params.end_window {
+                        voice_stream =
+                            voice_stream.with_end_window(Duration::from_millis(end_window));
+                    }
+                    if let Some(time_before_speech) = params.time_before_speech {
+                        voice_stream = voice_stream
+                            .with_time_before_speech(Duration::from_millis(time_before_speech));
                     }
                 } else {
-                    let _ = done_tx.send(Err(maybe_model.err().unwrap()));
+                    // Set default end window if no params provided
+                    voice_stream = voice_stream.with_end_window(Duration::from_millis(500));
+                }
+
+                let mut word_stream = voice_stream.transcribe(whisper);
+
+                tokio::select! {
+                    _ = drop_rx => {},
+                    _ = async {
+                        while let Some(segment) = word_stream.next().await {
+                            //println!("GOT segment: {}", segment.text());
+                            let stream_id_clone = stream_id_clone.clone();
+
+                            rt.spawn(async move {
+                                let _ = get_global_pubsub()
+                                    .await
+                                    .publish(
+                                        &AI_TRANSCRIPTION_TEXT_TOPIC,
+                                        &serde_json::to_string(&TranscriptionTextFilter {
+                                            stream_id: stream_id_clone.clone(),
+                                            text: segment.text().to_string(),
+                                        })
+                                        .expect("TranscriptionTextFilter must be serializable"),
+                                    )
+                                    .await;
+                            });
+
+                            sleep(Duration::from_millis(50)).await;
+                        }
+                    } => {}
                 }
             });
         });
-
-        done_rx.await??;
 
         self.transcription_streams.lock().await.insert(
             stream_id.clone(),
