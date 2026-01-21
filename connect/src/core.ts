@@ -20,7 +20,7 @@ export default class Ad4mConnect extends EventTarget {
   ad4mClient?: Ad4mClient;
   wsClient?: WSClient;
   apolloClient?: ApolloClient<NormalizedCacheObject>;
-  activeSocket: WebSocket = null;
+  activeSocket: WebSocket | null = null;
   requestId?: string;
   requestedRestart: boolean = false;
 
