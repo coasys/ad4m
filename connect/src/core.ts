@@ -210,12 +210,7 @@ export default class Ad4mConnect extends EventTarget {
         if (this.options.allowedOrigins && this.options.allowedOrigins.length > 0) {
           if (!event.origin || !this.options.allowedOrigins.includes(event.origin)) {
             console.warn('[Ad4m Connect] Rejected AD4M_CONFIG from unauthorized origin:', event.origin);
-            const error = new Error(`Unauthorized origin: ${event.origin}`);
-            if (this.embeddedReject) {
-              this.embeddedReject(error);
-              this.embeddedResolve = undefined;
-              this.embeddedReject = undefined;
-            }
+            this.rejectEmbedded(new Error(`Unauthorized origin: ${event.origin}`));
             return;
           }
         }
@@ -225,17 +220,40 @@ export default class Ad4mConnect extends EventTarget {
           hasToken: !!event.data.token 
         });
         
+        // Validate and normalize port
+        const { port: rawPort, token: rawToken } = event.data;
+        
+        if (rawPort === undefined || rawPort === null) {
+          const error = new Error('AD4M_CONFIG missing required field: port');
+          console.error('[Ad4m Connect]', error.message);
+          this.rejectEmbedded(error);
+          return;
+        }
+        
+        const parsedPort = parseInt(rawPort, 10);
+        if (!Number.isFinite(parsedPort) || parsedPort <= 0) {
+          const error = new Error(`AD4M_CONFIG invalid port: ${rawPort} (must be a positive integer)`);
+          console.error('[Ad4m Connect]', error.message);
+          this.rejectEmbedded(error);
+          return;
+        }
+        
+        // Validate and normalize token (optional but must be string if present)
+        const normalizedToken = rawToken !== undefined && rawToken !== null && typeof rawToken === 'string' 
+          ? rawToken 
+          : '';
+        
         try {
-          const { port, token } = event.data;
+          // Set connection details from parent (after successful validation)
+          this.port = parsedPort;
+          this.token = normalizedToken;
+          this.url = `ws://localhost:${parsedPort}/graphql`;
           
-          // Set connection details from parent
-          this.port = port;
-          this.token = token;
-          this.url = `ws://localhost:${port}/graphql`;
-          
-          // Store in localStorage for persistence
-          setLocal('ad4m-port', port.toString());
-          setLocal('ad4m-token', token);
+          // Store in localStorage for persistence (avoid storing undefined)
+          setLocal('ad4m-port', parsedPort.toString());
+          if (normalizedToken) {
+            setLocal('ad4m-token', normalizedToken);
+          }
           setLocal('ad4m-url', this.url);
           
           // Build the client with received credentials
@@ -243,11 +261,7 @@ export default class Ad4mConnect extends EventTarget {
           await this.checkAuth();
         } catch (error) {
           console.error('[Ad4m Connect] Failed to initialize from AD4M_CONFIG:', error);
-          if (this.embeddedReject) {
-            this.embeddedReject(error as Error);
-            this.embeddedResolve = undefined;
-            this.embeddedReject = undefined;
-          }
+          this.rejectEmbedded(error as Error);
         }
       }
     });
@@ -288,8 +302,13 @@ export default class Ad4mConnect extends EventTarget {
   }
 
   async verifyLocalAd4mCode(code: string): Promise<boolean> {
+    if (!this.requestId) {
+      console.error('[Ad4m Connect] Cannot verify code: requestId is missing. Call requestCapability() first to obtain a requestId.');
+      return false;
+    }
+
     try {
-      const jwt = await this.ad4mClient.agent.generateJwt(this.requestId!, code);
+      const jwt = await this.ad4mClient.agent.generateJwt(this.requestId, code);
       this.token = jwt;
       setLocal("ad4m-token", this.token);
       await this.connect();
@@ -376,7 +395,23 @@ export default class Ad4mConnect extends EventTarget {
     }
   }
 
-  // Private helpers to notify state changes
+  // Private helpers
+  private resolveEmbedded(client: Ad4mClient): void {
+    if (this.embeddedResolve) {
+      this.embeddedResolve(client);
+      this.embeddedResolve = undefined;
+      this.embeddedReject = undefined;
+    }
+  }
+
+  private rejectEmbedded(error: Error): void {
+    if (this.embeddedReject) {
+      this.embeddedReject(error);
+      this.embeddedResolve = undefined;
+      this.embeddedReject = undefined;
+    }
+  }
+
   private notifyConnectionChange(value: ConnectionStates) {
     if (this.connectionState === value) return;
     this.connectionState = value;
@@ -391,20 +426,16 @@ export default class Ad4mConnect extends EventTarget {
     // In embedded mode, handle connect() promise resolution/rejection
     if (this.embedded) {
       // Resolve when authenticated
-      if (value === "authenticated" && this.embeddedResolve) {
-        this.embeddedResolve(this.ad4mClient);
-        this.embeddedResolve = undefined;
-        this.embeddedReject = undefined;
+      if (value === "authenticated") {
+        this.resolveEmbedded(this.ad4mClient);
       }
       
       // Reject on failing auth states
-      if ((value === "unauthenticated" || value === "locked") && this.embeddedReject) {
+      if (value === "unauthenticated" || value === "locked") {
         const errorMessage = value === "locked" 
           ? "Authentication failed: Agent is locked"
           : "Authentication failed: Unauthenticated";
-        this.embeddedReject(new Error(errorMessage));
-        this.embeddedResolve = undefined;
-        this.embeddedReject = undefined;
+        this.rejectEmbedded(new Error(errorMessage));
       }
     }
   }
