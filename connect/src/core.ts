@@ -249,10 +249,13 @@ export default class Ad4mConnect extends EventTarget {
           this.token = normalizedToken;
           this.url = `ws://localhost:${parsedPort}/graphql`;
           
-          // Store in localStorage for persistence (avoid storing undefined)
+          // Store in localStorage for persistence (avoid storing undefined or stale credentials)
           setLocal('ad4m-port', parsedPort.toString());
           if (normalizedToken) {
             setLocal('ad4m-token', normalizedToken);
+          } else {
+            // Explicitly clear stale token when absent/invalid to prevent reuse on reload
+            removeLocal('ad4m-token');
           }
           setLocal('ad4m-url', this.url);
           
