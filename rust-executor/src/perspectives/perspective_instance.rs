@@ -2296,6 +2296,47 @@ impl PerspectiveInstance {
             })
     }
 
+    /// Executes a SurrealQL query for notifications with context injection
+    /// Auto-injects $agentDid and $perspectiveId variables before execution
+    pub async fn surreal_query_notification(
+        &self,
+        query: String,
+    ) -> Result<Vec<serde_json::Value>, AnyError> {
+        // Get context data without holding locks
+        let perspective_id = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
+
+        // Get global agent DID (not perspective-specific owner)
+        let agent_did = crate::agent::did();
+
+        // Inject context variables using string replacement instead of LET statements
+        // This ensures the SELECT query result is at index 0
+        let query_with_context = query
+            .replace("$agentDid", &format!("'{}'", agent_did))
+            .replace("$perspectiveId", &format!("'{}'", perspective_id));
+
+        log::debug!("🔔 Notification query original: {}", query);
+        log::debug!("🔔 Notification query with context (agentDid='{}', perspectiveId='{}'): {}", agent_did, perspective_id, query_with_context);
+
+        let results = self.surreal_service
+            .query_links(&perspective_id, &query_with_context)
+            .await
+            .map_err(|e| {
+                log::error!(
+                    "Failed to execute notification query for perspective {}: {:?}",
+                    perspective_id,
+                    e
+                );
+                anyhow!("Notification query failed for perspective {}: {}", perspective_id, e)
+            })?;
+
+        log::debug!("🔔 Notification query results: {:?}", results);
+
+        Ok(results)
+    }
+
     async fn retry_surreal_op<F, Fut>(op: F, uuid: &str, op_name: &str)
     where
         F: Fn() -> Fut,
@@ -2523,7 +2564,7 @@ impl PerspectiveInstance {
 
     async fn calc_notification_trigger_matches(
         &self,
-    ) -> Result<BTreeMap<Notification, Vec<QueryMatch>>, AnyError> {
+    ) -> Result<BTreeMap<Notification, Vec<serde_json::Value>>, AnyError> {
         // Get UUID without holding lock during operations
         let uuid = {
             let persisted_guard = self.persisted.lock().await;
@@ -2538,7 +2579,7 @@ impl PerspectiveInstance {
         //    .collect::<Vec<String>>()
         //    .join("\n"));
         let mut result_map = BTreeMap::new();
-        let mut trigger_cache: HashMap<String, Vec<QueryMatch>> = HashMap::new();
+        let mut trigger_cache: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
 
         for n in notifications {
             //log::info!("🔔 NOTIFICATIONS: Processing notification for perspective {}: {}", uuid, n.trigger);
@@ -2548,11 +2589,7 @@ impl PerspectiveInstance {
             } else {
                 //let query_start = std::time::Instant::now();
                 //log::info!("🔔 NOTIFICATIONS: not cached - Querying notification for perspective {}", uuid);
-                let query_result = self.prolog_query_notification(n.trigger.clone()).await?;
-                let matches = match query_result {
-                    QueryResolution::Matches(matches) => matches,
-                    _ => Vec::new(), // For True/False results, use empty matches
-                };
+                let matches = self.surreal_query_notification(n.trigger.clone()).await?;
                 trigger_cache.insert(n.trigger.clone(), matches.clone());
                 result_map.insert(n.clone(), matches);
                 //log::info!("🔔 NOTIFICATIONS: Querying notification: {} - took {:?}", n.trigger, query_start.elapsed());
@@ -2562,7 +2599,7 @@ impl PerspectiveInstance {
         Ok(result_map)
     }
 
-    async fn notification_trigger_snapshot(&self) -> BTreeMap<Notification, Vec<QueryMatch>> {
+    async fn notification_trigger_snapshot(&self) -> BTreeMap<Notification, Vec<serde_json::Value>> {
         self.calc_notification_trigger_matches()
             .await
             .unwrap_or_else(|e| {
@@ -2572,38 +2609,52 @@ impl PerspectiveInstance {
     }
 
     fn subtract_before_notification_matches(
-        before: &BTreeMap<Notification, Vec<QueryMatch>>,
-        after: &BTreeMap<Notification, Vec<QueryMatch>>,
-    ) -> BTreeMap<Notification, Vec<QueryMatch>> {
+        before: &BTreeMap<Notification, Vec<serde_json::Value>>,
+        after: &BTreeMap<Notification, Vec<serde_json::Value>>,
+    ) -> BTreeMap<Notification, Vec<serde_json::Value>> {
         after
             .iter()
-            .map(|(notification, matches)| {
-                let new_matches: Vec<QueryMatch> =
-                    if let Some(old_matches) = before.get(notification) {
-                        matches
+            .filter_map(|(notification, after_matches)| {
+                let new_matches: Vec<serde_json::Value> =
+                    if let Some(before_matches) = before.get(notification) {
+                        // Find matches that exist in "after" but not in "before"
+                        after_matches
                             .iter()
-                            .filter(|m| !old_matches.contains(m))
+                            .filter(|after_match| {
+                                !before_matches.iter().any(|before_match| {
+                                    before_match == *after_match
+                                })
+                            })
                             .cloned()
                             .collect()
                     } else {
-                        matches.clone()
+                        // No previous matches, so all current matches are new
+                        after_matches.clone()
                     };
 
-                (notification.clone(), new_matches)
+                if new_matches.is_empty() {
+                    None
+                } else {
+                    Some((notification.clone(), new_matches))
+                }
             })
             .collect()
     }
 
     async fn publish_notification_matches(
         uuid: String,
-        match_map: BTreeMap<Notification, Vec<QueryMatch>>,
+        match_map: BTreeMap<Notification, Vec<serde_json::Value>>,
     ) {
         for (notification, matches) in match_map {
             if !matches.is_empty() {
+                // Convert matches to JSON string
+                let trigger_match = serde_json::to_string(&matches)
+                    .unwrap_or_else(|_| "[]".to_string());
+
                 let payload = TriggeredNotification {
                     notification: notification.clone(),
                     perspective_id: uuid.clone(),
-                    trigger_match: prolog_resolution_to_string(QueryResolution::Matches(matches)),
+                    trigger_match,
                 };
 
                 let message = serde_json::to_string(&payload).unwrap();

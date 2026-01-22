@@ -453,10 +453,105 @@ impl Ad4mDb {
         Ok(result > 0)
     }
 
+    /// Validates that a notification query is safe and well-formed
+    fn validate_notification_query(query: &str) -> Result<(), String> {
+        let query_trimmed = query.trim();
+        let query_upper = query_trimmed.to_uppercase();
+
+        // Check for empty query
+        if query_trimmed.is_empty() {
+            return Err("Query cannot be empty".to_string());
+        }
+
+        // Check query length (prevent extremely long queries)
+        if query_trimmed.len() > 10000 {
+            return Err("Query is too long (max 10000 characters)".to_string());
+        }
+
+        // Validate that query starts with SELECT, RETURN, LET, or WITH
+        let first_word = query_upper.split_whitespace().next().unwrap_or("");
+        if !matches!(first_word, "SELECT" | "RETURN" | "LET" | "WITH") {
+            return Err(format!(
+                "Query must start with SELECT, RETURN, LET, or WITH. Got: {}",
+                first_word
+            ));
+        }
+
+        // Check for mutating operations
+        let mutating_operations = [
+            "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "REMOVE",
+            "DEFINE", "ALTER", "RELATE", "BEGIN", "COMMIT", "CANCEL",
+        ];
+
+        for operation in &mutating_operations {
+            let mut search_pos = 0;
+            while let Some(pos) = query_upper[search_pos..].find(operation) {
+                let absolute_pos = search_pos + pos;
+
+                // Check what comes before
+                let before_ok = if absolute_pos == 0 {
+                    true
+                } else {
+                    let before_char = query_upper.chars().nth(absolute_pos - 1);
+                    matches!(
+                        before_char,
+                        Some(' ') | Some('\t') | Some('\n') | Some('\r') | Some(';') | Some('(')
+                    )
+                };
+
+                // Check what comes after
+                let after_pos = absolute_pos + operation.len();
+                let after_ok = if after_pos >= query_upper.len() {
+                    true
+                } else {
+                    let after_char = query_upper.chars().nth(after_pos);
+                    matches!(
+                        after_char,
+                        Some(' ') | Some('\t') | Some('\n') | Some('\r') | Some(';') | Some('(')
+                    )
+                };
+
+                if before_ok && after_ok {
+                    return Err(format!(
+                        "Query contains mutating operation '{}' which is not allowed",
+                        operation
+                    ));
+                }
+
+                search_pos = absolute_pos + 1;
+            }
+        }
+
+        // Basic syntax check - ensure balanced parentheses
+        let mut paren_count = 0;
+        for c in query_trimmed.chars() {
+            match c {
+                '(' => paren_count += 1,
+                ')' => paren_count -= 1,
+                _ => {}
+            }
+            if paren_count < 0 {
+                return Err("Unbalanced parentheses in query".to_string());
+            }
+        }
+        if paren_count != 0 {
+            return Err("Unbalanced parentheses in query".to_string());
+        }
+
+        Ok(())
+    }
+
     pub fn add_notification(
         &self,
         notification: NotificationInput,
     ) -> Result<String, rusqlite::Error> {
+        // Validate the trigger query before storing
+        if let Err(e) = Self::validate_notification_query(&notification.trigger) {
+            return Err(rusqlite::Error::InvalidParameterName(
+                format!("Invalid notification query: {}", e)
+            ));
+        }
+
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
             "INSERT INTO notifications (id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -535,6 +630,13 @@ impl Ad4mDb {
         id: String,
         updated_notification: &Notification,
     ) -> Result<bool, rusqlite::Error> {
+        // Validate the trigger query before updating
+        if let Err(e) = Self::validate_notification_query(&updated_notification.trigger) {
+            return Err(rusqlite::Error::InvalidParameterName(
+                format!("Invalid notification query: {}", e)
+            ));
+        }
+
         let result = self.conn.execute(
             "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10 WHERE id = ?1",
             params![
