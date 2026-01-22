@@ -2257,7 +2257,10 @@ impl Mutation {
         notification: NotificationInput,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        Ok(RuntimeService::request_install_notification(notification).await?)
+        // Extract user context from auth token
+        let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
+        let user_email = agent_context.user_email;
+        Ok(RuntimeService::request_install_notification(notification, user_email).await?)
     }
 
     async fn runtime_update_notification(
@@ -2268,7 +2271,10 @@ impl Mutation {
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
 
-        let notification = Notification::from_input_and_id(id.clone(), notification);
+        // Extract user context from auth token
+        let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
+        let user_email = agent_context.user_email;
+        let notification = Notification::from_input_and_id(id.clone(), notification, user_email);
 
         Ad4mDb::with_global_instance(|db| db.update_notification(id, &notification))?;
 

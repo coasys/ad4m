@@ -184,7 +184,8 @@ impl Ad4mDb {
                 trigger TEXT NOT NULL,
                 perspective_ids TEXT NOT NULL,
                 webhookUrl TEXT NOT NULL,
-                webhookAuth TEXT NOT NULL
+                webhookAuth TEXT NOT NULL,
+                user_email TEXT
              )",
             [],
         )?;
@@ -313,6 +314,13 @@ impl Ad4mDb {
         // Migrate existing owner_did values to owners array
         let _ = conn.execute(
             "UPDATE perspective_handle SET owners = json_array(owner_did) WHERE owner_did IS NOT NULL AND owners = '[]'",
+            [],
+        );
+
+        // Add user_email column to notifications table for multi-user support
+        // This column tracks which user created the notification (NULL for main agent)
+        let _ = conn.execute(
+            "ALTER TABLE notifications ADD COLUMN user_email TEXT",
             [],
         );
 
@@ -619,6 +627,7 @@ impl Ad4mDb {
     pub fn add_notification(
         &self,
         notification: NotificationInput,
+        user_email: Option<String>,
     ) -> Result<String, rusqlite::Error> {
         // Validate the trigger query before storing
         if let Err(e) = Self::validate_notification_query(&notification.trigger) {
@@ -630,7 +639,7 @@ impl Ad4mDb {
 
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO notifications (id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO notifications (id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, user_email) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 id,
                 false,
@@ -642,6 +651,7 @@ impl Ad4mDb {
                 serde_json::to_string(&notification.perspective_ids).unwrap(),
                 notification.webhook_url,
                 notification.webhook_auth,
+                user_email,
             ],
         )?;
         Ok(id)
@@ -661,6 +671,7 @@ impl Ad4mDb {
                 perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
                 webhook_url: row.get(8)?,
                 webhook_auth: row.get(9)?,
+                user_email: row.get(10)?,
             })
         })?;
 
@@ -668,6 +679,60 @@ impl Ad4mDb {
         for notification in notification_iter {
             notifications.push(notification?);
         }
+        Ok(notifications)
+    }
+
+    pub fn get_notifications_for_user(&self, user_email: Option<String>) -> Result<Vec<Notification>, rusqlite::Error> {
+        let notifications = if let Some(email) = user_email {
+            // Query for specific user's notifications
+            let mut stmt = self.conn.prepare("SELECT * FROM notifications WHERE user_email = ?1")?;
+            let notification_iter = stmt.query_map(params![email], |row| {
+                Ok(Notification {
+                    id: row.get(0)?,
+                    granted: row.get(1)?,
+                    description: row.get(2)?,
+                    app_name: row.get(3)?,
+                    app_url: row.get(4)?,
+                    app_icon_path: row.get(5)?,
+                    trigger: row.get(6)?,
+                    perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
+                    webhook_url: row.get(8)?,
+                    webhook_auth: row.get(9)?,
+                    user_email: row.get(10)?,
+                })
+            })?;
+
+            let mut result = Vec::new();
+            for notification in notification_iter {
+                result.push(notification?);
+            }
+            result
+        } else {
+            // Query for main agent's notifications (user_email IS NULL)
+            let mut stmt = self.conn.prepare("SELECT * FROM notifications WHERE user_email IS NULL")?;
+            let notification_iter = stmt.query_map([], |row| {
+                Ok(Notification {
+                    id: row.get(0)?,
+                    granted: row.get(1)?,
+                    description: row.get(2)?,
+                    app_name: row.get(3)?,
+                    app_url: row.get(4)?,
+                    app_icon_path: row.get(5)?,
+                    trigger: row.get(6)?,
+                    perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
+                    webhook_url: row.get(8)?,
+                    webhook_auth: row.get(9)?,
+                    user_email: row.get(10)?,
+                })
+            })?;
+
+            let mut result = Vec::new();
+            for notification in notification_iter {
+                result.push(notification?);
+            }
+            result
+        };
+
         Ok(notifications)
     }
 
@@ -689,6 +754,7 @@ impl Ad4mDb {
                 perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
                 webhook_url: row.get(8)?,
                 webhook_auth: row.get(9)?,
+                user_email: row.get(10)?,
             }))
         } else {
             Ok(None)
@@ -715,7 +781,7 @@ impl Ad4mDb {
         }
 
         let result = self.conn.execute(
-            "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10 WHERE id = ?1",
+            "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10, user_email = ?11 WHERE id = ?1",
             params![
                 id,
                 updated_notification.description,
@@ -727,6 +793,7 @@ impl Ad4mDb {
                 updated_notification.webhook_url,
                 updated_notification.webhook_auth,
                 updated_notification.granted,
+                updated_notification.user_email,
             ],
         )?;
         Ok(result > 0)

@@ -2301,6 +2301,7 @@ impl PerspectiveInstance {
     pub async fn surreal_query_notification(
         &self,
         query: String,
+        user_email: Option<String>,
     ) -> Result<Vec<serde_json::Value>, AnyError> {
         // Get context data without holding locks
         let perspective_id = {
@@ -2308,8 +2309,14 @@ impl PerspectiveInstance {
             persisted_guard.uuid.clone()
         };
 
-        // Get global agent DID (not perspective-specific owner)
-        let agent_did = crate::agent::did();
+        // Get agent DID for the specific user (main agent if user_email is None)
+        let agent_context = if let Some(email) = user_email {
+            crate::agent::AgentContext::for_user_email(email)
+        } else {
+            crate::agent::AgentContext::main_agent()
+        };
+        let agent_did = crate::agent::did_for_context(&agent_context)
+            .map_err(|e| anyhow!("Failed to get agent DID: {}", e))?;
 
         // Inject context variables using string replacement instead of LET statements
         // This ensures the SELECT query result is at index 0
@@ -2599,7 +2606,7 @@ impl PerspectiveInstance {
             } else {
                 //let query_start = std::time::Instant::now();
                 //log::info!("🔔 NOTIFICATIONS: not cached - Querying notification for perspective {}", uuid);
-                let matches = self.surreal_query_notification(n.trigger.clone()).await?;
+                let matches = self.surreal_query_notification(n.trigger.clone(), n.user_email.clone()).await?;
                 trigger_cache.insert(n.trigger.clone(), matches.clone());
                 result_map.insert(n.clone(), matches);
                 //log::info!("🔔 NOTIFICATIONS: Querying notification: {} - took {:?}", n.trigger, query_start.elapsed());

@@ -141,9 +141,10 @@ impl RuntimeService {
 
     pub async fn request_install_notification(
         notification_input: NotificationInput,
+        user_email: Option<String>,
     ) -> Result<String, String> {
         let notification_id =
-            Ad4mDb::with_global_instance(|db| db.add_notification(notification_input))
+            Ad4mDb::with_global_instance(|db| db.add_notification(notification_input, user_email))
                 .map_err(|e| e.to_string())?;
 
         let notification =
