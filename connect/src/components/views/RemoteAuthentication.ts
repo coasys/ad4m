@@ -142,6 +142,11 @@ export class RemoteAuthentication extends LitElement {
                   const input = e.target as HTMLInputElement;
                   this.email = input.value;
                 }}
+                @keydown=${(e: KeyboardEvent) => {
+                  if (e.key === 'Enter' && !this.remoteAuthLoading && this.isValidEmail()) {
+                    this.emailLogin();
+                  }
+                }}
               />
             </div>
 
@@ -222,6 +227,11 @@ export class RemoteAuthentication extends LitElement {
                   const input = e.target as HTMLInputElement;
                   this.password = input.value;
                 }}
+                @keydown=${(e: KeyboardEvent) => {
+                  if (e.key === 'Enter' && !this.remoteAuthLoading && this.password.length) {
+                    this.passwordLogin();
+                  }
+                }}
               />
             </div>
 
@@ -261,6 +271,11 @@ export class RemoteAuthentication extends LitElement {
                 @input=${(e: Event) => {
                   const input = e.target as HTMLInputElement;
                   this.password = input.value;
+                }}
+                @keydown=${(e: KeyboardEvent) => {
+                  if (e.key === 'Enter' && !this.remoteAuthLoading && this.password.length) {
+                    this.createAccount();
+                  }
                 }}
               />
             </div>

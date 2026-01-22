@@ -203,7 +203,9 @@ export class ConnectionOptions extends LitElement {
                 if (this.remoteNodeError) this.clearRemoteNodeError();
               }}
               @keydown=${(e: KeyboardEvent) => {
-                if (e.key === 'Enter') this.connectRemoteNode();
+                if (e.key === 'Enter' && !this.connectingToRemoteNode && this.newRemoteUrl.trim().length) {
+                  this.connectRemoteNode();
+                }
               }}
               style= "font-size: 16px;"
             />
@@ -220,7 +222,7 @@ export class ConnectionOptions extends LitElement {
 
             <button 
               class="primary"
-              ?disabled=${this.connectingToRemoteNode}
+              ?disabled=${this.connectingToRemoteNode || this.newRemoteUrl.trim().length === 0}
               @click=${this.connectRemoteNode}
             >
               ${this.connectingToRemoteNode ? "Connecting..." : "Connect to Remote Node"}

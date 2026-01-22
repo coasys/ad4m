@@ -219,10 +219,7 @@ export default class Ad4mConnect extends EventTarget {
           }
         }
 
-        console.log('[Ad4m Connect] Received AD4M_CONFIG from parent:', { 
-          port: event.data.port,
-          hasToken: !!event.data.token 
-        });
+        console.log('[Ad4m Connect] Received AD4M_CONFIG from parent:', { port: event.data.port, hasToken: !!event.data.token });
         
         // Validate and normalize port
         const { port: rawPort, token: rawToken } = event.data;
@@ -450,5 +447,4 @@ export default class Ad4mConnect extends EventTarget {
   private notifyConfigChange(type: ConfigStates, value: string) {
     this.dispatchEvent(new CustomEvent("configstatechange", { detail: { type, value } }));
   }
-
 }
