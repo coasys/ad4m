@@ -1094,10 +1094,10 @@ importers:
         specifier: 3.7.10
         version: 3.7.10(graphql-ws@5.12.0(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
       '@coasys/ad4m':
-        specifier: link:../core
+        specifier: workspace:*
         version: link:../core
       '@coasys/ad4m-connect':
-        specifier: workspace:0.11.2-dev
+        specifier: workspace:*
         version: link:../connect
       '@coasys/flux-ui':
         specifier: ^0.9.0
