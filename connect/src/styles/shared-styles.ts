@@ -45,12 +45,6 @@ export const sharedStyles = css`
     color: rgba(255, 255, 255, 0.8);
   }
 
-  label {
-    font-size: 14px;
-    font-weight: 500;
-    color: rgba(255, 255, 255, 0.9);
-  }
-
   /* Buttons */
   button {
     display: flex;
@@ -87,12 +81,6 @@ export const sharedStyles = css`
     background: var(--ac-primary-color-light);
   }
 
-  button.primary:focus-visible:not(:disabled) {
-    outline: 2px solid var(--ac-primary-color-light);
-    outline-offset: 2px;
-    box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.2);
-  }
-
   button.secondary {
     background: #00091e5c;
     color: var(--ac-primary-color);
@@ -110,38 +98,18 @@ export const sharedStyles = css`
     box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.2);
   }
 
-  button.ghost {
-    background: transparent;
-    color: rgba(255, 255, 255, 0.7);
+  button.danger {
+    background: var(--ac-danger-color);
   }
 
-  button.ghost:hover:not(:disabled) {
-    color: #ffffff;
-    background: rgba(255, 255, 255, 0.05);
+  button.danger:hover:not(:disabled) {
+    background: #c8165b;
   }
 
-  button.ghost:focus-visible:not(:disabled) {
-    outline: 2px solid rgba(255, 255, 255, 0.7);
+  button.danger:focus-visible:not(:disabled) {
+    outline: 2px solid var(--ac-danger-color);
     outline-offset: 2px;
-    background: rgba(255, 255, 255, 0.05);
-  }
-
-  button.link {
-    background: transparent;
-    color: var(--ac-primary-color);
-    text-decoration: none;
-    height: auto;
-    padding: 12px 24px;
-  }
-
-  button.link:hover {
-    text-decoration: underline;
-  }
-
-  button.link:focus-visible {
-    outline: 2px solid var(--ac-primary-color);
-    outline-offset: 2px;
-    text-decoration: underline;
+    box-shadow: 0 0 0 4px rgba(244, 54, 127, 0.2);
   }
 
   button:disabled {
@@ -151,6 +119,29 @@ export const sharedStyles = css`
 
   button.full {
     width: 100%;
+  }
+
+  .back-button,
+  .close-button {
+    position: absolute;
+    top: 20px;
+    cursor: pointer;
+  }
+
+  .back-button {
+    left: 20px;
+  }
+
+  .close-button {
+    right: 20px;
+  }
+
+  .back-button svg,
+  .close-button svg {
+    width: 28px;
+    height: 28px;
+    color: white;
+    opacity: 0.5;
   }
 
   /* Inputs */
@@ -198,6 +189,11 @@ export const sharedStyles = css`
     align-items: center;
     gap: 12px;
   }
+
+  .center {
+    display: flex;
+    justify-content: center;
+  }
     
   .header {
     text-align: center;
@@ -221,6 +217,26 @@ export const sharedStyles = css`
     transition: all 0.3s ease;
   }
 
+  .box-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: -8px;
+  }
+
+  .box-header h3 {
+    font-weight: 600;
+  }
+
+  .box-header svg {
+    width: 24px;
+    height: 24px;
+    stroke-width: 2;
+    flex-shrink: 0;
+    color: var(--ac-primary-color);
+  }
+
+  /* State indicators */
   .state {
     display: flex;
     align-items: center;
@@ -249,52 +265,5 @@ export const sharedStyles = css`
   .state.danger p,
   .state.danger svg {
     color: var(--ac-danger-color);
-  }
-
-  .back-button {
-    position: absolute;
-    top: 20px;
-    left: 20px;
-    cursor: pointer;
-  }
-
-  .back-button svg {
-    width: 28px;
-    height: 28px;
-    color: white;
-    opacity: 0.5;
-  }
-
-  .button-row {
-    display: flex;
-    gap: 12px;
-  }
-
-  .center {
-    display: flex;
-    justify-content: center;
-  }
-
-  .form-group {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  /* Error and info boxes */
-  .error-box {
-    padding: 16px;
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.3);
-    border-radius: 8px;
-    color: #fca5a5;
-    font-size: 14px;
-  }
-
-  .info-box {
-    background: rgba(145, 227, 253, 0.05);
-    border: 1px solid rgba(145, 227, 253, 0.2);
-    border-radius: 8px;
-    padding: 20px;
   }
 `;

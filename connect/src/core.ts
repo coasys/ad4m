@@ -197,6 +197,38 @@ export default class Ad4mConnect extends EventTarget {
     }
   }
 
+  // Disconnect and clean up
+  async disconnect(): Promise<void> {
+    console.log('[Ad4m Connect] Disconnecting...');
+    
+    // Dispose WebSocket client
+    if (this.wsClient) {
+      this.wsClient.dispose();
+      this.wsClient = null;
+    }
+    
+    // Stop Apollo client
+    if (this.apolloClient) {
+      this.apolloClient.stop();
+      this.apolloClient = null;
+    }
+    
+    // Clear client reference
+    this.ad4mClient = undefined;
+    
+    // Clear token
+    this.token = '';
+    removeLocal('ad4m-token');
+    
+    // Update auth state (will trigger authstatechange event)
+    this.notifyAuthChange('unauthenticated');
+    
+    // Update connection state
+    this.notifyConnectionChange('not-connected');
+    
+    console.log('[Ad4m Connect] Disconnected successfully');
+  }
+
   // Embedded mode
   private initializeEmbeddedMode(): void {
     console.log('[Ad4m Connect] Running in embedded mode - waiting for AD4M config from parent');

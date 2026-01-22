@@ -1,17 +1,17 @@
 import { css, html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import autoBind from "auto-bind";
-
+import { VerificationRequestResult } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
+import { connectWebSocket, setLocal } from "./utils";
 import Ad4mConnect from "./core";
 import { Ad4mLogo } from "./components/icons";
 
 import "./components/views/ConnectionOptions";
 import "./components/views/LocalAuthentication";
 import "./components/views/RemoteAuthentication";
-import { VerificationRequestResult } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
-import { connectWebSocket, setLocal } from "./utils";
+import "./components/views/CurrentState";
 
-type Views = 'connection-options' | 'local-authentication' | 'remote-authentication';
+type Views = 'connection-options' | 'local-authentication' | 'remote-authentication' | 'current-state';
 
 const styles = css`
   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap');
@@ -94,6 +94,8 @@ const styles = css`
     bottom: 20px;
     right: 20px;
     color: var(--ac-primary-color);
+    width: 40px;
+    height: 40px;
   }
 `;
 
@@ -128,25 +130,24 @@ export class Ad4mConnectElement extends LitElement {
     // Set up auth listener before attempting connection
     this.core.addEventListener('authstatechange', (e: any) => {
       if (e.detail === 'unauthenticated') {
-        // Token expired or invalid - show UI
+        // Token expired or invalid - show connection options
         this.currentView = "connection-options";
         this.modalOpen = true;
-        // Ensure element is visible
-        this.style.display = '';
       }
+      // Trigger re-render to update UI based on new auth state
+      this.requestUpdate();
     });
 
     if (this.core.token) {
       // Try to auto-connect with stored token
       this.core.connect().catch((error) => {
-        // Connection failed - show UI
+        // Connection failed - show connection options
         console.error('[Ad4m Connect UI] Auto-connect failed:', error);
         this.currentView = "connection-options";
         this.modalOpen = true;
-        // Ensure element is visible
-        this.style.display = '';
       });
     } else {
+      // No token - show connection options
       this.currentView = "connection-options";
       this.modalOpen = true;
     }
@@ -264,6 +265,11 @@ export class Ad4mConnectElement extends LitElement {
     }
   }
 
+  private async disconnect() {
+    await this.core.disconnect();
+    window.location.reload();
+  }
+
   renderViews() {
     if (this.currentView === "connection-options") {
       return html`
@@ -312,18 +318,45 @@ export class Ad4mConnectElement extends LitElement {
         ></remote-authentication>
       `;
     }
+
+    if (this.currentView === "current-state") {
+      return html`
+        <current-state
+          .url=${this.core.url}
+          .port=${this.core.port}
+          .authState=${this.core.authState}
+          @close=${() => { this.modalOpen = false; }}
+          @disconnect=${this.disconnect}
+        ></current-state>
+      `;
+    }
   }
 
   render() {
-    // Show settings button when authenticated and modal is closed
-    if (!this.modalOpen && this.core.authState === "authenticated") {
+    if (this.modalOpen) {
+      // Show modal
+      return html`
+        <div class="wrapper">
+          <div class="modal">
+            <header class="modal-header">
+              ${Ad4mLogo()}
+            </header>
+            <main class="modal-content">
+              ${this.renderViews()}
+            </main>
+          </div>
+          <div class="backdrop" />
+        </div>
+      `;
+    } else if (this.core.authState === "authenticated") {
+      // Show settings button when authenticated and modal is closed
       return html`
         <button
           type="button"
           class="settings-button"
           aria-label="Open settings"
           @click=${() => {
-            this.currentView = "connection-options";
+            this.currentView = "current-state";
             this.modalOpen = true;
           }}
         >
@@ -332,20 +365,8 @@ export class Ad4mConnectElement extends LitElement {
       `;
     }
 
-    // Render the main modal
-    return html`
-      <div class="wrapper">
-        <div class="modal">
-          <header class="modal-header">
-            ${Ad4mLogo()}
-          </header>
-          <main class="modal-content">
-            ${this.renderViews()}
-          </main>
-        </div>
-        <div class="backdrop" />
-      </div>
-    `;
+    // Nothing to render
+    return null;
   }
 }
 
@@ -360,13 +381,6 @@ export default function Ad4mConnectUI(core: Ad4mConnect): Ad4mConnectElement {
   } else {
     // Not embedded - mount UI to DOM
     console.log('[Ad4m Connect UI] Mounting UI to DOM');
-    
-    // Check if we have a token - if so, hide UI initially and try auto-connect
-    // The authstatechange listener will show it if connection fails
-    if (core.token) {
-      element.style.display = 'none';
-    }
-    
     document.body.appendChild(element);
   }
 

@@ -26,25 +26,6 @@ export class ConnectionOptions extends LitElement {
         gap: 30px;
       }
 
-      .option-header {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        margin-bottom: -8px;
-      }
-
-      .option-header h3 {
-        font-weight: 600;
-      }
-
-      .option-header svg {
-        width: 24px;
-        height: 24px;
-        stroke-width: 2;
-        flex-shrink: 0;
-        color: var(--ac-primary-color);
-      }
-
       .port-input {
         display: flex;
         justify-content: center;
@@ -126,7 +107,7 @@ export class ConnectionOptions extends LitElement {
 
         <div class="options">
           <div class="box">
-            <div class="option-header">
+            <div class="box-header">
               ${LocalIcon()}
               <h3>Local Node</h3>
             </div>
@@ -177,7 +158,7 @@ export class ConnectionOptions extends LitElement {
           </div>
 
           <div class="box">
-            <div class="option-header">
+            <div class="box-header">
               ${RemoteIcon()}
               <h3>Remote Node</h3>
             </div>

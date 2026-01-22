@@ -78,11 +78,6 @@ export class LocalAuthentication extends LitElement {
         flex-shrink: 0;
       }
 
-      .button-row {
-        display: flex;
-        justify-content: center;
-      }
-
       .security-code {
         width: 100%;
         display: flex;
@@ -163,7 +158,7 @@ export class LocalAuthentication extends LitElement {
               ${this.capabilities.map((cap) => html`<li>${CheckIcon()}<p>${capSentence(cap)}</p></li>`)}
             </ul>
 
-            <div class="button-row">
+            <div class="row center">
               <button class="primary" @click=${this.requestCapability}>
                 Authorize
               </button>
