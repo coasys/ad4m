@@ -316,15 +316,17 @@ pub fn get_smtp_config() -> Option<SmtpConfigDto> {
 
 #[tauri::command]
 pub fn set_smtp_config(config: SmtpConfigDto) -> Result<(), String> {
-    // Validate SMTP config
-    if config.host.is_empty() {
-        return Err("SMTP host cannot be empty".to_string());
-    }
-    if config.username.is_empty() {
-        return Err("SMTP username cannot be empty".to_string());
-    }
-    if config.from_address.is_empty() {
-        return Err("SMTP from address cannot be empty".to_string());
+    // Validate SMTP config only if enabled
+    if config.enabled {
+        if config.host.is_empty() {
+            return Err("SMTP host cannot be empty".to_string());
+        }
+        if config.username.is_empty() {
+            return Err("SMTP username cannot be empty".to_string());
+        }
+        if config.from_address.is_empty() {
+            return Err("SMTP from address cannot be empty".to_string());
+        }
     }
 
     // Convert DTO to SmtpConfig (password will be encrypted on save)

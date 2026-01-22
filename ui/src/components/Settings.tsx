@@ -114,6 +114,7 @@ const Profile = (props: Props) => {
 
   // SMTP Configuration state
   const [smtpConfig, setSmtpConfig] = useState<{
+    enabled: boolean;
     host: string;
     port: number;
     username: string;
@@ -163,6 +164,7 @@ const Profile = (props: Props) => {
       try {
         const config = await invoke<typeof smtpConfig>("get_smtp_config");
         setSmtpConfig(config || {
+          enabled: true,
           host: "",
           port: 587,
           username: "",
@@ -664,7 +666,23 @@ const Profile = (props: Props) => {
 
           {smtpConfig && (
             <>
-              {/* SMTP Host */}
+              {/* SMTP Enable/Disable Toggle */}
+              <j-box px="500" my="500">
+                <j-toggle
+                  checked={smtpConfig.enabled}
+                  onChange={(e) => {
+                    const newConfig = { ...smtpConfig, enabled: (e.target as HTMLInputElement).checked };
+                    setSmtpConfig(newConfig);
+                    handleSmtpConfigChange(newConfig);
+                  }}
+                >
+                  Enable Email/SMTP
+                </j-toggle>
+              </j-box>
+
+              {smtpConfig.enabled && (
+                <>
+                  {/* SMTP Host */}
               <j-box px="500" my="500">
                 <j-box mb="200">
                   <j-text size="500" weight="500">SMTP Host</j-text>
@@ -847,6 +865,8 @@ const Profile = (props: Props) => {
                   </j-text>
                 </j-box>
               </j-box>
+                </>
+              )}
             </>
           )}
         </>

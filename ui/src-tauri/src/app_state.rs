@@ -26,6 +26,7 @@ pub struct TlsConfig {
 
 #[derive(Clone)]
 pub struct SmtpConfig {
+    pub enabled: bool,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -36,6 +37,7 @@ pub struct SmtpConfig {
 impl fmt::Debug for SmtpConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SmtpConfig")
+            .field("enabled", &self.enabled)
             .field("host", &self.host)
             .field("port", &self.port)
             .field("username", &self.username)
@@ -48,6 +50,7 @@ impl fmt::Debug for SmtpConfig {
 impl SmtpConfig {
     /// Create a new SmtpConfig with plain password
     pub fn new(
+        enabled: bool,
         host: String,
         port: u16,
         username: String,
@@ -55,6 +58,7 @@ impl SmtpConfig {
         from_address: String,
     ) -> Self {
         SmtpConfig {
+            enabled,
             host,
             port,
             username,
@@ -87,7 +91,8 @@ impl Serialize for SmtpConfig {
         let encrypted = encrypt_password(&self.password)
             .map_err(|e| serde::ser::Error::custom(format!("Failed to encrypt password: {}", e)))?;
 
-        let mut state = serializer.serialize_struct("SmtpConfig", 5)?;
+        let mut state = serializer.serialize_struct("SmtpConfig", 6)?;
+        state.serialize_field("enabled", &self.enabled)?;
         state.serialize_field("host", &self.host)?;
         state.serialize_field("port", &self.port)?;
         state.serialize_field("username", &self.username)?;
@@ -104,6 +109,7 @@ impl<'de> Deserialize<'de> for SmtpConfig {
     {
         #[derive(Deserialize)]
         struct SmtpConfigHelper {
+            enabled: Option<bool>, // Optional for backward compatibility
             host: String,
             port: u16,
             username: String,
@@ -132,6 +138,7 @@ impl<'de> Deserialize<'de> for SmtpConfig {
         };
 
         Ok(SmtpConfig {
+            enabled: helper.enabled.unwrap_or(true), // Default to enabled for existing configs
             host: helper.host,
             port: helper.port,
             username: helper.username,
@@ -145,6 +152,7 @@ impl<'de> Deserialize<'de> for SmtpConfig {
 /// This is separate from SmtpConfig to avoid encrypting passwords when sending to UI
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SmtpConfigDto {
+    pub enabled: bool,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -155,6 +163,7 @@ pub struct SmtpConfigDto {
 impl From<&SmtpConfig> for SmtpConfigDto {
     fn from(config: &SmtpConfig) -> Self {
         SmtpConfigDto {
+            enabled: config.enabled,
             host: config.host.clone(),
             port: config.port,
             username: config.username.clone(),
@@ -167,6 +176,7 @@ impl From<&SmtpConfig> for SmtpConfigDto {
 impl From<SmtpConfigDto> for SmtpConfig {
     fn from(dto: SmtpConfigDto) -> Self {
         SmtpConfig::new(
+            dto.enabled,
             dto.host,
             dto.port,
             dto.username,
