@@ -479,8 +479,8 @@ impl Ad4mDb {
 
         // Check for mutating operations
         let mutating_operations = [
-            "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "REMOVE",
-            "DEFINE", "ALTER", "RELATE", "BEGIN", "COMMIT", "CANCEL",
+            "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "REMOVE", "DEFINE", "ALTER", "RELATE",
+            "BEGIN", "COMMIT", "CANCEL",
         ];
 
         for operation in &mutating_operations {
@@ -572,9 +572,10 @@ impl Ad4mDb {
     ) -> Result<String, rusqlite::Error> {
         // Validate the trigger query before storing
         if let Err(e) = Self::validate_notification_query(&notification.trigger) {
-            return Err(rusqlite::Error::InvalidParameterName(
-                format!("Invalid notification query: {}", e)
-            ));
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "Invalid notification query: {}",
+                e
+            )));
         }
 
         let id = uuid::Uuid::new_v4().to_string();
@@ -657,9 +658,10 @@ impl Ad4mDb {
     ) -> Result<bool, rusqlite::Error> {
         // Validate the trigger query before updating
         if let Err(e) = Self::validate_notification_query(&updated_notification.trigger) {
-            return Err(rusqlite::Error::InvalidParameterName(
-                format!("Invalid notification query: {}", e)
-            ));
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "Invalid notification query: {}",
+                e
+            )));
         }
 
         let result = self.conn.execute(

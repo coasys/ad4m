@@ -2318,9 +2318,15 @@ impl PerspectiveInstance {
             .replace("$perspectiveId", &format!("'{}'", perspective_id));
 
         log::debug!("🔔 Notification query original: {}", query);
-        log::debug!("🔔 Notification query with context (agentDid='{}', perspectiveId='{}'): {}", agent_did, perspective_id, query_with_context);
+        log::debug!(
+            "🔔 Notification query with context (agentDid='{}', perspectiveId='{}'): {}",
+            agent_did,
+            perspective_id,
+            query_with_context
+        );
 
-        let results = self.surreal_service
+        let results = self
+            .surreal_service
             .query_links(&perspective_id, &query_with_context)
             .await
             .map_err(|e| {
@@ -2329,7 +2335,11 @@ impl PerspectiveInstance {
                     perspective_id,
                     e
                 );
-                anyhow!("Notification query failed for perspective {}: {}", perspective_id, e)
+                anyhow!(
+                    "Notification query failed for perspective {}: {}",
+                    perspective_id,
+                    e
+                )
             })?;
 
         log::debug!("🔔 Notification query results: {:?}", results);
@@ -2599,7 +2609,9 @@ impl PerspectiveInstance {
         Ok(result_map)
     }
 
-    async fn notification_trigger_snapshot(&self) -> BTreeMap<Notification, Vec<serde_json::Value>> {
+    async fn notification_trigger_snapshot(
+        &self,
+    ) -> BTreeMap<Notification, Vec<serde_json::Value>> {
         self.calc_notification_trigger_matches()
             .await
             .unwrap_or_else(|e| {
@@ -2621,9 +2633,9 @@ impl PerspectiveInstance {
                         after_matches
                             .iter()
                             .filter(|after_match| {
-                                !before_matches.iter().any(|before_match| {
-                                    before_match == *after_match
-                                })
+                                !before_matches
+                                    .iter()
+                                    .any(|before_match| before_match == *after_match)
                             })
                             .cloned()
                             .collect()
@@ -2648,8 +2660,8 @@ impl PerspectiveInstance {
         for (notification, matches) in match_map {
             if !matches.is_empty() {
                 // Convert matches to JSON string
-                let trigger_match = serde_json::to_string(&matches)
-                    .unwrap_or_else(|_| "[]".to_string());
+                let trigger_match =
+                    serde_json::to_string(&matches).unwrap_or_else(|_| "[]".to_string());
 
                 let payload = TriggeredNotification {
                     notification: notification.clone(),
