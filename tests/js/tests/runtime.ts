@@ -316,8 +316,16 @@ export default function runtimeTests(testContext: TestContext) {
                 appName: "Flux Mentions",
                 appUrl: "https://flux.app",
                 appIconPath: "/flux-icon.png",
-                // Use context variable $agentDid, fn::parse_literal and fn::contains functions
-                trigger: `SELECT source, fn::parse_literal(target) as target, predicate FROM link WHERE predicate = 'rdf://content' AND fn::contains(fn::parse_literal(target), $agentDid)`,
+                // Extract multiple data points from the match
+                trigger: `SELECT
+                    source as message_id,
+                    fn::parse_literal(target) as message_content,
+                    fn::strip_html(fn::parse_literal(target)) as plain_text,
+                    $agentDid as mentioned_agent,
+                    $perspectiveId as perspective_id
+                FROM link
+                WHERE predicate = 'rdf://content'
+                    AND fn::contains(fn::parse_literal(target), $agentDid)`,
                 perspectiveIds: [notificationPerspective.uuid],
                 webhookUrl: "https://test.webhook",
                 webhookAuth: "test-auth"
@@ -340,11 +348,12 @@ export default function runtimeTests(testContext: TestContext) {
             await sleep(2000)
             expect(mockFunction.called).to.be.false
 
-            // Add a message that mentions the agent
+            // Add a message that mentions the agent (with HTML formatting)
+            const messageWithMention = `<p>Hey <strong>${agentDid!}</strong>, how are you?</p>`
             await notificationPerspective.add(new Link({
                 source: "message://2",
                 predicate: "rdf://content",
-                target: `literal://string:Hello%20${encodeURIComponent(agentDid!)}%2C%20how%20are%20you%3F`
+                target: `literal://string:${encodeURIComponent(messageWithMention)}`
             }))
             await sleep(7000)
             expect(mockFunction.called).to.be.true
@@ -353,10 +362,22 @@ export default function runtimeTests(testContext: TestContext) {
             expect(triggeredNotification.notification.description).to.equal(notification.description)
             let triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
             expect(triggerMatch.length).to.equal(1)
+
+            // Verify all extracted data points
             //@ts-ignore
-            expect(triggerMatch[0].source).to.equal("message://2")
+            expect(triggerMatch[0].message_id).to.equal("message://2")
             //@ts-ignore
-            expect(triggerMatch[0].target).to.include(agentDid)
+            expect(triggerMatch[0].message_content).to.include(agentDid)
+            //@ts-ignore
+            expect(triggerMatch[0].message_content).to.include("<strong>")
+            //@ts-ignore
+            expect(triggerMatch[0].plain_text).to.include(agentDid)
+            //@ts-ignore
+            expect(triggerMatch[0].plain_text).to.not.include("<strong>")
+            //@ts-ignore
+            expect(triggerMatch[0].mentioned_agent).to.equal(agentDid)
+            //@ts-ignore
+            expect(triggerMatch[0].perspective_id).to.equal(notificationPerspective.uuid)
         })
 
         it("can export and import database", async () => {
