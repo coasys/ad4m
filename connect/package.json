@@ -2,7 +2,7 @@
   "name": "@coasys/ad4m-connect",
   "description": "Lib for handling everything needed to setup a connection to a local or remote ad4m-executor",
   "license": "CAL-1.0",
-  "main": "dist/web.js",
+  "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "browser": "dist/web.js",
   "files": [
