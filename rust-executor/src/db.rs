@@ -523,13 +523,38 @@ impl Ad4mDb {
         }
 
         // Basic syntax check - ensure balanced parentheses
+        // Skip counting parentheses inside string literals
         let mut paren_count = 0;
+        let mut in_string = false;
+        let mut string_char = ' '; // Track which quote character started the string
+        let mut escaped = false;
+
         for c in query_trimmed.chars() {
+            if escaped {
+                // Skip this character as it's escaped
+                escaped = false;
+                continue;
+            }
+
             match c {
-                '(' => paren_count += 1,
-                ')' => paren_count -= 1,
+                '\\' => escaped = true,
+                '\'' | '"' => {
+                    if in_string {
+                        // Check if this closes the current string
+                        if c == string_char {
+                            in_string = false;
+                        }
+                    } else {
+                        // Start a new string
+                        in_string = true;
+                        string_char = c;
+                    }
+                }
+                '(' if !in_string => paren_count += 1,
+                ')' if !in_string => paren_count -= 1,
                 _ => {}
             }
+
             if paren_count < 0 {
                 return Err("Unbalanced parentheses in query".to_string());
             }
