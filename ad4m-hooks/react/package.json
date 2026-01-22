@@ -6,7 +6,6 @@
   "type": "module",
   "private": false,
   "files": [
-    "dist",
     "src"
   ],
   "scripts": {},
@@ -25,7 +24,8 @@
   },
   "publishConfig": {
     "dependencies": {
-      "@coasys/ad4m": "*"
+      "@coasys/ad4m": "*",
+      "@coasys/hooks-helpers": "*"
     }
   },
   "version": "0.11.2-dev"

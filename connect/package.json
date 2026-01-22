@@ -48,8 +48,8 @@
     "email": "nicolas@coasys.org"
   },
   "devDependencies": {
+    "@coasys/ad4m": "workspace:*",
     "@apollo/client": "3.7.10",
-    "@coasys/ad4m": "workspace:0.11.2-dev",
     "@types/node": "^16.11.11",
     "esbuild": "^0.15.5",
     "esbuild-plugin-lit": "^0.0.10",
@@ -66,6 +66,11 @@
     "esbuild-plugin-copy": "^2.1.1",
     "esbuild-plugin-replace": "^1.4.0",
     "lit": "^2.3.1"
+  },
+  "publishConfig": {
+    "devDependencies": {
+      "@coasys/ad4m": "*"
+    }
   },
   "version": "0.11.2-dev"
 }

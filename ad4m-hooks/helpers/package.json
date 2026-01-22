@@ -6,7 +6,6 @@
   "private": false,
   "type": "module",
   "files": [
-    "dist",
     "src"
   ],
   "scripts": {},
@@ -19,6 +18,11 @@
   },
   "devDependencies": {
     "@types/uuid": "^9.0.0"
+  },
+  "publishConfig": {
+    "dependencies": {
+      "@coasys/ad4m": "*"
+    }
   },
   "version": "0.11.2-dev"
 }
