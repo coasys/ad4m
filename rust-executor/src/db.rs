@@ -3119,7 +3119,7 @@ mod tests {
             webhook_url: "http://test.webhook".to_string(),
             webhook_auth: "test-auth".to_string(),
         };
-        let notification_id = db.add_notification(notification).unwrap();
+        let notification_id = db.add_notification(notification, None).unwrap();
 
         // Add tasks
         let task = AIPromptExamples {
@@ -3465,7 +3465,7 @@ mod tests {
         };
 
         // Add the test notification
-        let notification_id = db.add_notification(notification).unwrap();
+        let notification_id = db.add_notification(notification, None).unwrap();
         // Get all notifications
         let notifications = db.get_notifications().unwrap();
 
@@ -3504,6 +3504,7 @@ mod tests {
             perspective_ids: vec!["Test Perspective ID".to_string()],
             webhook_url: "Test Webhook URL".to_string(),
             webhook_auth: "Test Webhook Auth".to_string(),
+            user_email: None,
         };
 
         // Update the test notification
@@ -3548,7 +3549,7 @@ mod tests {
             webhook_auth: "".to_string(),
         };
 
-        let result1 = db.add_notification(notification1);
+        let result1 = db.add_notification(notification1, None);
         assert!(result1.is_ok(), "Should allow DELETE inside string literal");
 
         // Should reject: actual DELETE operation
@@ -3563,7 +3564,7 @@ mod tests {
             webhook_auth: "".to_string(),
         };
 
-        let result2 = db.add_notification(notification2);
+        let result2 = db.add_notification(notification2, None);
         assert!(result2.is_err(), "Should reject actual DELETE operation");
         assert!(result2.unwrap_err().to_string().contains("DELETE"));
 
@@ -3579,7 +3580,7 @@ mod tests {
             webhook_auth: "".to_string(),
         };
 
-        let result3 = db.add_notification(notification3);
+        let result3 = db.add_notification(notification3, None);
         assert!(result3.is_ok(), "Should allow DELETE inside escaped string");
     }
 
