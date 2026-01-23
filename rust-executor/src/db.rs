@@ -2993,7 +2993,7 @@ mod tests {
             app_name: "Test App".to_string(),
             app_url: "http://test.app".to_string(),
             app_icon_path: "/test/icon.png".to_string(),
-            trigger: "test-trigger".to_string(),
+            trigger: "SELECT * FROM link WHERE predicate = 'test://trigger'".to_string(),
             perspective_ids: vec![perspective1.uuid.clone()],
             webhook_url: "http://test.webhook".to_string(),
             webhook_auth: "test-auth".to_string(),
@@ -3337,7 +3337,7 @@ mod tests {
             app_name: "Test App Name".to_string(),
             app_url: "Test App URL".to_string(),
             app_icon_path: "Test App Icon Path".to_string(),
-            trigger: "Test Trigger".to_string(),
+            trigger: "SELECT * FROM link WHERE predicate = 'test://trigger'".to_string(),
             perspective_ids: vec!["Test Perspective ID".to_string()],
             webhook_url: "Test Webhook URL".to_string(),
             webhook_auth: "Test Webhook Auth".to_string(),
@@ -3360,7 +3360,7 @@ mod tests {
             test_notification.app_icon_path,
             "Test App Icon Path".to_string()
         );
-        assert_eq!(test_notification.trigger, "Test Trigger");
+        assert_eq!(test_notification.trigger, "SELECT * FROM link WHERE predicate = 'test://trigger'");
         assert_eq!(
             test_notification.perspective_ids,
             vec!["Test Perspective ID".to_string()]
@@ -3376,7 +3376,7 @@ mod tests {
             app_name: "Test App Name".to_string(),
             app_url: "Test App URL".to_string(),
             app_icon_path: "Test App Icon Path".to_string(),
-            trigger: "Test Trigger".to_string(),
+            trigger: "SELECT * FROM link WHERE predicate = 'test://updated'".to_string(),
             perspective_ids: vec!["Test Perspective ID".to_string()],
             webhook_url: "Test Webhook URL".to_string(),
             webhook_auth: "Test Webhook Auth".to_string(),
