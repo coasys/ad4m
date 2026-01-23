@@ -116,6 +116,16 @@ impl PrologService {
             .clone())
     }
 
+    /// Generate engine key for Simple/SdnaOnly mode
+    /// Includes owner_did to ensure per-user engines for proper SDNA filtering
+    fn get_engine_key(perspective_id: &str, owner_did: Option<&String>) -> String {
+        if let Some(did) = owner_did {
+            format!("{}_{}", perspective_id, did)
+        } else {
+            perspective_id.to_string()
+        }
+    }
+
     /// Mark a perspective's Prolog engine as dirty (needs update before next query)
     /// Only used in Simple and SdnaOnly modes
     pub async fn mark_dirty(&self, perspective_id: &str) {
@@ -125,9 +135,13 @@ impl PrologService {
             }
             PrologMode::Simple | PrologMode::SdnaOnly => {
                 let mut engines = self.simple_engines.write().await;
-                if let Some(simple_engine) = engines.get_mut(perspective_id) {
-                    simple_engine.dirty = true;
-                    log::debug!("Marked Prolog engine {} as dirty", perspective_id);
+                // Mark all user engines for this perspective as dirty
+                let perspective_prefix = format!("{}_", perspective_id);
+                for (key, simple_engine) in engines.iter_mut() {
+                    if key == perspective_id || key.starts_with(&perspective_prefix) {
+                        simple_engine.dirty = true;
+                        log::debug!("Marked Prolog engine {} as dirty", key);
+                    }
                 }
             }
             PrologMode::Pooled => {
@@ -165,13 +179,16 @@ impl PrologService {
         }
 
         // LOCK SCOPE OPTIMIZATION: Acquire write lock ONLY to check state, then release
+        // Use per-user engine key to ensure each user has their own Prolog engine
+        let engine_key = Self::get_engine_key(perspective_id, owner_did.as_ref());
+
         let (needs_update, engine_exists) = {
             let engines = self.simple_engines.read().await;
 
             // Check if we need to update (dirty or links changed or first time)
             let needs_update = if PROLOG_MODE == PrologMode::SdnaOnly {
                 // In SdnaOnly mode, only update if SDNA links actually changed
-                if let Some(simple_engine) = engines.get(perspective_id) {
+                if let Some(simple_engine) = engines.get(&engine_key) {
                     if simple_engine.dirty {
                         true
                     } else if let Some(ref current_sdna) = simple_engine.current_sdna_links {
@@ -184,13 +201,13 @@ impl PrologService {
                 } else {
                     true // First query = needs init
                 }
-            } else if let Some(simple_engine) = engines.get(perspective_id) {
+            } else if let Some(simple_engine) = engines.get(&engine_key) {
                 simple_engine.dirty || simple_engine.current_links != links
             } else {
                 true // First query = needs init
             };
 
-            let engine_exists = engines.contains_key(perspective_id);
+            let engine_exists = engines.contains_key(&engine_key);
             (needs_update, engine_exists)
         }; // Read lock released here
 
@@ -246,7 +263,7 @@ impl PrologService {
 
             // Use Entry API to avoid race condition between check and insert
             use std::collections::hash_map::Entry;
-            match engines.entry(perspective_id.to_string()) {
+            match engines.entry(engine_key.clone()) {
                 Entry::Vacant(entry) => {
                     // Insert new engines
                     entry.insert(SimpleEngine {
@@ -264,7 +281,7 @@ impl PrologService {
             }
 
             // Get mutable reference and move engines out temporarily
-            let simple_engine = engines.get_mut(perspective_id).unwrap();
+            let simple_engine = engines.get_mut(&engine_key).unwrap();
 
             // Move engines out of the struct temporarily
             let query_engine_to_update =
@@ -291,7 +308,7 @@ impl PrologService {
             // Handle load failure by restoring original engines
             if let Err(e) = load_result {
                 let mut engines = self.simple_engines.write().await;
-                let simple_engine = engines.get_mut(perspective_id).unwrap();
+                let simple_engine = engines.get_mut(&engine_key).unwrap();
 
                 // Restore the original engines
                 simple_engine.query_engine = query_engine_to_update;
@@ -305,7 +322,7 @@ impl PrologService {
 
             // LOCK SCOPE: Reacquire write lock to update final state
             let mut engines = self.simple_engines.write().await;
-            let simple_engine = engines.get_mut(perspective_id).unwrap();
+            let simple_engine = engines.get_mut(&engine_key).unwrap();
 
             // Move engines back
             simple_engine.query_engine = query_engine_to_update;
@@ -363,7 +380,7 @@ impl PrologService {
         }
 
         // Ensure engine is up to date
-        self.ensure_engine_updated(perspective_id, links, neighbourhood_author, owner_did)
+        self.ensure_engine_updated(perspective_id, links, neighbourhood_author.clone(), owner_did.clone())
             .await?;
 
         // Add "." at the end if missing
@@ -373,10 +390,13 @@ impl PrologService {
             query
         };
 
+        // Use per-user engine key
+        let engine_key = Self::get_engine_key(perspective_id, owner_did.as_ref());
+
         let engines = self.simple_engines.read().await;
         let simple_engine = engines
-            .get(perspective_id)
-            .ok_or_else(|| anyhow!("Prolog engine not found for perspective {}", perspective_id))?;
+            .get(&engine_key)
+            .ok_or_else(|| anyhow!("Prolog engine not found for perspective {} (key: {})", perspective_id, engine_key))?;
 
         // Run query through the query engine
         let result = simple_engine.query_engine.run_query(query).await?;
@@ -407,7 +427,7 @@ impl PrologService {
         }
 
         // Ensure engine is up to date
-        self.ensure_engine_updated(perspective_id, links, neighbourhood_author, owner_did)
+        self.ensure_engine_updated(perspective_id, links, neighbourhood_author.clone(), owner_did.clone())
             .await?;
 
         // Add "." at the end if missing
@@ -417,10 +437,13 @@ impl PrologService {
             query
         };
 
+        // Use per-user engine key
+        let engine_key = Self::get_engine_key(perspective_id, owner_did.as_ref());
+
         let engines = self.simple_engines.read().await;
         let simple_engine = engines
-            .get(perspective_id)
-            .ok_or_else(|| anyhow!("Prolog engine not found for perspective {}", perspective_id))?;
+            .get(&engine_key)
+            .ok_or_else(|| anyhow!("Prolog engine not found for perspective {} (key: {})", perspective_id, engine_key))?;
 
         // Run query through the subscription engine (separate from regular queries)
         let result = simple_engine.subscription_engine.run_query(query).await?;
