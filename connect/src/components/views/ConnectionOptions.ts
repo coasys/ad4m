@@ -11,6 +11,7 @@ export class ConnectionOptions extends LitElement {
   @property({ type: String }) remoteUrl?: string;
   @property({ type: Boolean }) connectingToRemoteNode: boolean = false;
   @property({ type: Boolean }) remoteNodeError: boolean = false;
+  @property({ type: Boolean }) showMultiUserOption: boolean = false;
 
   @state() private loading = true;
   @state() private localNodeDetected = false;
@@ -157,58 +158,60 @@ export class ConnectionOptions extends LitElement {
             </div>
           </div>
 
-          <div class="box">
-            <div class="box-header">
-              ${RemoteIcon()}
-              <h3>Remote Node</h3>
+          ${this.showMultiUserOption ? html`
+            <div class="box">
+              <div class="box-header">
+                ${RemoteIcon()}
+                <h3>Remote Node</h3>
+              </div>
+
+              ${this.remoteUrl
+                ? html`
+                    <div class="state success">
+                      ${CheckIcon()}
+                      <p>Remote configuration detected</p>
+                    </div>
+                  `
+                : html`<p style="margin-bottom: -12px">Enter the URL of a remote AD4M node</p>`
+              }
+
+              <input
+                type="text"
+                placeholder="https://ad4m-node:12000/graphql"
+                .value=${this.newRemoteUrl}
+                @input=${(e: Event) => {
+                  const input = e.target as HTMLInputElement;
+                  this.newRemoteUrl = input.value;
+
+                  if (this.remoteNodeError) this.clearRemoteNodeError();
+                }}
+                @keydown=${(e: KeyboardEvent) => {
+                  if (e.key === 'Enter' && !this.connectingToRemoteNode && this.newRemoteUrl.trim().length) {
+                    this.connectRemoteNode();
+                  }
+                }}
+                style= "font-size: 16px;"
+              />
+
+              ${this.remoteNodeError
+                ? html`
+                    <div class="state danger">
+                      ${CrossIcon()}
+                      <p>Unable to connect to remote node</p>
+                    </div>
+                  `
+                : ''
+              }
+
+              <button 
+                class="primary"
+                ?disabled=${this.connectingToRemoteNode || this.newRemoteUrl.trim().length === 0}
+                @click=${this.connectRemoteNode}
+              >
+                ${this.connectingToRemoteNode ? "Connecting..." : "Connect to Remote Node"}
+              </button>
             </div>
-
-            ${this.remoteUrl
-              ? html`
-                  <div class="state success">
-                    ${CheckIcon()}
-                    <p>Remote configuration detected</p>
-                  </div>
-                `
-              : html`<p style="margin-bottom: -12px">Enter the URL of a remote AD4M node</p>`
-            }
-
-            <input
-              type="text"
-              placeholder="https://ad4m-node:12000/graphql"
-              .value=${this.newRemoteUrl}
-              @input=${(e: Event) => {
-                const input = e.target as HTMLInputElement;
-                this.newRemoteUrl = input.value;
-
-                if (this.remoteNodeError) this.clearRemoteNodeError();
-              }}
-              @keydown=${(e: KeyboardEvent) => {
-                if (e.key === 'Enter' && !this.connectingToRemoteNode && this.newRemoteUrl.trim().length) {
-                  this.connectRemoteNode();
-                }
-              }}
-              style= "font-size: 16px;"
-            />
-
-            ${this.remoteNodeError
-              ? html`
-                  <div class="state danger">
-                    ${CrossIcon()}
-                    <p>Unable to connect to remote node</p>
-                  </div>
-                `
-              : ''
-            }
-
-            <button 
-              class="primary"
-              ?disabled=${this.connectingToRemoteNode || this.newRemoteUrl.trim().length === 0}
-              @click=${this.connectRemoteNode}
-            >
-              ${this.connectingToRemoteNode ? "Connecting..." : "Connect to Remote Node"}
-            </button>
-          </div>
+          ` : '' }
         </div>
       </div>
     `;
@@ -220,11 +223,6 @@ declare global {
     "connection-options": ConnectionOptions;
   }
 }
-
-// <p style="margin-bottom: -12px">If you have AD4M installed, boot it up and retry</p>
-// <button class="primary" @click=${this.detectLocalNode}>
-//   ${RefreshIcon()} Retry Connection
-// </button>
 
 // import QRCodeIcon from "../icons/QRCodeIcon";
 // ${showQRCode

@@ -278,6 +278,7 @@ export class Ad4mConnectElement extends LitElement {
           .remoteUrl=${this.core.options.remoteUrl}
           .connectingToRemoteNode=${this.connectingToRemoteNode}
           .remoteNodeError=${this.remoteNodeError}
+          .showMultiUserOption=${this.core.options.multiUser}
           @change-port=${this.changePort}
           @connect-local-node=${this.connectLocalNode}
           @connect-remote-node=${this.connectRemoteNode}
