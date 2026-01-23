@@ -478,37 +478,77 @@ impl Ad4mDb {
         }
 
         // Check for mutating operations
+        // Use a single pass that tracks string literals to avoid false positives
         let mutating_operations = [
             "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "REMOVE", "DEFINE", "ALTER", "RELATE",
             "BEGIN", "COMMIT", "CANCEL",
         ];
 
+        let query_bytes = query_upper.as_bytes();
+
         for operation in &mutating_operations {
+            let op_bytes = operation.as_bytes();
             let mut search_pos = 0;
+
             while let Some(pos) = query_upper[search_pos..].find(operation) {
                 let absolute_pos = search_pos + pos;
 
-                // Check what comes before
+                // Re-track string state up to this position
+                let mut in_string = false;
+                let mut escaped = false;
+                let mut string_char: u8 = 0;
+
+                for i in 0..absolute_pos {
+                    let byte = query_bytes[i];
+
+                    match byte {
+                        b'\\' if in_string => {
+                            escaped = !escaped;
+                        }
+                        b'\'' | b'"' => {
+                            if !escaped {
+                                if in_string {
+                                    if byte == string_char {
+                                        in_string = false;
+                                    }
+                                } else {
+                                    in_string = true;
+                                    string_char = byte;
+                                }
+                            }
+                            if escaped {
+                                escaped = false;
+                            }
+                        }
+                        _ => {
+                            if escaped {
+                                escaped = false;
+                            }
+                        }
+                    }
+                }
+
+                // Skip if inside a string literal
+                if in_string {
+                    search_pos = absolute_pos + 1;
+                    continue;
+                }
+
+                // Check what comes before (byte-based)
                 let before_ok = if absolute_pos == 0 {
                     true
                 } else {
-                    let before_char = query_upper.chars().nth(absolute_pos - 1);
-                    matches!(
-                        before_char,
-                        Some(' ') | Some('\t') | Some('\n') | Some('\r') | Some(';') | Some('(')
-                    )
+                    let before_byte = query_bytes[absolute_pos - 1];
+                    matches!(before_byte, b' ' | b'\t' | b'\n' | b'\r' | b';' | b'(')
                 };
 
-                // Check what comes after
-                let after_pos = absolute_pos + operation.len();
-                let after_ok = if after_pos >= query_upper.len() {
+                // Check what comes after (byte-based)
+                let after_pos = absolute_pos + op_bytes.len();
+                let after_ok = if after_pos >= query_bytes.len() {
                     true
                 } else {
-                    let after_char = query_upper.chars().nth(after_pos);
-                    matches!(
-                        after_char,
-                        Some(' ') | Some('\t') | Some('\n') | Some('\r') | Some(';') | Some('(')
-                    )
+                    let after_byte = query_bytes[after_pos];
+                    matches!(after_byte, b' ' | b'\t' | b'\n' | b'\r' | b';' | b'(')
                 };
 
                 if before_ok && after_ok {
@@ -3419,6 +3459,57 @@ mod tests {
         assert!(notifications_after_removal
             .iter()
             .all(|n| n.id != notification_id));
+    }
+
+    #[test]
+    fn test_notification_query_validation_with_string_literals() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Should accept: keyword inside string literal
+        let notification1 = NotificationInput {
+            description: "Test".to_string(),
+            app_name: "Test".to_string(),
+            app_url: "Test".to_string(),
+            app_icon_path: "Test".to_string(),
+            trigger: "SELECT * FROM link WHERE data = 'DELETE this'".to_string(),
+            perspective_ids: vec!["test".to_string()],
+            webhook_url: "".to_string(),
+            webhook_auth: "".to_string(),
+        };
+
+        let result1 = db.add_notification(notification1);
+        assert!(result1.is_ok(), "Should allow DELETE inside string literal");
+
+        // Should reject: actual DELETE operation
+        let notification2 = NotificationInput {
+            description: "Test".to_string(),
+            app_name: "Test".to_string(),
+            app_url: "Test".to_string(),
+            app_icon_path: "Test".to_string(),
+            trigger: "DELETE FROM link WHERE id = 123".to_string(),
+            perspective_ids: vec!["test".to_string()],
+            webhook_url: "".to_string(),
+            webhook_auth: "".to_string(),
+        };
+
+        let result2 = db.add_notification(notification2);
+        assert!(result2.is_err(), "Should reject actual DELETE operation");
+        assert!(result2.unwrap_err().to_string().contains("DELETE"));
+
+        // Should accept: escaped quotes with keyword
+        let notification3 = NotificationInput {
+            description: "Test".to_string(),
+            app_name: "Test".to_string(),
+            app_url: "Test".to_string(),
+            app_icon_path: "Test".to_string(),
+            trigger: r#"SELECT * FROM link WHERE data = "Don\'t DELETE this""#.to_string(),
+            perspective_ids: vec!["test".to_string()],
+            webhook_url: "".to_string(),
+            webhook_auth: "".to_string(),
+        };
+
+        let result3 = db.add_notification(notification3);
+        assert!(result3.is_ok(), "Should allow DELETE inside escaped string");
     }
 
     #[test]
