@@ -15,7 +15,7 @@ use crate::languages::language::Language;
 use crate::languages::LanguageController;
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
 use crate::prolog_service::get_prolog_service;
-use crate::prolog_service::types::{QueryMatch, QueryResolution};
+use crate::prolog_service::types::QueryResolution;
 use crate::prolog_service::PrologService;
 use crate::prolog_service::{
     engine_pool::FILTERING_THRESHOLD, DEFAULT_POOL_SIZE, DEFAULT_POOL_SIZE_WITH_FILTERING,
