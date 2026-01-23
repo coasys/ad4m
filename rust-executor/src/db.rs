@@ -3370,7 +3370,10 @@ mod tests {
             test_notification.app_icon_path,
             "Test App Icon Path".to_string()
         );
-        assert_eq!(test_notification.trigger, "SELECT * FROM link WHERE predicate = 'test://trigger'");
+        assert_eq!(
+            test_notification.trigger,
+            "SELECT * FROM link WHERE predicate = 'test://trigger'"
+        );
         assert_eq!(
             test_notification.perspective_ids,
             vec!["Test Perspective ID".to_string()]
