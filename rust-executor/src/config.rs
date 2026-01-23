@@ -31,6 +31,7 @@ pub struct TlsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SmtpConfig {
+    pub enabled: bool,
     pub host: String,
     pub port: u16,
     pub username: String,
