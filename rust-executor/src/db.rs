@@ -530,29 +530,39 @@ impl Ad4mDb {
         let mut escaped = false;
 
         for c in query_trimmed.chars() {
-            if escaped {
-                // Skip this character as it's escaped
-                escaped = false;
-                continue;
-            }
-
             match c {
-                '\\' => escaped = true,
+                '\\' if in_string => {
+                    // Toggle escaped state for backslashes inside strings
+                    // If already escaped, this is a literal backslash (\\)
+                    // If not escaped, next char will be escaped
+                    escaped = !escaped;
+                }
                 '\'' | '"' => {
-                    if in_string {
-                        // Check if this closes the current string
-                        if c == string_char {
-                            in_string = false;
+                    if !escaped {
+                        if in_string {
+                            // Check if this closes the current string
+                            if c == string_char {
+                                in_string = false;
+                            }
+                        } else {
+                            // Start a new string
+                            in_string = true;
+                            string_char = c;
                         }
-                    } else {
-                        // Start a new string
-                        in_string = true;
-                        string_char = c;
+                    }
+                    // Clear escaped state after processing
+                    if escaped {
+                        escaped = false;
                     }
                 }
                 '(' if !in_string => paren_count += 1,
                 ')' if !in_string => paren_count -= 1,
-                _ => {}
+                _ => {
+                    // Any other character clears the escaped state
+                    if escaped {
+                        escaped = false;
+                    }
+                }
             }
 
             if paren_count < 0 {
