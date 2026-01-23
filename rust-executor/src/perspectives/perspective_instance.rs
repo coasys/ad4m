@@ -1943,7 +1943,8 @@ impl PerspectiveInstance {
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
             PrologMode::Simple | PrologMode::SdnaOnly => {
-                self.execute_simple_mode_query(query, true, &AgentContext::main_agent()).await
+                self.execute_simple_mode_query(query, true, &AgentContext::main_agent())
+                    .await
             }
             PrologMode::Pooled => {
                 // Pooled mode: Use the old pool-based approach
@@ -2609,7 +2610,9 @@ impl PerspectiveInstance {
             } else {
                 //let query_start = std::time::Instant::now();
                 //log::info!("🔔 NOTIFICATIONS: not cached - Querying notification for perspective {}", uuid);
-                let matches = self.surreal_query_notification(n.trigger.clone(), n.user_email.clone()).await?;
+                let matches = self
+                    .surreal_query_notification(n.trigger.clone(), n.user_email.clone())
+                    .await?;
                 trigger_cache.insert(n.trigger.clone(), matches.clone());
                 result_map.insert(n.clone(), matches);
                 //log::info!("🔔 NOTIFICATIONS: Querying notification: {} - took {:?}", n.trigger, query_start.elapsed());

@@ -319,10 +319,7 @@ impl Ad4mDb {
 
         // Add user_email column to notifications table for multi-user support
         // This column tracks which user created the notification (NULL for main agent)
-        let _ = conn.execute(
-            "ALTER TABLE notifications ADD COLUMN user_email TEXT",
-            [],
-        );
+        let _ = conn.execute("ALTER TABLE notifications ADD COLUMN user_email TEXT", []);
 
         Ok(Self { conn })
     }
@@ -682,10 +679,15 @@ impl Ad4mDb {
         Ok(notifications)
     }
 
-    pub fn get_notifications_for_user(&self, user_email: Option<String>) -> Result<Vec<Notification>, rusqlite::Error> {
+    pub fn get_notifications_for_user(
+        &self,
+        user_email: Option<String>,
+    ) -> Result<Vec<Notification>, rusqlite::Error> {
         let notifications = if let Some(email) = user_email {
             // Query for specific user's notifications
-            let mut stmt = self.conn.prepare("SELECT * FROM notifications WHERE user_email = ?1")?;
+            let mut stmt = self
+                .conn
+                .prepare("SELECT * FROM notifications WHERE user_email = ?1")?;
             let notification_iter = stmt.query_map(params![email], |row| {
                 Ok(Notification {
                     id: row.get(0)?,
@@ -709,7 +711,9 @@ impl Ad4mDb {
             result
         } else {
             // Query for main agent's notifications (user_email IS NULL)
-            let mut stmt = self.conn.prepare("SELECT * FROM notifications WHERE user_email IS NULL")?;
+            let mut stmt = self
+                .conn
+                .prepare("SELECT * FROM notifications WHERE user_email IS NULL")?;
             let notification_iter = stmt.query_map([], |row| {
                 Ok(Notification {
                     id: row.get(0)?,

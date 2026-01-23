@@ -380,8 +380,13 @@ impl PrologService {
         }
 
         // Ensure engine is up to date
-        self.ensure_engine_updated(perspective_id, links, neighbourhood_author.clone(), owner_did.clone())
-            .await?;
+        self.ensure_engine_updated(
+            perspective_id,
+            links,
+            neighbourhood_author.clone(),
+            owner_did.clone(),
+        )
+        .await?;
 
         // Add "." at the end if missing
         let query = if !query.ends_with('.') {
@@ -394,9 +399,13 @@ impl PrologService {
         let engine_key = Self::get_engine_key(perspective_id, owner_did.as_ref());
 
         let engines = self.simple_engines.read().await;
-        let simple_engine = engines
-            .get(&engine_key)
-            .ok_or_else(|| anyhow!("Prolog engine not found for perspective {} (key: {})", perspective_id, engine_key))?;
+        let simple_engine = engines.get(&engine_key).ok_or_else(|| {
+            anyhow!(
+                "Prolog engine not found for perspective {} (key: {})",
+                perspective_id,
+                engine_key
+            )
+        })?;
 
         // Run query through the query engine
         let result = simple_engine.query_engine.run_query(query).await?;
@@ -427,8 +436,13 @@ impl PrologService {
         }
 
         // Ensure engine is up to date
-        self.ensure_engine_updated(perspective_id, links, neighbourhood_author.clone(), owner_did.clone())
-            .await?;
+        self.ensure_engine_updated(
+            perspective_id,
+            links,
+            neighbourhood_author.clone(),
+            owner_did.clone(),
+        )
+        .await?;
 
         // Add "." at the end if missing
         let query = if !query.ends_with('.') {
@@ -441,9 +455,13 @@ impl PrologService {
         let engine_key = Self::get_engine_key(perspective_id, owner_did.as_ref());
 
         let engines = self.simple_engines.read().await;
-        let simple_engine = engines
-            .get(&engine_key)
-            .ok_or_else(|| anyhow!("Prolog engine not found for perspective {} (key: {})", perspective_id, engine_key))?;
+        let simple_engine = engines.get(&engine_key).ok_or_else(|| {
+            anyhow!(
+                "Prolog engine not found for perspective {} (key: {})",
+                perspective_id,
+                engine_key
+            )
+        })?;
 
         // Run query through the subscription engine (separate from regular queries)
         let result = simple_engine.subscription_engine.run_query(query).await?;

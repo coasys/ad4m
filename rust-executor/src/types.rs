@@ -411,7 +411,11 @@ pub struct AITask {
 }
 
 impl Notification {
-    pub fn from_input_and_id(id: String, input: NotificationInput, user_email: Option<String>) -> Self {
+    pub fn from_input_and_id(
+        id: String,
+        input: NotificationInput,
+        user_email: Option<String>,
+    ) -> Self {
         Notification {
             id,
             granted: false,
