@@ -321,6 +321,76 @@ impl SurrealDBService {
                     return url;
                 };
             };
+
+            DEFINE FUNCTION IF NOT EXISTS fn::strip_html($html: option<string>) {
+                RETURN function($html) {
+                    const [html] = arguments;
+
+                    if (!html || typeof html !== 'string') {
+                        return html;
+                    }
+
+                    // Remove HTML tags using regex
+                    return html.replace(/<[^>]*>/g, '');
+                };
+            };
+
+            DEFINE FUNCTION IF NOT EXISTS fn::json_path($obj: option<record>, $path: option<string>) {
+                RETURN function($obj, $path) {
+                    const [obj, path] = arguments;
+
+                    if (!obj || !path || typeof path !== 'string') {
+                        return null;
+                    }
+
+                    // Split path by dots and traverse object
+                    const parts = path.split('.');
+                    let current = obj;
+
+                    for (const part of parts) {
+                        if (current && typeof current === 'object' && part in current) {
+                            current = current[part];
+                        } else {
+                            return null;
+                        }
+                    }
+
+                    return current;
+                };
+            };
+
+            DEFINE FUNCTION IF NOT EXISTS fn::contains($str: option<string>, $substring: option<string>) {
+                RETURN function($str, $substring) {
+                    const [str, substring] = arguments;
+                    //console.log('🔍 fn::contains input - str:', str, 'substring:', substring);
+
+                    if (!str || !substring || typeof str !== 'string' || typeof substring !== 'string') {
+                        //console.log('🔍 fn::contains: invalid types, returning false');
+                        return false;
+                    }
+
+                    const result = str.includes(substring);
+                    //console.log('🔍 fn::contains result:', result);
+                    return result;
+                };
+            };
+
+            DEFINE FUNCTION IF NOT EXISTS fn::regex_match($str: option<string>, $pattern: option<string>) {
+                RETURN function($str, $pattern) {
+                    const [str, pattern] = arguments;
+
+                    if (!str || !pattern || typeof str !== 'string' || typeof pattern !== 'string') {
+                        return false;
+                    }
+
+                    try {
+                        const regex = new RegExp(pattern);
+                        return regex.test(str);
+                    } catch (e) {
+                        return false;
+                    }
+                };
+            };
             ",
         )
         .await?;
