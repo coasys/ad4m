@@ -1,4 +1,4 @@
-import { Ad4mClient, CapabilityInput } from '@coasys/ad4m';
+import { CapabilityInput } from '@coasys/ad4m';
 
 export type AppInfo = {
   name: string;

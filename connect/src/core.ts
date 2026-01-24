@@ -2,7 +2,7 @@ import { ApolloClient, InMemoryCache, NormalizedCacheObject } from "@apollo/clie
 import { createClient, Client as WSClient } from "graphql-ws";
 import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
 import { isEmbedded, setLocal, getLocal, removeLocal, connectWebSocket } from './utils';
-import { Ad4mClient, CapabilityInput, VerificationRequestResult } from "@coasys/ad4m";
+import { Ad4mClient, VerificationRequestResult } from "@coasys/ad4m";
 import autoBind from "auto-bind";
 
 import { Ad4mConnectOptions, ConnectionStates, AuthStates, ConfigStates } from './types';
