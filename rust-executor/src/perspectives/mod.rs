@@ -52,6 +52,15 @@ pub fn initialize_from_db() {
     for handle in handles {
         let handle_clone = handle.clone();
 
+        // Check if perspective already exists (skip if already initialized)
+        {
+            let perspectives = PERSPECTIVES.read().unwrap();
+            if perspectives.contains_key(&handle_clone.uuid) {
+                log::debug!("Perspective {} already initialized, skipping", handle_clone.uuid);
+                continue;
+            }
+        }
+
         // Spawn async task to create service and initialize perspective
         tokio::spawn(async move {
             // Create a per-perspective SurrealDB instance with file-based storage
@@ -243,6 +252,19 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
 
     if let Some(ref instance) = removed_instance {
         instance.teardown_background_tasks().await;
+
+        // Clean up RocksDB directory for this perspective
+        if let Some(data_path) = get_app_data_path() {
+            let db_path = std::path::Path::new(&data_path)
+                .join(format!("surrealdb_perspectives/{}", uuid));
+            if db_path.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&db_path) {
+                    log::warn!("Failed to remove SurrealDB directory for perspective {}: {}", uuid, e);
+                } else {
+                    log::debug!("Cleaned up SurrealDB directory for perspective {}", uuid);
+                }
+            }
+        }
 
         // Publish one removal event per owner so each user gets their own notification
         let handle = instance.persisted.lock().await.clone();

@@ -248,40 +248,58 @@ impl SurrealDBService {
         let hash_prefix = &hash[..16];
         let node_id = format!("node:{}", hash_prefix);
 
-        // Use the SDK's create method with a specific record ID
-        // This will create the node or return error if exists
-        let create_result: Result<Option<NodeRecord>, _> = self
-            .db
-            .create(("node", hash_prefix))
-            .content(NodeRecord {
-                id: None,
-                uri: uri.to_string(),
-            })
-            .await;
+        // Retry logic for transaction conflicts (RocksDB can have concurrent write conflicts)
+        let max_retries = 5;
+        let mut retry_count = 0;
 
-        // Handle the result: ignore duplicate errors but propagate other failures
-        match create_result {
-            Ok(_) => {
-                // Node created successfully
-                Ok(node_id)
-            }
-            Err(e) => {
-                // Check if this is a duplicate/already exists error
-                let error_string = e.to_string().to_lowercase();
-                if error_string.contains("already exists")
-                    || error_string.contains("duplicate")
-                    || error_string.contains("unique")
-                {
-                    // This is expected - node already exists, which is fine
-                    Ok(node_id)
-                } else {
-                    // Unexpected database error - log and propagate
-                    log::warn!(
-                        "Unexpected database error in ensure_node for URI '{}': {}",
-                        uri,
-                        e
-                    );
-                    Err(e.into())
+        loop {
+            // Use the SDK's create method with a specific record ID
+            // This will create the node or return error if exists
+            let create_result: Result<Option<NodeRecord>, _> = self
+                .db
+                .create(("node", hash_prefix))
+                .content(NodeRecord {
+                    id: None,
+                    uri: uri.to_string(),
+                })
+                .await;
+
+            // Handle the result: ignore duplicate errors but propagate other failures
+            match create_result {
+                Ok(_) => {
+                    // Node created successfully
+                    return Ok(node_id);
+                }
+                Err(e) => {
+                    // Check if this is a duplicate/already exists error
+                    let error_string = e.to_string().to_lowercase();
+                    if error_string.contains("already exists")
+                        || error_string.contains("duplicate")
+                        || error_string.contains("unique")
+                    {
+                        // This is expected - node already exists, which is fine
+                        return Ok(node_id);
+                    } else if error_string.contains("transaction")
+                        && error_string.contains("conflict")
+                        && retry_count < max_retries
+                    {
+                        // Transaction conflict - retry with exponential backoff
+                        retry_count += 1;
+                        let delay_ms = 10 * 2_u64.pow(retry_count - 1); // 10, 20, 40, 80, 160 ms
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                        continue;
+                    } else {
+                        // Unexpected database error - log and propagate
+                        if retry_count > 0 {
+                            log::warn!(
+                                "Database error in ensure_node for URI '{}' after {} retries: {}",
+                                uri,
+                                retry_count,
+                                e
+                            );
+                        }
+                        return Err(e.into());
+                    }
                 }
             }
         }
@@ -298,7 +316,29 @@ impl SurrealDBService {
             let db_path = std::path::Path::new(path).join(format!("surrealdb_perspectives/{}", database));
             std::fs::create_dir_all(&db_path)?;
 
-            Surreal::new::<RocksDb>(db_path).await?
+            // Try to create RocksDB with config (scripting enabled)
+            // If we get a lock error, wait briefly and retry (in case previous instance is being cleaned up)
+            let mut retries = 0;
+            let max_retries = 3;
+
+            loop {
+                match Surreal::new::<RocksDb>((db_path.clone(), config.clone())).await {
+                    Ok(db) => break db,
+                    Err(e) => {
+                        let error_string = e.to_string();
+                        if error_string.contains("LOCK") && error_string.contains("No locks available") && retries < max_retries {
+                            // Lock file exists - likely from previous instance
+                            // Wait a bit and retry (previous instance should release soon)
+                            retries += 1;
+                            log::warn!("RocksDB lock detected for {}, waiting and retrying ({}/{})", database, retries, max_retries);
+                            tokio::time::sleep(tokio::time::Duration::from_millis(500 * retries as u64)).await;
+                        } else {
+                            // Unrecoverable error or max retries reached
+                            return Err(e.into());
+                        }
+                    }
+                }
+            }
         } else {
             // Fallback to in-memory for tests
             use surrealdb::engine::local::Mem;
@@ -338,6 +378,10 @@ impl SurrealDBService {
             DEFINE INDEX IF NOT EXISTS out_predicate_idx ON link FIELDS out, predicate;
             DEFINE INDEX IF NOT EXISTS source_predicate_idx ON link FIELDS source, predicate;
             DEFINE INDEX IF NOT EXISTS target_predicate_idx ON link FIELDS target, predicate;
+
+            -- UNIQUE index to prevent duplicate links (by source, target, predicate, author, timestamp)
+            -- This prevents race conditions during concurrent link creation
+            DEFINE INDEX IF NOT EXISTS link_unique_idx ON link FIELDS in, out, predicate, author, timestamp UNIQUE;
 
             DEFINE FUNCTION IF NOT EXISTS fn::parse_literal($url: option<string>) {
                 RETURN function($url) {
@@ -467,10 +511,11 @@ impl SurrealDBService {
         let source_id = self.ensure_node(&link.data.source).await?;
         let target_id = self.ensure_node(&link.data.target).await?;
 
-        // Create the edge using RELATE
-        // RELATE creates graph 'in'/'out' fields, we also set explicit source/target strings
         let predicate = link.data.predicate.clone().unwrap_or_default();
 
+        // Create the edge using RELATE
+        // RELATE creates graph 'in'/'out' fields, we also set explicit source/target strings
+        // The UNIQUE index on (in, out, predicate, author, timestamp) will prevent duplicates
         let relate_query = format!(
             "RELATE {}->link->{} SET source = $source, target = $target, predicate = $predicate, author = $author, timestamp = $timestamp, proof_key = $proof_key, proof_signature = $proof_signature, status = $status",
             source_id, target_id
@@ -481,7 +526,7 @@ impl SurrealDBService {
             crate::graphql::graphql_types::LinkStatus::Local => "Local",
         });
 
-        self.db
+        let result = self.db
             .query(&relate_query)
             .bind(("source", link.data.source.clone()))
             .bind(("target", link.data.target.clone()))
@@ -491,9 +536,27 @@ impl SurrealDBService {
             .bind(("proof_key", link.proof.key.clone()))
             .bind(("proof_signature", link.proof.signature.clone()))
             .bind(("status", status_str))
-            .await?;
+            .await;
 
-        Ok(())
+        // Handle result: ignore unique constraint violations (link already exists)
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let error_string = e.to_string().to_lowercase();
+                // Check for unique constraint violation
+                if error_string.contains("unique")
+                    || error_string.contains("duplicate")
+                    || error_string.contains("already exists")
+                    || error_string.contains("index")
+                {
+                    // Link already exists - this is expected and OK (idempotent operation)
+                    Ok(())
+                } else {
+                    // Unexpected error - propagate it
+                    Err(e.into())
+                }
+            }
+        }
     }
 
     pub async fn remove_link(
