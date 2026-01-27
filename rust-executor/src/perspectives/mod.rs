@@ -21,6 +21,16 @@ use crate::types::{LinkExpression, PerspectiveDiff};
 lazy_static! {
     static ref PERSPECTIVES: RwLock<HashMap<String, RwLock<PerspectiveInstance>>> =
         RwLock::new(HashMap::new());
+    static ref APP_DATA_PATH: RwLock<Option<String>> = RwLock::new(None);
+}
+
+pub fn set_app_data_path(path: String) {
+    let mut data_path = APP_DATA_PATH.write().unwrap();
+    *data_path = Some(path);
+}
+
+fn get_app_data_path() -> Option<String> {
+    APP_DATA_PATH.read().unwrap().clone()
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -44,9 +54,10 @@ pub fn initialize_from_db() {
 
         // Spawn async task to create service and initialize perspective
         tokio::spawn(async move {
-            // Create a per-perspective SurrealDB instance
+            // Create a per-perspective SurrealDB instance with file-based storage
+            let data_path = get_app_data_path();
             let surreal_service =
-                crate::surreal_service::SurrealDBService::new("ad4m", &handle_clone.uuid)
+                crate::surreal_service::SurrealDBService::new("ad4m", &handle_clone.uuid, data_path.as_deref())
                     .await
                     .expect("Failed to create SurrealDB service for perspective");
 
@@ -58,17 +69,7 @@ pub fn initialize_from_db() {
                 perspectives.insert(handle_clone.uuid.clone(), RwLock::new(p.clone()));
             }
 
-            // Sync existing links to SurrealDB before starting background tasks
-            // This must complete before background tasks start to avoid race conditions
-            if let Err(e) = p.sync_existing_links_to_surreal().await {
-                log::warn!(
-                    "Failed to sync existing links to SurrealDB for perspective {}: {:?}",
-                    handle_clone.uuid,
-                    e
-                );
-            }
-
-            // Only start background tasks after sync completes
+            // Start background tasks (no sync needed - SurrealDB is file-based and persistent)
             tokio::spawn(p.start_background_tasks());
         });
     }
@@ -93,8 +94,9 @@ pub async fn add_perspective(
         .add_perspective(&handle)
         .map_err(|e| e.to_string())?;
 
-    // Create a per-perspective SurrealDB instance
-    let surreal_service = crate::surreal_service::SurrealDBService::new("ad4m", &handle.uuid)
+    // Create a per-perspective SurrealDB instance with file-based storage
+    let data_path = get_app_data_path();
+    let surreal_service = crate::surreal_service::SurrealDBService::new("ad4m", &handle.uuid, data_path.as_deref())
         .await
         .expect("Failed to create SurrealDB service for perspective");
 
@@ -375,11 +377,22 @@ pub async fn import_perspective(
             .map_err(|e| format!("Failed to create perspective: {}", e))?;
     }
 
-    // Add all links directly to DB to preserve original authorship
-    Ad4mDb::with_global_instance(|db| {
-        db.add_many_links(&instance.handle.uuid, instance.links, &LinkStatus::Local)
-            .map_err(|e| e.to_string())
-    })?;
+    // Add all links directly to SurrealDB to preserve original authorship
+    let perspective = get_perspective(&instance.handle.uuid)
+        .ok_or_else(|| "Perspective not found after creation".to_string())?;
+
+    let decorated_links: Vec<crate::types::DecoratedLinkExpression> = instance.links
+        .into_iter()
+        .map(|link| crate::types::DecoratedLinkExpression::from((link, LinkStatus::Local)))
+        .collect();
+
+    let diff = crate::graphql::graphql_types::DecoratedPerspectiveDiff {
+        additions: decorated_links,
+        removals: vec![],
+    };
+
+    // Write to SurrealDB
+    perspective.update_surreal_cache(&diff).await;
 
     Ok(instance.handle)
 }
