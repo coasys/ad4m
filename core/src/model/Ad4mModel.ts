@@ -825,7 +825,25 @@ export class Ad4mModel {
           const matching = links.filter((l: any) => l.predicate === collMeta.predicate);
           // Collections preserve chronological order: links are sorted ASC by timestamp,
           // so the collection reflects the order in which items were added (oldest to newest).
-          (this as any)[collName] = matching.map((l: any) => l.target);
+          let values = matching.map((l: any) => l.target);
+          
+          // Apply where.isInstance filtering if present
+          if (collMeta.where?.isInstance && values.length > 0) {
+            try {
+              const className = typeof collMeta.where.isInstance === 'string' 
+                ? collMeta.where.isInstance 
+                : collMeta.where.isInstance.name;
+              
+              const filterMetadata = await this.#perspective.getSubjectClassMetadataFromSDNA(className);
+              if (filterMetadata) {
+                values = await this.#perspective.batchCheckSubjectInstances(values, filterMetadata);
+              }
+            } catch (error) {
+              // Keep unfiltered values on error
+            }
+          }
+          
+          (this as any)[collName] = values;
         }
 
         // Set author and timestamp
@@ -1625,6 +1643,36 @@ WHERE ${whereConditions.join(' AND ')}
         instances.push(instance);
       } catch (error) {
         console.error(`Failed to process SurrealDB instance ${base}:`, error);
+      }
+    }
+    
+    // Filter collections by where.isInstance if specified
+    // Do this for all instances that have collections with filters
+    for (const instance of instances) {
+      for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+        if (collMeta.where?.isInstance && instance[collName]?.length > 0) {
+          try {
+            const targetClass = collMeta.where.isInstance;
+            const subjects = instance[collName];
+            
+            // Get the class metadata from SDNA to pass to batchCheckSubjectInstances
+            const targetClassName = typeof targetClass === 'string' 
+              ? targetClass 
+              : (targetClass as any).prototype?.className || targetClass.name;
+            const classMetadata = await perspective.getSubjectClassMetadataFromSDNA(targetClassName);
+            
+            if (!classMetadata) {
+              continue;
+            }
+            
+            // Check which subjects are instances of the target class
+            const validSubjects = await perspective.batchCheckSubjectInstances(subjects, classMetadata);
+            
+            instance[collName] = validSubjects;
+          } catch (error) {
+            // On error, leave the collection unfiltered rather than breaking everything
+          }
+        }
       }
     }
     
