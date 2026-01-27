@@ -2274,6 +2274,27 @@ impl Mutation {
         // Extract user context from auth token
         let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
         let user_email = agent_context.user_email;
+
+        // Fetch existing notification to verify ownership
+        let existing_notification =
+            Ad4mDb::with_global_instance(|db| db.get_notification(id.clone()))
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to fetch notification: {}", e),
+                        Value::null(),
+                    )
+                })?
+                .ok_or_else(|| FieldError::new("Notification not found", Value::null()))?;
+
+        // Verify ownership: user_email must match
+        if existing_notification.user_email != user_email {
+            return Err(FieldError::new(
+                "Permission denied: You do not own this notification",
+                Value::null(),
+            ));
+        }
+
+        // Build updated notification after ownership check
         let notification = Notification::from_input_and_id(id.clone(), notification, user_email);
 
         Ad4mDb::with_global_instance(|db| db.update_notification(id, &notification))?;
@@ -2287,6 +2308,31 @@ impl Mutation {
         id: String,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+
+        // Extract user context from auth token
+        let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
+        let user_email = agent_context.user_email;
+
+        // Fetch existing notification to verify ownership
+        let existing_notification =
+            Ad4mDb::with_global_instance(|db| db.get_notification(id.clone()))
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to fetch notification: {}", e),
+                        Value::null(),
+                    )
+                })?
+                .ok_or_else(|| FieldError::new("Notification not found", Value::null()))?;
+
+        // Verify ownership: user_email must match
+        if existing_notification.user_email != user_email {
+            return Err(FieldError::new(
+                "Permission denied: You do not own this notification",
+                Value::null(),
+            ));
+        }
+
+        // Proceed with removal after ownership check
         Ad4mDb::with_global_instance(|db| db.remove_notification(id))?;
         Ok(true)
     }
