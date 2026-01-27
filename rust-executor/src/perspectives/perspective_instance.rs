@@ -1845,7 +1845,8 @@ impl PerspectiveInstance {
         };
 
         // Get the correct user DID based on context (for proper SDNA filtering)
-        let owner_did = crate::agent::did_for_context(context).ok();
+        // Propagate errors instead of silently converting to None to ensure proper per-user filtering
+        let owner_did = Some(crate::agent::did_for_context(context)?);
 
         // Fetch links based on mode
         let links = match PROLOG_MODE {
