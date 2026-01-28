@@ -385,6 +385,8 @@ export class PerspectiveProxy {
     #perspectiveLinkRemovedCallbacks: LinkCallback[]
     #perspectiveLinkUpdatedCallbacks: LinkCallback[]
     #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
+    /** Track ongoing ensureSDNA operations to prevent concurrent duplicates */
+    #ensureSdnaPromises: Map<string, Promise<void>>
 
     /**
      * Creates a new PerspectiveProxy instance.
@@ -395,6 +397,7 @@ export class PerspectiveProxy {
         this.#perspectiveLinkRemovedCallbacks = []
         this.#perspectiveLinkUpdatedCallbacks = []
         this.#perspectiveSyncStateChangeCallbacks = []
+        this.#ensureSdnaPromises = new Map()
         this.#handle = handle
         this.#client = ad4m
         this.uuid = this.#handle.uuid;
@@ -1272,14 +1275,35 @@ export class PerspectiveProxy {
      * static generateSDNA() function and adds it to the perspective's SDNA.
      */
     async ensureSDNASubjectClass(jsClass: any): Promise<void> {
-        const subjectClass = await this.subjectClassesByTemplate(new jsClass)
-        if(subjectClass.length > 0) {
-            return
+        // Get the class name that would be generated
+        const { name } = jsClass.generateSDNA();
+        
+        // If there's already an ongoing operation for this class, return that promise
+        const existingPromise = this.#ensureSdnaPromises.get(name);
+        if (existingPromise) {
+            return existingPromise;
         }
+        
+        // Create a new promise for this operation
+        const operationPromise = (async () => {
+            try {
+                const subjectClass = await this.subjectClassesByTemplate(new jsClass)
+                if(subjectClass.length > 0) {
+                    return
+                }
 
-        const { name, sdna } = jsClass.generateSDNA();
-
-        await this.addSdna(name, sdna, 'subject_class');
+                const { sdna } = jsClass.generateSDNA();
+                await this.addSdna(name, sdna, 'subject_class');
+            } finally {
+                // Clean up the promise from the map when done (success or failure)
+                this.#ensureSdnaPromises.delete(name);
+            }
+        })();
+        
+        // Store the promise in the map
+        this.#ensureSdnaPromises.set(name, operationPromise);
+        
+        return operationPromise;
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {
