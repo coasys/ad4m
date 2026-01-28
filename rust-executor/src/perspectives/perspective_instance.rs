@@ -784,7 +784,7 @@ impl PerspectiveInstance {
         };
 
         // Write to SurrealDB (primary storage for links)
-        self.update_surreal_cache(&decorated_diff).await;
+        self.persist_link_diff(&decorated_diff).await;
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_diff.clone()).await;
@@ -908,7 +908,7 @@ impl PerspectiveInstance {
                     DecoratedPerspectiveDiff::from_removals(vec![decorated_link_result.clone()]);
 
                 // Remove from SurrealDB (primary storage)
-                self.update_surreal_cache(&decorated_diff).await;
+                self.persist_link_diff(&decorated_diff).await;
 
                 // Update both Prolog engines: subscription (immediate) + query (lazy)
                 self.update_prolog_engines(decorated_diff.clone()).await;
@@ -1035,7 +1035,7 @@ impl PerspectiveInstance {
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
         // Write to SurrealDB (primary storage for links)
-        self.update_surreal_cache(&decorated_perspective_diff).await;
+        self.persist_link_diff(&decorated_perspective_diff).await;
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_perspective_diff.clone())
@@ -1089,7 +1089,7 @@ impl PerspectiveInstance {
                 DecoratedPerspectiveDiff::from_additions(decorated_link_expressions.clone());
 
             // Write to SurrealDB (primary storage for links)
-            self.update_surreal_cache(&decorated_perspective_diff).await;
+            self.persist_link_diff(&decorated_perspective_diff).await;
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
             self.pubsub_publish_diff(decorated_perspective_diff).await;
@@ -1136,7 +1136,7 @@ impl PerspectiveInstance {
         };
 
         // Write to SurrealDB (primary storage for links)
-        self.update_surreal_cache(&decorated_diff).await;
+        self.persist_link_diff(&decorated_diff).await;
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
         self.pubsub_publish_diff(decorated_diff.clone()).await;
@@ -1213,7 +1213,7 @@ impl PerspectiveInstance {
             );
 
             // Write to SurrealDB (primary storage for links)
-            self.update_surreal_cache(&decorated_diff).await;
+            self.persist_link_diff(&decorated_diff).await;
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
@@ -1321,7 +1321,7 @@ impl PerspectiveInstance {
             let decorated_diff = DecoratedPerspectiveDiff::from_removals(decorated_links.clone());
 
             // Remove from SurrealDB (primary storage)
-            self.update_surreal_cache(&decorated_diff).await;
+            self.persist_link_diff(&decorated_diff).await;
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
@@ -2400,7 +2400,7 @@ impl PerspectiveInstance {
         }
     }
 
-    pub(crate) async fn update_surreal_cache(&self, diff: &DecoratedPerspectiveDiff) {
+    pub(crate) async fn persist_link_diff(&self, diff: &DecoratedPerspectiveDiff) {
         // Get UUID
         let uuid = {
             let persisted_guard = self.persisted.lock().await;
@@ -4123,7 +4123,7 @@ impl PerspectiveInstance {
             //let db_start = std::time::Instant::now();
             //log::info!("🔄 BATCH COMMIT: Starting DB operations for shared changes");
 
-            // Commit to link language (SurrealDB will be updated later via update_surreal_cache)
+            // Commit to link language (SurrealDB will be updated later via persist_link_diff)
             if self.has_link_language().await {
                 //let link_lang_start = std::time::Instant::now();
                 //log::info!("🔄 BATCH COMMIT: Starting link language commit");
@@ -4163,7 +4163,7 @@ impl PerspectiveInstance {
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(combined_diff.clone()).await;
 
-            self.update_surreal_cache(&combined_diff).await;
+            self.persist_link_diff(&combined_diff).await;
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
         }

@@ -414,7 +414,7 @@ pub async fn import_perspective(
     };
 
     // Write to SurrealDB
-    perspective.update_surreal_cache(&diff).await;
+    perspective.persist_link_diff(&diff).await;
 
     Ok(instance.handle)
 }
