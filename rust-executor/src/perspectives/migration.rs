@@ -73,7 +73,7 @@ pub async fn migrate_links_from_rusqlite_to_surrealdb(
     let mut migrated_count = 0;
     let mut error_count = 0;
 
-    for (link_expr, status) in links {
+    for (link_expr, status) in &links {
         let decorated_link = DecoratedLinkExpression {
             author: link_expr.author.clone(),
             timestamp: link_expr.timestamp.clone(),
@@ -84,7 +84,7 @@ pub async fn migrate_links_from_rusqlite_to_surrealdb(
                 valid: None,
                 invalid: None,
             },
-            status: Some(status),
+            status: Some(status.clone()),
         };
 
         match surreal_service
