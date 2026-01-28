@@ -181,6 +181,13 @@ export interface PropertyOptions {
     setter?: string;
 
     /**
+     * Custom SurrealQL getter to resolve the property value. Use this for custom graph traversals.
+     * The expression can reference 'Base' which will be replaced with the instance's base expression.
+     * Example: "(<-link[WHERE predicate = 'flux://has_reply'].in.uri)[0]"
+     */
+    surrealGetter?: string;
+
+    /**
      * Indicates whether the property is stored locally in the perspective and not in the network. Useful for properties that are not meant to be shared with the network.
      */
     local?: boolean;
@@ -411,6 +418,13 @@ export interface CollectionOptions {
      * An object representing the WHERE clause of the query.
      */
     where?: WhereOptions;
+
+    /**
+     * Custom SurrealQL getter to resolve the collection values. Use this for custom graph traversals.
+     * The expression can reference 'Base' which will be replaced with the instance's base expression.
+     * Example: "(<-link[WHERE predicate = 'flux://has_reply'].in.uri)"
+     */
+    surrealGetter?: string;
 
     /**
      * Indicates whether the property is stored locally in the perspective and not in the network. Useful for properties that are not meant to be shared with the network.

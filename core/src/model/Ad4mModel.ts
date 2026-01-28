@@ -93,6 +93,8 @@ export interface PropertyMetadata {
   getter?: string;
   /** Custom Prolog setter code */
   setter?: string;
+  /** Custom SurrealQL getter code */
+  surrealGetter?: string;
   /** Whether stored locally only */
   local?: boolean;
   /** Transform function */
@@ -111,6 +113,8 @@ export interface CollectionMetadata {
   predicate: string;
   /** Filter conditions */
   where?: { isInstance?: any; condition?: string };
+  /** Custom SurrealQL getter code */
+  surrealGetter?: string;
   /** Whether stored locally only */
   local?: boolean;
 }
@@ -503,6 +507,7 @@ export class Ad4mModel {
         ...(options.initial !== undefined && { initial: options.initial }),
         ...(options.resolveLanguage !== undefined && { resolveLanguage: options.resolveLanguage }),
         ...(options.getter !== undefined && { getter: options.getter }),
+        ...(options.surrealGetter !== undefined && { surrealGetter: options.surrealGetter }),
         ...(options.setter !== undefined && { setter: options.setter }),
         ...(options.local !== undefined && { local: options.local }),
         ...(options.transform !== undefined && { transform: options.transform }),
@@ -520,7 +525,8 @@ export class Ad4mModel {
         name: collectionName,
         predicate: options.through || "",
         ...(options.where !== undefined && { where: options.where }),
-        ...(options.local !== undefined && { local: options.local })
+        ...(options.local !== undefined && { local: options.local }),
+        ...(options.surrealGetter !== undefined && { surrealGetter: options.surrealGetter })
       };
     }
     
@@ -772,8 +778,9 @@ export class Ad4mModel {
         let maxTimestamp = null;
         let latestAuthor = null;
 
-        // Process properties
+        // Process properties (skip those with surrealGetter)
         for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+          if (propMeta.surrealGetter) continue; // Handle via surrealGetter evaluation
           const matching = links.filter((l: any) => l.predicate === propMeta.predicate);
           if (matching.length > 0) {
             // "Latest wins" semantics: select the last element since links are ordered ASC.
@@ -820,8 +827,9 @@ export class Ad4mModel {
           }
         }
 
-        // Process collections
+        // Process collections (skip those with surrealGetter)
         for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+          if (collMeta.surrealGetter) continue; // Handle via surrealGetter evaluation
           const matching = links.filter((l: any) => l.predicate === collMeta.predicate);
           // Collections preserve chronological order: links are sorted ASC by timestamp,
           // so the collection reflects the order in which items were added (oldest to newest).
@@ -854,6 +862,9 @@ export class Ad4mModel {
           (this as any).timestamp = maxTimestamp;
         }
       }
+
+      // Evaluate SurrealQL getters
+      await ctor.evaluateSurrealGettersForInstance(this, this.#perspective, metadata);
     } catch (e) {
       console.error(`SurrealDB getData also failed for ${this.#baseExpression}:`, e);
     }
@@ -886,6 +897,60 @@ export class Ad4mModel {
     `;
 
     return fullQuery;
+  }
+
+  /**
+   * Evaluates custom SurrealQL getters for properties and collections on a specific instance.
+   * @private
+   */
+  private static async evaluateSurrealGettersForInstance(
+    instance: any,
+    perspective: PerspectiveProxy,
+    metadata: any
+  ) {
+    const safeBaseExpression = this.formatSurrealValue(instance.baseExpression);
+
+    // Evaluate property surrealGetters
+    for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+      if ((propMeta as any).surrealGetter) {
+        try {
+          // Replace 'Base' placeholder with actual base expression
+          const query = (propMeta as any).surrealGetter.replace(/Base/g, safeBaseExpression);
+          // Query from node table to have graph traversal context
+          const result = await perspective.querySurrealDB(
+            `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`
+          );
+          if (result && result.length > 0 && result[0].value !== undefined && result[0].value !== null && result[0].value !== 'None' && result[0].value !== '') {
+            instance[propName] = result[0].value;
+          }
+        } catch (error) {
+          console.warn(`Failed to evaluate surrealGetter for ${propName}:`, error);
+        }
+      }
+    }
+
+    // Evaluate collection surrealGetters
+    for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+      if ((collMeta as any).surrealGetter) {
+        try {
+          // Replace 'Base' placeholder with actual base expression
+          const query = (collMeta as any).surrealGetter.replace(/Base/g, safeBaseExpression);
+          // Query from node table to have graph traversal context
+          const result = await perspective.querySurrealDB(
+            `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`
+          );
+          if (result && result.length > 0 && result[0].value !== undefined && result[0].value !== null) {
+            // Filter out 'None' from collection results
+            const value = result[0].value;
+            instance[collName] = Array.isArray(value) 
+              ? value.filter((v: any) => v && v !== '' && v !== 'None')
+              : value;
+          }
+        } catch (error) {
+          console.warn(`Failed to evaluate surrealGetter for ${collName}:`, error);
+        }
+      }
+    }
   }
 
   /**
@@ -1488,9 +1553,10 @@ WHERE ${whereConditions.join(' AND ')}
             latestAuthor = link.author;
           }
           
-          // Find matching property
+          // Find matching property (skip those with surrealGetter)
           let foundProperty = false;
           for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+            if (propMeta.surrealGetter) continue; // Handle via surrealGetter evaluation
             if (propMeta.predicate === predicate) {
               // For properties, take the first value (or we could use timestamp to get latest)
               // Note: Empty objects {} are truthy, so we need to check for them explicitly
@@ -1557,9 +1623,10 @@ WHERE ${whereConditions.join(' AND ')}
             }
           }
           
-          // If not a property, check if it's a collection
+          // If not a property, check if it's a collection (skip those with surrealGetter)
           if (!foundProperty) {
             for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+              if (collMeta.surrealGetter) continue; // Handle via surrealGetter evaluation
               if (collMeta.predicate === predicate) {
                 // For collections, accumulate all values with their timestamps and indices for sorting
                 if (!instance[collName]) {
@@ -1621,8 +1688,10 @@ WHERE ${whereConditions.join(' AND ')}
               // Use original index as tiebreaker for stable sorting
               return a.originalIndex - b.originalIndex;
             });
-            // Replace collection with sorted values
-            instance[collName] = pairs.map(p => p.value);
+            // Replace collection with sorted values, filtering out empty strings and None
+            instance[collName] = pairs
+              .map(p => p.value)
+              .filter((v: any) => v && v !== '' && v !== 'None');
             // Clean up temporary arrays
             delete instance[timestampsKey];
             delete instance[indicesKey];
@@ -1644,6 +1713,11 @@ WHERE ${whereConditions.join(' AND ')}
       } catch (error) {
         console.error(`Failed to process SurrealDB instance ${base}:`, error);
       }
+    }
+    
+    // Evaluate SurrealQL getters for all instances
+    for (const instance of instances) {
+      await this.evaluateSurrealGettersForInstance(instance, perspective, metadata);
     }
     
     // Filter collections by where.isInstance if specified
@@ -1674,6 +1748,11 @@ WHERE ${whereConditions.join(' AND ')}
           }
         }
       }
+    }
+    
+    // Evaluate SurrealQL getters for all instances
+    for (const instance of instances) {
+      await this.evaluateSurrealGettersForInstance(instance, perspective, metadata);
     }
     
     // Filter by where conditions that couldn't be filtered in SQL
