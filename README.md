@@ -172,6 +172,7 @@ These concepts work together to create a new kind of internet – one where mean
   ```bash
   npm install -g pnpm@9.15.0
   ```
+  > ⚠️ **Note:** Turbo is installed automatically as a devDependency via `pnpm install`. The project currently uses Turbo 1.x with the `pipeline` syntax in `turbo.json`.
 
 - **Rust** (1.84.0 or later)
   ```bash
@@ -185,7 +186,7 @@ These concepts work together to create a new kind of internet – one where mean
   # Follow instructions at https://go.dev/doc/install
   ```
 
-- **Deno** (latest)
+- **Deno** (optional, for language development)
   ```bash
   # Install via curl (Unix/macOS)
   curl -fsSL https://deno.land/install.sh | sh
@@ -196,6 +197,7 @@ These concepts work together to create a new kind of internet – one where mean
   # Or via PowerShell (Windows)
   irm https://deno.land/install.ps1 | iex
   ```
+  > ℹ️ **Note:** Deno runtime is bundled with the AD4M executor. The CLI is only needed if you're developing Languages.
 
 #### Platform-Specific Dependencies
 
