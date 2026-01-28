@@ -564,7 +564,6 @@ impl SurrealDBService {
                 if error_string.contains("unique")
                     || error_string.contains("duplicate")
                     || error_string.contains("already exists")
-                    || error_string.contains("index")
                 {
                     // Link already exists - this is expected and OK (idempotent operation)
                     Ok(())
@@ -753,7 +752,14 @@ impl SurrealDBService {
         Ok(())
     }
 
-    /// Get all links from the database
+    /// Get all links from the database for a perspective
+    ///
+    /// # Arguments
+    /// * `_perspective_uuid` - UUID of the perspective (unused, for API consistency)
+    ///
+    /// # Returns
+    /// * `Ok(Vec<DecoratedLinkExpression>)` - All links in the database
+    /// * `Err(Error)` - Database query error
     pub async fn get_all_links(
         &self,
         _perspective_uuid: &str,
@@ -772,6 +778,17 @@ impl SurrealDBService {
     }
 
     /// Get a specific link by its source, predicate, and target
+    ///
+    /// # Arguments
+    /// * `_perspective_uuid` - UUID of the perspective (unused, for API consistency)
+    /// * `source` - Source address of the link
+    /// * `predicate` - Optional predicate of the link (defaults to empty string if None)
+    /// * `target` - Target address of the link
+    ///
+    /// # Returns
+    /// * `Ok(Some(DecoratedLinkExpression))` - The matching link if found
+    /// * `Ok(None)` - No matching link found
+    /// * `Err(Error)` - Database query error
     pub async fn get_link(
         &self,
         _perspective_uuid: &str,
@@ -812,7 +829,15 @@ impl SurrealDBService {
         Ok(None)
     }
 
-    /// Get links by source
+    /// Get all links matching a specific source address
+    ///
+    /// # Arguments
+    /// * `_perspective_uuid` - UUID of the perspective (unused, for API consistency)
+    /// * `source` - Source address to filter by
+    ///
+    /// # Returns
+    /// * `Ok(Vec<DecoratedLinkExpression>)` - All links with the specified source
+    /// * `Err(Error)` - Database query error
     pub async fn get_links_by_source(
         &self,
         _perspective_uuid: &str,
@@ -841,7 +866,15 @@ impl SurrealDBService {
         Ok(vec![])
     }
 
-    /// Get links by target
+    /// Get all links matching a specific target address
+    ///
+    /// # Arguments
+    /// * `_perspective_uuid` - UUID of the perspective (unused, for API consistency)
+    /// * `target` - Target address to filter by
+    ///
+    /// # Returns
+    /// * `Ok(Vec<DecoratedLinkExpression>)` - All links with the specified target
+    /// * `Err(Error)` - Database query error
     pub async fn get_links_by_target(
         &self,
         _perspective_uuid: &str,
@@ -870,7 +903,15 @@ impl SurrealDBService {
         Ok(vec![])
     }
 
-    /// Get links by predicate
+    /// Get all links matching a specific predicate
+    ///
+    /// # Arguments
+    /// * `_perspective_uuid` - UUID of the perspective (unused, for API consistency)
+    /// * `predicate` - Predicate URI to filter by
+    ///
+    /// # Returns
+    /// * `Ok(Vec<DecoratedLinkExpression>)` - All links with the specified predicate
+    /// * `Err(Error)` - Database query error
     pub async fn get_links_by_predicate(
         &self,
         _perspective_uuid: &str,

@@ -109,5 +109,5 @@ After removing the migration code:
 **Will be updated:**
 - `src/perspectives/mod.rs` - Remove module declaration and migration calls
 
-**Can optionally be cleaned up:**
+**The following can optionally be cleaned up:**
 - `src/db.rs` - Migration tracking methods (optional to remove)

@@ -112,6 +112,16 @@ pub async fn migrate_links_from_rusqlite_to_surrealdb(
         error_count
     );
 
+    // Only mark as migrated and delete if no errors occurred
+    if error_count > 0 {
+        return Err(format!(
+            "Migration failed for perspective {}: {} out of {} links failed to migrate",
+            perspective_uuid,
+            error_count,
+            links.len()
+        ));
+    }
+
     // Mark perspective as migrated
     Ad4mDb::with_global_instance(|db| {
         db.mark_perspective_as_migrated(perspective_uuid)

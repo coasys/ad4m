@@ -25,11 +25,23 @@ lazy_static! {
     static ref APP_DATA_PATH: RwLock<Option<String>> = RwLock::new(None);
 }
 
+/// Set the application data path for file-based SurrealDB storage
+///
+/// This must be called before creating perspectives to enable file-based storage.
+/// Each perspective will create its own SurrealDB database in `{app_data_path}/surrealdb_perspectives/{uuid}/`
+///
+/// # Arguments
+/// * `path` - The base application data directory path
 pub fn set_app_data_path(path: String) {
     let mut data_path = APP_DATA_PATH.write().unwrap();
     *data_path = Some(path);
 }
 
+/// Get the configured application data path
+///
+/// # Returns
+/// * `Some(String)` - The configured app data path if set
+/// * `None` - No app data path configured (will use in-memory storage)
 fn get_app_data_path() -> Option<String> {
     APP_DATA_PATH.read().unwrap().clone()
 }
