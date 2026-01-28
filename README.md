@@ -158,15 +158,49 @@ These concepts work together to create a new kind of internet – one where mean
 ### Prerequisites
 
 #### Core Dependencies
+
+- **Node.js** (v18.20.0 or later)
+  ```bash
+  # Install using nvm (recommended)
+  nvm install 18.20.0
+  nvm use 18.20.0
+  
+  # Or download from https://nodejs.org/
+  ```
+
+- **pnpm** (9.15.0 or later)
+  ```bash
+  npm install -g pnpm@9.15.0
+  ```
+
+- **Turbo** (2.7.6 or later)
+  ```bash
+  npm install -g turbo@2.7.6
+  ```
+  > ⚠️ **Note:** If you encounter errors with Turbo, ensure you're using version 2.x as the project uses the new `tasks` syntax (not the old `pipeline` from Turbo 1.x)
+
 - **Rust** (1.84.0 or later)
   ```bash
   rustup install 1.84.0
   rustup default 1.84.0
   rustup target add wasm32-unknown-unknown
   ```
+
 - **Go** (1.22.0 or later)
   ```bash
   # Follow instructions at https://go.dev/doc/install
+  ```
+
+- **Deno** (latest)
+  ```bash
+  # Install via curl (Unix/macOS)
+  curl -fsSL https://deno.land/install.sh | sh
+  
+  # Or via brew (macOS)
+  brew install deno
+  
+  # Or via PowerShell (Windows)
+  irm https://deno.land/install.ps1 | iex
   ```
 
 #### Platform-Specific Dependencies
@@ -205,17 +239,42 @@ cd ad4m
 pnpm install
 ```
 
-3. Build all packages project:
+3. Build all packages:
 ```bash
 pnpm run build
 ```
+   > 💡 **Tip:** The first build may take 10-15 minutes as it compiles Rust dependencies
 
-4. Create a UI bundle for the Ad4m Launcher
+4. Create a UI bundle for the AD4M Launcher:
 ```bash
 pnpm run package-ad4m
 ```
 
 Find the launcher bundle in `/target/release/bundle`.
+
+### Common Installation Issues
+
+#### Turbo Version Mismatch
+If you see errors about `pipeline` vs `tasks` in turbo.json:
+- **Problem:** Turbo 1.x uses `pipeline` syntax, Turbo 2.x uses `tasks`
+- **Solution:** Ensure you have Turbo 2.7.6 or later: `npm install -g turbo@latest`
+
+#### Browser Automation (Development/Testing)
+If working with Moltbot or browser automation:
+- **Problem:** Snap-installed Chromium has AppArmor restrictions that break automation
+- **Solution:** Install Google Chrome directly:
+  ```bash
+  # Ubuntu/Debian
+  wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+  sudo dpkg -i google-chrome-stable_current_amd64.deb
+  sudo apt-get install -f
+  ```
+
+#### Rust Compilation Errors
+If you encounter errors during Rust compilation:
+- Ensure you have the latest stable Rust: `rustup update stable`
+- Check that wasm32 target is installed: `rustup target add wasm32-unknown-unknown`
+- On Linux, make sure all system libraries are installed (see platform-specific dependencies above)
 
 ## Project Structure
 
