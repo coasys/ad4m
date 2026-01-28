@@ -1,6 +1,7 @@
 pub mod perspective_instance;
 pub mod sdna;
 pub mod utils;
+pub mod migration; // TODO: Remove this module after all users have migrated to SurrealDB
 use crate::graphql::graphql_types::{
     LinkQuery, LinkStatus, PerspectiveExpression, PerspectiveHandle, PerspectiveRemovedWithOwner,
     PerspectiveState, PerspectiveWithOwner,
@@ -70,6 +71,12 @@ pub fn initialize_from_db() {
                     .await
                     .expect("Failed to create SurrealDB service for perspective");
 
+            // Migrate links from Rusqlite to SurrealDB (one-time migration)
+            // TODO: Remove this migration call after all users have migrated
+            if let Err(e) = migration::migrate_links_from_rusqlite_to_surrealdb(&handle_clone.uuid, &surreal_service).await {
+                log::error!("Failed to migrate links for perspective {}: {}", handle_clone.uuid, e);
+            }
+
             let p = PerspectiveInstance::new(handle_clone.clone(), None, surreal_service);
 
             // Store the perspective
@@ -108,6 +115,12 @@ pub async fn add_perspective(
     let surreal_service = crate::surreal_service::SurrealDBService::new("ad4m", &handle.uuid, data_path.as_deref())
         .await
         .expect("Failed to create SurrealDB service for perspective");
+
+    // Migrate links from Rusqlite to SurrealDB (one-time migration)
+    // TODO: Remove this migration call after all users have migrated
+    if let Err(e) = migration::migrate_links_from_rusqlite_to_surrealdb(&handle.uuid, &surreal_service).await {
+        log::error!("Failed to migrate links for perspective {}: {}", handle.uuid, e);
+    }
 
     let p = PerspectiveInstance::new(handle.clone(), created_from_join, surreal_service);
     tokio::spawn(p.clone().start_background_tasks());
@@ -584,6 +597,8 @@ mod tests {
 
         remove_perspective(&handle.uuid).await;
     }
+
+    // Migration tests have been moved to src/perspectives/migration.rs
 
     // Additional tests for other functions can be added here
 }

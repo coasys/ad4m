@@ -156,6 +156,15 @@ impl Ad4mDb {
         )?;
 
         conn.execute(
+            "CREATE TABLE IF NOT EXISTS perspective_link_migration (
+                id INTEGER PRIMARY KEY,
+                perspective_uuid TEXT NOT NULL UNIQUE,
+                migrated_at TEXT NOT NULL
+             )",
+            [],
+        )?;
+
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS outbox (
                 id INTEGER PRIMARY KEY,
                 message TEXT NOT NULL,
@@ -1397,6 +1406,31 @@ impl Ad4mDb {
         })?;
         let links: Result<Vec<_>, _> = link_iter.collect();
         Ok(links?)
+    }
+
+    pub fn is_perspective_migrated(&self, perspective_uuid: &str) -> Ad4mDbResult<bool> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COUNT(*) FROM perspective_link_migration WHERE perspective_uuid = ?1",
+        )?;
+        let count: i64 = stmt.query_row(params![perspective_uuid], |row| row.get(0))?;
+        Ok(count > 0)
+    }
+
+    pub fn mark_perspective_as_migrated(&self, perspective_uuid: &str) -> Ad4mDbResult<()> {
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO perspective_link_migration (perspective_uuid, migrated_at) VALUES (?1, ?2)",
+            params![perspective_uuid, timestamp],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_all_links_for_perspective(&self, perspective_uuid: &str) -> Ad4mDbResult<usize> {
+        let count = self.conn.execute(
+            "DELETE FROM link WHERE perspective = ?1",
+            params![perspective_uuid],
+        )?;
+        Ok(count)
     }
 
     pub fn add_pending_diff(
