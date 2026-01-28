@@ -186,7 +186,7 @@ These concepts work together to create a new kind of internet – one where mean
   # Follow instructions at https://go.dev/doc/install
   ```
 
-- **Deno** (optional, for language development)
+- **Deno** (latest)
   ```bash
   # Install via curl (Unix/macOS)
   curl -fsSL https://deno.land/install.sh | sh
@@ -197,7 +197,7 @@ These concepts work together to create a new kind of internet – one where mean
   # Or via PowerShell (Windows)
   irm https://deno.land/install.ps1 | iex
   ```
-  > ℹ️ **Note:** Deno runtime is bundled with the AD4M executor. The CLI is only needed if you're developing Languages.
+  > ℹ️ **Note:** Deno CLI is required to build the Language bundles during the build process.
 
 #### Platform-Specific Dependencies
 
