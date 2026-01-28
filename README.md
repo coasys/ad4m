@@ -173,12 +173,6 @@ These concepts work together to create a new kind of internet – one where mean
   npm install -g pnpm@9.15.0
   ```
 
-- **Turbo** (2.7.6 or later)
-  ```bash
-  npm install -g turbo@2.7.6
-  ```
-  > ⚠️ **Note:** If you encounter errors with Turbo, ensure you're using version 2.x as the project uses the new `tasks` syntax (not the old `pipeline` from Turbo 1.x)
-
 - **Rust** (1.84.0 or later)
   ```bash
   rustup install 1.84.0
@@ -253,22 +247,6 @@ pnpm run package-ad4m
 Find the launcher bundle in `/target/release/bundle`.
 
 ### Common Installation Issues
-
-#### Turbo Version Mismatch
-If you see errors about `pipeline` vs `tasks` in turbo.json:
-- **Problem:** Turbo 1.x uses `pipeline` syntax, Turbo 2.x uses `tasks`
-- **Solution:** Ensure you have Turbo 2.7.6 or later: `npm install -g turbo@latest`
-
-#### Browser Automation (Development/Testing)
-If working with Moltbot or browser automation:
-- **Problem:** Snap-installed Chromium has AppArmor restrictions that break automation
-- **Solution:** Install Google Chrome directly:
-  ```bash
-  # Ubuntu/Debian
-  wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-  sudo dpkg -i google-chrome-stable_current_amd64.deb
-  sudo apt-get install -f
-  ```
 
 #### Rust Compilation Errors
 If you encounter errors during Rust compilation:
