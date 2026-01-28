@@ -803,12 +803,12 @@ impl SurrealDBService {
         let predicate_str = predicate.unwrap_or("").to_string();
         let source_owned = source.to_string();
         let target_owned = target.to_string();
-        
+
         let query = if let (Some(author_str), Some(timestamp_str)) = (author, timestamp) {
             // Full unique constraint lookup (all 5 fields)
             let author_owned = author_str.to_string();
             let timestamp_owned = timestamp_str.to_string();
-            
+
             let results = self
                 .db
                 .query("SELECT * FROM link WHERE source = $source AND target = $target AND predicate = $predicate AND author = $author AND timestamp = $timestamp LIMIT 1")
