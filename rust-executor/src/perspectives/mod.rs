@@ -65,7 +65,7 @@ pub fn initialize_from_db() {
     for handle in handles {
         let handle_clone = handle.clone();
 
-        // Check if perspective already exists (skip if already initialized)
+        // Check if perspective already exists (initial quick check)
         {
             let perspectives = PERSPECTIVES.read().unwrap();
             if perspectives.contains_key(&handle_clone.uuid) {
@@ -106,14 +106,26 @@ pub fn initialize_from_db() {
 
             let p = PerspectiveInstance::new(handle_clone.clone(), None, surreal_service);
 
-            // Store the perspective
-            {
+            // Atomically check-and-insert to prevent race condition
+            // (In case multiple initializations were spawned before any completed)
+            let should_start_tasks = {
                 let mut perspectives = PERSPECTIVES.write().unwrap();
-                perspectives.insert(handle_clone.uuid.clone(), RwLock::new(p.clone()));
-            }
+                if perspectives.contains_key(&handle_clone.uuid) {
+                    log::warn!(
+                        "Perspective {} was initialized by another task, discarding duplicate",
+                        handle_clone.uuid
+                    );
+                    false
+                } else {
+                    perspectives.insert(handle_clone.uuid.clone(), RwLock::new(p.clone()));
+                    true
+                }
+            };
 
-            // Start background tasks (no sync needed - SurrealDB is file-based and persistent)
-            tokio::spawn(p.start_background_tasks());
+            if should_start_tasks {
+                // Start background tasks (no sync needed - SurrealDB is file-based and persistent)
+                tokio::spawn(p.start_background_tasks());
+            }
         });
     }
 }
