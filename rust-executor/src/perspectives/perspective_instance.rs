@@ -876,12 +876,15 @@ impl PerspectiveInstance {
             let handle = self.persisted.lock().await.clone();
 
             // Query SurrealDB instead of Rusqlite
-            let decorated_link = self.surreal_service.get_link(
-                &handle.uuid,
-                &link_expression.data.source,
-                link_expression.data.predicate.as_deref(),
-                &link_expression.data.target,
-            ).await?
+            let decorated_link = self
+                .surreal_service
+                .get_link(
+                    &handle.uuid,
+                    &link_expression.data.source,
+                    link_expression.data.predicate.as_deref(),
+                    &link_expression.data.target,
+                )
+                .await?
                 .ok_or(anyhow!("Link not found"))?;
 
             let link_from_db = LinkExpression::from(decorated_link.clone());
@@ -893,17 +896,22 @@ impl PerspectiveInstance {
             let handle = self.persisted.lock().await.clone();
 
             // Query SurrealDB instead of Rusqlite
-            if let Some(decorated_link) = self.surreal_service.get_link(
-                &handle.uuid,
-                &link_expression.data.source,
-                link_expression.data.predicate.as_deref(),
-                &link_expression.data.target,
-            ).await? {
+            if let Some(decorated_link) = self
+                .surreal_service
+                .get_link(
+                    &handle.uuid,
+                    &link_expression.data.source,
+                    link_expression.data.predicate.as_deref(),
+                    &link_expression.data.target,
+                )
+                .await?
+            {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
 
                 let diff = PerspectiveDiff::from_removals(vec![link_expression.clone()]);
-                let decorated_link_result = DecoratedLinkExpression::from((link_from_db, status.clone()));
+                let decorated_link_result =
+                    DecoratedLinkExpression::from((link_from_db, status.clone()));
                 let decorated_diff =
                     DecoratedPerspectiveDiff::from_removals(vec![decorated_link_result.clone()]);
 
@@ -1159,18 +1167,21 @@ impl PerspectiveInstance {
         let handle = self.persisted.lock().await.clone();
 
         // Query SurrealDB instead of Rusqlite
-        let decorated_link_option = self.surreal_service.get_link(
-            &handle.uuid,
-            &old_link.data.source,
-            old_link.data.predicate.as_deref(),
-            &old_link.data.target,
-        ).await?;
+        let decorated_link_option = self
+            .surreal_service
+            .get_link(
+                &handle.uuid,
+                &old_link.data.source,
+                old_link.data.predicate.as_deref(),
+                &old_link.data.target,
+            )
+            .await?;
 
         let (link, link_status) = match decorated_link_option {
             Some(decorated) => {
                 let status = decorated.status.clone().unwrap_or(LinkStatus::Local);
                 (LinkExpression::from(decorated), status)
-            },
+            }
             None => {
                 return Err(AnyError::msg(format!(
                     "NH [{}] ({}) Link not found in perspective \"{}\": {:?}",
@@ -1272,12 +1283,16 @@ impl PerspectiveInstance {
         let mut existing_links = Vec::new();
         for link in link_expressions {
             // Query SurrealDB instead of Rusqlite
-            if let Some(decorated_link) = self.surreal_service.get_link(
-                &handle.uuid,
-                &link.data.source,
-                link.data.predicate.as_deref(),
-                &link.data.target,
-            ).await? {
+            if let Some(decorated_link) = self
+                .surreal_service
+                .get_link(
+                    &handle.uuid,
+                    &link.data.source,
+                    link.data.predicate.as_deref(),
+                    &link.data.target,
+                )
+                .await?
+            {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
                 existing_links.push((link_from_db, status));
@@ -1395,17 +1410,24 @@ impl PerspectiveInstance {
         let uuid = self.persisted.lock().await.uuid.clone();
 
         // Query SurrealDB instead of Rusqlite
-        let decorated_links = if query.source.is_none() && query.predicate.is_none() && query.target.is_none() {
-            self.surreal_service.get_all_links(&uuid).await?
-        } else if let Some(source) = &query.source {
-            self.surreal_service.get_links_by_source(&uuid, source).await?
-        } else if let Some(target) = &query.target {
-            self.surreal_service.get_links_by_target(&uuid, target).await?
-        } else if let Some(predicate) = &query.predicate {
-            self.surreal_service.get_links_by_predicate(&uuid, predicate).await?
-        } else {
-            vec![]
-        };
+        let decorated_links =
+            if query.source.is_none() && query.predicate.is_none() && query.target.is_none() {
+                self.surreal_service.get_all_links(&uuid).await?
+            } else if let Some(source) = &query.source {
+                self.surreal_service
+                    .get_links_by_source(&uuid, source)
+                    .await?
+            } else if let Some(target) = &query.target {
+                self.surreal_service
+                    .get_links_by_target(&uuid, target)
+                    .await?
+            } else if let Some(predicate) = &query.predicate {
+                self.surreal_service
+                    .get_links_by_predicate(&uuid, predicate)
+                    .await?
+            } else {
+                vec![]
+            };
 
         // Convert DecoratedLinkExpression to (LinkExpression, LinkStatus)
         let mut result: Vec<(LinkExpression, LinkStatus)> = decorated_links

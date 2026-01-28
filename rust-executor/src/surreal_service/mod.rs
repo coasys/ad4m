@@ -305,7 +305,11 @@ impl SurrealDBService {
         }
     }
 
-    pub async fn new(namespace: &str, database: &str, data_path: Option<&str>) -> Result<Self, Error> {
+    pub async fn new(
+        namespace: &str,
+        database: &str,
+        data_path: Option<&str>,
+    ) -> Result<Self, Error> {
         // Enable scripting (and any other capabilities you want)
         let config = Config::default().capabilities(Capabilities::default().with_scripting(true));
 
@@ -313,7 +317,8 @@ impl SurrealDBService {
         // Each perspective gets its own separate database file for isolation
         let db = if let Some(path) = data_path {
             // Create the directory if it doesn't exist
-            let db_path = std::path::Path::new(path).join(format!("surrealdb_perspectives/{}", database));
+            let db_path =
+                std::path::Path::new(path).join(format!("surrealdb_perspectives/{}", database));
             std::fs::create_dir_all(&db_path)?;
 
             // Try to create RocksDB with config (scripting enabled)
@@ -326,12 +331,23 @@ impl SurrealDBService {
                     Ok(db) => break db,
                     Err(e) => {
                         let error_string = e.to_string();
-                        if error_string.contains("LOCK") && error_string.contains("No locks available") && retries < max_retries {
+                        if error_string.contains("LOCK")
+                            && error_string.contains("No locks available")
+                            && retries < max_retries
+                        {
                             // Lock file exists - likely from previous instance
                             // Wait a bit and retry (previous instance should release soon)
                             retries += 1;
-                            log::warn!("RocksDB lock detected for {}, waiting and retrying ({}/{})", database, retries, max_retries);
-                            tokio::time::sleep(tokio::time::Duration::from_millis(500 * retries as u64)).await;
+                            log::warn!(
+                                "RocksDB lock detected for {}, waiting and retrying ({}/{})",
+                                database,
+                                retries,
+                                max_retries
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_millis(
+                                500 * retries as u64,
+                            ))
+                            .await;
                         } else {
                             // Unrecoverable error or max retries reached
                             return Err(e.into());
@@ -526,7 +542,8 @@ impl SurrealDBService {
             crate::graphql::graphql_types::LinkStatus::Local => "Local",
         });
 
-        let result = self.db
+        let result = self
+            .db
             .query(&relate_query)
             .bind(("source", link.data.source.clone()))
             .bind(("target", link.data.target.clone()))
@@ -737,7 +754,10 @@ impl SurrealDBService {
     }
 
     /// Get all links from the database
-    pub async fn get_all_links(&self, _perspective_uuid: &str) -> Result<Vec<DecoratedLinkExpression>, Error> {
+    pub async fn get_all_links(
+        &self,
+        _perspective_uuid: &str,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         let query = "SELECT * FROM link";
         let results = self.query_links(_perspective_uuid, query).await?;
 
@@ -766,7 +786,8 @@ impl SurrealDBService {
             "SELECT * FROM link WHERE source = $source AND target = $target AND predicate = $predicate LIMIT 1"
         );
 
-        let results = self.db
+        let results = self
+            .db
             .query(&query)
             .bind(("source", source_owned))
             .bind(("target", target_owned))
@@ -799,10 +820,7 @@ impl SurrealDBService {
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         let query = "SELECT * FROM link WHERE source = $source";
         let source_owned = source.to_string();
-        let results = self.db
-            .query(query)
-            .bind(("source", source_owned))
-            .await?;
+        let results = self.db.query(query).bind(("source", source_owned)).await?;
 
         let mut response = results;
         let result: SurrealValue = response.take(0)?;
@@ -831,10 +849,7 @@ impl SurrealDBService {
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         let query = "SELECT * FROM link WHERE target = $target";
         let target_owned = target.to_string();
-        let results = self.db
-            .query(query)
-            .bind(("target", target_owned))
-            .await?;
+        let results = self.db.query(query).bind(("target", target_owned)).await?;
 
         let mut response = results;
         let result: SurrealValue = response.take(0)?;
@@ -863,7 +878,8 @@ impl SurrealDBService {
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         let query = "SELECT * FROM link WHERE predicate = $predicate";
         let predicate_owned = predicate.to_string();
-        let results = self.db
+        let results = self
+            .db
             .query(query)
             .bind(("predicate", predicate_owned))
             .await?;
@@ -926,7 +942,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_single_link() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_1";
         let link = create_test_link(
             "source1",
@@ -947,7 +965,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_link_with_none_predicate() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_2";
         let link = create_test_link(
             "source1",
@@ -970,7 +990,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_multiple_links() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_3";
 
         let link1 = create_test_link(
@@ -1006,7 +1028,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_link() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_4";
         let link = create_test_link(
             "source1",
@@ -1035,7 +1059,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_nonexistent_link() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_5";
         let link = create_test_link(
             "source1",
@@ -1052,7 +1078,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_ensure_node_creates_node() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let test_uri = "testnode://example";
 
         // Use ensure_node to create the node
@@ -1085,7 +1113,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_nodes_are_created_for_links() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_nodes";
 
         // Create and add a link (which should ensure two nodes exist)
@@ -1139,7 +1169,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_links_by_source() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_6";
 
         let link1 = create_test_link(
@@ -1180,7 +1212,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_links_by_predicate() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_7";
 
         let link1 = create_test_link(
@@ -1220,7 +1254,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_links_by_target() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_8";
 
         let link1 = create_test_link(
@@ -1261,7 +1297,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_links_composite_source_and_predicate() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_9";
 
         let link1 = create_test_link(
@@ -1302,7 +1340,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_clear_perspective() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_10";
 
         let link1 = create_test_link(
@@ -1342,8 +1382,12 @@ mod tests {
         // Each perspective gets its own isolated database
         let perspective1 = "test_perspective_11";
         let perspective2 = "test_perspective_12";
-        let service1 = SurrealDBService::new("ad4m", perspective1, None).await.unwrap();
-        let service2 = SurrealDBService::new("ad4m", perspective2, None).await.unwrap();
+        let service1 = SurrealDBService::new("ad4m", perspective1, None)
+            .await
+            .unwrap();
+        let service2 = SurrealDBService::new("ad4m", perspective2, None)
+            .await
+            .unwrap();
 
         let link1 = create_test_link(
             "source1",
@@ -1399,7 +1443,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_reload_perspective() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_13";
 
         // Add initial links
@@ -1466,7 +1512,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_reload_perspective_with_empty_list() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_14";
 
         // Add initial links
@@ -1498,7 +1546,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_reload_perspective_data_integrity() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_reload_integrity";
 
         // Add initial links with specific data
@@ -1759,7 +1809,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_reload_perspective_with_large_dataset() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_large_reload";
 
         // Create a larger dataset to simulate real-world usage (1000 links)
@@ -1936,7 +1988,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_without_perspective_binding() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_16";
 
         let link = create_test_link(
@@ -1964,8 +2018,12 @@ mod tests {
         // Each perspective has its own database
         let perspective1 = "test_perspective_auto_1";
         let perspective2 = "test_perspective_auto_2";
-        let service1 = SurrealDBService::new("ad4m", perspective1, None).await.unwrap();
-        let service2 = SurrealDBService::new("ad4m", perspective2, None).await.unwrap();
+        let service1 = SurrealDBService::new("ad4m", perspective1, None)
+            .await
+            .unwrap();
+        let service2 = SurrealDBService::new("ad4m", perspective2, None)
+            .await
+            .unwrap();
 
         // Add links to perspective1
         let link1 = create_test_link(
@@ -2016,7 +2074,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_operations() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_17";
 
         // Create multiple links
@@ -2052,7 +2112,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_allows_select() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_validation_1";
 
         // Add a test link
@@ -2083,7 +2145,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_blocks_delete() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_validation_2";
 
         // DELETE queries should be blocked
@@ -2098,7 +2162,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_blocks_update() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_validation_3";
 
         // UPDATE queries should be blocked
@@ -2113,7 +2179,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_blocks_insert() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_validation_4";
 
         // INSERT queries should be blocked
@@ -2128,7 +2196,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_blocks_create() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_validation_5";
 
         // CREATE queries should be blocked
@@ -2143,7 +2213,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_blocks_drop() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_validation_6";
 
         // DROP queries should be blocked
@@ -2158,7 +2230,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_blocks_define() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_validation_7";
 
         // DEFINE queries should be blocked
@@ -2173,7 +2247,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_blocks_relate() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_validation_8";
 
         // RELATE queries should be blocked
@@ -2188,7 +2264,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_blocks_transaction() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_validation_9";
 
         // BEGIN TRANSACTION should be blocked
@@ -2212,7 +2290,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_case_insensitive() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_validation_10";
 
         // Should block lowercase delete
@@ -2228,7 +2308,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_with_semicolons() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_validation_11";
 
         // Should block DELETE even with multiple statements
@@ -2242,7 +2324,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_validation_allows_delete_in_string() {
-        let service = SurrealDBService::new("ad4m", "test_db", None).await.unwrap();
+        let service = SurrealDBService::new("ad4m", "test_db", None)
+            .await
+            .unwrap();
         let perspective_uuid = "test_perspective_validation_12";
 
         // Add a test link

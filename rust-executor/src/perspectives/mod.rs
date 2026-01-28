@@ -1,7 +1,7 @@
+pub mod migration;
 pub mod perspective_instance;
 pub mod sdna;
-pub mod utils;
-pub mod migration; // TODO: Remove this module after all users have migrated to SurrealDB
+pub mod utils; // TODO: Remove this module after all users have migrated to SurrealDB
 use crate::graphql::graphql_types::{
     LinkQuery, LinkStatus, PerspectiveExpression, PerspectiveHandle, PerspectiveRemovedWithOwner,
     PerspectiveState, PerspectiveWithOwner,
@@ -57,7 +57,10 @@ pub fn initialize_from_db() {
         {
             let perspectives = PERSPECTIVES.read().unwrap();
             if perspectives.contains_key(&handle_clone.uuid) {
-                log::debug!("Perspective {} already initialized, skipping", handle_clone.uuid);
+                log::debug!(
+                    "Perspective {} already initialized, skipping",
+                    handle_clone.uuid
+                );
                 continue;
             }
         }
@@ -66,15 +69,27 @@ pub fn initialize_from_db() {
         tokio::spawn(async move {
             // Create a per-perspective SurrealDB instance with file-based storage
             let data_path = get_app_data_path();
-            let surreal_service =
-                crate::surreal_service::SurrealDBService::new("ad4m", &handle_clone.uuid, data_path.as_deref())
-                    .await
-                    .expect("Failed to create SurrealDB service for perspective");
+            let surreal_service = crate::surreal_service::SurrealDBService::new(
+                "ad4m",
+                &handle_clone.uuid,
+                data_path.as_deref(),
+            )
+            .await
+            .expect("Failed to create SurrealDB service for perspective");
 
             // Migrate links from Rusqlite to SurrealDB (one-time migration)
             // TODO: Remove this migration call after all users have migrated
-            if let Err(e) = migration::migrate_links_from_rusqlite_to_surrealdb(&handle_clone.uuid, &surreal_service).await {
-                log::error!("Failed to migrate links for perspective {}: {}", handle_clone.uuid, e);
+            if let Err(e) = migration::migrate_links_from_rusqlite_to_surrealdb(
+                &handle_clone.uuid,
+                &surreal_service,
+            )
+            .await
+            {
+                log::error!(
+                    "Failed to migrate links for perspective {}: {}",
+                    handle_clone.uuid,
+                    e
+                );
             }
 
             let p = PerspectiveInstance::new(handle_clone.clone(), None, surreal_service);
@@ -112,14 +127,21 @@ pub async fn add_perspective(
 
     // Create a per-perspective SurrealDB instance with file-based storage
     let data_path = get_app_data_path();
-    let surreal_service = crate::surreal_service::SurrealDBService::new("ad4m", &handle.uuid, data_path.as_deref())
-        .await
-        .expect("Failed to create SurrealDB service for perspective");
+    let surreal_service =
+        crate::surreal_service::SurrealDBService::new("ad4m", &handle.uuid, data_path.as_deref())
+            .await
+            .expect("Failed to create SurrealDB service for perspective");
 
     // Migrate links from Rusqlite to SurrealDB (one-time migration)
     // TODO: Remove this migration call after all users have migrated
-    if let Err(e) = migration::migrate_links_from_rusqlite_to_surrealdb(&handle.uuid, &surreal_service).await {
-        log::error!("Failed to migrate links for perspective {}: {}", handle.uuid, e);
+    if let Err(e) =
+        migration::migrate_links_from_rusqlite_to_surrealdb(&handle.uuid, &surreal_service).await
+    {
+        log::error!(
+            "Failed to migrate links for perspective {}: {}",
+            handle.uuid,
+            e
+        );
     }
 
     let p = PerspectiveInstance::new(handle.clone(), created_from_join, surreal_service);
@@ -268,11 +290,15 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
 
         // Clean up RocksDB directory for this perspective
         if let Some(data_path) = get_app_data_path() {
-            let db_path = std::path::Path::new(&data_path)
-                .join(format!("surrealdb_perspectives/{}", uuid));
+            let db_path =
+                std::path::Path::new(&data_path).join(format!("surrealdb_perspectives/{}", uuid));
             if db_path.exists() {
                 if let Err(e) = std::fs::remove_dir_all(&db_path) {
-                    log::warn!("Failed to remove SurrealDB directory for perspective {}: {}", uuid, e);
+                    log::warn!(
+                        "Failed to remove SurrealDB directory for perspective {}: {}",
+                        uuid,
+                        e
+                    );
                 } else {
                     log::debug!("Cleaned up SurrealDB directory for perspective {}", uuid);
                 }
@@ -416,7 +442,8 @@ pub async fn import_perspective(
     let perspective = get_perspective(&instance.handle.uuid)
         .ok_or_else(|| "Perspective not found after creation".to_string())?;
 
-    let decorated_links: Vec<crate::types::DecoratedLinkExpression> = instance.links
+    let decorated_links: Vec<crate::types::DecoratedLinkExpression> = instance
+        .links
         .into_iter()
         .map(|link| crate::types::DecoratedLinkExpression::from((link, LinkStatus::Local)))
         .collect();

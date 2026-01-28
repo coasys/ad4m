@@ -11,7 +11,6 @@
 ///    - mark_perspective_as_migrated()
 ///    - delete_all_links_for_perspective()
 ///    - perspective_link_migration table
-
 use crate::db::Ad4mDb;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression};
 
@@ -50,14 +49,12 @@ pub async fn migrate_links_from_rusqlite_to_surrealdb(
 
     // Get all links from Rusqlite
     let links = Ad4mDb::with_global_instance(|db| {
-        db.get_all_links(perspective_uuid).map_err(|e| e.to_string())
+        db.get_all_links(perspective_uuid)
+            .map_err(|e| e.to_string())
     })?;
 
     if links.is_empty() {
-        log::debug!(
-            "No links to migrate for perspective {}",
-            perspective_uuid
-        );
+        log::debug!("No links to migrate for perspective {}", perspective_uuid);
         // Mark as migrated even if no links
         Ad4mDb::with_global_instance(|db| {
             db.mark_perspective_as_migrated(perspective_uuid)
@@ -190,7 +187,9 @@ mod tests {
     async fn test_delete_all_links_for_perspective() {
         setup();
 
-        let handle = crate::graphql::graphql_types::PerspectiveHandle::new_from_name("Test Delete Links".to_string());
+        let handle = crate::graphql::graphql_types::PerspectiveHandle::new_from_name(
+            "Test Delete Links".to_string(),
+        );
 
         // Add some links directly to Rusqlite (simulating old data)
         let test_link_1 = LinkExpression {
@@ -232,8 +231,7 @@ mod tests {
 
         // Verify links were added
         let links_before = Ad4mDb::with_global_instance(|db| {
-            db.get_all_links(&handle.uuid)
-                .expect("Failed to get links")
+            db.get_all_links(&handle.uuid).expect("Failed to get links")
         });
         assert_eq!(links_before.len(), 2, "Should have 2 links before deletion");
 
@@ -246,8 +244,7 @@ mod tests {
 
         // Verify links were deleted
         let links_after = Ad4mDb::with_global_instance(|db| {
-            db.get_all_links(&handle.uuid)
-                .expect("Failed to get links")
+            db.get_all_links(&handle.uuid).expect("Failed to get links")
         });
         assert_eq!(links_after.len(), 0, "Should have 0 links after deletion");
     }
@@ -303,7 +300,10 @@ mod tests {
         );
 
         // Create SurrealDB service with unique database name for isolation
-        let db_name = format!("test_migration_{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
+        let db_name = format!(
+            "test_migration_{}",
+            uuid::Uuid::new_v4().to_string().replace("-", "")
+        );
         let surreal_service = crate::surreal_service::SurrealDBService::new("ad4m", &db_name, None)
             .await
             .expect("Failed to create SurrealDB service");
@@ -387,10 +387,15 @@ mod tests {
     async fn test_migration_with_no_links() {
         setup();
 
-        let handle = crate::graphql::graphql_types::PerspectiveHandle::new_from_name("Test Empty Migration".to_string());
+        let handle = crate::graphql::graphql_types::PerspectiveHandle::new_from_name(
+            "Test Empty Migration".to_string(),
+        );
 
         // Create SurrealDB service with unique database name for isolation
-        let db_name = format!("test_empty_migration_{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
+        let db_name = format!(
+            "test_empty_migration_{}",
+            uuid::Uuid::new_v4().to_string().replace("-", "")
+        );
         let surreal_service = crate::surreal_service::SurrealDBService::new("ad4m", &db_name, None)
             .await
             .expect("Failed to create SurrealDB service");
@@ -415,10 +420,6 @@ mod tests {
             .get_all_links(&handle.uuid)
             .await
             .expect("Failed to get links from SurrealDB");
-        assert_eq!(
-            surreal_links.len(),
-            0,
-            "Should have 0 links in SurrealDB"
-        );
+        assert_eq!(surreal_links.len(), 0, "Should have 0 links in SurrealDB");
     }
 }
