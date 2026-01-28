@@ -784,7 +784,8 @@ impl PerspectiveInstance {
         };
 
         // Write to SurrealDB (primary storage for links)
-        self.persist_link_diff(&decorated_diff).await;
+        self.persist_link_diff(&decorated_diff).await
+            .expect("SurrealDB link persistence failed - critical synchronization error");
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_diff.clone()).await;
@@ -916,7 +917,8 @@ impl PerspectiveInstance {
                     DecoratedPerspectiveDiff::from_removals(vec![decorated_link_result.clone()]);
 
                 // Remove from SurrealDB (primary storage)
-                self.persist_link_diff(&decorated_diff).await;
+                self.persist_link_diff(&decorated_diff).await
+                    .expect("SurrealDB link persistence failed - critical synchronization error");
 
                 // Update both Prolog engines: subscription (immediate) + query (lazy)
                 self.update_prolog_engines(decorated_diff.clone()).await;
@@ -1043,7 +1045,8 @@ impl PerspectiveInstance {
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
         // Write to SurrealDB (primary storage for links)
-        self.persist_link_diff(&decorated_perspective_diff).await;
+        self.persist_link_diff(&decorated_perspective_diff).await
+                .expect("SurrealDB link persistence failed - critical synchronization error");
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_perspective_diff.clone())
@@ -1097,7 +1100,8 @@ impl PerspectiveInstance {
                 DecoratedPerspectiveDiff::from_additions(decorated_link_expressions.clone());
 
             // Write to SurrealDB (primary storage for links)
-            self.persist_link_diff(&decorated_perspective_diff).await;
+            self.persist_link_diff(&decorated_perspective_diff).await
+                .expect("SurrealDB link persistence failed - critical synchronization error");
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
             self.pubsub_publish_diff(decorated_perspective_diff).await;
@@ -1144,7 +1148,8 @@ impl PerspectiveInstance {
         };
 
         // Write to SurrealDB (primary storage for links)
-        self.persist_link_diff(&decorated_diff).await;
+        self.persist_link_diff(&decorated_diff).await
+                .expect("SurrealDB link persistence failed - critical synchronization error");
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
         self.pubsub_publish_diff(decorated_diff.clone()).await;
@@ -1224,7 +1229,8 @@ impl PerspectiveInstance {
             );
 
             // Write to SurrealDB (primary storage for links)
-            self.persist_link_diff(&decorated_diff).await;
+            self.persist_link_diff(&decorated_diff).await
+                .expect("SurrealDB link persistence failed - critical synchronization error");
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
@@ -1336,7 +1342,8 @@ impl PerspectiveInstance {
             let decorated_diff = DecoratedPerspectiveDiff::from_removals(decorated_links.clone());
 
             // Remove from SurrealDB (primary storage)
-            self.persist_link_diff(&decorated_diff).await;
+            self.persist_link_diff(&decorated_diff).await
+                .expect("SurrealDB link persistence failed - critical synchronization error");
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
@@ -2390,7 +2397,7 @@ impl PerspectiveInstance {
         Ok(results)
     }
 
-    async fn retry_surreal_op<F, Fut>(op: F, uuid: &str, op_name: &str)
+    async fn retry_surreal_op<F, Fut>(op: F, uuid: &str, op_name: &str) -> Result<(), anyhow::Error>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<(), anyhow::Error>>,
@@ -2399,7 +2406,7 @@ impl PerspectiveInstance {
         let max_attempts = 5;
         loop {
             match op().await {
-                Ok(_) => break,
+                Ok(_) => return Ok(()),
                 Err(e) => {
                     let msg = format!("{}", e);
                     if msg.contains("Failed to commit transaction due to a read or write conflict")
@@ -2415,14 +2422,14 @@ impl PerspectiveInstance {
                             uuid,
                             e
                         );
-                        break;
+                        return Err(e);
                     }
                 }
             }
         }
     }
 
-    pub(crate) async fn persist_link_diff(&self, diff: &DecoratedPerspectiveDiff) {
+    pub(crate) async fn persist_link_diff(&self, diff: &DecoratedPerspectiveDiff) -> Result<(), AnyError> {
         // Get UUID
         let uuid = {
             let persisted_guard = self.persisted.lock().await;
@@ -2444,7 +2451,7 @@ impl PerspectiveInstance {
                 &uuid,
                 "remove",
             )
-            .await;
+            .await?;
         }
         // Additions after
         for addition in &diff.additions {
@@ -2453,8 +2460,9 @@ impl PerspectiveInstance {
                 &uuid,
                 "add",
             )
-            .await;
+            .await?;
         }
+        Ok(())
     }
 
     fn spawn_prolog_facts_update(
@@ -4185,7 +4193,8 @@ impl PerspectiveInstance {
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(combined_diff.clone()).await;
 
-            self.persist_link_diff(&combined_diff).await;
+            self.persist_link_diff(&combined_diff).await
+                .expect("SurrealDB link persistence failed - critical synchronization error");
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
         }

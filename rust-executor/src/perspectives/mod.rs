@@ -469,7 +469,8 @@ pub async fn import_perspective(
     };
 
     // Write to SurrealDB
-    perspective.persist_link_diff(&diff).await;
+    perspective.persist_link_diff(&diff).await
+        .map_err(|e| format!("Failed to persist link diff to SurrealDB: {}", e))?;
 
     Ok(instance.handle)
 }
