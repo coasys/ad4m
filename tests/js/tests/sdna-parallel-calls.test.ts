@@ -1,19 +1,16 @@
 import { TestContext } from './integration.test'
 import { expect } from "chai";
-import { SDNAClass, SubjectEntity, SubjectFlag, SubjectProperty, sdna } from "@coasys/ad4m";
+import { Ad4mModel, Flag, Property } from "@coasys/ad4m";
 
 // Test subject classes to demonstrate parallel calls
-@SDNAClass({
-    name: "TestClass1",
-})
-class TestClass1 {
-    @SubjectFlag({
+class TestClass1 extends Ad4mModel {
+    @Flag({
         through: "test://class1-flag",
         value: "test://class1-value",
     })
     flag?: boolean;
 
-    @SubjectProperty({
+    @Property({
         through: "test://class1-property",
         writable: true,
         resolveLanguage: "literal",
@@ -21,22 +18,16 @@ class TestClass1 {
     property?: string;
 }
 
-@SDNAClass({
-    name: "TestClass2",
-})
-class TestClass2 {
-    @SubjectFlag({
+class TestClass2 extends Ad4mModel {
+    @Flag({
         through: "test://class2-flag",
         value: "test://class2-value",
     })
     flag?: boolean;
 }
 
-@SDNAClass({
-    name: "TestClass3",
-})
-class TestClass3 {
-    @SubjectProperty({
+class TestClass3 extends Ad4mModel {
+    @Property({
         through: "test://class3-property",
         writable: true,
         resolveLanguage: "literal",
@@ -44,22 +35,16 @@ class TestClass3 {
     property?: string;
 }
 
-@SDNAClass({
-    name: "TestClass4",
-})
-class TestClass4 {
-    @SubjectFlag({
+class TestClass4 extends Ad4mModel {
+    @Flag({
         through: "test://class4-flag",
         value: "test://class4-value",
     })
     flag?: boolean;
 }
 
-@SDNAClass({
-    name: "TestClass5",
-})
-class TestClass5 {
-    @SubjectProperty({
+class TestClass5 extends Ad4mModel {
+    @Property({
         through: "test://class5-property",
         writable: true,
         resolveLanguage: "literal",
