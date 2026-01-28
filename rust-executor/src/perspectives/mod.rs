@@ -457,7 +457,10 @@ pub async fn import_perspective(
     let decorated_links: Vec<crate::types::DecoratedLinkExpression> = instance
         .links
         .into_iter()
-        .map(|link| crate::types::DecoratedLinkExpression::from((link, LinkStatus::Local)))
+        .map(|link| {
+            let status = link.status.unwrap_or(LinkStatus::Local);
+            crate::types::DecoratedLinkExpression::from((link, status))
+        })
         .collect();
 
     let diff = crate::graphql::graphql_types::DecoratedPerspectiveDiff {
