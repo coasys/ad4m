@@ -777,13 +777,15 @@ impl SurrealDBService {
         Ok(links)
     }
 
-    /// Get a specific link by its source, predicate, and target
+    /// Get a specific link by its unique constraint fields
     ///
     /// # Arguments
     /// * `_perspective_uuid` - UUID of the perspective (unused, for API consistency)
     /// * `source` - Source address of the link
     /// * `predicate` - Optional predicate of the link (defaults to empty string if None)
     /// * `target` - Target address of the link
+    /// * `author` - Optional author DID to match (if None, only matches source/predicate/target)
+    /// * `timestamp` - Optional timestamp to match (if None, only matches source/predicate/target)
     ///
     /// # Returns
     /// * `Ok(Some(DecoratedLinkExpression))` - The matching link if found
@@ -795,21 +797,41 @@ impl SurrealDBService {
         source: &str,
         predicate: Option<&str>,
         target: &str,
+        author: Option<&str>,
+        timestamp: Option<&str>,
     ) -> Result<Option<DecoratedLinkExpression>, Error> {
         let predicate_str = predicate.unwrap_or("").to_string();
         let source_owned = source.to_string();
         let target_owned = target.to_string();
-        let query = format!(
-            "SELECT * FROM link WHERE source = $source AND target = $target AND predicate = $predicate LIMIT 1"
-        );
+        
+        let query = if let (Some(author_str), Some(timestamp_str)) = (author, timestamp) {
+            // Full unique constraint lookup (all 5 fields)
+            let author_owned = author_str.to_string();
+            let timestamp_owned = timestamp_str.to_string();
+            
+            let results = self
+                .db
+                .query("SELECT * FROM link WHERE source = $source AND target = $target AND predicate = $predicate AND author = $author AND timestamp = $timestamp LIMIT 1")
+                .bind(("source", source_owned))
+                .bind(("target", target_owned))
+                .bind(("predicate", predicate_str))
+                .bind(("author", author_owned))
+                .bind(("timestamp", timestamp_owned))
+                .await?;
+            results
+        } else {
+            // Backward compatible lookup (only source/predicate/target)
+            let results = self
+                .db
+                .query("SELECT * FROM link WHERE source = $source AND target = $target AND predicate = $predicate LIMIT 1")
+                .bind(("source", source_owned))
+                .bind(("target", target_owned))
+                .bind(("predicate", predicate_str))
+                .await?;
+            results
+        };
 
-        let results = self
-            .db
-            .query(&query)
-            .bind(("source", source_owned))
-            .bind(("target", target_owned))
-            .bind(("predicate", predicate_str))
-            .await?;
+        let results = query;
 
         let mut response = results;
         let result: SurrealValue = response.take(0)?;
