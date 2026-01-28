@@ -470,7 +470,7 @@ pub async fn import_perspective(
         .links
         .into_iter()
         .map(|link| {
-            let status = link.status.unwrap_or(LinkStatus::Local);
+            let status = link.status.clone().unwrap_or(LinkStatus::Local);
             crate::types::DecoratedLinkExpression::from((link, status))
         })
         .collect();
