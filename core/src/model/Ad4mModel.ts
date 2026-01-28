@@ -413,7 +413,8 @@ export class Ad4mModel {
   #source: string;
   #perspective: PerspectiveProxy;
   author: string;
-  timestamp: string;
+  createdAt: any;
+  updatedAt: any;
 
   private static classNamesByClass = new WeakMap<typeof Ad4mModel, { [perspectiveId: string]: string }>();
 
@@ -440,6 +441,14 @@ export class Ad4mModel {
     }
 
     return classCache[perspectiveID];
+  }
+
+  /**
+   * Backwards compatibility alias for createdAt.
+   * @deprecated Use createdAt instead. This will be removed in a future version.
+   */
+  get timestamp(): any {
+    return (this as any).createdAt;
   }
 
   /**
@@ -775,8 +784,10 @@ export class Ad4mModel {
       const links = await this.#perspective.querySurrealDB(linksQuery);
 
       if (links && links.length > 0) {
+        let minTimestamp = null;
         let maxTimestamp = null;
         let latestAuthor = null;
+        let originalAuthor = null;
 
         // Process properties (skip those with surrealGetter)
         for (const [propName, propMeta] of Object.entries(metadata.properties)) {
@@ -788,10 +799,16 @@ export class Ad4mModel {
             const link = matching[matching.length - 1];
             let value = link.target;
 
-            // Track timestamp/author
-            if (link.timestamp && (!maxTimestamp || link.timestamp > maxTimestamp)) {
-              maxTimestamp = link.timestamp;
-              latestAuthor = link.author;
+            // Track timestamps/authors for createdAt and updatedAt
+            if (link.timestamp) {
+              if (!minTimestamp || link.timestamp < minTimestamp) {
+                minTimestamp = link.timestamp;
+                originalAuthor = link.author;
+              }
+              if (!maxTimestamp || link.timestamp > maxTimestamp) {
+                maxTimestamp = link.timestamp;
+                latestAuthor = link.author;
+              }
             }
 
             // Handle resolveLanguage
@@ -854,12 +871,15 @@ export class Ad4mModel {
           (this as any)[collName] = values;
         }
 
-        // Set author and timestamp
-        if (latestAuthor) {
-          (this as any).author = latestAuthor;
+        // Set author and timestamps
+        if (originalAuthor) {
+          (this as any).author = originalAuthor;
+        }
+        if (minTimestamp) {
+          (this as any).createdAt = minTimestamp;
         }
         if (maxTimestamp) {
-          (this as any).timestamp = maxTimestamp;
+          (this as any).updatedAt = maxTimestamp;
         }
       }
 
@@ -1378,8 +1398,9 @@ WHERE ${whereConditions.join(' AND ')}
     }
     
     // Always add author and timestamp fields
-    fields.push(`(SELECT VALUE author FROM link WHERE source = source LIMIT 1) AS author`);
-    fields.push(`(SELECT VALUE timestamp FROM link WHERE source = source LIMIT 1) AS timestamp`);
+    fields.push(`(SELECT VALUE author FROM link WHERE source = source ORDER BY timestamp ASC LIMIT 1) AS author`);
+    fields.push(`(SELECT VALUE timestamp FROM link WHERE source = source ORDER BY timestamp ASC LIMIT 1) AS createdAt`);
+    fields.push(`(SELECT VALUE timestamp FROM link WHERE source = source ORDER BY timestamp DESC LIMIT 1) AS updatedAt`);
     
     return fields.join(',\n  ');
   }
@@ -1415,9 +1436,10 @@ WHERE ${whereConditions.join(' AND ')}
       fields.push(`target[WHERE predicate = '${escapedPredicate}'] AS ${collName}`);
     }
     
-    // Always add author and timestamp fields using array::first
+    // Always add author and timestamp fields
     fields.push(`array::first(author) AS author`);
-    fields.push(`array::first(timestamp) AS timestamp`);
+    fields.push(`array::first(timestamp) AS createdAt`);
+    fields.push(`array::last(timestamp) AS updatedAt`);
     
     return fields.join(',\n  ');
   }
@@ -1534,8 +1556,10 @@ WHERE ${whereConditions.join(' AND ')}
         
         const instance = new this(perspective, base) as any;
         
-        // Track the most recent timestamp and corresponding author
+        // Track both earliest (createdAt) and most recent (updatedAt) timestamps
+        let minTimestamp = null;
         let maxTimestamp = null;
+        let originalAuthor = null;
         let latestAuthor = null;
         
         // Process each link (track index for collection ordering)
@@ -1547,10 +1571,16 @@ WHERE ${whereConditions.join(' AND ')}
           // Skip 'None' values
           if (target === 'None') continue;
           
-          // Track the most recent timestamp and its author
-          if (link.timestamp && (!maxTimestamp || link.timestamp > maxTimestamp)) {
-            maxTimestamp = link.timestamp;
-            latestAuthor = link.author;
+          // Track both earliest (createdAt) and latest (updatedAt) timestamps with their authors
+          if (link.timestamp) {
+            if (!minTimestamp || link.timestamp < minTimestamp) {
+              minTimestamp = link.timestamp;
+              originalAuthor = link.author;
+            }
+            if (!maxTimestamp || link.timestamp > maxTimestamp) {
+              maxTimestamp = link.timestamp;
+              latestAuthor = link.author;
+            }
           }
           
           // Find matching property (skip those with surrealGetter)
@@ -1653,18 +1683,32 @@ WHERE ${whereConditions.join(' AND ')}
           }
         }
         
-        // Set author and timestamp from the most recent link
-        if (latestAuthor && maxTimestamp) {
-          instance.author = latestAuthor;
-          // Convert timestamp to number (milliseconds) if it's an ISO string
-          if (typeof maxTimestamp === 'string' && maxTimestamp.includes('T')) {
-            instance.timestamp = new Date(maxTimestamp).getTime();
-          } else if (typeof maxTimestamp === 'string') {
-            // Try to parse as number string
-            const parsed = parseInt(maxTimestamp, 10);
-            instance.timestamp = isNaN(parsed) ? maxTimestamp : parsed;
+        // Set author and timestamps
+        if (originalAuthor) {
+          instance.author = originalAuthor;
+        }
+        
+        // Set createdAt from earliest timestamp
+        if (minTimestamp) {
+          if (typeof minTimestamp === 'string' && minTimestamp.includes('T')) {
+            instance.createdAt = new Date(minTimestamp).getTime();
+          } else if (typeof minTimestamp === 'string') {
+            const parsed = parseInt(minTimestamp, 10);
+            instance.createdAt = isNaN(parsed) ? minTimestamp : parsed;
           } else {
-            instance.timestamp = maxTimestamp;
+            instance.createdAt = minTimestamp;
+          }
+        }
+        
+        // Set updatedAt from most recent timestamp
+        if (maxTimestamp) {
+          if (typeof maxTimestamp === 'string' && maxTimestamp.includes('T')) {
+            instance.updatedAt = new Date(maxTimestamp).getTime();
+          } else if (typeof maxTimestamp === 'string') {
+            const parsed = parseInt(maxTimestamp, 10);
+            instance.updatedAt = isNaN(parsed) ? maxTimestamp : parsed;
+          } else {
+            instance.updatedAt = maxTimestamp;
           }
         }
         
