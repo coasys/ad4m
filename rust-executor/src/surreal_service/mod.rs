@@ -570,18 +570,23 @@ impl SurrealDBService {
 
         let predicate = link.data.predicate.clone().unwrap_or_default();
 
-        // Delete the graph edge matching in, out, and predicate
+        // Delete the specific link matching all unique fields (in, out, predicate, author, timestamp)
+        // This ensures we only delete the exact link, not all links with the same source/target/predicate
         // In graph edges, 'in' is source and 'out' is target
         self.db
             .query(
                 "DELETE FROM link WHERE
                 in = type::thing($source_id) AND
                 out = type::thing($target_id) AND
-                predicate = $predicate",
+                predicate = $predicate AND
+                author = $author AND
+                timestamp = $timestamp",
             )
             .bind(("source_id", source_id))
             .bind(("target_id", target_id))
             .bind(("predicate", predicate))
+            .bind(("author", link.author.clone()))
+            .bind(("timestamp", link.timestamp.clone()))
             .await?;
 
         Ok(())
