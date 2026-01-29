@@ -155,7 +155,12 @@ pub async fn add_perspective(
     let surreal_service =
         crate::surreal_service::SurrealDBService::new("ad4m", &handle.uuid, data_path.as_deref())
             .await
-            .expect("Failed to create SurrealDB service for perspective");
+            .map_err(|e| {
+                format!(
+                    "Failed to create SurrealDB service for perspective {}: {}",
+                    handle.uuid, e
+                )
+            })?;
 
     // Migrate links from Rusqlite to SurrealDB (one-time migration)
     // TODO: Remove this migration call after all users have migrated
