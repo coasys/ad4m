@@ -1,48 +1,164 @@
 # Installation
-To kick off with AD4M and tap into its agent-centric network, you’ll need to install the core runtime and, for JavaScript UI projects, 
-the client libraries to connect your apps. AD4M provides the AD4M Launcher for ease of use, the AD4M CLI for developer flexibility, 
-and two npm packages—`@coasys/ad4m` and `@coasys/ad4m-connect`—for front-end integration. 
-This guide aligns with the v0.10.1 release candidate (as of March 24, 2025), featuring AI integration and enhanced Social DNA querying.
+
+To kick off with AD4M and tap into its agent-centric network, you'll need to install the core runtime and, for JavaScript UI projects,
+the client libraries to connect your apps. AD4M provides the AD4M Launcher for ease of use, the AD4M CLI for developer flexibility,
+and two npm packages-`@coasys/ad4m` and `@coasys/ad4m-connect`-for front-end integration.
+
+## Prerequisites
+
+Before installing AD4M, ensure you have the following dependencies installed:
+
+### Core Dependencies
+
+- **Node.js** (v18.20.0 or later)
+  ```bash
+  # Install using nvm (recommended)
+  nvm install 18.20.0
+  nvm use 18.20.0
+
+  # Or download from https://nodejs.org/
+  ```
+
+- **pnpm** (9.15.0 or later)
+  ```bash
+  npm install -g pnpm@9.15.0
+  ```
+  > ⚠️ **Note:** Turbo is installed automatically as a devDependency via `pnpm install`. The project currently uses Turbo 1.x with the `pipeline` syntax in `turbo.json`.
+
+- **Rust** (1.84.0 or later)
+  ```bash
+  rustup install 1.84.0
+  rustup default 1.84.0
+  rustup target add wasm32-unknown-unknown
+  ```
+
+- **Go** (1.22.0 or later)
+  ```bash
+  # Follow instructions at https://go.dev/doc/install
+  ```
+
+- **Deno** (latest)
+  ```bash
+  # Install via curl (Unix/macOS)
+  curl -fsSL https://deno.land/install.sh | sh
+
+  # Or via brew (macOS)
+  brew install deno
+
+  # Or via PowerShell (Windows)
+  irm https://deno.land/install.ps1 | iex
+  ```
+  > ℹ️ **Note:** Deno CLI is required to build the Language bundles during the build process.
+
+### Platform-Specific Dependencies
+
+**macOS**:
+```bash
+brew install protobuf cmake
+```
+
+**Linux (Ubuntu/Debian)**:
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev \
+  librsvg2-dev patchelf protobuf-compiler cmake \
+  fuse libfuse2 mesa-utils mesa-vulkan-drivers \
+  libsoup-3.0-dev javascriptcoregtk-4.1-dev \
+  webkit2gtk-4.1-dev librust-alsa-sys-dev
+```
+
+**Windows**:
+```bash
+choco install strawberryperl protoc cmake curl cygwin gnuwin32-m4 msys2 make mingw
+```
+
+## Building from Source
+
+1. **Clone the repository:**
+```bash
+git clone https://github.com/coasys/ad4m.git
+cd ad4m
+```
+
+2. **Install dependencies:**
+```bash
+pnpm install
+```
+
+3. **Build all packages:**
+```bash
+pnpm run build
+```
+> 💡 **Tip:** The first build may take 10-15 minutes as it compiles Rust dependencies
+
+4. **Create a UI bundle for the AD4M Launcher:**
+```bash
+pnpm run package-ad4m
+```
+
+Find the launcher bundle in `/target/release/bundle`.
+
+### Common Installation Issues
+
+#### Rust Compilation Errors
+If you encounter errors during Rust compilation:
+- Ensure you have the latest stable Rust: `rustup update stable`
+- Check that wasm32 target is installed: `rustup target add wasm32-unknown-unknown`
+- On Linux, make sure all system libraries are installed (see platform-specific dependencies above)
 
 ## AD4M Launcher
-The AD4M Launcher is a Tauri-based, system-tray app that bundles the AD4M executor, a background UI and a setup wizard—ideal for users and developers seeking a quick start. 
-It runs your agent’s instance locally, managing keys and data as the back-end for AD4M apps. Install it like this:
-- Download: Visit the [GitHub release page](https://github.com/coasys/ad4m/releases) and download the binary for your OS—e.g., 
-  `ADAM_Launcher_<version>-release-candidate-1_aarch64.dmg`, or `ADAM.Launcher_<version>-release-candidate-1_amd64-CUDA.AppImage` 
-  (**We are working on a Windows build!.**)
-- Run/Install: Execute the file. Windows may prompt a security warning (allow it; signed builds are coming); macOS/Linux follow standard app install steps.
-- Initialize: Launch it to generate or unlock an agent (DID and keys). It runs on localhost:12000, offering WebSocket and GraphQL endpoints.
+
+The AD4M Launcher is a Tauri-based, system-tray app that bundles the AD4M executor, a background UI and a setup wizard-ideal for users and developers seeking a quick start.
+It runs your agent's instance locally, managing keys and data as the back-end for AD4M apps.
+
+### Installation
+- **Download**: Visit the [GitHub release page](https://github.com/coasys/ad4m/releases) and download the binary for your OS
+- **Run/Install**: Execute the file. Windows may prompt a security warning (allow it; signed builds are coming); macOS/Linux follow standard app install steps
+- **Initialize**: Launch it to generate or unlock an agent (DID and keys). It runs on localhost:12000, offering WebSocket and GraphQL endpoints
 
 The Launcher delivers a plug-and-play AD4M experience, ready for UI connections.
 
 ## AD4M CLI (For Developers)
-The AD4M CLI, written in Rust, gives developers command-line control over the AD4M ecosystem. 
-Available on Crates.io (**currently not updated due to unpublished dependencies** ) and sourced at https://github.com/coasys/ad4m/tree/dev/cli, 
-it includes two binaries: ad4m (CLI client) and ad4m-executor (full runtime without UI). It’s perfect for debugging, scripting, or Language development. 
 
-### Set it up:
-Follow the CLI [README](https://github.com/coasys/ad4m/tree/dev/cli) to install all necessary dependencies.
-Clone or Install: Clone the repo and build:
+The AD4M CLI, written in Rust, gives developers command-line control over the AD4M ecosystem.
+Available on [Crates.io](https://crates.io/crates/ad4m) (when all dependencies are published) and sourced at the [GitHub repository](https://github.com/coasys/ad4m/tree/dev/cli),
+it includes two binaries: `ad4m` (CLI client) and `ad4m-executor` (full runtime without UI). It's perfect for debugging, scripting, or Language development.
+
+### Installation
+
+After installing all prerequisites above:
+
 ```bash
+# Clone the repository
 git clone --branch dev https://github.com/coasys/ad4m.git
-cd ad4m/cli
+cd ad4m
+
+# Build and install the CLI
+pnpm install
+pnpm run build
+cd cli
 cargo install --path .
 ```
-(Or install from Crates.io once we have published all dependencies: `cargo install ad4m`.)
 
-Run the Executor: Start the full runtime with:
+### Usage
+
+Start the executor:
 ```bash
 ad4m-executor run
 ```
-Use ad4m init first to generate an agent if needed. It runs on localhost:12000.
+Use `ad4m init` first to generate an agent if needed. It runs on localhost:12000.
 
-CLI Usage Example: With the executor running, use the ad4m CLI to interact:
+Example CLI commands:
 ```bash
+# Fetch Language metadata
 ad4m languages meta QmXyz123
-```
-This fetches metadata for a Language (e.g., social-context) at QmXyz123, outputting details like name and description. See the CLI README for commands like ad4m expression create.
 
-The ad4m-executor provides the runtime (like the Launcher sans UI), while ad4m offers client commands—together, they’re a developer’s toolkit for AD4M.
+# Create an expression
+ad4m expression create
+```
+
+The `ad4m-executor` provides the runtime (like the Launcher sans UI), while `ad4m` offers client commands-together, they're a developer's toolkit for AD4M.
 
 ## AD4M Client Libraries for JS UI Projects
 For JavaScript UI projects (React, Vue, etc.), the client libraries `@coasys/ad4m` and `@coasys/ad4m-connect` connect your front-end to an AD4M instance (Launcher or CLI executor).
@@ -57,7 +173,7 @@ const client = new Ad4mClient("ws://localhost:12000");
 const agent = await client.agent.me();
 console.log(agent.did); // e.g., "did:key:z6Mk..."
 ```
-It’s suited for custom logic needing full API control.
+It's suited for custom logic needing full API control.
 
 @coasys/ad4m-connect: A higher-level library with WebSocket connectivity and authentication handling, ideal for streamlined UI integration. Install it:
 ```bash
@@ -67,7 +183,7 @@ Use it to connect and authenticate:
 ```javascript
 
 import Ad4mConnect from "@coasys/ad4m-connect";
- 
+
 const ui = Ad4mConnect({
   appName: "My First ADAM App",
   appDesc: "This is my first app here.",
@@ -75,7 +191,7 @@ const ui = Ad4mConnect({
   appIconPath: "https://i.ibb.co/GnqjPJP/icon.png",
   capabilities: [{ with: { domain: "*", pointers: ["*"] }, can: ["*"] }],
 });
- 
+
 // .connect() will show the authentication pop up
 ui.connect().then((client) => {
   // Save the client after authentication is done
@@ -84,15 +200,19 @@ ui.connect().then((client) => {
 });
 
 ```
-Authentication Handling: Per [auth docs](/auth), `@coasys/ad4m-connect` manages capability-based auth. On first connect, it requests a capability token from the executor, prompting the user (via Launcher UI or CLI) to approve. Specify required capabilities (e.g., perspective:write) in the config. Once approved, it stores a JWT locally, auto-authenticating future connections. If the executor isn’t running or capabilities mismatch, it retries or prompts again—simplifying secure app setup.
+Authentication Handling: Per [auth docs](/auth), `@coasys/ad4m-connect` manages capability-based auth. On first connect, it requests a capability token from the executor, prompting the user (via Launcher UI or CLI) to approve. Specify required capabilities (e.g., perspective:write) in the config. Once approved, it stores a JWT locally, auto-authenticating future connections. If the executor isn't running or capabilities mismatch, it retries or prompts again-simplifying secure app setup.
 
 Start with `@coasys/ad4m-connect` for quick UI integration with auth, then use `@coasys/ad4m` for deeper API calls. Ensure the executor (Launcher or ad4m-executor) is active first.
 ## System Requirements
-- OS: macOS 10.15+, or modern Linux (e.g., Ubuntu 22.04+, glibc 2.35+). 
-  **We are working on a Windows build!.**
-- Memory: 4GB RAM minimum (8GB recommended).
-- Node.js: 18+
-- Dependencies: Launcher bundles all (Holochain, Deno, Rust); CLI needs Rust; client libs need Node.js (18+) and an executor instance.
-- Optional: CUDA for GPU acceleration AI inference.
-With these tools installed, you’re ready to harness AD4M’s distributed power.
+
+- **OS**: macOS 10.15+, modern Linux (Ubuntu 22.04+, glibc 2.35+), or Windows 10/11
+  - ⚠️ **Note:** Windows builds are in progress
+- **Memory**: 4GB RAM minimum (8GB recommended)
+- **Dependencies**:
+  - **End Users** (Launcher): All dependencies bundled (Holochain, Deno runtime, Rust binaries)
+  - **Developers** (CLI/Build from source): See Prerequisites section above
+  - **App Developers** (Client libraries): Node.js 18+ and a running executor instance
+- **Optional**: CUDA-compatible GPU for AI inference acceleration
+
+With these tools installed, you're ready to harness AD4M's distributed power.
 
