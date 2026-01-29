@@ -538,7 +538,17 @@ impl PerspectiveInstance {
 
         if let Some(mut link_language) = link_language_clone {
             // Query SurrealDB instead of Rusqlite
-            let decorated_links = self.surreal_service.get_all_links(&uuid).await.unwrap();
+            let decorated_links = match self.surreal_service.get_all_links(&uuid).await {
+                Ok(links) => links,
+                Err(e) => {
+                    log::error!(
+                        "Failed to get links from SurrealDB in ensure_public_links_are_shared for perspective {}: {}",
+                        uuid, e
+                    );
+                    return false;
+                }
+            };
+
             let mut local_links: Vec<(LinkExpression, LinkStatus)> = decorated_links
                 .into_iter()
                 .map(|decorated| {
