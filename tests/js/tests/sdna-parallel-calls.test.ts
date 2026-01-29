@@ -62,9 +62,9 @@ export default function sdnaParallelCallsTests(testContext: TestContext) {
                 console.log("Parallel calls completed successfully");
                 
                 // Verify the classes were registered (should have 3 unique classes)
-                const class1Instances = await perspective.subjectClassesByTemplate(new TestClass1());
-                const class2Instances = await perspective.subjectClassesByTemplate(new TestClass2());
-                const class3Instances = await perspective.subjectClassesByTemplate(new TestClass3());
+                const class1Instances = await perspective.subjectClassesByTemplate(TestClass1);
+                const class2Instances = await perspective.subjectClassesByTemplate(TestClass2);
+                const class3Instances = await perspective.subjectClassesByTemplate(TestClass3);
                 
                 expect(class1Instances.length).to.be.greaterThan(0, "TestClass1 should be registered");
                 expect(class2Instances.length).to.be.greaterThan(0, "TestClass2 should be registered");
@@ -87,7 +87,7 @@ export default function sdnaParallelCallsTests(testContext: TestContext) {
                 console.log("Sequential calls completed successfully");
                 
                 // Verify all classes were registered
-                const class1Instances = await perspective.subjectClassesByTemplate(new TestClass1());
+                const class1Instances = await perspective.subjectClassesByTemplate(TestClass1);
                 expect(class1Instances.length).to.be.greaterThan(0, "TestClass1 should be registered");
             });
         });
