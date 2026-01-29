@@ -110,33 +110,6 @@ export default function sdnaParallelCallsTests(testContext: TestContext) {
                 // Sequential should work reliably
                 expect(elapsed).to.be.lessThan(15000); // Should complete within 15s
             });
-
-            it.skip("should use batch API when implemented (ensureSDNASubjectClasses)", async function() {
-                this.timeout(30000);
-
-                const ad4mClient = testContext.ad4mClient!;
-                const perspective = await ad4mClient.perspective.add("sdna-batch-test");
-
-                console.log("Testing batch ensureSDNASubjectClasses API...");
-                
-                const startTime = Date.now();
-
-                // Future batch API - will be implemented
-                // @ts-ignore - API doesn't exist yet
-                await perspective.ensureSDNASubjectClasses([
-                    TestClass1,
-                    TestClass2,
-                    TestClass3,
-                    TestClass4,
-                    TestClass5,
-                ]);
-
-                const elapsed = Date.now() - startTime;
-                console.log(`Batch API completed in ${elapsed}ms`);
-
-                // Batch API should be most efficient
-                expect(elapsed).to.be.lessThan(10000); // Should complete within 10s
-            });
         });
     }
 }
