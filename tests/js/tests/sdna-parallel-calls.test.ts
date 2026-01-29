@@ -1,11 +1,14 @@
 import { TestContext } from './integration.test'
 import { expect } from "chai";
-import { Ad4mModel, Flag, Property, Optional } from "@coasys/ad4m";
+import { Ad4mModel, Flag, Optional, ModelOptions } from "@coasys/ad4m";
 
 // Test subject classes to demonstrate parallel calls
+@ModelOptions({
+    name: "TestClass1"
+})
 class TestClass1 extends Ad4mModel {
     @Flag({
-        through: "test://type",
+        through: "ad4m://type",
         value: "test://class1",
     })
     type: string = "";
@@ -17,17 +20,23 @@ class TestClass1 extends Ad4mModel {
     property: string = "";
 }
 
+@ModelOptions({
+    name: "TestClass2"
+})
 class TestClass2 extends Ad4mModel {
     @Flag({
-        through: "test://type",
+        through: "ad4m://type",
         value: "test://class2",
     })
     type: string = "";
 }
 
+@ModelOptions({
+    name: "TestClass3"
+})
 class TestClass3 extends Ad4mModel {
     @Flag({
-        through: "test://type",
+        through: "ad4m://type",
         value: "test://class3",
     })
     type: string = "";
@@ -62,13 +71,17 @@ export default function sdnaParallelCallsTests(testContext: TestContext) {
                 console.log("Parallel calls completed successfully");
                 
                 // Verify the classes were registered (should have 3 unique classes)
-                const class1Instances = await perspective.subjectClassesByTemplate(TestClass1);
-                const class2Instances = await perspective.subjectClassesByTemplate(TestClass2);
-                const class3Instances = await perspective.subjectClassesByTemplate(TestClass3);
+                const allSdna = await perspective.getSdna();
+                expect(allSdna.length).to.equal(4, "Should have 4 SDNA entries (1 base + 3 test classes)");
                 
-                expect(class1Instances.length).to.be.greaterThan(0, "TestClass1 should be registered");
-                expect(class2Instances.length).to.be.greaterThan(0, "TestClass2 should be registered");
-                expect(class3Instances.length).to.be.greaterThan(0, "TestClass3 should be registered");
+                // Verify we can find instances by template
+                const class1Instances = await perspective.subjectClassesByTemplate(new TestClass1());
+                const class2Instances = await perspective.subjectClassesByTemplate(new TestClass2());
+                const class3Instances = await perspective.subjectClassesByTemplate(new TestClass3());
+                
+                expect(class1Instances).to.include("TestClass1", "TestClass1 should be registered");
+                expect(class2Instances).to.include("TestClass2", "TestClass2 should be registered");
+                expect(class3Instances).to.include("TestClass3", "TestClass3 should be registered");
             });
 
             it("should work with sequential ensureSDNASubjectClass calls", async function() {
@@ -87,8 +100,11 @@ export default function sdnaParallelCallsTests(testContext: TestContext) {
                 console.log("Sequential calls completed successfully");
                 
                 // Verify all classes were registered
-                const class1Instances = await perspective.subjectClassesByTemplate(TestClass1);
-                expect(class1Instances.length).to.be.greaterThan(0, "TestClass1 should be registered");
+                const allSdna = await perspective.getSdna();
+                expect(allSdna.length).to.equal(4, "Should have 4 SDNA entries");
+                
+                const class1Instances = await perspective.subjectClassesByTemplate(new TestClass1());
+                expect(class1Instances).to.include("TestClass1", "TestClass1 should be registered");
             });
         });
     }
