@@ -26,11 +26,13 @@ struct SurrealLink {
 
 impl From<SurrealLink> for DecoratedLinkExpression {
     fn from(surreal_link: SurrealLink) -> Self {
-        let status = surreal_link.status.and_then(|s| match s.as_str() {
-            "Shared" => Some(LinkStatus::Shared),
-            "Local" => Some(LinkStatus::Local),
-            _ => None,
-        });
+        let status = surreal_link
+            .status
+            .and_then(|s| match s.to_lowercase().as_str() {
+                "shared" => Some(LinkStatus::Shared),
+                "local" => Some(LinkStatus::Local),
+                _ => None,
+            });
 
         DecoratedLinkExpression {
             author: surreal_link.author,
@@ -797,39 +799,25 @@ impl SurrealDBService {
         source: &str,
         predicate: Option<&str>,
         target: &str,
-        author: Option<&str>,
-        timestamp: Option<&str>,
+        author: &str,
+        timestamp: &str,
     ) -> Result<Option<DecoratedLinkExpression>, Error> {
         let predicate_str = predicate.unwrap_or("").to_string();
         let source_owned = source.to_string();
         let target_owned = target.to_string();
+        let author_owned = author.to_string();
+        let timestamp_owned = timestamp.to_string();
 
-        let mut response = if let (Some(author_str), Some(timestamp_str)) = (author, timestamp) {
-            // Full unique constraint lookup (all 5 fields)
-            let author_owned = author_str.to_string();
-            let timestamp_owned = timestamp_str.to_string();
-
-            let results = self
-                .db
-                .query("SELECT * FROM link WHERE source = $source AND target = $target AND predicate = $predicate AND author = $author AND timestamp = $timestamp LIMIT 1")
-                .bind(("source", source_owned))
-                .bind(("target", target_owned))
-                .bind(("predicate", predicate_str))
-                .bind(("author", author_owned))
-                .bind(("timestamp", timestamp_owned))
-                .await?;
-            results
-        } else {
-            // Backward compatible lookup (only source/predicate/target)
-            let results = self
-                .db
-                .query("SELECT * FROM link WHERE source = $source AND target = $target AND predicate = $predicate LIMIT 1")
-                .bind(("source", source_owned))
-                .bind(("target", target_owned))
-                .bind(("predicate", predicate_str))
-                .await?;
-            results
-        };
+        // Full unique constraint lookup (all 5 fields)
+        let mut response = self
+            .db
+            .query("SELECT * FROM link WHERE source = $source AND target = $target AND predicate = $predicate AND author = $author AND timestamp = $timestamp LIMIT 1")
+            .bind(("source", source_owned))
+            .bind(("target", target_owned))
+            .bind(("predicate", predicate_str))
+            .bind(("author", author_owned))
+            .bind(("timestamp", timestamp_owned))
+            .await?;
         let result: SurrealValue = response.take(0)?;
 
         let json_string = serde_json::to_string(&result)?;
@@ -1648,7 +1636,7 @@ mod tests {
         }
 
         // Verify initial state
-        let query = "SELECT * FROM link WHERE perspective = $perspective ORDER BY timestamp";
+        let query = "SELECT * FROM link ORDER BY timestamp";
         let initial_results = service.query_links(perspective_uuid, query).await.unwrap();
         assert_eq!(initial_results.len(), 4, "Should have 4 initial links");
 
@@ -1667,7 +1655,8 @@ mod tests {
         );
 
         // Test graph traversal BEFORE reload
-        let graph_query_before = "SELECT * FROM link WHERE perspective = $perspective AND count(->link[WHERE predicate = 'flux://member']) > 0";
+        let graph_query_before =
+            "SELECT * FROM link WHERE count(->link[WHERE predicate = 'flux://member']) > 0";
         let graph_results_before = service
             .query_links(perspective_uuid, graph_query_before)
             .await
@@ -1792,8 +1781,7 @@ mod tests {
         println!("\n=== Testing graph traversal after reload ===");
 
         // Test 1: Use graph traversal on source node (in.uri)
-        let graph_query1 =
-            "SELECT * FROM link WHERE perspective = $perspective AND in.uri = 'ad4m://self'";
+        let graph_query1 = "SELECT * FROM link WHERE in.uri = 'ad4m://self'";
         let graph_results1 = service
             .query_links(perspective_uuid, graph_query1)
             .await
@@ -1809,7 +1797,7 @@ mod tests {
         );
 
         // Test 2: Use graph traversal on target node (out.uri)
-        let graph_query2 = "SELECT * FROM link WHERE perspective = $perspective AND out.uri = 'flux://has_channel'";
+        let graph_query2 = "SELECT * FROM link WHERE out.uri = 'flux://has_channel'";
         let graph_results2 = service
             .query_links(perspective_uuid, graph_query2)
             .await
@@ -1825,7 +1813,8 @@ mod tests {
         );
 
         // Test 3: Combined source and predicate filter (common Ad4mModel pattern)
-        let graph_query3 = "SELECT * FROM link WHERE perspective = $perspective AND in.uri = 'ad4m://self' AND predicate = 'flux://message'";
+        let graph_query3 =
+            "SELECT * FROM link WHERE in.uri = 'ad4m://self' AND predicate = 'flux://message'";
         let graph_results3 = service
             .query_links(perspective_uuid, graph_query3)
             .await
@@ -1837,7 +1826,7 @@ mod tests {
         assert_eq!(graph_results3.len(), 3, "Should find 3 message links");
 
         // Test 4: Combined target and predicate filter
-        let graph_query4 = "SELECT * FROM link WHERE perspective = $perspective AND out.uri = 'flux://has_channel' AND predicate = 'flux://entry_type'";
+        let graph_query4 = "SELECT * FROM link WHERE out.uri = 'flux://has_channel' AND predicate = 'flux://entry_type'";
         let graph_results4 = service
             .query_links(perspective_uuid, graph_query4)
             .await
@@ -1850,7 +1839,7 @@ mod tests {
 
         // Test 5: Testing the EXISTS pattern that Ad4mModel uses for required properties
         // This tests if there exists a link from ad4m://self with predicate flux://entry_type
-        let graph_query5 = "SELECT * FROM link WHERE perspective = $perspective AND in.uri = 'ad4m://self' AND predicate IN ['flux://entry_type', 'rdf://name']";
+        let graph_query5 = "SELECT * FROM link WHERE in.uri = 'ad4m://self' AND predicate IN ['flux://entry_type', 'rdf://name']";
         let graph_results5 = service
             .query_links(perspective_uuid, graph_query5)
             .await
@@ -1895,7 +1884,7 @@ mod tests {
         );
 
         // Verify count
-        let query = "SELECT * FROM link WHERE perspective = $perspective";
+        let query = "SELECT * FROM link";
         let results = service.query_links(perspective_uuid, query).await.unwrap();
         assert_eq!(
             results.len(),
@@ -1977,8 +1966,7 @@ mod tests {
         println!("\n=== Testing graph traversal with large dataset ===");
 
         // Test graph traversal on source nodes
-        let graph_query_source =
-            "SELECT * FROM link WHERE perspective = $perspective AND in.uri = 'new_source://0'";
+        let graph_query_source = "SELECT * FROM link WHERE in.uri = 'new_source://0'";
         let graph_results_source = service
             .query_links(perspective_uuid, graph_query_source)
             .await
@@ -1994,8 +1982,7 @@ mod tests {
         );
 
         // Test graph traversal on target nodes
-        let graph_query_target =
-            "SELECT * FROM link WHERE perspective = $perspective AND out.uri = 'new_target://0'";
+        let graph_query_target = "SELECT * FROM link WHERE out.uri = 'new_target://0'";
         let graph_results_target = service
             .query_links(perspective_uuid, graph_query_target)
             .await
@@ -2012,7 +1999,7 @@ mod tests {
 
         // Test graph traversal with predicate filter
         // Note: Combined filters work, just verifying the count
-        let graph_query_predicate = "SELECT * FROM link WHERE perspective = $perspective AND predicate = 'new_predicate://0' AND in.uri = 'new_source://0'";
+        let graph_query_predicate = "SELECT * FROM link WHERE predicate = 'new_predicate://0' AND in.uri = 'new_source://0'";
         let graph_results_predicate = service
             .query_links(perspective_uuid, graph_query_predicate)
             .await

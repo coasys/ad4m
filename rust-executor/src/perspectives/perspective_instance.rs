@@ -885,8 +885,8 @@ impl PerspectiveInstance {
                     &link_expression.data.source,
                     link_expression.data.predicate.as_deref(),
                     &link_expression.data.target,
-                    Some(&link_expression.author),
-                    Some(&link_expression.timestamp),
+                    &link_expression.author,
+                    &link_expression.timestamp,
                 )
                 .await?
                 .ok_or(anyhow!("Link not found"))?;
@@ -907,8 +907,8 @@ impl PerspectiveInstance {
                     &link_expression.data.source,
                     link_expression.data.predicate.as_deref(),
                     &link_expression.data.target,
-                    Some(&link_expression.author),
-                    Some(&link_expression.timestamp),
+                    &link_expression.author,
+                    &link_expression.timestamp,
                 )
                 .await?
             {
@@ -1188,8 +1188,8 @@ impl PerspectiveInstance {
                 &old_link.data.source,
                 old_link.data.predicate.as_deref(),
                 &old_link.data.target,
-                Some(&old_link.author),
-                Some(&old_link.timestamp),
+                &old_link.author,
+                &old_link.timestamp,
             )
             .await?;
 
@@ -1308,8 +1308,8 @@ impl PerspectiveInstance {
                     &link.data.source,
                     link.data.predicate.as_deref(),
                     &link.data.target,
-                    Some(&link.author),
-                    Some(&link.timestamp),
+                    &link.author,
+                    &link.timestamp,
                 )
                 .await?
             {
