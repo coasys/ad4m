@@ -1320,7 +1320,11 @@ impl PerspectiveInstance {
         }
 
         // Check if SDNA already exists (prevent duplicates from concurrent calls)
-        let existing_links = self
+        // We need to verify BOTH links exist for true idempotency
+        let author = crate::agent::did();
+
+        // Check first link: ad4m://self -> predicate -> literal_name
+        let name_links = self
             .get_links(&LinkQuery {
                 source: Some("ad4m://self".to_string()),
                 predicate: Some(predicate.to_string()),
@@ -1331,32 +1335,47 @@ impl PerspectiveInstance {
             })
             .await?;
 
-        let author = crate::agent::did();
-        let links_from_current_agent = existing_links
-            .into_iter()
-            .filter(|l| l.author == author)
-            .collect::<Vec<DecoratedLinkExpression>>();
+        let name_link_exists = name_links.iter().any(|l| l.author == author);
 
-        // Only add if not already present
-        if links_from_current_agent.is_empty() {
-            let mut sdna_links: Vec<Link> = Vec::new();
+        // Check second link: literal_name -> ad4m://sdna -> sdna_code
+        let sdna_links_existing = self
+            .get_links(&LinkQuery {
+                source: Some(literal_name.clone()),
+                predicate: Some("ad4m://sdna".to_string()),
+                target: Some(sdna_code.clone()),
+                from_date: None,
+                until_date: None,
+                limit: None,
+            })
+            .await?;
 
-            sdna_links.push(Link {
+        let sdna_link_exists = sdna_links_existing.iter().any(|l| l.author == author);
+
+        // Add missing links to ensure both exist
+        let mut links_to_add: Vec<Link> = Vec::new();
+
+        if !name_link_exists {
+            links_to_add.push(Link {
                 source: "ad4m://self".to_string(),
                 predicate: Some(predicate.to_string()),
                 target: literal_name.clone(),
             });
+        }
 
-            sdna_links.push(Link {
+        if !sdna_link_exists {
+            links_to_add.push(Link {
                 source: literal_name.clone(),
                 predicate: Some("ad4m://sdna".to_string()),
                 target: sdna_code,
             });
+        }
 
-            self.add_links(sdna_links, LinkStatus::Shared, None).await?;
+        if !links_to_add.is_empty() {
+            self.add_links(links_to_add, LinkStatus::Shared, None)
+                .await?;
             Ok(true)
         } else {
-            // Already exists, no need to add again
+            // Both links already exist
             Ok(false)
         }
     }
