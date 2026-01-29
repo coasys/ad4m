@@ -98,10 +98,11 @@ pub fn initialize_from_db() {
             .await
             {
                 log::error!(
-                    "Failed to migrate links for perspective {}: {}",
+                    "Failed to migrate links for perspective {}: {}, skipping initialization",
                     handle_clone.uuid,
                     e
                 );
+                return;
             }
 
             let p = PerspectiveInstance::new(handle_clone.clone(), None, surreal_service);
@@ -158,15 +159,14 @@ pub async fn add_perspective(
 
     // Migrate links from Rusqlite to SurrealDB (one-time migration)
     // TODO: Remove this migration call after all users have migrated
-    if let Err(e) =
-        migration::migrate_links_from_rusqlite_to_surrealdb(&handle.uuid, &surreal_service).await
-    {
-        log::error!(
-            "Failed to migrate links for perspective {}: {}",
-            handle.uuid,
-            e
-        );
-    }
+    migration::migrate_links_from_rusqlite_to_surrealdb(&handle.uuid, &surreal_service)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to migrate links for perspective {}: {}",
+                handle.uuid, e
+            )
+        })?;
 
     let p = PerspectiveInstance::new(handle.clone(), created_from_join, surreal_service);
     tokio::spawn(p.clone().start_background_tasks());
