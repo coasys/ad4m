@@ -72,7 +72,6 @@ export default function sdnaParallelCallsTests(testContext: TestContext) {
                 
                 // Verify the classes were registered (should have 3 unique classes)
                 const allSdna = await perspective.getSdna();
-                console.log(`DEBUG: Got ${allSdna.length} SDNA entries:`, allSdna.map(s => s.name));
                 expect(allSdna.length).to.equal(4, "Should have 4 SDNA entries (1 base + 3 test classes)");
                 
                 // Verify we can find instances by template
@@ -102,7 +101,6 @@ export default function sdnaParallelCallsTests(testContext: TestContext) {
                 
                 // Verify all classes were registered
                 const allSdna = await perspective.getSdna();
-                console.log(`DEBUG: Got ${allSdna.length} SDNA entries:`, allSdna.map(s => s.name));
                 expect(allSdna.length).to.equal(4, "Should have 4 SDNA entries");
                 
                 const class1Instances = await perspective.subjectClassesByTemplate(new TestClass1(perspective));
