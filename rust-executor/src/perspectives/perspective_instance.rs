@@ -1300,9 +1300,6 @@ impl PerspectiveInstance {
         mut sdna_code: String,
         sdna_type: SdnaType,
     ) -> Result<bool, AnyError> {
-        let mutex = self.sdna_change_mutex.clone();
-        let _guard = mutex.lock().await;
-
         let predicate = match sdna_type {
             SdnaType::SubjectClass => "ad4m://has_subject_class",
             SdnaType::Flow => "ad4m://has_flow",
@@ -1319,8 +1316,8 @@ impl PerspectiveInstance {
                 .expect("just initialized Literal couldn't be turned into URL");
         }
 
-        // Check if SDNA already exists (prevent duplicates from concurrent calls)
-        // We need to verify BOTH links exist for true idempotency
+        // FAST PATH: Check if SDNA already exists BEFORE acquiring mutex
+        // This prevents pile-up of 12+ concurrent calls when SDNA is already registered
         let author = crate::agent::did();
 
         // Check first link: ad4m://self -> predicate -> literal_name
@@ -1351,7 +1348,43 @@ impl PerspectiveInstance {
 
         let sdna_link_exists = sdna_links_existing.iter().any(|l| l.author == author);
 
-        // Add missing links to ensure both exist
+        // Fast return if both links already exist
+        if name_link_exists && sdna_link_exists {
+            return Ok(false);
+        }
+
+        // SLOW PATH: Need to add links - acquire mutex for atomic check-and-add
+        let mutex = self.sdna_change_mutex.clone();
+        let _guard = mutex.lock().await;
+
+        // TOCTOU protection: Re-check after acquiring mutex in case another thread added it
+        let name_links = self
+            .get_links(&LinkQuery {
+                source: Some("ad4m://self".to_string()),
+                predicate: Some(predicate.to_string()),
+                target: Some(literal_name.clone()),
+                from_date: None,
+                until_date: None,
+                limit: None,
+            })
+            .await?;
+
+        let name_link_exists = name_links.iter().any(|l| l.author == author);
+
+        let sdna_links_existing = self
+            .get_links(&LinkQuery {
+                source: Some(literal_name.clone()),
+                predicate: Some("ad4m://sdna".to_string()),
+                target: Some(sdna_code.clone()),
+                from_date: None,
+                until_date: None,
+                limit: None,
+            })
+            .await?;
+
+        let sdna_link_exists = sdna_links_existing.iter().any(|l| l.author == author);
+
+        // Add missing links
         let mut links_to_add: Vec<Link> = Vec::new();
 
         if !name_link_exists {
@@ -1375,7 +1408,7 @@ impl PerspectiveInstance {
                 .await?;
             Ok(true)
         } else {
-            // Both links already exist
+            // Another thread added it while we were waiting for the mutex
             Ok(false)
         }
     }
