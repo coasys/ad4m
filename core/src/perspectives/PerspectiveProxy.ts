@@ -1275,8 +1275,8 @@ export class PerspectiveProxy {
      * static generateSDNA() function and adds it to the perspective's SDNA.
      */
     async ensureSDNASubjectClass(jsClass: any): Promise<void> {
-        // Get the class name that would be generated
-        const { name } = jsClass.generateSDNA();
+        // Get the SDNA metadata (call generateSDNA once)
+        const { name, sdna } = jsClass.generateSDNA();
         
         // If there's already an ongoing operation for this class, return that promise
         const existingPromise = this.#ensureSdnaPromises.get(name);
@@ -1292,7 +1292,6 @@ export class PerspectiveProxy {
                     return
                 }
 
-                const { sdna } = jsClass.generateSDNA();
                 await this.addSdna(name, sdna, 'subject_class');
             } finally {
                 // Clean up the promise from the map when done (success or failure)
