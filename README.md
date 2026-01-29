@@ -158,16 +158,46 @@ These concepts work together to create a new kind of internet – one where mean
 ### Prerequisites
 
 #### Core Dependencies
+
+- **Node.js** (v18.20.0 or later)
+  ```bash
+  # Install using nvm (recommended)
+  nvm install 18.20.0
+  nvm use 18.20.0
+  
+  # Or download from https://nodejs.org/
+  ```
+
+- **pnpm** (9.15.0 or later)
+  ```bash
+  npm install -g pnpm@9.15.0
+  ```
+  > ⚠️ **Note:** Turbo is installed automatically as a devDependency via `pnpm install`. The project currently uses Turbo 1.x with the `pipeline` syntax in `turbo.json`.
+
 - **Rust** (1.84.0 or later)
   ```bash
   rustup install 1.84.0
   rustup default 1.84.0
   rustup target add wasm32-unknown-unknown
   ```
+
 - **Go** (1.22.0 or later)
   ```bash
   # Follow instructions at https://go.dev/doc/install
   ```
+
+- **Deno CLI** (required for building — tested with v2.6.6 or later)
+  ```bash
+  # Install via curl (Unix/macOS)
+  curl -fsSL https://deno.land/install.sh | sh
+  
+  # Or via brew (macOS)
+  brew install deno
+  
+  # Or via PowerShell (Windows)
+  irm https://deno.land/install.ps1 | iex
+  ```
+  > ℹ️ **Note:** The Deno CLI is required to build Language bundles during development. AD4M embeds a Deno runtime in the rust-executor and bundles it with the Launcher, so CLI installation is not necessary for end users running the packaged application.
 
 #### Platform-Specific Dependencies
 
@@ -205,17 +235,26 @@ cd ad4m
 pnpm install
 ```
 
-3. Build all packages project:
+3. Build all packages:
 ```bash
 pnpm run build
 ```
+   > 💡 **Tip:** The first build often takes 10–15 minutes on a typical dev machine as it compiles Rust dependencies (faster on subsequent builds with cached artifacts)
 
-4. Create a UI bundle for the Ad4m Launcher
+4. Create a UI bundle for the AD4M Launcher:
 ```bash
 pnpm run package-ad4m
 ```
 
 Find the launcher bundle in `/target/release/bundle`.
+
+### Common Installation Issues
+
+#### Rust Compilation Errors
+If you encounter errors during Rust compilation:
+- Ensure you have Rust ≥1.84.0: `rustup install 1.84.0 && rustup default 1.84.0`
+- Check that wasm32 target is installed for your toolchain: `rustup target add wasm32-unknown-unknown`
+- On Linux, make sure all system libraries are installed (see platform-specific dependencies above)
 
 ## Project Structure
 
