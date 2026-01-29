@@ -1268,11 +1268,32 @@ export class PerspectiveProxy {
         }
     }
 
-    /** Takes a JS class (its constructor) and assumes that it was decorated by
-     * the @subjectClass etc. decorators. It then tests if there is a subject class
-     * already present in the perspective's SDNA that matches the given class.
-     * If there is no such class, it gets the JS class's SDNA by calling its
-     * static generateSDNA() function and adds it to the perspective's SDNA.
+    /**
+     * Ensures a subject class is registered in the perspective's SDNA.
+     * 
+     * Takes a JS class (its constructor) decorated with Ad4mModel decorators
+     * (@Property, @Flag, etc.) and ensures it's registered in the perspective's SDNA.
+     * 
+     * This method is safe to call concurrently - if multiple calls happen simultaneously
+     * for the same class, only one registration will occur. Subsequent calls will wait
+     * for the first operation to complete.
+     * 
+     * @param jsClass - A class decorated with Ad4mModel decorators that has a static generateSDNA() method
+     * @returns Promise that resolves when the class is registered (or already was registered)
+     * 
+     * @example
+     * ```typescript
+     * class Post extends Ad4mModel {
+     *   @Property({ through: "rdf://title", writable: true })
+     *   title?: string;
+     * }
+     * 
+     * // Safe to call multiple times or concurrently
+     * await Promise.all([
+     *   perspective.ensureSDNASubjectClass(Post),
+     *   perspective.ensureSDNASubjectClass(Post),
+     * ]);
+     * ```
      */
     async ensureSDNASubjectClass(jsClass: any): Promise<void> {
         // Get the SDNA metadata (call generateSDNA once)
