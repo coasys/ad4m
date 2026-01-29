@@ -804,7 +804,7 @@ impl SurrealDBService {
         let source_owned = source.to_string();
         let target_owned = target.to_string();
 
-        let query = if let (Some(author_str), Some(timestamp_str)) = (author, timestamp) {
+        let mut response = if let (Some(author_str), Some(timestamp_str)) = (author, timestamp) {
             // Full unique constraint lookup (all 5 fields)
             let author_owned = author_str.to_string();
             let timestamp_owned = timestamp_str.to_string();
@@ -830,10 +830,6 @@ impl SurrealDBService {
                 .await?;
             results
         };
-
-        let results = query;
-
-        let mut response = results;
         let result: SurrealValue = response.take(0)?;
 
         let json_string = serde_json::to_string(&result)?;
