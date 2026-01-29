@@ -1300,7 +1300,6 @@ impl PerspectiveInstance {
         mut sdna_code: String,
         sdna_type: SdnaType,
     ) -> Result<bool, AnyError> {
-        //let mut added = false;
         let mutex = self.sdna_change_mutex.clone();
         let _guard = mutex.lock().await;
 
@@ -1314,47 +1313,52 @@ impl PerspectiveInstance {
             .to_url()
             .expect("just initialized Literal couldn't be turned into URL");
 
-        let mut sdna_links: Vec<Link> = Vec::new();
-
         if (Literal::from_url(sdna_code.clone())).is_err() {
             sdna_code = Literal::from_string(sdna_code)
                 .to_url()
                 .expect("just initialized Literal couldn't be turned into URL");
         }
 
-        // let links = self
-        //     .get_links(&LinkQuery {
-        //         source: Some("ad4m://self".to_string()),
-        //         predicate: Some(predicate.to_string()),
-        //         target: Some(literal_name.clone()),
-        //         from_date: None,
-        //         until_date: None,
-        //         limit: None,
-        //     })
-        //     .await?;
-        // let author = agent::did();
-        // let links = links
-        //     .into_iter()
-        //     .filter(|l| l.author == author)
-        //     .collect::<Vec<DecoratedLinkExpression>>();
-        //if links.is_empty() {
-        sdna_links.push(Link {
-            source: "ad4m://self".to_string(),
-            predicate: Some(predicate.to_string()),
-            target: literal_name.clone(),
-        });
+        // Check if SDNA already exists (prevent duplicates from concurrent calls)
+        let existing_links = self
+            .get_links(&LinkQuery {
+                source: Some("ad4m://self".to_string()),
+                predicate: Some(predicate.to_string()),
+                target: Some(literal_name.clone()),
+                from_date: None,
+                until_date: None,
+                limit: None,
+            })
+            .await?;
 
-        sdna_links.push(Link {
-            source: literal_name.clone(),
-            predicate: Some("ad4m://sdna".to_string()),
-            target: sdna_code,
-        });
+        let author = crate::agent::did();
+        let links_from_current_agent = existing_links
+            .into_iter()
+            .filter(|l| l.author == author)
+            .collect::<Vec<DecoratedLinkExpression>>();
 
-        self.add_links(sdna_links, LinkStatus::Shared, None).await?;
-        //added = true;
-        //}
-        // Mutex guard is automatically dropped here
-        Ok(true)
+        // Only add if not already present
+        if links_from_current_agent.is_empty() {
+            let mut sdna_links: Vec<Link> = Vec::new();
+
+            sdna_links.push(Link {
+                source: "ad4m://self".to_string(),
+                predicate: Some(predicate.to_string()),
+                target: literal_name.clone(),
+            });
+
+            sdna_links.push(Link {
+                source: literal_name.clone(),
+                predicate: Some("ad4m://sdna".to_string()),
+                target: sdna_code,
+            });
+
+            self.add_links(sdna_links, LinkStatus::Shared, None).await?;
+            Ok(true)
+        } else {
+            // Already exists, no need to add again
+            Ok(false)
+        }
     }
 
     async fn ensure_prolog_engine_pool(&self) -> Result<(), AnyError> {
