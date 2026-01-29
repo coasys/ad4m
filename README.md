@@ -186,7 +186,7 @@ These concepts work together to create a new kind of internet – one where mean
   # Follow instructions at https://go.dev/doc/install
   ```
 
-- **Deno** (latest)
+- **Deno CLI** (required for building — tested with v2.6.6 or later)
   ```bash
   # Install via curl (Unix/macOS)
   curl -fsSL https://deno.land/install.sh | sh
@@ -197,7 +197,7 @@ These concepts work together to create a new kind of internet – one where mean
   # Or via PowerShell (Windows)
   irm https://deno.land/install.ps1 | iex
   ```
-  > ℹ️ **Note:** Deno CLI is required to build the Language bundles during the build process.
+  > ℹ️ **Note:** The Deno CLI is required to build Language bundles during development. AD4M embeds a Deno runtime in the rust-executor and bundles it with the Launcher, so CLI installation is not necessary for end users running the packaged application.
 
 #### Platform-Specific Dependencies
 
@@ -239,7 +239,7 @@ pnpm install
 ```bash
 pnpm run build
 ```
-   > 💡 **Tip:** The first build may take 10-15 minutes as it compiles Rust dependencies
+   > 💡 **Tip:** The first build often takes 10–15 minutes on a typical dev machine as it compiles Rust dependencies (faster on subsequent builds with cached artifacts)
 
 4. Create a UI bundle for the AD4M Launcher:
 ```bash
@@ -252,8 +252,8 @@ Find the launcher bundle in `/target/release/bundle`.
 
 #### Rust Compilation Errors
 If you encounter errors during Rust compilation:
-- Ensure you have the latest stable Rust: `rustup update stable`
-- Check that wasm32 target is installed: `rustup target add wasm32-unknown-unknown`
+- Ensure you have Rust ≥1.84.0: `rustup install 1.84.0 && rustup default 1.84.0`
+- Check that wasm32 target is installed for your toolchain: `rustup target add wasm32-unknown-unknown`
 - On Linux, make sure all system libraries are installed (see platform-specific dependencies above)
 
 ## Project Structure
