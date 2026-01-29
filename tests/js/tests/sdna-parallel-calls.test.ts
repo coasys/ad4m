@@ -72,12 +72,13 @@ export default function sdnaParallelCallsTests(testContext: TestContext) {
                 
                 // Verify the classes were registered (should have 3 unique classes)
                 const allSdna = await perspective.getSdna();
+                console.log(`DEBUG: Got ${allSdna.length} SDNA entries:`, allSdna.map(s => s.name));
                 expect(allSdna.length).to.equal(4, "Should have 4 SDNA entries (1 base + 3 test classes)");
                 
                 // Verify we can find instances by template
-                const class1Instances = await perspective.subjectClassesByTemplate(new TestClass1());
-                const class2Instances = await perspective.subjectClassesByTemplate(new TestClass2());
-                const class3Instances = await perspective.subjectClassesByTemplate(new TestClass3());
+                const class1Instances = await perspective.subjectClassesByTemplate(new TestClass1(perspective));
+                const class2Instances = await perspective.subjectClassesByTemplate(new TestClass2(perspective));
+                const class3Instances = await perspective.subjectClassesByTemplate(new TestClass3(perspective));
                 
                 expect(class1Instances).to.include("TestClass1", "TestClass1 should be registered");
                 expect(class2Instances).to.include("TestClass2", "TestClass2 should be registered");
@@ -101,9 +102,10 @@ export default function sdnaParallelCallsTests(testContext: TestContext) {
                 
                 // Verify all classes were registered
                 const allSdna = await perspective.getSdna();
+                console.log(`DEBUG: Got ${allSdna.length} SDNA entries:`, allSdna.map(s => s.name));
                 expect(allSdna.length).to.equal(4, "Should have 4 SDNA entries");
                 
-                const class1Instances = await perspective.subjectClassesByTemplate(new TestClass1());
+                const class1Instances = await perspective.subjectClassesByTemplate(new TestClass1(perspective));
                 expect(class1Instances).to.include("TestClass1", "TestClass1 should be registered");
             });
         });
