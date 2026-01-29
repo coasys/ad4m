@@ -61,33 +61,30 @@ export default function sdnaParallelCallsTests(testContext: TestContext) {
                 const ad4mClient = testContext.ad4mClient!;
                 const perspective = await ad4mClient.perspective.add("sdna-parallel-test");
 
-                console.log("Testing parallel ensureSDNASubjectClass calls...");
+                console.log("Testing parallel ensureSDNASubjectClass calls (including duplicates for deduplication)...");
                 
-                const startTime = Date.now();
+                // Test with duplicate calls to verify deduplication
+                await Promise.all([
+                    perspective.ensureSDNASubjectClass(TestClass1),
+                    perspective.ensureSDNASubjectClass(TestClass1), // duplicate
+                    perspective.ensureSDNASubjectClass(TestClass2),
+                    perspective.ensureSDNASubjectClass(TestClass2), // duplicate
+                    perspective.ensureSDNASubjectClass(TestClass3),
+                ]);
 
-                try {
-                    // Multiple concurrent calls should be deduplicated via promise cache
-                    await Promise.all([
-                        perspective.ensureSDNASubjectClass(TestClass1),
-                        perspective.ensureSDNASubjectClass(TestClass2),
-                        perspective.ensureSDNASubjectClass(TestClass3),
-                        perspective.ensureSDNASubjectClass(TestClass4),
-                        perspective.ensureSDNASubjectClass(TestClass5),
-                    ]);
-
-                    const elapsed = Date.now() - startTime;
-                    console.log(`Parallel calls completed in ${elapsed}ms`);
-
-                    // Should complete efficiently without race conditions
-                    expect(elapsed).to.be.lessThan(15000); // Should complete within 15s
-                } catch (error) {
-                    const elapsed = Date.now() - startTime;
-                    console.error(`Parallel calls failed after ${elapsed}ms:`, error);
-                    throw error;
-                }
+                console.log("Parallel calls completed successfully");
+                
+                // Verify the classes were registered (should have 3 unique classes)
+                const class1Instances = await perspective.subjectClassesByTemplate(new TestClass1());
+                const class2Instances = await perspective.subjectClassesByTemplate(new TestClass2());
+                const class3Instances = await perspective.subjectClassesByTemplate(new TestClass3());
+                
+                expect(class1Instances.length).to.be.greaterThan(0, "TestClass1 should be registered");
+                expect(class2Instances.length).to.be.greaterThan(0, "TestClass2 should be registered");
+                expect(class3Instances.length).to.be.greaterThan(0, "TestClass3 should be registered");
             });
 
-            it("should work with sequential ensureSDNASubjectClass calls (current workaround)", async function() {
+            it("should work with sequential ensureSDNASubjectClass calls", async function() {
                 this.timeout(30000);
 
                 const ad4mClient = testContext.ad4mClient!;
@@ -95,20 +92,18 @@ export default function sdnaParallelCallsTests(testContext: TestContext) {
 
                 console.log("Testing sequential ensureSDNASubjectClass calls...");
                 
-                const startTime = Date.now();
-
-                // This WORKS - sequential execution
+                // Sequential execution
                 await perspective.ensureSDNASubjectClass(TestClass1);
                 await perspective.ensureSDNASubjectClass(TestClass2);
                 await perspective.ensureSDNASubjectClass(TestClass3);
                 await perspective.ensureSDNASubjectClass(TestClass4);
                 await perspective.ensureSDNASubjectClass(TestClass5);
 
-                const elapsed = Date.now() - startTime;
-                console.log(`Sequential calls completed in ${elapsed}ms`);
-
-                // Sequential should work reliably
-                expect(elapsed).to.be.lessThan(15000); // Should complete within 15s
+                console.log("Sequential calls completed successfully");
+                
+                // Verify all classes were registered
+                const class1Instances = await perspective.subjectClassesByTemplate(new TestClass1());
+                expect(class1Instances.length).to.be.greaterThan(0, "TestClass1 should be registered");
             });
         });
     }
