@@ -758,8 +758,16 @@ export class Ad4mModel {
         })
       )
     );
+    // Filter out properties that are read-only (getters without setters)
+    const writableProps = Object.fromEntries(
+      Object.entries(propsObject).filter(([key]) => {
+        const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(instance), key);
+        // Allow if no descriptor (regular property) or if it has a setter
+        return !descriptor || descriptor.set !== undefined || descriptor.writable !== false;
+      })
+    );
     // Assign properties to instance
-    Object.assign(instance, propsObject);
+    Object.assign(instance, writableProps);
   }
 
   private async getData() {
@@ -1499,7 +1507,7 @@ WHERE ${whereConditions.join(' AND ')}
             });
           }
           // Collect values to assign to instance
-          const values = [...Properties, ...Collections, ["timestamp", Timestamp], ["author", Author]];
+          const values = [...Properties, ...Collections, ["createdAt", Timestamp], ["author", Author]];
           await Ad4mModel.assignValuesToInstance(perspective, instance, values);
 
           return instance;
@@ -1746,8 +1754,9 @@ WHERE ${whereConditions.join(' AND ')}
         if (requestedProperties.length > 0 || requestedCollections.length > 0) {
           const requestedAttributes = [...requestedProperties, ...requestedCollections];
           Object.keys(instance).forEach((key) => {
-            // Keep only requested attributes, plus always keep timestamp and author
-            if (!requestedAttributes.includes(key) && key !== 'timestamp' && key !== 'author' && key !== 'baseExpression') {
+            // Keep only requested attributes, plus always keep createdAt, updatedAt, author, and baseExpression
+            // Note: timestamp is a getter alias for createdAt, so we preserve createdAt instead
+            if (!requestedAttributes.includes(key) && key !== 'createdAt' && key !== 'updatedAt' && key !== 'author' && key !== 'baseExpression') {
               delete instance[key];
             }
           });

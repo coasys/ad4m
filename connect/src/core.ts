@@ -47,10 +47,10 @@ export default class Ad4mConnect extends EventTarget {
       console.log('[Ad4m Connect] Embedded mode - waiting for AD4M config via postMessage');
       
       return new Promise((resolve, reject) => {
-        // Set up timeout
+        // Set up 30 second timeout
         const timeout = setTimeout(() => {
           reject(new Error('Timeout waiting for AD4M config from parent window'));
-        }, 30000); // 30 second timeout
+        }, 30000);
         
         // Store resolvers to call when AD4M_CONFIG arrives
         this.embeddedResolve = (client: Ad4mClient) => {
@@ -65,14 +65,16 @@ export default class Ad4mConnect extends EventTarget {
         };
         
         // If we already have a client (message arrived before connect() was called)
-        if (this.ad4mClient && this.authState === 'authenticated') {
-          clearTimeout(timeout);
-          console.log('[Ad4m Connect] Client already initialized in embedded mode');
-          resolve(this.ad4mClient);
-        } else if (this.ad4mClient && this.authState !== 'authenticated') {
-          // Auth already failed before connect() was called
-          clearTimeout(timeout);
-          reject(new Error(`Embedded auth state: ${this.authState}`));
+        if (this.ad4mClient) {
+          if (this.authState === 'authenticated') {
+            clearTimeout(timeout);
+            console.log('[Ad4m Connect] Client already initialized in embedded mode');
+            resolve(this.ad4mClient);
+          } else {
+            // Auth already failed before connect() was called
+            clearTimeout(timeout);
+            reject(new Error(`Embedded auth state: ${this.authState}`));
+          }
         }
       });
     }
