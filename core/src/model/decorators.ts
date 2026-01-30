@@ -1,6 +1,7 @@
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import { Subject } from "./Subject";
 import { capitalize, propertyNameToSetterName, singularToPlural, stringifyObjectLiteral } from "./util";
+import { SHACLShape, SHACLPropertyShape } from "../shacl/SHACLShape";
 
 export class PerspectiveAction {
     action: string
@@ -739,6 +740,122 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                 sdna,
                 name: subjectName
             }
+        }
+
+        // Generate SHACL shape (W3C standard replacement for Prolog)
+        target.generateSHACL = function() {
+            const subjectName = opts.name;
+            const obj = target.prototype;
+            
+            // Determine namespace from first property or use default
+            let namespace = "ad4m://";
+            const properties = obj.__properties || {};
+            if (Object.keys(properties).length > 0) {
+                const firstProp = properties[Object.keys(properties)[0]];
+                if (firstProp.through) {
+                    // Extract namespace from through predicate (e.g., "recipe://name" -> "recipe://")
+                    const match = firstProp.through.match(/^([^:]+:\/\/)/);
+                    if (match) {
+                        namespace = match[1];
+                    }
+                }
+            }
+            
+            // Create SHACL shape
+            const shapeUri = `${namespace}${subjectName}Shape`;
+            const targetClass = `${namespace}${subjectName}`;
+            const shape = new SHACLShape(shapeUri, targetClass);
+            
+            // Convert properties to SHACL property shapes
+            for (const propName in properties) {
+                const propMeta = properties[propName];
+                
+                if (!propMeta.through) continue; // Skip properties without predicates
+                
+                const propShape: SHACLPropertyShape = {
+                    path: propMeta.through,
+                };
+                
+                // Determine datatype from initial value or resolveLanguage
+                if (propMeta.resolveLanguage === "literal") {
+                    // If it resolves via literal language, it's likely a string
+                    propShape.datatype = "xsd://string";
+                } else if (propMeta.initial) {
+                    // Try to infer from initial value type
+                    const initialType = typeof obj[propName];
+                    if (initialType === "number") {
+                        propShape.datatype = "xsd://integer";
+                    } else if (initialType === "boolean") {
+                        propShape.datatype = "xsd://boolean";
+                    } else if (initialType === "string") {
+                        propShape.datatype = "xsd://string";
+                    }
+                }
+                
+                // Cardinality constraints
+                if (propMeta.required) {
+                    propShape.minCount = 1;
+                }
+                
+                // Single-valued properties get maxCount 1
+                // (collections are handled separately below)
+                if (!propMeta.collection) {
+                    propShape.maxCount = 1;
+                }
+                
+                // Flag properties have fixed value
+                if (propMeta.flag && propMeta.initial) {
+                    propShape.hasValue = propMeta.initial;
+                }
+                
+                // AD4M-specific metadata
+                if (propMeta.local !== undefined) {
+                    propShape.local = propMeta.local;
+                }
+                
+                if (propMeta.writable !== undefined) {
+                    propShape.writable = propMeta.writable;
+                }
+                
+                shape.addProperty(propShape);
+            }
+            
+            // Convert collections to SHACL property shapes
+            const collections = obj.__collections || {};
+            for (const collName in collections) {
+                const collMeta = collections[collName];
+                
+                if (!collMeta.through) continue;
+                
+                const collShape: SHACLPropertyShape = {
+                    path: collMeta.through,
+                    // Collections have no maxCount (unlimited)
+                    // minCount defaults to 0 (optional)
+                };
+                
+                // Determine if it's a reference (IRI) or literal
+                if (collMeta.resolveLanguage) {
+                    collShape.nodeKind = 'IRI'; // References to other entities
+                } else {
+                    collShape.nodeKind = 'Literal';
+                }
+                
+                // AD4M-specific metadata
+                if (collMeta.local !== undefined) {
+                    collShape.local = collMeta.local;
+                }
+                
+                if (collMeta.writable !== undefined) {
+                    collShape.writable = collMeta.writable;
+                }
+                
+                shape.addProperty(collShape);
+            }
+            
+            return {
+                shape,
+                name: subjectName
+            };
         }
 
         Object.defineProperty(target, 'type', {configurable: true});
