@@ -81,13 +81,23 @@ pub fn initialize_from_db() {
         tokio::spawn(async move {
             // Create a per-perspective SurrealDB instance with file-based storage
             let data_path = get_app_data_path();
-            let surreal_service = crate::surreal_service::SurrealDBService::new(
+            let surreal_service = match crate::surreal_service::SurrealDBService::new(
                 "ad4m",
                 &handle_clone.uuid,
                 data_path.as_deref(),
             )
             .await
-            .expect("Failed to create SurrealDB service for perspective");
+            {
+                Ok(service) => service,
+                Err(e) => {
+                    log::error!(
+                        "Failed to create SurrealDB service for perspective {}: {}, skipping initialization",
+                        handle_clone.uuid,
+                        e
+                    );
+                    return;
+                }
+            };
 
             // Migrate links from Rusqlite to SurrealDB (one-time migration)
             // TODO: Remove this migration call after all users have migrated
