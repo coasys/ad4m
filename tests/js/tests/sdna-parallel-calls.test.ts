@@ -70,6 +70,9 @@ export default function sdnaParallelCallsTests(testContext: TestContext) {
 
                 console.log("Parallel calls completed successfully");
                 
+                // Small delay to let SurrealDB settle (async link propagation)
+                await new Promise(resolve => setTimeout(resolve, 100));
+                
                 // Verify we can find instances by template (the real test - parallel registration worked)
                 const class1Instances = await perspective.subjectClassesByTemplate(new TestClass1(perspective));
                 const class2Instances = await perspective.subjectClassesByTemplate(new TestClass2(perspective));
@@ -98,6 +101,9 @@ export default function sdnaParallelCallsTests(testContext: TestContext) {
                 await perspective.ensureSDNASubjectClass(TestClass3);
 
                 console.log("Sequential calls completed successfully");
+                
+                // Small delay to let SurrealDB settle (async link propagation)
+                await new Promise(resolve => setTimeout(resolve, 100));
                 
                 // Verify all classes were registered
                 const class1Instances = await perspective.subjectClassesByTemplate(new TestClass1(perspective));
