@@ -1874,9 +1874,15 @@ export class PerspectiveProxy {
             return
         }
 
+        // Generate Prolog SDNA (for backward compatibility)
         const { name, sdna } = jsClass.generateSDNA();
-
         await this.addSdna(name, sdna, 'subject_class');
+
+        // Generate and store SHACL (W3C standard)
+        if (jsClass.generateSHACL) {
+            const { shape } = jsClass.generateSHACL();
+            await this.addShacl(name, shape);
+        }
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {
