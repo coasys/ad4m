@@ -390,8 +390,7 @@
       "ad4m-hooks/helpers": {
         "packageJson": {
           "dependencies": [
-            "npm:@coasys/ad4m-connect@*",
-            "npm:@coasys/ad4m@*",
+            "npm:@types/uuid@9",
             "npm:uuid@*"
           ]
         }
@@ -399,17 +398,8 @@
       "ad4m-hooks/react": {
         "packageJson": {
           "dependencies": [
-            "npm:@coasys/ad4m-connect@*",
-            "npm:@coasys/hooks-helpers@*",
             "npm:@types/react-dom@^18.2.19",
             "npm:@types/react@^18.2.55"
-          ]
-        }
-      },
-      "ad4m-hooks/vue": {
-        "packageJson": {
-          "dependencies": [
-            "npm:@coasys/hooks-helpers@*"
           ]
         }
       },
