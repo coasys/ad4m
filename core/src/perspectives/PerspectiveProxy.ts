@@ -980,6 +980,122 @@ export class PerspectiveProxy {
         return this.#client.addSdna(this.#handle.uuid, name, sdnaCode, sdnaType)
     }
 
+    /**
+     * Store a SHACL shape in this Perspective
+     * Serializes the shape as RDF triples (links) for native AD4M storage
+     */
+    async addShacl(name: string, shape: import("../shacl/SHACLShape").SHACLShape): Promise<void> {
+        // Serialize shape to links
+        const links = shape.toLinks();
+        
+        // Add all links to perspective
+        for (const link of links) {
+            await this.add({
+                source: link.source,
+                predicate: link.predicate,
+                target: link.target
+            });
+        }
+        
+        // Create a name -> shape mapping link for easy retrieval
+        const nameMapping = new Literal(`shacl://${name}`);
+        await this.add({
+            source: "ad4m://self",
+            predicate: "ad4m://has_shacl",
+            target: nameMapping.toUrl()
+        });
+        
+        await this.add({
+            source: nameMapping.toUrl(),
+            predicate: "ad4m://shacl_shape_uri",
+            target: shape.nodeShapeUri
+        });
+    }
+    
+    /**
+     * Retrieve a SHACL shape by name from this Perspective
+     */
+    async getShacl(name: string): Promise<import("../shacl/SHACLShape").SHACLShape | null> {
+        // Find the shape URI from the name mapping
+        const nameMapping = new Literal(`shacl://${name}`);
+        const shapeUriLinks = await this.get(new LinkQuery({
+            source: nameMapping.toUrl(),
+            predicate: "ad4m://shacl_shape_uri"
+        }));
+        
+        if (shapeUriLinks.length === 0) {
+            return null;
+        }
+        
+        const shapeUri = shapeUriLinks[0].data.target;
+        
+        // Get all links that are part of this shape
+        // This includes the shape itself and all its property shapes
+        const shapeLinks: any[] = [];
+        
+        // Get shape type and target class
+        const shapeTypeLinks = await this.get(new LinkQuery({
+            source: shapeUri,
+            predicate: "rdf://type"
+        }));
+        shapeLinks.push(...shapeTypeLinks.map(l => l.data));
+        
+        const targetClassLinks = await this.get(new LinkQuery({
+            source: shapeUri,
+            predicate: "sh://targetClass"
+        }));
+        shapeLinks.push(...targetClassLinks.map(l => l.data));
+        
+        // Get property shapes
+        const propertyLinks = await this.get(new LinkQuery({
+            source: shapeUri,
+            predicate: "sh://property"
+        }));
+        
+        for (const propLink of propertyLinks) {
+            shapeLinks.push(propLink.data);
+            
+            // Get all links for this property shape (blank node)
+            const propShapeId = propLink.data.target;
+            
+            // Query all links with this blank node as source
+            const allLinks = await this.get(new LinkQuery({}));
+            const propShapeLinks = allLinks.filter(l => 
+                l.data.source === propShapeId
+            );
+            
+            shapeLinks.push(...propShapeLinks.map(l => l.data));
+        }
+        
+        // Reconstruct shape from links
+        const { SHACLShape } = await import("../shacl/SHACLShape");
+        return SHACLShape.fromLinks(shapeLinks, shapeUri);
+    }
+    
+    /**
+     * Get all SHACL shapes stored in this Perspective
+     */
+    async getAllShacl(): Promise<Array<{name: string, shape: import("../shacl/SHACLShape").SHACLShape}>> {
+        const nameLinks = await this.get(new LinkQuery({
+            source: "ad4m://self",
+            predicate: "ad4m://has_shacl"
+        }));
+        
+        const shapes = [];
+        for (const nameLink of nameLinks) {
+            const nameUrl = nameLink.data.target;
+            const name = Literal.fromUrl(nameUrl).get() as string;
+            const shapeName = name.replace('shacl://', '');
+            
+            const shape = await this.getShacl(shapeName);
+            if (shape) {
+                shapes.push({ name: shapeName, shape });
+            }
+        }
+        
+        return shapes;
+    }
+
     /** Returns all the Subject classes defined in this perspectives SDNA */
     async subjectClasses(): Promise<string[]> {
         try {
