@@ -773,6 +773,7 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                 if (!propMeta.through) continue; // Skip properties without predicates
                 
                 const propShape: SHACLPropertyShape = {
+                    name: propName, // Property name for generating named URIs
                     path: propMeta.through,
                 };
                 
@@ -828,6 +829,7 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                 if (!collMeta.through) continue;
                 
                 const collShape: SHACLPropertyShape = {
+                    name: collName, // Collection name for generating named URIs
                     path: collMeta.through,
                     // Collections have no maxCount (unlimited)
                     // minCount defaults to 0 (optional)
