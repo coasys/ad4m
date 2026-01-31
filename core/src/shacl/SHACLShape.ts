@@ -1,10 +1,73 @@
 import { Link } from "../links/Links";
 
 /**
+ * Extract namespace from a URI
+ * Examples:
+ *   - "recipe://name" -> "recipe://"
+ *   - "https://example.com/vocab#term" -> "https://example.com/vocab#"
+ *   - "recipe:Recipe" -> "recipe:"
+ */
+function extractNamespace(uri: string): string {
+  // Handle protocol-style URIs (://ending)
+  const protocolMatch = uri.match(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)/);
+  if (protocolMatch) {
+    return protocolMatch[1];
+  }
+  
+  // Handle hash fragments
+  const hashIndex = uri.lastIndexOf('#');
+  if (hashIndex !== -1) {
+    return uri.substring(0, hashIndex + 1);
+  }
+  
+  // Handle colon-separated (namespace:localName)
+  const colonMatch = uri.match(/^([a-zA-Z][a-zA-Z0-9+.-]*:)/);
+  if (colonMatch) {
+    return colonMatch[1];
+  }
+  
+  // Fallback: no clear namespace
+  return '';
+}
+
+/**
+ * Extract local name from a URI
+ * Examples:
+ *   - "recipe://name" -> "name"
+ *   - "https://example.com/vocab#term" -> "term"
+ *   - "recipe:Recipe" -> "Recipe"
+ */
+function extractLocalName(uri: string): string {
+  // Handle hash fragments
+  const hashIndex = uri.lastIndexOf('#');
+  if (hashIndex !== -1) {
+    return uri.substring(hashIndex + 1);
+  }
+  
+  // Handle protocol-style URIs
+  const protocolMatch = uri.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/(.+)$/);
+  if (protocolMatch) {
+    return protocolMatch[1];
+  }
+  
+  // Handle colon-separated
+  const colonMatch = uri.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:(.+)$/);
+  if (colonMatch) {
+    return colonMatch[1];
+  }
+  
+  // Fallback: entire URI
+  return uri;
+}
+
+/**
  * SHACL Property Shape
  * Represents constraints on a single property path
  */
 export interface SHACLPropertyShape {
+  /** Property name (e.g., "name", "ingredients") - used for generating named URIs */
+  name?: string;
+  
   /** The property path (predicate URI) */
   path: string;
   
@@ -162,10 +225,22 @@ export class SHACLShape {
       });
     }
     
-    // Property shapes (each gets a blank node ID)
+    // Property shapes (each gets a named URI: {namespace}/{ClassName}.{propertyName})
     for (let i = 0; i < this.properties.length; i++) {
       const prop = this.properties[i];
-      const propShapeId = `_:propShape${i}`;
+      
+      // Generate named property shape URI
+      let propShapeId: string;
+      if (prop.name && this.targetClass) {
+        // Extract namespace from targetClass
+        const namespace = extractNamespace(this.targetClass);
+        const className = extractLocalName(this.targetClass);
+        // Use format: {namespace}{ClassName}.{propertyName}
+        propShapeId = `${namespace}${className}.${prop.name}`;
+      } else {
+        // Fallback to blank node if name is missing
+        propShapeId = `_:propShape${i}`;
+      }
       
       // Link shape to property shape
       links.push({
