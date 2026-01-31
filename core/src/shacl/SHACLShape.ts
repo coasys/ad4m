@@ -368,7 +368,18 @@ export class SHACLShape {
       
       if (!pathLink) continue;
       
+      // Extract property name from propShapeId if it's a named URI
+      // Format: {namespace}{ClassName}.{propertyName}
+      let propertyName: string | undefined;
+      if (!propShapeId.startsWith('_:')) {
+        const lastDotIndex = propShapeId.lastIndexOf('.');
+        if (lastDotIndex !== -1) {
+          propertyName = propShapeId.substring(lastDotIndex + 1);
+        }
+      }
+      
       const prop: SHACLPropertyShape = {
+        name: propertyName,
         path: pathLink.target
       };
       
