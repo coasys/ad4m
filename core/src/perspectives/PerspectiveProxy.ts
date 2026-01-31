@@ -998,7 +998,7 @@ export class PerspectiveProxy {
         }
         
         // Create a name -> shape mapping link for easy retrieval
-        const nameMapping = new Literal(`shacl://${name}`);
+        const nameMapping = Literal.fromUrl(`literal://string:shacl://${name}`);
         await this.add({
             source: "ad4m://self",
             predicate: "ad4m://has_shacl",
@@ -1017,7 +1017,7 @@ export class PerspectiveProxy {
      */
     async getShacl(name: string): Promise<import("../shacl/SHACLShape").SHACLShape | null> {
         // Find the shape URI from the name mapping
-        const nameMapping = new Literal(`shacl://${name}`);
+        const nameMapping = Literal.fromUrl(`literal://string:shacl://${name}`);
         const shapeUriLinks = await this.get(new LinkQuery({
             source: nameMapping.toUrl(),
             predicate: "ad4m://shacl_shape_uri"
