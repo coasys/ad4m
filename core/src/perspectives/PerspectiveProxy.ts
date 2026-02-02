@@ -1874,31 +1874,31 @@ export class PerspectiveProxy {
             return
         }
 
-        // Generate Prolog SDNA (for backward compatibility)
-        const { name, sdna } = jsClass.generateSDNA();
-        
-        // Generate SHACL JSON (W3C standard) if available
-        let shaclJson: string | undefined = undefined;
-        if (jsClass.generateSHACL) {
-            const { shape } = jsClass.generateSHACL();
-            // Serialize SHACL shape to JSON for Rust backend
-            shaclJson = JSON.stringify({
-                target_class: shape.targetClass,
-                properties: shape.properties.map(p => ({
-                    path: p.path,
-                    name: p.name,
-                    datatype: p.datatype,
-                    min_count: p.minCount,
-                    max_count: p.maxCount,
-                    writable: p.writable,
-                    resolve_language: p.resolveLanguage,
-                    node_kind: p.nodeKind,
-                    collection: p.collection
-                }))
-            });
+        // Generate SHACL (W3C standard) - replaces Prolog
+        if (!jsClass.generateSHACL) {
+            throw new Error(`Class ${jsClass.name} must have generateSHACL() method. Use @ModelOptions decorator.`);
         }
         
-        await this.addSdna(name, sdna, 'subject_class', shaclJson);
+        const { shape, name } = jsClass.generateSHACL();
+        
+        // Serialize SHACL shape to JSON for Rust backend
+        const shaclJson = JSON.stringify({
+            target_class: shape.targetClass,
+            properties: shape.properties.map(p => ({
+                path: p.path,
+                name: p.name,
+                datatype: p.datatype,
+                min_count: p.minCount,
+                max_count: p.maxCount,
+                writable: p.writable,
+                resolve_language: p.resolveLanguage,
+                node_kind: p.nodeKind,
+                collection: p.collection
+            }))
+        });
+        
+        // Pass empty string for Prolog (deprecated, only SHACL used now)
+        await this.addSdna(name, "", 'subject_class', shaclJson);
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {
