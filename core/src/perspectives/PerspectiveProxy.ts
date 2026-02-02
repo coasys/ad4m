@@ -976,8 +976,8 @@ export class PerspectiveProxy {
     }
 
     /** Adds the given Social DNA code to the perspective's SDNA code */
-    async addSdna(name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom") {
-        return this.#client.addSdna(this.#handle.uuid, name, sdnaCode, sdnaType)
+    async addSdna(name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string) {
+        return this.#client.addSdna(this.#handle.uuid, name, sdnaCode, sdnaType, shaclJson)
     }
 
     /**
@@ -1876,13 +1876,29 @@ export class PerspectiveProxy {
 
         // Generate Prolog SDNA (for backward compatibility)
         const { name, sdna } = jsClass.generateSDNA();
-        await this.addSdna(name, sdna, 'subject_class');
-
-        // Generate and store SHACL (W3C standard)
+        
+        // Generate SHACL JSON (W3C standard) if available
+        let shaclJson: string | undefined = undefined;
         if (jsClass.generateSHACL) {
             const { shape } = jsClass.generateSHACL();
-            await this.addShacl(name, shape);
+            // Serialize SHACL shape to JSON for Rust backend
+            shaclJson = JSON.stringify({
+                target_class: shape.targetClass,
+                properties: shape.properties.map(p => ({
+                    path: p.path,
+                    name: p.name,
+                    datatype: p.datatype,
+                    min_count: p.minCount,
+                    max_count: p.maxCount,
+                    writable: p.writable,
+                    resolve_language: p.resolveLanguage,
+                    node_kind: p.nodeKind,
+                    collection: p.collection
+                }))
+            });
         }
+        
+        await this.addSdna(name, sdna, 'subject_class', shaclJson);
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {

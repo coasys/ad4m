@@ -1830,6 +1830,7 @@ impl Mutation {
         name: String,
         sdna_code: String,
         sdna_type: String,
+        shacl_json: Option<String>,
     ) -> FieldResult<bool> {
         check_capability(
             &context.capabilities,
@@ -1840,7 +1841,7 @@ impl Mutation {
         let sdna_type = SdnaType::from_string(&sdna_type)
             .map_err(|e| FieldError::new(e, graphql_value!({ "invalid_sdna_type": sdna_type })))?;
         perspective
-            .add_sdna(name, sdna_code, sdna_type, None, &agent_context)
+            .add_sdna(name, sdna_code, sdna_type, shacl_json, &agent_context)
             .await?;
         Ok(true)
     }
