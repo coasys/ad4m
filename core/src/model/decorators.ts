@@ -742,10 +742,16 @@ export function ModelOptions(opts: ModelOptionsOptions) {
             }
         }
 
-        // Generate SHACL shape (W3C standard replacement for Prolog)
+        // Generate SHACL shape (W3C standard + AD4M action definitions)
         target.generateSHACL = function() {
             const subjectName = opts.name;
             const obj = target.prototype;
+            
+            // Build constructor actions (same logic as generateSDNA)
+            let constructorActions = [];
+            if(obj.subjectConstructor && obj.subjectConstructor.length) {
+                constructorActions = constructorActions.concat(obj.subjectConstructor);
+            }
             
             // Determine namespace from first property or use default
             let namespace = "ad4m://";

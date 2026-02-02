@@ -1874,32 +1874,37 @@ export class PerspectiveProxy {
             return
         }
 
-        // Generate Prolog SDNA (for behaviors: constructor, destructor, setters, etc.)
-        const { name, sdna } = jsClass.generateSDNA();
-        
-        // Generate SHACL (W3C standard for schema constraints)
-        let shaclJson: string | undefined = undefined;
-        if (jsClass.generateSHACL) {
-            const { shape } = jsClass.generateSHACL();
-            // Serialize SHACL shape to JSON for Rust backend
-            shaclJson = JSON.stringify({
-                target_class: shape.targetClass,
-                properties: shape.properties.map(p => ({
-                    path: p.path,
-                    name: p.name,
-                    datatype: p.datatype,
-                    min_count: p.minCount,
-                    max_count: p.maxCount,
-                    writable: p.writable,
-                    resolve_language: p.resolveLanguage,
-                    node_kind: p.nodeKind,
-                    collection: p.collection
-                }))
-            });
+        // Generate SHACL (W3C standard + AD4M action definitions)
+        if (!jsClass.generateSHACL || !jsClass.generateSDNA) {
+            throw new Error(`Class ${jsClass.name} must have both generateSHACL() and generateSDNA(). Use @ModelOptions decorator.`);
         }
         
-        // Store both: Prolog for behaviors, SHACL for queryable schema
-        await this.addSdna(name, sdna, 'subject_class', shaclJson);
+        const { name } = jsClass.generateSHACL();
+        const {shape} = jsClass.generateSHACL();
+        
+        // Extract action definitions from Prolog SDNA
+        // TODO: Parse Prolog to get constructor/setter/collection actions
+        // For now, pass empty Prolog to force test failures (shows us what breaks)
+        
+        // Serialize SHACL shape to JSON for Rust backend
+        const shaclJson = JSON.stringify({
+            target_class: shape.targetClass,
+            properties: shape.properties.map(p => ({
+                path: p.path,
+                name: p.name,
+                datatype: p.datatype,
+                min_count: p.minCount,
+                max_count: p.maxCount,
+                writable: p.writable,
+                resolve_language: p.resolveLanguage,
+                node_kind: p.nodeKind,
+                collection: p.collection
+            }))
+            // TODO: Add constructor_actions, destructor_actions fields here
+        });
+        
+        // Pass empty Prolog (forcing migration to SHACL-based actions)
+        await this.addSdna(name, "", 'subject_class', shaclJson);
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {
