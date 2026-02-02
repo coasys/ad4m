@@ -1508,7 +1508,7 @@ impl PerspectiveInstance {
             SdnaType::Custom => "ad4m://has_custom_sdna",
         };
 
-        let literal_name = Literal::from_string(name)
+        let literal_name = Literal::from_string(name.clone())
             .to_url()
             .expect("just initialized Literal couldn't be turned into URL");
 

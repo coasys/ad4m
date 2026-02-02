@@ -155,7 +155,6 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
 /// Extract namespace from URI (e.g., "recipe://Recipe" -> "recipe://")
 fn extract_namespace(uri: &str) -> String {
     if let Some(pos) = uri.rfind("://") {
-        let after_scheme = &uri[..pos + 3];
         // Find next slash after scheme
         if let Some(slash_pos) = uri[pos + 3..].find('/') {
             uri[..pos + 3 + slash_pos + 1].to_string()
