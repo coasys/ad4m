@@ -154,16 +154,26 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
 
 /// Extract namespace from URI (e.g., "recipe://Recipe" -> "recipe://")
 fn extract_namespace(uri: &str) -> String {
-    if let Some(pos) = uri.rfind("://") {
-        // Find next slash after scheme
-        if let Some(slash_pos) = uri[pos + 3..].find('/') {
-            uri[..pos + 3 + slash_pos + 1].to_string()
+    // Handle fragment separator (#) if present
+    let base_uri = if let Some(hash_pos) = uri.rfind('#') {
+        &uri[..hash_pos + 1]
+    } else {
+        uri
+    };
+    
+    // Find scheme separator
+    if let Some(scheme_pos) = base_uri.find("://") {
+        let after_scheme = &base_uri[scheme_pos + 3..];
+        
+        // Find last slash in the authority/path
+        if let Some(last_slash) = after_scheme.rfind('/') {
+            base_uri[..scheme_pos + 3 + last_slash + 1].to_string()
         } else {
-            // No path component, just add trailing slash
-            format!("{}/", uri)
+            // No path, just return scheme + "://"
+            base_uri[..scheme_pos + 3].to_string()
         }
     } else {
-        // Fallback: assume entire string is namespace
+        // No scheme, fallback
         format!("{}/", uri)
     }
 }
