@@ -1840,7 +1840,7 @@ impl Mutation {
         let sdna_type = SdnaType::from_string(&sdna_type)
             .map_err(|e| FieldError::new(e, graphql_value!({ "invalid_sdna_type": sdna_type })))?;
         perspective
-            .add_sdna(name, sdna_code, sdna_type, &agent_context)
+            .add_sdna(name, sdna_code, sdna_type, None, &agent_context)
             .await?;
         Ok(true)
     }

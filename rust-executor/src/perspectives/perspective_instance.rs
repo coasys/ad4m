@@ -1,4 +1,5 @@
 use super::sdna::{generic_link_fact, is_sdna_link};
+use super::shacl_parser::parse_shacl_to_links;
 use super::update_perspective;
 use super::utils::{
     prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string,
@@ -1488,11 +1489,13 @@ impl PerspectiveInstance {
     }
 
     /// Adds the given Social DNA code to the perspective's SDNA code
+    /// If shacl_json is provided, also stores SHACL as queryable RDF links
     pub async fn add_sdna(
         &mut self,
         name: String,
         mut sdna_code: String,
         sdna_type: SdnaType,
+        shacl_json: Option<String>,
         context: &AgentContext,
     ) -> Result<bool, AnyError> {
         //let mut added = false;
@@ -1547,6 +1550,14 @@ impl PerspectiveInstance {
 
         self.add_links(sdna_links, LinkStatus::Shared, None, context)
             .await?;
+        
+        // If SHACL JSON provided, parse and store as RDF links
+        if let Some(shacl) = shacl_json {
+            let shacl_links = parse_shacl_to_links(&shacl, &name)?;
+            self.add_links(shacl_links, LinkStatus::Shared, None, context)
+                .await?;
+        }
+        
         //added = true;
         //}
         // Mutex guard is automatically dropped here
@@ -5123,6 +5134,7 @@ property_setter(c, "rating", '[{action: "setSingleTarget", source: "this", predi
                 "Recipe".to_string(),
                 recipe_sdna.to_string(),
                 SdnaType::SubjectClass,
+                None, // shacl_json
                 &AgentContext::main_agent(),
             )
             .await
