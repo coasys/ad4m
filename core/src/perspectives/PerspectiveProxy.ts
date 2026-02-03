@@ -1874,37 +1874,41 @@ export class PerspectiveProxy {
             return
         }
 
-        // Generate SHACL (W3C standard + AD4M action definitions)
+        // Generate both SHACL and Prolog SDNA
         if (!jsClass.generateSHACL || !jsClass.generateSDNA) {
             throw new Error(`Class ${jsClass.name} must have both generateSHACL() and generateSDNA(). Use @ModelOptions decorator.`);
         }
-        
-        const { name } = jsClass.generateSHACL();
-        const {shape} = jsClass.generateSHACL();
-        
-        // Extract action definitions from Prolog SDNA
-        // TODO: Parse Prolog to get constructor/setter/collection actions
-        // For now, pass empty Prolog to force test failures (shows us what breaks)
-        
+
+        // Get Prolog SDNA for backward compatibility (Rust backend still uses Prolog for queries)
+        const { name: sdnaName, sdna: prologSdna } = jsClass.generateSDNA();
+
+        // Get SHACL shape (W3C standard + AD4M action definitions)
+        const { shape } = jsClass.generateSHACL();
+
         // Serialize SHACL shape to JSON for Rust backend
         const shaclJson = JSON.stringify({
             target_class: shape.targetClass,
-            properties: shape.properties.map(p => ({
+            constructor_actions: shape.constructor_actions,
+            destructor_actions: shape.destructor_actions,
+            properties: shape.properties.map((p: any) => ({
                 path: p.path,
                 name: p.name,
                 datatype: p.datatype,
                 min_count: p.minCount,
                 max_count: p.maxCount,
                 writable: p.writable,
+                local: p.local,
                 resolve_language: p.resolveLanguage,
                 node_kind: p.nodeKind,
-                collection: p.collection
+                collection: p.collection,
+                setter: p.setter,
+                adder: p.adder,
+                remover: p.remover
             }))
-            // TODO: Add constructor_actions, destructor_actions fields here
         });
-        
-        // Pass empty Prolog (forcing migration to SHACL-based actions)
-        await this.addSdna(name, "", 'subject_class', shaclJson);
+
+        // Pass both Prolog SDNA (for backward compatibility) and SHACL JSON
+        await this.addSdna(sdnaName, prologSdna, 'subject_class', shaclJson);
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {

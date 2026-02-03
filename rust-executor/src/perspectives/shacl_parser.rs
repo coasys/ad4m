@@ -2,11 +2,28 @@ use crate::types::Link;
 use deno_core::error::AnyError;
 use serde::{Deserialize, Serialize};
 
+/// AD4M Action - represents a link operation (e.g., addLink, removeLink, setSingleTarget)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AD4MAction {
+    pub action: String,
+    pub source: String,
+    pub predicate: String,
+    pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local: Option<bool>,
+}
+
 /// SHACL Shape structure (from TypeScript)
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SHACLShape {
     pub target_class: String,
     pub properties: Vec<PropertyShape>,
+    /// Constructor actions for creating instances
+    #[serde(default)]
+    pub constructor_actions: Vec<AD4MAction>,
+    /// Destructor actions for removing instances
+    #[serde(default)]
+    pub destructor_actions: Vec<AD4MAction>,
 }
 
 /// SHACL Property Shape structure
@@ -18,9 +35,19 @@ pub struct PropertyShape {
     pub min_count: Option<u32>,
     pub max_count: Option<u32>,
     pub writable: Option<bool>,
+    pub local: Option<bool>,
     pub resolve_language: Option<String>,
     pub node_kind: Option<String>,
     pub collection: Option<bool>,
+    /// Setter action for single-valued properties
+    #[serde(default)]
+    pub setter: Vec<AD4MAction>,
+    /// Adder action for collection properties
+    #[serde(default)]
+    pub adder: Vec<AD4MAction>,
+    /// Remover action for collection properties
+    #[serde(default)]
+    pub remover: Vec<AD4MAction>,
 }
 
 /// Parse SHACL JSON to RDF links (Option 3: Named Property Shapes)
@@ -64,6 +91,28 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         predicate: Some("sh://targetClass".to_string()),
         target: shape.target_class.clone(),
     });
+
+    // Constructor actions (stored as JSON in literal)
+    if !shape.constructor_actions.is_empty() {
+        let constructor_json = serde_json::to_string(&shape.constructor_actions)
+            .unwrap_or_else(|_| "[]".to_string());
+        links.push(Link {
+            source: shape_uri.clone(),
+            predicate: Some("ad4m://constructor".to_string()),
+            target: format!("literal://string:{}", constructor_json),
+        });
+    }
+
+    // Destructor actions (stored as JSON in literal)
+    if !shape.destructor_actions.is_empty() {
+        let destructor_json = serde_json::to_string(&shape.destructor_actions)
+            .unwrap_or_else(|_| "[]".to_string());
+        links.push(Link {
+            source: shape_uri.clone(),
+            predicate: Some("ad4m://destructor".to_string()),
+            target: format!("literal://string:{}", destructor_json),
+        });
+    }
 
     // Property shape links (Option 3: Named Property Shapes)
     for prop in shape.properties.iter() {
@@ -147,35 +196,79 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 target: node_kind.clone(),
             });
         }
+
+        if let Some(local) = prop.local {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://local".to_string()),
+                target: format!("literal://boolean:{}", local),
+            });
+        }
+
+        // Property-level actions (setter, adder, remover)
+        if !prop.setter.is_empty() {
+            let setter_json = serde_json::to_string(&prop.setter)
+                .unwrap_or_else(|_| "[]".to_string());
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://setter".to_string()),
+                target: format!("literal://string:{}", setter_json),
+            });
+        }
+
+        if !prop.adder.is_empty() {
+            let adder_json = serde_json::to_string(&prop.adder)
+                .unwrap_or_else(|_| "[]".to_string());
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://adder".to_string()),
+                target: format!("literal://string:{}", adder_json),
+            });
+        }
+
+        if !prop.remover.is_empty() {
+            let remover_json = serde_json::to_string(&prop.remover)
+                .unwrap_or_else(|_| "[]".to_string());
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://remover".to_string()),
+                target: format!("literal://string:{}", remover_json),
+            });
+        }
     }
 
     Ok(links)
 }
 
 /// Extract namespace from URI (e.g., "recipe://Recipe" -> "recipe://")
+/// Matches TypeScript SHACLShape.ts extractNamespace() behavior
 fn extract_namespace(uri: &str) -> String {
-    // Handle fragment separator (#) if present
-    let base_uri = if let Some(hash_pos) = uri.rfind('#') {
-        &uri[..hash_pos + 1]
-    } else {
-        uri
-    };
-    
-    // Find scheme separator
-    if let Some(scheme_pos) = base_uri.find("://") {
-        let after_scheme = &base_uri[scheme_pos + 3..];
-        
-        // Find last slash in the authority/path
-        if let Some(last_slash) = after_scheme.rfind('/') {
-            base_uri[..scheme_pos + 3 + last_slash + 1].to_string()
-        } else {
-            // No path, just return scheme + "://"
-            base_uri[..scheme_pos + 3].to_string()
+    // Handle protocol-style URIs (://ending) - for AD4M-style URIs like "recipe://Recipe"
+    // We want just the scheme + "://" part
+    if let Some(scheme_pos) = uri.find("://") {
+        let after_scheme = &uri[scheme_pos + 3..];
+
+        // If nothing after scheme or only simple local name (no / or #), return just scheme://
+        if !after_scheme.contains('/') && !after_scheme.contains('#') {
+            return uri[..scheme_pos + 3].to_string();
         }
-    } else {
-        // No scheme, fallback
-        format!("{}/", uri)
     }
+
+    // Handle hash fragments (e.g., "http://example.com/ns#Recipe" -> "http://example.com/ns#")
+    if let Some(hash_pos) = uri.rfind('#') {
+        return uri[..hash_pos + 1].to_string();
+    }
+
+    // Handle slash-based paths (e.g., "http://example.com/ns/Recipe" -> "http://example.com/ns/")
+    if let Some(scheme_pos) = uri.find("://") {
+        let after_scheme = &uri[scheme_pos + 3..];
+        if let Some(last_slash) = after_scheme.rfind('/') {
+            return uri[..scheme_pos + 3 + last_slash + 1].to_string();
+        }
+    }
+
+    // Fallback: return as-is with trailing separator
+    String::new()
 }
 
 /// Extract local name from URI (e.g., "recipe://name" -> "name")
@@ -192,9 +285,15 @@ mod tests {
 
     #[test]
     fn test_extract_namespace() {
+        // AD4M-style URIs (scheme://LocalName) -> just scheme://
         assert_eq!(extract_namespace("recipe://Recipe"), "recipe://");
-        assert_eq!(extract_namespace("http://example.com/ns#Recipe"), "http://example.com/ns/");
         assert_eq!(extract_namespace("simple://Test"), "simple://");
+
+        // W3C-style URIs with hash fragments -> include the hash
+        assert_eq!(extract_namespace("http://example.com/ns#Recipe"), "http://example.com/ns#");
+
+        // W3C-style URIs with slash paths -> include trailing slash
+        assert_eq!(extract_namespace("http://example.com/ns/Recipe"), "http://example.com/ns/");
     }
 
     #[test]
@@ -222,13 +321,81 @@ mod tests {
         }"#;
 
         let links = parse_shacl_to_links(shacl_json, "Recipe").unwrap();
-        
+
         // Should have: class definition (5) + property shape (7) = 12 links minimum
         assert!(links.len() >= 12);
-        
+
         // Check for key links
         assert!(links.iter().any(|l| l.source == "ad4m://self" && l.target == "literal://string:Recipe"));
         assert!(links.iter().any(|l| l.source == "recipe://RecipeShape" && l.predicate == Some("sh://targetClass".to_string())));
         assert!(links.iter().any(|l| l.source == "recipe://Recipe.name" && l.predicate == Some("sh://path".to_string())));
+    }
+
+    #[test]
+    fn test_parse_shacl_with_actions() {
+        let shacl_json = r#"{
+            "target_class": "recipe://Recipe",
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "recipe://name", "target": "literal://string:uninitialized"}
+            ],
+            "destructor_actions": [
+                {"action": "removeLink", "source": "this", "predicate": "recipe://name", "target": "*"}
+            ],
+            "properties": [
+                {
+                    "path": "recipe://name",
+                    "name": "name",
+                    "datatype": "xsd://string",
+                    "min_count": 1,
+                    "max_count": 1,
+                    "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "recipe://name", "target": "value"}]
+                },
+                {
+                    "path": "recipe://ingredient",
+                    "name": "ingredients",
+                    "node_kind": "IRI",
+                    "adder": [{"action": "addLink", "source": "this", "predicate": "recipe://ingredient", "target": "value"}],
+                    "remover": [{"action": "removeLink", "source": "this", "predicate": "recipe://ingredient", "target": "value"}]
+                }
+            ]
+        }"#;
+
+        let links = parse_shacl_to_links(shacl_json, "Recipe").unwrap();
+
+        // Check for constructor action link
+        assert!(links.iter().any(|l|
+            l.source == "recipe://RecipeShape" &&
+            l.predicate == Some("ad4m://constructor".to_string()) &&
+            l.target.starts_with("literal://string:")
+        ), "Missing constructor action link");
+
+        // Check for destructor action link
+        assert!(links.iter().any(|l|
+            l.source == "recipe://RecipeShape" &&
+            l.predicate == Some("ad4m://destructor".to_string()) &&
+            l.target.starts_with("literal://string:")
+        ), "Missing destructor action link");
+
+        // Check for property setter action link
+        assert!(links.iter().any(|l|
+            l.source == "recipe://Recipe.name" &&
+            l.predicate == Some("ad4m://setter".to_string()) &&
+            l.target.starts_with("literal://string:")
+        ), "Missing setter action link");
+
+        // Check for collection adder action link
+        assert!(links.iter().any(|l|
+            l.source == "recipe://Recipe.ingredients" &&
+            l.predicate == Some("ad4m://adder".to_string()) &&
+            l.target.starts_with("literal://string:")
+        ), "Missing adder action link");
+
+        // Check for collection remover action link
+        assert!(links.iter().any(|l|
+            l.source == "recipe://Recipe.ingredients" &&
+            l.predicate == Some("ad4m://remover".to_string()) &&
+            l.target.starts_with("literal://string:")
+        ), "Missing remover action link");
     }
 }

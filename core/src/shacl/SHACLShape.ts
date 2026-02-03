@@ -61,45 +61,65 @@ function extractLocalName(uri: string): string {
 }
 
 /**
+ * AD4M Action - represents a link operation
+ */
+export interface AD4MAction {
+  action: string;
+  source: string;
+  predicate: string;
+  target: string;
+  local?: boolean;
+}
+
+/**
  * SHACL Property Shape
  * Represents constraints on a single property path
  */
 export interface SHACLPropertyShape {
   /** Property name (e.g., "name", "ingredients") - used for generating named URIs */
   name?: string;
-  
+
   /** The property path (predicate URI) */
   path: string;
-  
+
   /** Expected datatype (e.g., xsd:string, xsd:integer) */
   datatype?: string;
-  
+
   /** Node kind constraint (IRI, Literal, BlankNode) */
   nodeKind?: 'IRI' | 'Literal' | 'BlankNode';
-  
+
   /** Minimum cardinality (required if >= 1) */
   minCount?: number;
-  
+
   /** Maximum cardinality (single-valued if 1, omit for collections) */
   maxCount?: number;
-  
+
   /** Regex pattern for string validation */
   pattern?: string;
-  
+
   /** Minimum value (inclusive) for numeric properties */
   minInclusive?: number;
-  
+
   /** Maximum value (inclusive) for numeric properties */
   maxInclusive?: number;
-  
+
   /** Fixed value constraint (for Flag properties) */
   hasValue?: string;
-  
+
   /** AD4M-specific: Local-only property */
   local?: boolean;
-  
+
   /** AD4M-specific: Writable property */
   writable?: boolean;
+
+  /** AD4M-specific: Setter action for this property */
+  setter?: AD4MAction[];
+
+  /** AD4M-specific: Adder action for collection properties */
+  adder?: AD4MAction[];
+
+  /** AD4M-specific: Remover action for collection properties */
+  remover?: AD4MAction[];
 }
 
 /**
@@ -109,24 +129,44 @@ export interface SHACLPropertyShape {
 export class SHACLShape {
   /** URI of this shape (e.g., recipe:RecipeShape) */
   nodeShapeUri: string;
-  
+
   /** Target class this shape applies to (e.g., recipe:Recipe) */
   targetClass?: string;
-  
+
   /** Property constraints */
   properties: SHACLPropertyShape[];
-  
+
+  /** AD4M-specific: Constructor actions for creating instances */
+  constructor_actions?: AD4MAction[];
+
+  /** AD4M-specific: Destructor actions for removing instances */
+  destructor_actions?: AD4MAction[];
+
   constructor(nodeShapeUri: string, targetClass?: string) {
     this.nodeShapeUri = nodeShapeUri;
     this.targetClass = targetClass;
     this.properties = [];
   }
-  
+
   /**
    * Add a property constraint to this shape
    */
   addProperty(prop: SHACLPropertyShape): void {
     this.properties.push(prop);
+  }
+
+  /**
+   * Set constructor actions for this shape
+   */
+  setConstructorActions(actions: AD4MAction[]): void {
+    this.constructor_actions = actions;
+  }
+
+  /**
+   * Set destructor actions for this shape
+   */
+  setDestructorActions(actions: AD4MAction[]): void {
+    this.destructor_actions = actions;
   }
   
   /**
@@ -208,20 +248,38 @@ export class SHACLShape {
    */
   toLinks(): Link[] {
     const links: Link[] = [];
-    
+
     // Shape type declaration
     links.push({
       source: this.nodeShapeUri,
       predicate: "rdf://type",
       target: "sh://NodeShape"
     });
-    
+
     // Target class
     if (this.targetClass) {
       links.push({
         source: this.nodeShapeUri,
         predicate: "sh://targetClass",
         target: this.targetClass
+      });
+    }
+
+    // Constructor actions
+    if (this.constructor_actions && this.constructor_actions.length > 0) {
+      links.push({
+        source: this.nodeShapeUri,
+        predicate: "ad4m://constructor",
+        target: `literal://string:${JSON.stringify(this.constructor_actions)}`
+      });
+    }
+
+    // Destructor actions
+    if (this.destructor_actions && this.destructor_actions.length > 0) {
+      links.push({
+        source: this.nodeShapeUri,
+        predicate: "ad4m://destructor",
+        target: `literal://string:${JSON.stringify(this.destructor_actions)}`
       });
     }
     
@@ -337,8 +395,33 @@ export class SHACLShape {
           target: `literal://${prop.writable}`
         });
       }
+
+      // AD4M-specific actions
+      if (prop.setter && prop.setter.length > 0) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://setter",
+          target: `literal://string:${JSON.stringify(prop.setter)}`
+        });
+      }
+
+      if (prop.adder && prop.adder.length > 0) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://adder",
+          target: `literal://string:${JSON.stringify(prop.adder)}`
+        });
+      }
+
+      if (prop.remover && prop.remover.length > 0) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://remover",
+          target: `literal://string:${JSON.stringify(prop.remover)}`
+        });
+      }
     }
-    
+
     return links;
   }
   
@@ -352,7 +435,33 @@ export class SHACLShape {
     );
     
     const shape = new SHACLShape(shapeUri, targetClassLink?.target);
-    
+
+    // Find constructor actions
+    const constructorLink = links.find(l =>
+      l.source === shapeUri && l.predicate === "ad4m://constructor"
+    );
+    if (constructorLink) {
+      try {
+        const jsonStr = constructorLink.target.replace('literal://string:', '');
+        shape.constructor_actions = JSON.parse(jsonStr);
+      } catch (e) {
+        // Ignore parse errors
+      }
+    }
+
+    // Find destructor actions
+    const destructorLink = links.find(l =>
+      l.source === shapeUri && l.predicate === "ad4m://destructor"
+    );
+    if (destructorLink) {
+      try {
+        const jsonStr = destructorLink.target.replace('literal://string:', '');
+        shape.destructor_actions = JSON.parse(jsonStr);
+      } catch (e) {
+        // Ignore parse errors
+      }
+    }
+
     // Find all property shapes
     const propShapeLinks = links.filter(l => 
       l.source === shapeUri && l.predicate === "sh://property"
@@ -432,13 +541,50 @@ export class SHACLShape {
         prop.local = localLink.target.replace('literal://', '') === 'true';
       }
       
-      const writableLink = links.find(l => 
+      const writableLink = links.find(l =>
         l.source === propShapeId && l.predicate === "ad4m://writable"
       );
       if (writableLink) {
         prop.writable = writableLink.target.replace('literal://', '') === 'true';
       }
-      
+
+      // Parse action arrays
+      const setterLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://setter"
+      );
+      if (setterLink) {
+        try {
+          const jsonStr = setterLink.target.replace('literal://string:', '');
+          prop.setter = JSON.parse(jsonStr);
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
+
+      const adderLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://adder"
+      );
+      if (adderLink) {
+        try {
+          const jsonStr = adderLink.target.replace('literal://string:', '');
+          prop.adder = JSON.parse(jsonStr);
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
+
+      const removerLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://remover"
+      );
+      if (removerLink) {
+        try {
+          const jsonStr = removerLink.target.replace('literal://string:', '');
+          prop.remover = JSON.parse(jsonStr);
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
+
       shape.addProperty(prop);
     }
     

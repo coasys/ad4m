@@ -746,13 +746,7 @@ export function ModelOptions(opts: ModelOptionsOptions) {
         target.generateSHACL = function() {
             const subjectName = opts.name;
             const obj = target.prototype;
-            
-            // Build constructor actions (same logic as generateSDNA)
-            let constructorActions = [];
-            if(obj.subjectConstructor && obj.subjectConstructor.length) {
-                constructorActions = constructorActions.concat(obj.subjectConstructor);
-            }
-            
+
             // Determine namespace from first property or use default
             let namespace = "ad4m://";
             const properties = obj.__properties || {};
@@ -766,23 +760,32 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                     }
                 }
             }
-            
+
             // Create SHACL shape
             const shapeUri = `${namespace}${subjectName}Shape`;
             const targetClass = `${namespace}${subjectName}`;
             const shape = new SHACLShape(shapeUri, targetClass);
+
+            // === Extract Constructor Actions (same logic as generateSDNA) ===
+            let constructorActions = [];
+            if(obj.subjectConstructor && obj.subjectConstructor.length) {
+                constructorActions = constructorActions.concat(obj.subjectConstructor);
+            }
+
+            // === Extract Destructor Actions ===
+            let destructorActions = [];
             
             // Convert properties to SHACL property shapes
             for (const propName in properties) {
                 const propMeta = properties[propName];
-                
+
                 if (!propMeta.through) continue; // Skip properties without predicates
-                
+
                 const propShape: SHACLPropertyShape = {
                     name: propName, // Property name for generating named URIs
                     path: propMeta.through,
                 };
-                
+
                 // Determine datatype from initial value or resolveLanguage
                 if (propMeta.resolveLanguage === "literal") {
                     // If it resolves via literal language, it's likely a string
@@ -798,32 +801,67 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                         propShape.datatype = "xsd://string";
                     }
                 }
-                
+
                 // Cardinality constraints
                 if (propMeta.required) {
                     propShape.minCount = 1;
                 }
-                
+
                 // Single-valued properties get maxCount 1
                 // (collections are handled separately below)
                 if (!propMeta.collection) {
                     propShape.maxCount = 1;
                 }
-                
+
                 // Flag properties have fixed value
                 if (propMeta.flag && propMeta.initial) {
                     propShape.hasValue = propMeta.initial;
                 }
-                
+
                 // AD4M-specific metadata
                 if (propMeta.local !== undefined) {
                     propShape.local = propMeta.local;
                 }
-                
+
                 if (propMeta.writable !== undefined) {
                     propShape.writable = propMeta.writable;
                 }
-                
+
+                // === Extract Setter Actions (same logic as generateSDNA) ===
+                if (propMeta.setter) {
+                    // Custom setter defined - not yet supported in SHACL
+                    // TODO: Parse custom Prolog setter to extract actions
+                } else if (propMeta.writable && propMeta.through) {
+                    let setter = obj[propertyNameToSetterName(propName)];
+                    if (typeof setter === "function") {
+                        propShape.setter = [{
+                            action: "setSingleTarget",
+                            source: "this",
+                            predicate: propMeta.through,
+                            target: "value",
+                            ...(propMeta.local && { local: true })
+                        }];
+                    }
+                }
+
+                // Add to constructor actions if property has initial value
+                if (propMeta.initial) {
+                    constructorActions.push({
+                        action: "addLink",
+                        source: "this",
+                        predicate: propMeta.through,
+                        target: propMeta.initial,
+                    });
+
+                    // Add to destructor actions
+                    destructorActions.push({
+                        action: "removeLink",
+                        source: "this",
+                        predicate: propMeta.through,
+                        target: "*",
+                    });
+                }
+
                 shape.addProperty(propShape);
             }
             
@@ -852,14 +890,41 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                 if (collMeta.local !== undefined) {
                     collShape.local = collMeta.local;
                 }
-                
+
                 if (collMeta.writable !== undefined) {
                     collShape.writable = collMeta.writable;
                 }
-                
+
+                // === Extract Collection Actions (adder/remover) ===
+                // Adder action - adds a link to the collection
+                collShape.adder = [{
+                    action: "addLink",
+                    source: "this",
+                    predicate: collMeta.through,
+                    target: "value",
+                    ...(collMeta.local && { local: true })
+                }];
+
+                // Remover action - removes a link from the collection
+                collShape.remover = [{
+                    action: "removeLink",
+                    source: "this",
+                    predicate: collMeta.through,
+                    target: "value",
+                    ...(collMeta.local && { local: true })
+                }];
+
                 shape.addProperty(collShape);
             }
-            
+
+            // Set constructor and destructor actions on the shape
+            if (constructorActions.length > 0) {
+                shape.setConstructorActions(constructorActions);
+            }
+            if (destructorActions.length > 0) {
+                shape.setDestructorActions(destructorActions);
+            }
+
             return {
                 shape,
                 name: subjectName
