@@ -90,12 +90,13 @@ const styles = css`
     background: transparent;
     padding: 0;
     cursor: pointer;
-    position: absolute;
+    position: fixed;
     bottom: 20px;
     right: 20px;
     color: var(--ac-primary-color);
     width: 40px;
     height: 40px;
+    z-index: 99999;
   }
 `;
 
