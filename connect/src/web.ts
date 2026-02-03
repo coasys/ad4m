@@ -39,7 +39,7 @@ const styles = css`
     left: 0;
     height: 100vh;
     width: 100vw;
-    z-index: 100;
+    z-index: 99999;
   }
 
   .backdrop {
