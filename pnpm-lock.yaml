@@ -119,7 +119,7 @@ importers:
   ad4m-hooks/react:
     dependencies:
       '@coasys/ad4m':
-        specifier: workspace:0.10.1-release-candidate-5
+        specifier: workspace:0.11.1
         version: link:../../core
       '@coasys/ad4m-connect':
         specifier: '*'
@@ -143,7 +143,7 @@ importers:
   ad4m-hooks/vue:
     dependencies:
       '@coasys/ad4m':
-        specifier: workspace:0.10.1-release-candidate-5
+        specifier: workspace:0.11.1
         version: link:../../core
       '@coasys/hooks-helpers':
         specifier: '*'
@@ -577,70 +577,6 @@ importers:
         specifier: ^1.1.6
         version: 1.1.6
 
-  bootstrap-languages/p-diff-sync-socket-signaling:
-    dependencies:
-      '@coasys/ad4m':
-        specifier: '*'
-        version: 0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
-      '@perspect3vism/rollup-plugin-dna':
-        specifier: ^0.0.2
-        version: 0.0.2
-      '@rollup/plugin-commonjs':
-        specifier: ^14.0.0
-        version: 14.0.0(rollup@2.79.1)
-      '@rollup/plugin-json':
-        specifier: ^4.1.0
-        version: 4.1.0(rollup@2.79.1)
-      '@rollup/plugin-node-resolve':
-        specifier: ^8.0.0
-        version: 8.4.0(rollup@2.79.1)
-      '@rollup/plugin-typescript':
-        specifier: ^4.0.0
-        version: 4.1.2(rollup@2.79.1)(tslib@2.6.2)(typescript@4.9.5)
-      '@tsconfig/svelte':
-        specifier: ^1.0.0
-        version: 1.0.13
-      '@types/node':
-        specifier: ^18.0.0
-        version: 18.11.10
-      faker:
-        specifier: ^5.5.3
-        version: 5.5.3
-      rollup:
-        specifier: ^2.3.4
-        version: 2.79.1
-      rollup-plugin-postcss:
-        specifier: ^3.1.8
-        version: 3.1.8
-      rollup-plugin-string:
-        specifier: ^3.0.0
-        version: 3.0.0
-      rollup-plugin-svelte:
-        specifier: ^6.0.0
-        version: 6.1.1(rollup@2.79.1)(svelte@3.59.2)
-      rollup-plugin-terser:
-        specifier: ^7.0.0
-        version: 7.0.2(rollup@2.79.1)
-      svelte:
-        specifier: ^3.0.0
-        version: 3.59.2
-      svelte-check:
-        specifier: ^1.0.0
-        version: 1.6.0(@babel/core@7.24.3)(postcss-load-config@4.0.2(postcss@8.4.33)(ts-node@10.9.1(@types/node@18.11.10)(typescript@4.9.5)))(postcss@8.4.33)(sass@1.70.0)(svelte@3.59.2)
-      svelte-preprocess:
-        specifier: ^4.0.0
-        version: 4.10.7(@babel/core@7.24.3)(postcss-load-config@4.0.2(postcss@8.4.33)(ts-node@10.9.1(@types/node@18.11.10)(typescript@4.9.5)))(postcss@8.4.33)(sass@1.70.0)(svelte@3.59.2)(typescript@4.9.5)
-      tslib:
-        specifier: ^2.0.0
-        version: 2.6.2
-      typescript:
-        specifier: ^4.5.5
-        version: 4.9.5
-    devDependencies:
-      run-script-os:
-        specifier: ^1.1.6
-        version: 1.1.6
-
   bootstrap-languages/perspective-language:
     devDependencies:
       '@coasys/ad4m':
@@ -699,7 +635,7 @@ importers:
     devDependencies:
       '@coasys/ad4m-executor':
         specifier: '*'
-        version: 0.10.1-release-candidate-4(ws@8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10))
+        version: 0.10.1
 
   connect:
     dependencies:
@@ -726,7 +662,7 @@ importers:
         specifier: 3.7.10
         version: 3.7.10(graphql-ws@5.12.0(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
       '@coasys/ad4m':
-        specifier: workspace:0.10.1-release-candidate-5
+        specifier: workspace:0.11.1
         version: link:../core
       '@types/node':
         specifier: ^16.11.11
@@ -2279,8 +2215,8 @@ packages:
   '@coasys/ad4m-connect@0.8.1':
     resolution: {integrity: sha512-pbyeescsVOVAnXjn2Uh4BV0oWbuiseHT0HvGmDISdaJztaFv1MNglka2oOFf9xYmwz7PBExYNprnE5g75YVyNQ==}
 
-  '@coasys/ad4m-executor@0.10.1-release-candidate-4':
-    resolution: {integrity: sha512-apbyfBnQOxylhnq1KL3kLJW3WEPH50svbnAnBML7tDBICZaVJ35qUCA3TdeOajlZ8QQVDvdtSriTMBrqEenreQ==}
+  '@coasys/ad4m-executor@0.10.1':
+    resolution: {integrity: sha512-AGiRCjX1ay8OF70S8Y8iCYTumjGWr0XC750J8PdJB84tZEC77Y0tMf/Uo38wwoL93LfrTzkPap6uMR7axP1hIQ==}
 
   '@coasys/ad4m@0.8.1':
     resolution: {integrity: sha512-2or0Ykc+F+geDumBABYD/us5Iu9Se2xVRdVcj4h0l7etd9Zx3u5m/Q32YHywJz61DbPQV8Q+zTkYiqF54y9GrA==}
@@ -15751,7 +15687,7 @@ snapshots:
       - esbuild
       - supports-color
 
-  '@coasys/ad4m-executor@0.10.1-release-candidate-4(ws@8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10))':
+  '@coasys/ad4m-executor@0.10.1':
     dependencies:
       '@coasys/ad4m': link:../core
       '@holochain/client': https://codeload.github.com/coasys/holochain-client-js/tar.gz/2f3a436b6d28344b0aca883ef3dc229cd042c04b(ws@8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10))
@@ -15777,7 +15713,7 @@ snapshots:
   '@coasys/ad4m@0.8.1':
     dependencies:
       '@apollo/client': 3.7.10(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@17.0.2))(react@17.0.2)
-      '@holochain/client': 0.16.0(bufferutil@4.0.8)(utf-8-validate@5.0.10)
+      '@holochain/client': 0.16.0
       '@types/jest': 26.0.24
       class-validator: 0.13.2
       express: 4.18.2
@@ -15815,7 +15751,7 @@ snapshots:
   '@coasys/ad4m@0.8.1(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)':
     dependencies:
       '@apollo/client': 3.7.10(graphql-ws@5.14.3(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q)))(graphql@15.7.2(patch_hash=nr4gprddtjag7fz5nm4wirqs4q))(react-dom@18.2.0(react@18.2.0))(react@18.2.0)
-      '@holochain/client': 0.16.0(bufferutil@4.0.8)(utf-8-validate@5.0.10)
+      '@holochain/client': 0.16.0
       '@types/jest': 26.0.24
       class-validator: 0.13.2
       express: 4.18.2
@@ -16204,6 +16140,22 @@ snapshots:
       client-only: 0.0.1
       react: 18.2.0
       react-dom: 18.2.0(react@18.2.0)
+
+  '@holochain/client@0.16.0':
+    dependencies:
+      '@holochain/serialization': 0.1.0-beta-rc.3
+      '@msgpack/msgpack': 2.8.0
+      '@noble/ed25519': 2.0.0
+      '@tauri-apps/api': 1.5.3
+      emittery: 1.0.1
+      isomorphic-ws: 5.0.0(ws@8.13.0)
+      js-base64: 3.7.6
+      libsodium-wrappers: 0.7.13
+      lodash-es: 4.17.21
+      ws: 8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10)
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
 
   '@holochain/client@0.16.0(bufferutil@4.0.8)(utf-8-validate@5.0.10)':
     dependencies:
@@ -24084,6 +24036,10 @@ snapshots:
       ws: 7.5.9(bufferutil@4.0.8)(utf-8-validate@5.0.10)
 
   isomorphic-ws@5.0.0(ws@8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10)):
+    dependencies:
+      ws: 8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10)
+
+  isomorphic-ws@5.0.0(ws@8.13.0):
     dependencies:
       ws: 8.13.0(bufferutil@4.0.8)(utf-8-validate@5.0.10)
 

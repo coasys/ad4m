@@ -61,7 +61,7 @@ jobs:
       uses: actions-rs/toolchain@v1
       with:
         override: true
-        toolchain: 1.84.0
+        toolchain: 1.86.0
     - run: rustup target add wasm32-unknown-unknown
 
     - name: Install Rust targets for macOS
@@ -73,7 +73,7 @@ jobs:
     - name: Install GO
       uses: actions/setup-go@v4
       with:
-        go-version: '1.22.0'
+        go-version: '1.24.6'
     
     - name: Install/update node-gyp
       run: npm install -g node-gyp
@@ -81,7 +81,7 @@ jobs:
     - name: Install Deno
       uses: denoland/setup-deno@v1
       with:
-        deno-version: v1.32.4
+        deno-version: v2.x
 
     - name: Use Python 3.11
       uses: actions/setup-python@v4
@@ -131,10 +131,10 @@ jobs:
         node-version: ${{ matrix.node-version }}
 
     - name: pnpm Install
-      run: pnpm install
+      run: pnpm install --no-cache
 
     - name: Install core dependencies
-      run: cd ./core && pnpm install
+      run: cd ./core && pnpm install --no-cache
 
     #- name: Decrypt and install certificates
     #  if: matrix.platform == 'macos-latest'
@@ -194,7 +194,7 @@ jobs:
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
         asset_path: /home/runner/work/ad4m/ad4m/target/release/bundle/appimage/ADAM Launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
-        asset_name: ADAM/ Launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
+        asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_amd64.AppImage
         asset_content_type: application/octet-stream
 
     #- name: Upload Release AppImage Update Asset
@@ -230,7 +230,7 @@ jobs:
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
         asset_path: /home/runner/work/ad4m/ad4m/target/release/ad4m
-        asset_name: ad4m-linux-${{ steps.extract_version.outputs.version }}-x64
+        asset_name: ad4m-cli-client-linux-${{ steps.extract_version.outputs.version }}-x64
         asset_content_type: application/octet-stream
 
     - name: Upload Release AD4M CLI executor Linux Binary
@@ -253,7 +253,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
-        asset_path:  "/Users/runner/work/ad4m/ad4m/target/universal-apple-darwin/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_universal.dmg"
+        asset_path:  "/Users/runner/work/ad4m/ad4m/target/release/bundle/dmg/ADAM Launcher_${{ steps.extract_version.outputs.version }}_aarch64.dmg"
         asset_name: ADAM\ Launcher_${{ steps.extract_version.outputs.version }}_aarch64.dmg
         asset_content_type: application/octet-stream
 
@@ -290,7 +290,7 @@ jobs:
       with:
         upload_url: ${{ needs.create-release.outputs.upload_url }} # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
         asset_path: /Users/runner/work/ad4m/ad4m/target/release/ad4m
-        asset_name: ad4m-cli-client-macos-${{ steps.extract_version.outputs.version }}-x64
+        asset_name: ad4m-cli-client-macos-${{ steps.extract_version.outputs.version }}-aarch64
         asset_content_type: application/octet-stream
 
     - name: Upload Release AD4M CLI executor macOS Binary
@@ -407,7 +407,7 @@ jobs:
       - name: Install GO
         uses: actions/setup-go@v4
         with:
-          go-version: '1.20'
+          go-version: '1.24.6'
 
       - name: Install Linux Deps
         run: |
@@ -423,10 +423,18 @@ jobs:
       - name: Install Deno
         uses: denoland/setup-deno@v1
         with:
-          deno-version: v1.32.4
+          deno-version: v2.x
 
       - name: Build modules
-        run: pnpm run build-libs
+        run: pnpm run build-npm-packages
+
+      - name: Set NPM tag
+        run: |
+          if [ "$CONTAINS_PRERELEASE" = "true" ]; then
+            echo "NPM_TAG=next" >> $GITHUB_ENV
+          else
+            echo "NPM_TAG=latest" >> $GITHUB_ENV
+          fi
 
       - name: Change Package Visibility to Public
         run: |
@@ -438,6 +446,7 @@ jobs:
         with:
           token: ${{ secrets.COASYS_NPM_TOKEN }}
           package: core/package.json
+          tag: ${{ env.NPM_TAG }}
           access: public
 
       - name: Publish connect
@@ -445,6 +454,7 @@ jobs:
         with:
           token: ${{ secrets.COASYS_NPM_TOKEN }}
           package: connect/package.json
+          tag: ${{ env.NPM_TAG }}
           access: public
 
       - name: Publish ad4m hook helpers
@@ -452,6 +462,7 @@ jobs:
         with:
           token: ${{ secrets.COASYS_NPM_TOKEN }}
           package: ad4m-hooks/helpers/package.json
+          tag: ${{ env.NPM_TAG }}
           access: public
 
       - name: Publish ad4m react hooks
@@ -459,6 +470,7 @@ jobs:
         with:
           token: ${{ secrets.COASYS_NPM_TOKEN }}
           package: ad4m-hooks/react/package.json
+          tag: ${{ env.NPM_TAG }}
           access: public
 
       - name: Publish ad4m vue hooks
@@ -466,6 +478,7 @@ jobs:
         with:
           token: ${{ secrets.COASYS_NPM_TOKEN }}
           package: ad4m-hooks/vue/package.json
+          tag: ${{ env.NPM_TAG }}
           access: public
 
       - name: Publish executor
@@ -473,6 +486,7 @@ jobs:
         with:
           token: ${{ secrets.COASYS_NPM_TOKEN }}
           package: executor/package.json
+          tag: ${{ env.NPM_TAG }}
           access: public
 
       - name: Publish Test runner
@@ -480,6 +494,7 @@ jobs:
         with:
           token: ${{ secrets.COASYS_NPM_TOKEN }}
           package: test-runner/package.json
+          tag: ${{ env.NPM_TAG }}
           access: public
 
 
@@ -489,13 +504,13 @@ jobs:
      - uses: actions/checkout@v2
      - uses: actions-rs/toolchain@v1
        with:
-         toolchain: 1.81.0
+         toolchain: 1.86.0
          override: true
   
      - name: Install GO
        uses: actions/setup-go@v4
        with:
-         go-version: '1.22'
+         go-version: '1.24.6'
   
      - uses: pnpm/action-setup@v4
   
@@ -523,7 +538,7 @@ jobs:
      - name: Install Deno
        uses: denoland/setup-deno@v1
        with:
-        deno-version: v1.32.4
+        deno-version: v2.x
   
      - run: rustup target add wasm32-unknown-unknown
      - run: pnpm install

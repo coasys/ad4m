@@ -155,6 +155,26 @@ export class PerspectiveClient {
         return JSON.parse(perspectiveQueryProlog)
     }
 
+    /**
+     * Executes a read-only SurrealQL query against a perspective's link cache.
+     * 
+     * Security: Only SELECT, RETURN, and other read-only queries are permitted.
+     * Mutating operations (DELETE, UPDATE, INSERT, etc.) are blocked.
+     * 
+     * Note: GraphQL field name is "perspectiveQuerySurrealDb" (lowercase "b" in "Db")
+     * as generated from Rust method "perspective_query_surreal_db"
+     */
+    async querySurrealDB(uuid: string, query: string): Promise<any> {
+        const { perspectiveQuerySurrealDb } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query perspectiveQuerySurrealDb($uuid: String!, $query: String!) {
+                perspectiveQuerySurrealDb(uuid: $uuid, query: $query)
+            }`,
+            variables: { uuid, query }
+        }))
+
+        return JSON.parse(perspectiveQuerySurrealDb)
+    }
+
     async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult, isInit?: boolean }> {
         const { perspectiveSubscribeQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveSubscribeQuery($uuid: String!, $query: String!) {
@@ -178,6 +198,53 @@ export class PerspectiveClient {
             console.error('Error parsing perspectiveSubscribeQuery result:', e)
         }
         return { subscriptionId, result: finalResult, isInit }
+    }
+
+    async perspectiveSubscribeSurrealQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult, isInit?: boolean }> {
+        const { perspectiveSubscribeSurrealQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveSubscribeSurrealQuery($uuid: String!, $query: String!) {
+                perspectiveSubscribeSurrealQuery(uuid: $uuid, query: $query) {
+                    subscriptionId
+                    result
+                }
+            }`,
+            variables: { uuid, query }
+        }))
+        const { subscriptionId, result } = perspectiveSubscribeSurrealQuery
+        let finalResult = result;
+        let isInit = false;
+        if(finalResult.startsWith("#init#")) {
+            finalResult = finalResult.substring(6)
+            isInit = true;
+        }
+        try {
+            finalResult = JSON.parse(finalResult)
+        } catch (e) {
+            console.error('Error parsing perspectiveSubscribeSurrealQuery result:', e)
+        }
+        return { subscriptionId, result: finalResult, isInit }
+    }
+
+    async perspectiveKeepAliveSurrealQuery(uuid: string, subscriptionId: string): Promise<boolean> {
+        const { perspectiveKeepAliveSurrealQuery } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveKeepAliveSurrealQuery($uuid: String!, $subscriptionId: String!) {
+                perspectiveKeepAliveSurrealQuery(uuid: $uuid, subscriptionId: $subscriptionId)
+            }`,
+            variables: { uuid, subscriptionId }
+        }))
+
+        return perspectiveKeepAliveSurrealQuery
+    }
+
+    async perspectiveDisposeSurrealQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
+        const { perspectiveDisposeSurrealQuerySubscription } = unwrapApolloResult(await this.#apolloClient.mutate({
+            mutation: gql`mutation perspectiveDisposeSurrealQuerySubscription($uuid: String!, $subscriptionId: String!) {
+                perspectiveDisposeSurrealQuerySubscription(uuid: $uuid, subscriptionId: $subscriptionId)
+            }`,
+            variables: { uuid, subscriptionId }
+        }))
+
+        return perspectiveDisposeSurrealQuerySubscription
     }
 
     subscribeToQueryUpdates(subscriptionId: string, onData: (result: AllInstancesResult) => void): () => void {

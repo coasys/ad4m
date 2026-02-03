@@ -47,7 +47,7 @@
   },
   "devDependencies": {
     "@apollo/client": "3.7.10",
-    "@coasys/ad4m": "workspace:0.10.1-release-candidate-5",
+    "@coasys/ad4m": "workspace:0.11.1",
     "@types/node": "^16.11.11",
     "esbuild": "^0.15.5",
     "esbuild-plugin-lit": "^0.0.10",
@@ -65,5 +65,5 @@
     "esbuild-plugin-replace": "^1.4.0",
     "lit": "^2.3.1"
   },
-  "version": "0.10.1-release-candidate-5"
+  "version": "0.11.1"
 }

@@ -1,5 +1,5 @@
 ---
-manifest_version: 1
+manifest_version: 0
 name: "direct-message-language"
 integrity:
   network_seed: 00000000-0000-0000-0000-000000000000
@@ -7,10 +7,10 @@ integrity:
     recipient_hc_agent_pubkey: "needs replacement through templating"
   zomes:
     - name: direct-message-integrity
-      bundled: ../target/wasm32-unknown-unknown/release/direct_message_integrity.wasm
+      path: ../target/wasm32-unknown-unknown/release/direct_message_integrity.wasm
 coordinator:
   zomes:
     - name: direct-message
-      bundled: ../target/wasm32-unknown-unknown/release/direct_message.wasm
+      path: ../target/wasm32-unknown-unknown/release/direct_message.wasm
       dependencies:
         - name: direct-message-integrity

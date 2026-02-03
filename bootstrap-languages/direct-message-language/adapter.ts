@@ -1,4 +1,4 @@
-import { DirectMessageAdapter, HolochainLanguageDelegate, LanguageContext, MessageCallback, Perspective, PerspectiveExpression } from "https://esm.sh/@perspect3vism/ad4m@0.5.0";
+import { DirectMessageAdapter, HolochainLanguageDelegate, LanguageContext, MessageCallback, Perspective, PerspectiveExpression } from "https://esm.sh/v135/@perspect3vism/ad4m@0.5.0";
 import { BUNDLE, DNA_ROLE, ZOME_NAME } from "./build/happ.js";
 
 //!@ad4m-template-variable

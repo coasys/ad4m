@@ -6,6 +6,41 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Fixed
+### Added
+### Changed
+
+## [0.11.1] - 02/12/2025
+
+### Fixed
+- Avoid delays in Ad4mModel.save() and batch.commit() [#639](https://github.com/coasys/ad4m/pull/639)
+- Set get strategy to local for all HC DNAs to avoid timeouts [#638](https://github.com/coasys/ad4m/pull/638)
+- Support non-literal resolveLanguage with transform in SurrealDB queries [#637](https://github.com/coasys/ad4m/pull/637)
+
+### Added
+
+### Changed
+- Refactor: Use Separate SurrealDB Database per Perspective [#636](https://github.com/coasys/ad4m/pull/636)
+
+## [0.11.0] - 28/11/2025
+
+### Fixed
+- Subscription fixes [#634](https://github.com/coasys/ad4m/pull/634)
+- Async Runtime Performance Optimization: Fix CPU Thrashing Issues [#626](https://github.com/coasys/ad4m/pull/626)
+
+### Added
+- SurrealDB Query Engine Integration for blazing fast Ad4mModel operations [#632](https://github.com/coasys/ad4m/pull/632)
+- Add `fromJSONSchema()` method to Ad4mModel for dynamic model generation [#628](https://github.com/coasys/ad4m/pull/628)
+- p-diff-sync: Add validation to ensure parent commits exist before accepting PerspectiveDiffEntryReference [#627](https://github.com/coasys/ad4m/pull/627)
+
+### Changed
+- Deno lockfile updates [#635](https://github.com/coasys/ad4m/pull/635)
+- Holochain bump to 0.6.0 [#633](https://github.com/coasys/ad4m/pull/633)
+- Update to Holochain 0.6.0-rc.0 [#630](https://github.com/coasys/ad4m/pull/630)
+
+
+## [0.10.1] - 15/09/2025
+
+### Fixed
 - Entry instances preserved in useModel hook when making the base expression [PR#617](https://github.com/coasys/ad4m/pull/617)
 - Prolog engine gets respawned when a query caused an error to clean the machine state [PR#483](https://github.com/coasys/ad4m/pull/483)
 - Catch panics in Scryer and handle as error instead of killing the engine thread which caused `channel closed` error in future queries [PR#483](https://github.com/coasys/ad4m/pull/483)
@@ -37,6 +72,9 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Fix Ad4mModel usage without subclass and improve cache handling for class names [PR#603](https://github.com/coasys/ad4m/pull/603)
 - Fix race condition in prolog query subscriptions and resolve deadlock issues [PR#607](https://github.com/coasys/ad4m/pull/607)
 - Fix expression content parsing in Ad4mModel by attempting JSON parsing of resolved expression data [PR#614](https://github.com/coasys/ad4m/pull/614)
+- Fix missing links in new neighbourhoods and add fallback sync system for better reliability [PR#625](https://github.com/coasys/ad4m/pull/625)
+- Deduplicate links to prevent duplicate entries in perspectives [PR#619](https://github.com/coasys/ad4m/pull/619)
+- Fix special character handling in prolog and ad4m model for better text processing [PR#620](https://github.com/coasys/ad4m/pull/620)
   
 ### Added
 - Prolog predicates needed in new Flux mention notification trigger:
@@ -76,6 +114,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Holochain debugging features: network metrics retrieval and Holochain restart capability [PR#610](https://github.com/coasys/ad4m/pull/610)
 - Scoped Prolog engine-pools for fast inference inside a channel, ignoring other channels' data for better performance isolation [PR#613](https://github.com/coasys/ad4m/pull/613)
 - Runtime Log Level Configuration with UI in launcher [PR#616](https://github.com/coasys/ad4m/pull/616)
+- Interactive Perspective Selector with Enhanced SDNA Debugging for better development experience [PR#624](https://github.com/coasys/ad4m/pull/624)
 
 ### Changed
 - Partially migrated the Runtime service to Rust. (DM language installation for agents is pending.) [PR#466](https://github.com/coasys/ad4m/pull/466)
@@ -100,6 +139,8 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Ad4mModel.save() now uses automatic batch creation and commit for improved performance [PR#609](https://github.com/coasys/ad4m/pull/609)
 - Updated Holochain dependencies to version 0.5.3-rc0 and kitsune2_api to 0.1.9 [PR#612](https://github.com/coasys/ad4m/pull/612)
 - Upgraded Holochain to version 0.5.5 [PR#618](https://github.com/coasys/ad4m/pull/618)
+- Upgraded Holochain to version 0.5.6 [PR#622](https://github.com/coasys/ad4m/pull/622)
+- Allow for multiple SDNA classes with same name by same author for better flexibility [PR#621](https://github.com/coasys/ad4m/pull/621)
 
 ## [0.9.0] - 23/03/2024
 

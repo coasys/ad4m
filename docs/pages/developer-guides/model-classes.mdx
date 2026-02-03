@@ -6,7 +6,9 @@ Model classes in AD4M provide a way to define, store, and query structured data 
 
 ## Quick Start
 
-Here's a basic recipe model:
+There are two ways to create model classes in AD4M:
+
+### Option 1: Using Decorators (Traditional)
 
 ```typescript
 import { Ad4mModel, ModelOptions, Property } from '@coasys/ad4m';
@@ -28,6 +30,44 @@ await recipe.save();
 // Reading it back
 const recipes = await Recipe.findAll(perspective);
 console.log(recipes[0].name); // "Chocolate Cake"
+```
+
+### Option 2: From JSON Schema (Dynamic)
+
+Perfect for integrating with external systems or when you have existing JSON Schema definitions:
+
+```typescript
+import { Ad4mModel } from '@coasys/ad4m';
+
+// Define your data structure using JSON Schema
+const recipeSchema = {
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Recipe",
+  "type": "object",
+  "properties": {
+    "name": { "type": "string" },
+    "ingredients": { 
+      "type": "array", 
+      "items": { "type": "string" } 
+    },
+    "difficulty": { "type": "number" }
+  },
+  "required": ["name"]
+};
+
+// Dynamically create the model class
+const Recipe = Ad4mModel.fromJSONSchema(recipeSchema, {
+  name: "Recipe",
+  namespace: "recipe://",
+  resolveLanguage: "literal"
+});
+
+// Use exactly like decorator-based models
+const recipe = new Recipe(perspective);
+recipe.name = "Chocolate Cake";
+recipe.ingredients = ["flour", "sugar", "cocoa"];
+recipe.difficulty = 3;
+await recipe.save();
 ```
 
 Before using any model class, register it with your perspective:
@@ -115,7 +155,7 @@ await recipe.update();
 ### Basic Querying
 
 ```typescript
-// Get all recipes
+// Get all recipes (uses SurrealDB by default - 10-100x faster)
 const allRecipes = await Recipe.findAll(perspective);
 
 // Get with simple conditions
@@ -123,6 +163,31 @@ const recipes = await Recipe.findAll(perspective, {
   where: { name: "Chocolate Cake" }
 });
 ```
+
+## Query Performance with SurrealDB
+
+**Important**: `Ad4mModel` now uses **SurrealDB by default** for all query operations, providing **10-100x faster performance** compared to the legacy Prolog engine. This means:
+
+- `findAll()` automatically uses SurrealDB
+- `findAllAndCount()` automatically uses SurrealDB  
+- Query builder methods automatically use SurrealDB
+- Live query subscriptions automatically use SurrealDB
+
+```typescript
+// Uses SurrealDB by default (fast!)
+const highRated = await Recipe.findAll(perspective, {
+  where: { rating: { gt: 4 } },
+  order: { rating: "DESC" },
+  limit: 10
+});
+
+// You can explicitly use Prolog if needed (for backward compatibility)
+const recipesProlog = await Recipe.findAll(perspective, {
+  where: { rating: { gt: 4 } }
+}, false); // useSurrealDB = false
+```
+
+For advanced graph traversal queries and direct SurrealQL access, see the [SurrealDB Queries Guide](/developer-guides/surreal-queries).
 
 ## Understanding the Underlying System
 
@@ -220,9 +285,10 @@ topReviews: string[] = [];
 
 ### Advanced Querying
 
-The query builder provides a fluent interface for complex queries:
+The query builder provides a fluent interface for complex queries and uses **SurrealDB by default** for optimal performance:
 
 ```typescript
+// Uses SurrealDB by default (10-100x faster)
 const recipes = await Recipe.query(perspective)
   .where({ 
     category: "MainCourse",
@@ -231,20 +297,41 @@ const recipes = await Recipe.query(perspective)
   .order({ createdAt: "DESC" })
   .limit(5)
   .get();
+
+// Explicitly control query engine
+const recipesSurreal = await Recipe.query(perspective)
+  .where({ rating: { gt: 4 } })
+  .useSurrealDB(true)  // Default is true
+  .get();
+
+// Use Prolog for backward compatibility
+const recipesProlog = await Recipe.query(perspective)
+  .where({ rating: { gt: 4 } })
+  .useSurrealDB(false)  // Switch to Prolog
+  .get();
 ```
 
 ### Real-time Updates
 
-Subscribe to changes in your data:
+Subscribe to changes in your data. Subscriptions also use **SurrealDB by default** for better performance:
 
 ```typescript
-// Create a query builder
+// Create a query builder (uses SurrealDB by default)
 const builder = Recipe.query(perspective)
   .where({ status: "cooking" });
 
 // Subscribe to updates
 const initialRecipes = await builder.subscribe(recipes => {
   console.log("Currently cooking:", recipes);
+});
+
+// Subscribe with Prolog (for backward compatibility)
+const builderProlog = Recipe.query(perspective)
+  .where({ status: "cooking" })
+  .useSurrealDB(false);  // Use Prolog
+
+await builderProlog.subscribe(recipes => {
+  console.log("Currently cooking (Prolog):", recipes);
 });
 
 // Important: Clean up when done
@@ -276,6 +363,341 @@ const initialCount = await builder.countSubscribe(count => {
 // Remember to clean up
 builder.dispose();
 ```
+
+## Dynamic Models from JSON Schema
+
+The `fromJSONSchema()` method allows you to dynamically create AD4M model classes from JSON Schema definitions. This is perfect for:
+
+- **Integrating with external systems** that use JSON Schema
+- **Runtime model generation** based on user-defined schemas
+- **Partner app integration** (like Holons) that define types using JSON Schema
+- **Rapid prototyping** without writing decorator-based classes
+
+### Basic Usage
+
+```typescript
+import { Ad4mModel } from '@coasys/ad4m';
+
+const schema = {
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BlogPost",
+  "type": "object",
+  "properties": {
+    "title": { "type": "string" },
+    "content": { "type": "string" },
+    "tags": { 
+      "type": "array", 
+      "items": { "type": "string" } 
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "author": { "type": "string" },
+        "publishedAt": { "type": "string" }
+      }
+    }
+  },
+  "required": ["title"]
+};
+
+const BlogPost = Ad4mModel.fromJSONSchema(schema, {
+  name: "BlogPost",
+  namespace: "blog://",
+  resolveLanguage: "literal"
+});
+
+// Use like any other Ad4mModel
+const post = new BlogPost(perspective);
+post.title = "My First Post";
+post.tags = ["ad4m", "tutorial"];
+post.metadata = { author: "Alice", publishedAt: "2025-09-23" };
+await post.save();
+```
+
+### Configuration Options
+
+The second parameter to `fromJSONSchema()` is optional and accepts these options:
+
+```typescript
+interface JSONSchemaToModelOptions {
+  // Model configuration
+  name?: string;              // Class name override (optional: falls back to x-ad4m.className → schema.title → schema.$id)
+  namespace?: string;         // Base namespace for predicates (optional: falls back to x-ad4m.namespace → schema.title → schema.$id)
+
+  // Predicate generation helpers
+  // 1) Direct mapping: propertyName -> predicate URI
+  propertyMapping?: Record<string, string>;
+
+  // 2) Template: supports ${scheme}, ${namespace} (or ${ns}), ${title}, ${property}
+  predicateTemplate?: string;
+
+  // 3) Generator callback: receives schema title and property name
+  predicateGenerator?: (title: string, property: string) => string;
+
+  // Global property settings (applied to all properties unless overridden)
+  resolveLanguage?: string;   // Default language for all properties
+  local?: boolean;            // Whether properties are stored locally
+
+  // Property-specific overrides
+  // Accepts any PropertyOptions fields: through, initial, required, writable,
+  // resolveLanguage, getter, setter, local, transform
+  propertyOptions?: Record<string, Partial<PropertyOptions>>;
+}
+```
+
+### Class Name Resolution (Cascading Priority)
+
+The class name is determined using this priority order:
+
+1. **Explicit `options.name`** (highest priority)
+2. **`x-ad4m.className` metadata in schema**
+3. **Schema `title`**
+4. **Schema `$id`** (extracted from URI)
+5. **Error** if none found (lowest priority)
+
+```typescript
+// Priority 1: Explicit name override
+const Model1 = Ad4mModel.fromJSONSchema(schema, {
+  name: "CustomModelName"
+});
+
+// Priority 2: x-ad4m.className metadata
+const schemaWithClassName = {
+  "title": "Person",
+  "x-ad4m": {
+    "className": "PersonModel"
+  },
+  "properties": { /* ... */ }
+};
+const PersonClass = Ad4mModel.fromJSONSchema(schemaWithClassName);
+
+// Priority 3: Inferred from title
+const schemaWithTitle = {
+  "title": "BlogPost",  // becomes "BlogPost" class name
+  "properties": { /* ... */ }
+};
+const BlogPostClass = Ad4mModel.fromJSONSchema(schemaWithTitle);
+
+// Priority 4: Inferred from $id
+const schemaWithId = {
+  "$id": "https://example.com/schemas/product.schema.json",  // becomes "Product"
+  "properties": { /* ... */ }
+};
+const ProductClass = Ad4mModel.fromJSONSchema(schemaWithId);
+```
+
+### Namespace Resolution (Cascading Priority)
+
+The namespace is determined using this priority order:
+
+1. **Explicit `options.namespace`** (highest priority)
+2. **`x-ad4m.namespace` metadata in schema**
+3. **Schema `title`** (converted to namespace)
+4. **Schema `$id`** (extracted from URI)
+5. **Error** if none found (lowest priority)
+
+```typescript
+// Priority 1: Explicit namespace
+const Model1 = Ad4mModel.fromJSONSchema(schema, {
+  namespace: "custom://"
+});
+
+// Priority 2: x-ad4m.namespace metadata
+const schemaWithMetadata = {
+  "title": "Person",
+  "x-ad4m": {
+    "namespace": "person://"
+  },
+  "properties": { /* ... */ }
+};
+
+// Priority 3: Inferred from title
+const schemaWithTitle = {
+  "title": "BlogPost", // becomes "blogpost://"
+  "properties": { /* ... */ }
+};
+```
+
+### Property Predicate Resolution
+
+Each property's predicate URI is determined by (highest to lowest precedence):
+
+1. **`options.propertyMapping[name]`** (explicit mapping)
+2. **`x-ad4m.through` in property schema**
+3. **`predicateTemplate`** (supports `${scheme}`, `${namespace}`/`${ns}`, `${title}`, `${property}`)
+4. **`predicateGenerator(title, property)`**
+5. **Default**: `${namespace}/${propertyName}` (normalized)
+
+```typescript
+const schema = {
+  "title": "Product",
+  "properties": {
+    "name": { "type": "string" },
+    "price": { 
+      "type": "number",
+      "x-ad4m": {
+        "through": "product://cost"  // Custom predicate
+      }
+    }
+  }
+};
+
+const Product = Ad4mModel.fromJSONSchema(schema, {
+  name: "Product",
+  namespace: "product://",
+  // Option A: direct mapping
+  propertyMapping: {
+    name: "product://title"
+  }
+  // Option B: or per-property options
+  // propertyOptions: { name: { through: "product://title" } }
+});
+```
+
+### Advanced Schema Features
+
+#### Using x-ad4m Extensions
+
+Add AD4M-specific metadata directly to your JSON Schema:
+
+```typescript
+const advancedSchema = {
+  "title": "User",
+  "x-ad4m": {
+    "namespace": "user://",
+    "resolveLanguage": "literal"
+  },
+  "properties": {
+    "email": { 
+      "type": "string",
+      "x-ad4m": {
+        "through": "user://email_address",
+        "local": true
+      }
+    },
+    "profile": {
+      "type": "object",
+      "x-ad4m": {
+        "resolveLanguage": "literal"  // Store as JSON
+      }
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "x-ad4m": {
+        "through": "user://interests"
+      }
+    }
+  },
+  "required": ["email"]
+};
+
+const User = Ad4mModel.fromJSONSchema(advancedSchema, { name: "User" });
+```
+
+#### Complex Object Handling
+
+Object properties are automatically stored as JSON literals:
+
+```typescript
+const schema = {
+  "title": "Article",
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "author": { "type": "string" },
+        "publishedAt": { "type": "string" },
+        "views": { "type": "number" }
+      }
+    }
+  },
+  "required": ["metadata"]
+};
+
+const Article = Ad4mModel.fromJSONSchema(schema, {
+  namespace: "article://"
+});
+
+const article = new Article(perspective);
+article.metadata = {
+  author: "Alice",
+  publishedAt: "2025-09-23",
+  views: 42
+};
+await article.save();
+
+// Complex objects are preserved
+const saved = await Article.findAll(perspective);
+console.log(saved[0].metadata.author); // "Alice"
+```
+
+#### Array/Collection Mapping
+
+Arrays in JSON Schema automatically become AD4M collections:
+
+```typescript
+const schema = {
+  "title": "BlogPost",
+  "properties": {
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "categories": {
+      "type": "array", 
+      "items": { "type": "string" }
+    }
+  }
+};
+
+const BlogPost = Ad4mModel.fromJSONSchema(schema, {
+  namespace: "blog://"
+});
+
+const post = new BlogPost(perspective);
+post.tags = ["ad4m", "tutorial"];
+post.categories = ["technology"];
+await post.save();
+
+// Collections work with all standard AD4M collection methods
+post.addTags("blockchain");
+post.removeCategories("technology");
+```
+
+### Type Safety Considerations
+
+Since properties are added dynamically, TypeScript won't know about them at compile time. You can:
+
+1. **Use type assertions** for better IDE support:
+```typescript
+const BlogPost = Ad4mModel.fromJSONSchema(schema) as typeof Ad4mModel & {
+  new(perspective: PerspectiveProxy): Ad4mModel & {
+    title: string;
+    tags: string[];
+    metadata: { author: string; publishedAt: string };
+  }
+};
+```
+
+2. **Create TypeScript interfaces** for your schemas:
+```typescript
+interface BlogPostData {
+  title: string;
+  tags: string[];
+  metadata: { author: string; publishedAt: string };
+}
+
+const post = new BlogPost(perspective) as Ad4mModel & BlogPostData;
+post.title = "Type-safe access";
+```
+
+### Limitations and Best Practices
+
+- **No `author` property**: JSON schemas cannot define a top-level `author` property (conflicts with built-in AD4M property)
+- **Required properties**: At least one property must be required or have an initial value
+- **Complex objects**: Nested objects are stored as JSON literals, limiting semantic querying capabilities
+- **Performance**: For better semantic querying, consider flattening complex objects into separate properties
 
 ## Under the Hood
 
@@ -349,31 +771,45 @@ AD4M's model classes share concepts with SHACL (Shapes Constraint Language):
    reviews: Review[] = [];
    ```
 
-4. **Query Optimization**: Use specific queries instead of filtering in memory:
+4. **Query Optimization**: Use specific queries instead of filtering in memory, and leverage SurrealDB's performance:
    ```typescript
-   // Good
+   // Good - Let SurrealDB do the filtering (fast)
    const topRated = await Recipe.query(perspective)
      .where({ rating: { gt: 4 } })
      .get();
    
-   // Bad
+   // Bad - Fetching all and filtering in memory (slow)
    const all = await Recipe.findAll(perspective);
    const topRated = all.filter(r => r.rating > 4);
    ```
 
-5. **Subscriptions**: Clean up subscriptions when they're no longer needed:
+5. **Use SurrealDB by Default**: SurrealDB is 10-100x faster than Prolog for most queries:
    ```typescript
-   const subscription = await Recipe.query(perspective)
-     .where({ status: "active" })
-     .subscribe(recipes => {
-       // Handle updates
-     });
+   // Good - Uses SurrealDB by default
+   const recipes = await Recipe.findAll(perspective, {
+     where: { rating: { gt: 4 } }
+   });
    
-   // Later...
-   subscription.unsubscribe();
+   // Only use Prolog if you need backward compatibility
+   const recipesProlog = await Recipe.findAll(perspective, {
+     where: { rating: { gt: 4 } }
+   }, false); // useSurrealDB = false
    ```
 
-6. **Use Literals Appropriately**: 
+6. **Subscriptions**: Clean up subscriptions when they're no longer needed:
+   ```typescript
+   const builder = Recipe.query(perspective)
+     .where({ status: "active" });
+     
+   await builder.subscribe(recipes => {
+     // Handle updates
+   });
+   
+   // Later...
+   builder.dispose();
+   ```
+
+7. **Use Literals Appropriately**: 
    ```typescript
    // Good - Using literals for simple values
    @Property({
@@ -390,7 +826,7 @@ AD4M's model classes share concepts with SHACL (Shapes Constraint Language):
    instructions: string = "";
    ```
 
-7. **Meaningful Base Expressions**:
+8. **Meaningful Base Expressions**:
    ```typescript
    // Good - Descriptive base expression
    const recipe = new Recipe(perspective, "recipe://chocolate-cake-2024-03");

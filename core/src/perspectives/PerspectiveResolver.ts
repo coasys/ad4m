@@ -90,6 +90,14 @@ export default class PerspectiveResolver {
         return `[{"X": 1}]`
     }
 
+    @Query(returns => String)
+    async perspectiveQuerySurrealDB(
+        @Arg('uuid') uuid: string, 
+        @Arg('query') query: string
+    ): Promise<string> {
+        return `[]`
+    }
+
     @Mutation(returns => QuerySubscription)
     async perspectiveSubscribeQuery(
         @Arg('uuid') uuid: string,

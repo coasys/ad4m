@@ -1,5 +1,5 @@
 import type { FileExpression, EntryHash } from "./types.ts";
-//import { Blob } from "https://esm.sh/buffer@6.0.3";
+//import { Blob } from "https://esm.sh/v135/buffer@6.0.3";
 
 type ZomeCallFn = (fn: string, params: any) => Promise<any>;
 
