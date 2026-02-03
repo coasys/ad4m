@@ -1470,7 +1470,7 @@ impl Mutation {
                 .links
                 .into_iter()
                 .map(Link::from)
-                .map(|l| create_signed_expression(l, &agent_context))
+                .map(|l| create_signed_expression(l.normalize(), &agent_context))
                 .filter_map(Result::ok)
                 .map(LinkExpression::from)
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
@@ -1526,7 +1526,7 @@ impl Mutation {
                 .links
                 .into_iter()
                 .map(Link::from)
-                .map(|l| create_signed_expression(l, &agent_context))
+                .map(|l| create_signed_expression(l.normalize(), &agent_context))
                 .filter_map(Result::ok)
                 .map(LinkExpression::from)
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))

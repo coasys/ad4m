@@ -868,7 +868,7 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
-        let link_expr: LinkExpression = create_signed_expression(link, context)?.into();
+        let link_expr: LinkExpression = create_signed_expression(link.normalize(), context)?.into();
         self.add_link_expression(link_expr, status, batch_id).await
     }
 
@@ -1049,7 +1049,7 @@ impl PerspectiveInstance {
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let link_expressions: Result<Vec<_>, _> = links
             .into_iter()
-            .map(|l| create_signed_expression(l, context).map(LinkExpression::from))
+            .map(|l| create_signed_expression(l.normalize(), context).map(LinkExpression::from))
             .collect();
         let link_expressions = link_expressions?;
 
@@ -1107,7 +1107,7 @@ impl PerspectiveInstance {
             .additions
             .into_iter()
             .map(Link::from)
-            .map(|l| create_signed_expression(l, context))
+            .map(|l| create_signed_expression(l.normalize(), context))
             .map(|r| r.map(LinkExpression::from))
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
         let removals = mutations
@@ -1176,7 +1176,7 @@ impl PerspectiveInstance {
         };
 
         let new_link_expression =
-            LinkExpression::from(create_signed_expression(new_link, context)?);
+            LinkExpression::from(create_signed_expression(new_link.normalize(), context)?);
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
@@ -3220,7 +3220,7 @@ impl PerspectiveInstance {
             .await?;
 
         // Find the link whose source ends with {ClassName}Shape
-        for link in links {
+        for (link, _status) in links {
             if link.data.source.ends_with(&shape_suffix) {
                 return Self::parse_actions_from_literal(&link.data.target).map(Some);
             }
@@ -3247,7 +3247,7 @@ impl PerspectiveInstance {
             .await?;
 
         // Find the link whose source ends with {ClassName}.{propertyName}
-        for link in links {
+        for (link, _status) in links {
             if link.data.source.ends_with(&prop_suffix) {
                 return Self::parse_actions_from_literal(&link.data.target).map(Some);
             }
@@ -3271,7 +3271,7 @@ impl PerspectiveInstance {
             })
             .await?;
 
-        for link in links {
+        for (link, _status) in links {
             if link.data.source.ends_with(&prop_suffix) {
                 // Extract value from literal://string:{value}
                 let prefix = "literal://string:";
@@ -4253,7 +4253,7 @@ impl PerspectiveInstance {
         // Process additions
         for link in diff.additions {
             let status = link.status.unwrap_or(LinkStatus::Shared);
-            let signed_expr = create_signed_expression(link.data, context)?;
+            let signed_expr = create_signed_expression(link.data.normalize(), context)?;
             let decorated =
                 DecoratedLinkExpression::from((LinkExpression::from(signed_expr), status.clone()));
 
