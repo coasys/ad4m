@@ -38,6 +38,7 @@ use futures::future;
 use json5;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use urlencoding;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::sync::Arc;
@@ -3187,28 +3188,148 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Parse actions JSON from a literal target (format: "literal://string:{json}")
+    fn parse_actions_from_literal(target: &str) -> Result<Vec<Command>, AnyError> {
+        let prefix = "literal://string:";
+        if !target.starts_with(prefix) {
+            return Err(anyhow!("Invalid literal format: {}", target));
+        }
+        let json_str = &target[prefix.len()..];
+        // Decode URL-encoded characters if present
+        let decoded = urlencoding::decode(json_str)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| json_str.to_string());
+        serde_json::from_str(&decoded)
+            .map_err(|e| anyhow!("Failed to parse actions JSON: {} - input: {}", e, decoded))
+    }
+
+    /// Get actions from SHACL links for a shape-level predicate (constructor/destructor)
+    async fn get_shape_actions_from_shacl(
+        &self,
+        class_name: &str,
+        predicate: &str,
+    ) -> Result<Option<Vec<Command>>, AnyError> {
+        // Query for links with the given predicate that have a source ending with {ClassName}Shape
+        let shape_suffix = format!("{}Shape", class_name);
+
+        let links = self
+            .get_links_local(&LinkQuery {
+                predicate: Some(predicate.to_string()),
+                ..Default::default()
+            })
+            .await?;
+
+        // Find the link whose source ends with {ClassName}Shape
+        for link in links {
+            if link.data.source.ends_with(&shape_suffix) {
+                return Self::parse_actions_from_literal(&link.data.target).map(Some);
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Get actions from SHACL links for a property-level predicate (setter/adder/remover)
+    async fn get_property_actions_from_shacl(
+        &self,
+        class_name: &str,
+        property: &str,
+        predicate: &str,
+    ) -> Result<Option<Vec<Command>>, AnyError> {
+        // Property shape URI format: {namespace}{ClassName}.{propertyName}
+        let prop_suffix = format!("{}.{}", class_name, property);
+
+        let links = self
+            .get_links_local(&LinkQuery {
+                predicate: Some(predicate.to_string()),
+                ..Default::default()
+            })
+            .await?;
+
+        // Find the link whose source ends with {ClassName}.{propertyName}
+        for link in links {
+            if link.data.source.ends_with(&prop_suffix) {
+                return Self::parse_actions_from_literal(&link.data.target).map(Some);
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Get resolve language from SHACL links
+    async fn get_resolve_language_from_shacl(
+        &self,
+        class_name: &str,
+        property: &str,
+    ) -> Result<Option<String>, AnyError> {
+        let prop_suffix = format!("{}.{}", class_name, property);
+
+        let links = self
+            .get_links_local(&LinkQuery {
+                predicate: Some("ad4m://resolveLanguage".to_string()),
+                ..Default::default()
+            })
+            .await?;
+
+        for link in links {
+            if link.data.source.ends_with(&prop_suffix) {
+                // Extract value from literal://string:{value}
+                let prefix = "literal://string:";
+                if link.data.target.starts_with(prefix) {
+                    return Ok(Some(link.data.target[prefix.len()..].to_string()));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     async fn get_constructor_actions(
         &self,
         class_name: &str,
         context: &AgentContext,
     ) -> Result<Vec<Command>, AnyError> {
-        //let method_start = std::time::Instant::now();
-        //log::info!("🏗️ CONSTRUCTOR: Getting constructor actions for class '{}'", class_name);
+        // Try SHACL links first
+        if let Some(actions) = self
+            .get_shape_actions_from_shacl(class_name, "ad4m://constructor")
+            .await?
+        {
+            return Ok(actions);
+        }
 
+        // Fall back to Prolog
         let query = format!(
             r#"subject_class("{}", C), constructor(C, Actions)"#,
             class_name
         );
 
-        //log::info!("🏗️ CONSTRUCTOR: Running prolog query: {}", query);
-        //let query_start = std::time::Instant::now();
-
-        //log::info!("🏗️ CONSTRUCTOR: Prolog query completed in {:?} (total: {:?})",
-        //    query_start.elapsed(), method_start.elapsed());
-
         self.get_actions_from_prolog(query, context)
             .await?
             .ok_or(anyhow!("No constructor found for class: {}", class_name))
+    }
+
+    async fn get_destructor_actions(
+        &self,
+        class_name: &str,
+        context: &AgentContext,
+    ) -> Result<Vec<Command>, AnyError> {
+        // Try SHACL links first
+        if let Some(actions) = self
+            .get_shape_actions_from_shacl(class_name, "ad4m://destructor")
+            .await?
+        {
+            return Ok(actions);
+        }
+
+        // Fall back to Prolog
+        let query = format!(
+            r#"subject_class("{}", C), destructor(C, Actions)"#,
+            class_name
+        );
+
+        self.get_actions_from_prolog(query, context)
+            .await?
+            .ok_or(anyhow!("No destructor found for class: {}", class_name))
     }
 
     async fn get_property_setter_actions(
@@ -3217,19 +3338,65 @@ impl PerspectiveInstance {
         property: &str,
         context: &AgentContext,
     ) -> Result<Option<Vec<Command>>, AnyError> {
-        //let method_start = std::time::Instant::now();
-        //log::info!("🔧 PROPERTY SETTER: Getting setter for class '{}', property '{}'", class_name, property);
+        // Try SHACL links first
+        if let Some(actions) = self
+            .get_property_actions_from_shacl(class_name, property, "ad4m://setter")
+            .await?
+        {
+            return Ok(Some(actions));
+        }
 
+        // Fall back to Prolog
         let query = format!(
             r#"subject_class("{}", C), property_setter(C, "{}", Actions)"#,
             class_name, property
         );
 
-        //log::info!("🔧 PROPERTY SETTER: Running prolog query: {}", query);
-        //let query_start = std::time::Instant::now();
+        self.get_actions_from_prolog(query, context).await
+    }
 
-        //log::info!("🔧 PROPERTY SETTER: Prolog query completed in {:?} (total: {:?})",
-        //    query_start.elapsed(), method_start.elapsed());
+    async fn get_collection_adder_actions(
+        &self,
+        class_name: &str,
+        collection: &str,
+        context: &AgentContext,
+    ) -> Result<Option<Vec<Command>>, AnyError> {
+        // Try SHACL links first
+        if let Some(actions) = self
+            .get_property_actions_from_shacl(class_name, collection, "ad4m://adder")
+            .await?
+        {
+            return Ok(Some(actions));
+        }
+
+        // Fall back to Prolog
+        let query = format!(
+            r#"subject_class("{}", C), collection_adder(C, "{}", Actions)"#,
+            class_name, collection
+        );
+
+        self.get_actions_from_prolog(query, context).await
+    }
+
+    async fn get_collection_remover_actions(
+        &self,
+        class_name: &str,
+        collection: &str,
+        context: &AgentContext,
+    ) -> Result<Option<Vec<Command>>, AnyError> {
+        // Try SHACL links first
+        if let Some(actions) = self
+            .get_property_actions_from_shacl(class_name, collection, "ad4m://remover")
+            .await?
+        {
+            return Ok(Some(actions));
+        }
+
+        // Fall back to Prolog
+        let query = format!(
+            r#"subject_class("{}", C), collection_remover(C, "{}", Actions)"#,
+            class_name, collection
+        );
 
         self.get_actions_from_prolog(query, context).await
     }
@@ -3241,13 +3408,22 @@ impl PerspectiveInstance {
         value: &serde_json::Value,
         context: &AgentContext,
     ) -> Result<String, AnyError> {
-        let resolve_result = self.prolog_query_with_context(format!(
-            r#"subject_class("{}", C), property_resolve(C, "{}"), property_resolve_language(C, "{}", Language)"#,
-            class_name, property, property
-        ), context).await?;
-
-        if let Some(resolve_language) = prolog_get_first_string_binding(&resolve_result, "Language")
+        // Try SHACL links first for resolve language
+        let resolve_language = if let Some(lang) = self
+            .get_resolve_language_from_shacl(class_name, property)
+            .await?
         {
+            Some(lang)
+        } else {
+            // Fall back to Prolog
+            let resolve_result = self.prolog_query_with_context(format!(
+                r#"subject_class("{}", C), property_resolve(C, "{}"), property_resolve_language(C, "{}", Language)"#,
+                class_name, property, property
+            ), context).await?;
+            prolog_get_first_string_binding(&resolve_result, "Language")
+        };
+
+        if let Some(resolve_language) = resolve_language {
             // Create an expression for the value
             let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
             let content = serde_json::to_string(value)

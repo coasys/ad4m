@@ -1181,6 +1181,35 @@ export class PerspectiveProxy {
         return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({query}), exprAddr))
     }
 
+    /**
+     * Gets actions from SHACL links for a given predicate (e.g., ad4m://constructor, ad4m://destructor).
+     * Returns the parsed action array if found, or null if not found.
+     */
+    private async getActionsFromSHACL(className: string, predicate: string): Promise<any[] | null> {
+        const shapeSuffix = `${className}Shape`;
+        const links = await this.get(new LinkQuery({ predicate }));
+
+        for (const link of links) {
+            if (link.data.source.endsWith(shapeSuffix)) {
+                // Parse actions from literal://string:{json}
+                const prefix = "literal://string:";
+                if (link.data.target.startsWith(prefix)) {
+                    const jsonStr = link.data.target.slice(prefix.length);
+                    // Decode URL-encoded JSON if needed
+                    const decoded = decodeURIComponent(jsonStr);
+                    try {
+                        return JSON.parse(decoded);
+                    } catch (e) {
+                        console.warn(`Failed to parse SHACL actions JSON for ${className}:`, e);
+                        return null;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
     /** Removes a subject instance by running its (SDNA defined) destructor,
      * which means removing links around the given expression address
      *
@@ -1193,13 +1222,20 @@ export class PerspectiveProxy {
      */
     async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
-        let result = await this.infer(`subject_class("${className}", C), destructor(C, Actions)`)
-        if(!result.length) {
-            throw "No destructor found for given subject class: " + className
+
+        // Try SHACL links first
+        let actions = await this.getActionsFromSHACL(className, "ad4m://destructor");
+
+        if (!actions) {
+            // Fall back to Prolog
+            let result = await this.infer(`subject_class("${className}", C), destructor(C, Actions)`)
+            if(!result.length) {
+                throw "No destructor found for given subject class: " + className
+            }
+            actions = result.map(x => eval(x.Actions))[0]
         }
 
-        let actions = result.map(x => eval(x.Actions))
-        await this.executeAction(actions[0], exprAddr, undefined, batchId)
+        await this.executeAction(actions, exprAddr, undefined, batchId)
     }
 
     /** Checks if the given expression is a subject instance of the given subject class

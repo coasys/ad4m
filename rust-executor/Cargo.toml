@@ -48,6 +48,7 @@ sys_traits = "=0.1.9"
 # deno_runtime = {version = "0.162.0", path = "../../deno/runtime"}
 tokio = { version = "1.25.0", features = ["full"] }
 url = "2.3.1"
+urlencoding = "2.1"
 futures = "0.3.28"
 tokio-stream = { version = "0.1.12", features = ["sync"] }
 lazy_static = "1.4.0"
