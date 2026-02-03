@@ -62,11 +62,8 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
     let shape_uri = format!("{}{}Shape", namespace, class_name);
 
     // Class definition links
-    links.push(Link {
-        source: "ad4m://self".to_string(),
-        predicate: Some("ad4m://has_subject_class".to_string()),
-        target: format!("literal://string:{}", class_name),
-    });
+    // Note: The ad4m://has_subject_class link is created by add_sdna(), not here,
+    // to avoid duplication since add_sdna() always creates that link
 
     links.push(Link {
         source: shape.target_class.clone(),
@@ -322,11 +319,11 @@ mod tests {
 
         let links = parse_shacl_to_links(shacl_json, "Recipe").unwrap();
 
-        // Should have: class definition (5) + property shape (7) = 12 links minimum
-        assert!(links.len() >= 12);
+        // Should have: class definition (4) + property shape (7) = 11 links minimum
+        // Note: ad4m://has_subject_class link is NOT created here - it's created by add_sdna()
+        assert!(links.len() >= 11);
 
-        // Check for key links
-        assert!(links.iter().any(|l| l.source == "ad4m://self" && l.target == "literal://string:Recipe"));
+        // Check for key links (note: ad4m://self -> literal://string:Recipe is NOT here)
         assert!(links.iter().any(|l| l.source == "recipe://RecipeShape" && l.predicate == Some("sh://targetClass".to_string())));
         assert!(links.iter().any(|l| l.source == "recipe://Recipe.name" && l.predicate == Some("sh://path".to_string())));
     }
