@@ -91,8 +91,8 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
 
     // Constructor actions (stored as JSON in literal)
     if !shape.constructor_actions.is_empty() {
-        let constructor_json = serde_json::to_string(&shape.constructor_actions)
-            .unwrap_or_else(|_| "[]".to_string());
+        let constructor_json =
+            serde_json::to_string(&shape.constructor_actions).unwrap_or_else(|_| "[]".to_string());
         links.push(Link {
             source: shape_uri.clone(),
             predicate: Some("ad4m://constructor".to_string()),
@@ -102,8 +102,8 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
 
     // Destructor actions (stored as JSON in literal)
     if !shape.destructor_actions.is_empty() {
-        let destructor_json = serde_json::to_string(&shape.destructor_actions)
-            .unwrap_or_else(|_| "[]".to_string());
+        let destructor_json =
+            serde_json::to_string(&shape.destructor_actions).unwrap_or_else(|_| "[]".to_string());
         links.push(Link {
             source: shape_uri.clone(),
             predicate: Some("ad4m://destructor".to_string()),
@@ -114,10 +114,12 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
     // Property shape links (Option 3: Named Property Shapes)
     for prop in shape.properties.iter() {
         // Use name field if provided, otherwise extract from path
-        let prop_name = prop.name.as_ref()
+        let prop_name = prop
+            .name
+            .as_ref()
             .map(|n| n.clone())
             .unwrap_or_else(|| extract_local_name(&prop.path));
-        
+
         let prop_shape_uri = format!("{}{}.{}", namespace, class_name, prop_name);
 
         links.push(Link {
@@ -204,8 +206,8 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
 
         // Property-level actions (setter, adder, remover)
         if !prop.setter.is_empty() {
-            let setter_json = serde_json::to_string(&prop.setter)
-                .unwrap_or_else(|_| "[]".to_string());
+            let setter_json =
+                serde_json::to_string(&prop.setter).unwrap_or_else(|_| "[]".to_string());
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://setter".to_string()),
@@ -214,8 +216,8 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         }
 
         if !prop.adder.is_empty() {
-            let adder_json = serde_json::to_string(&prop.adder)
-                .unwrap_or_else(|_| "[]".to_string());
+            let adder_json =
+                serde_json::to_string(&prop.adder).unwrap_or_else(|_| "[]".to_string());
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://adder".to_string()),
@@ -224,8 +226,8 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         }
 
         if !prop.remover.is_empty() {
-            let remover_json = serde_json::to_string(&prop.remover)
-                .unwrap_or_else(|_| "[]".to_string());
+            let remover_json =
+                serde_json::to_string(&prop.remover).unwrap_or_else(|_| "[]".to_string());
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://remover".to_string()),
@@ -239,7 +241,10 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
 
 /// Parse Prolog SDNA code and generate SHACL links for the class
 /// This enables backward compatibility with Prolog-only SDNA definitions
-pub fn parse_prolog_sdna_to_shacl_links(prolog_sdna: &str, class_name: &str) -> Result<Vec<Link>, AnyError> {
+pub fn parse_prolog_sdna_to_shacl_links(
+    prolog_sdna: &str,
+    class_name: &str,
+) -> Result<Vec<Link>, AnyError> {
     use regex::Regex;
 
     let mut links = Vec::new();
@@ -249,7 +254,8 @@ pub fn parse_prolog_sdna_to_shacl_links(prolog_sdna: &str, class_name: &str) -> 
     let predicate_regex = Regex::new(r#"triple\([^,]+,\s*"([a-zA-Z][a-zA-Z0-9+.-]*://)[^"]*""#)
         .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
 
-    let namespace = predicate_regex.captures(prolog_sdna)
+    let namespace = predicate_regex
+        .captures(prolog_sdna)
         .map(|c| c.get(1).map(|m| m.as_str().to_string()))
         .flatten()
         .unwrap_or_else(|| "ad4m://".to_string());
@@ -328,16 +334,20 @@ pub fn parse_prolog_sdna_to_shacl_links(prolog_sdna: &str, class_name: &str) -> 
         .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
 
     // property_resolve_language(c, "name", "literal").
-    let resolve_lang_regex = Regex::new(r#"property_resolve_language\([^,]+,\s*"([^"]+)",\s*"([^"]+)"\)"#)
-        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+    let resolve_lang_regex =
+        Regex::new(r#"property_resolve_language\([^,]+,\s*"([^"]+)",\s*"([^"]+)"\)"#)
+            .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
 
     // Collect properties
-    let mut properties: std::collections::HashMap<String, (Option<String>, Option<String>, Option<String>)> =
-        std::collections::HashMap::new();
+    let mut properties: std::collections::HashMap<
+        String,
+        (Option<String>, Option<String>, Option<String>),
+    > = std::collections::HashMap::new();
 
     for caps in property_regex.captures_iter(prolog_sdna) {
         if let Some(prop_name) = caps.get(1) {
-            properties.entry(prop_name.as_str().to_string())
+            properties
+                .entry(prop_name.as_str().to_string())
                 .or_insert((None, None, None));
         }
     }
@@ -416,24 +426,30 @@ pub fn parse_prolog_sdna_to_shacl_links(prolog_sdna: &str, class_name: &str) -> 
         .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
 
     // collection_getter(c, Base, "comments", List) :- findall(C, triple(Base, "predicate://path", C), List).
-    let coll_getter_regex = Regex::new(r#"collection_getter\([^,]+,\s*[^,]+,\s*"([^"]+)"[^)]*\)\s*:-.*triple\([^,]+,\s*"([^"]+)""#)
-        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+    let coll_getter_regex = Regex::new(
+        r#"collection_getter\([^,]+,\s*[^,]+,\s*"([^"]+)"[^)]*\)\s*:-.*triple\([^,]+,\s*"([^"]+)""#,
+    )
+    .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
 
     // collection_adder(c, "commentss", '[{action: ...}]').
     let coll_adder_regex = Regex::new(r#"collection_adder\([^,]+,\s*"([^"]+)",\s*'(\[.*?\])'\)"#)
         .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
 
     // collection_remover(c, "commentss", '[{action: ...}]').
-    let coll_remover_regex = Regex::new(r#"collection_remover\([^,]+,\s*"([^"]+)",\s*'(\[.*?\])'\)"#)
-        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+    let coll_remover_regex =
+        Regex::new(r#"collection_remover\([^,]+,\s*"([^"]+)",\s*'(\[.*?\])'\)"#)
+            .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
 
     // Collect collections: name -> (path, adder, remover)
-    let mut collections: std::collections::HashMap<String, (Option<String>, Option<String>, Option<String>)> =
-        std::collections::HashMap::new();
+    let mut collections: std::collections::HashMap<
+        String,
+        (Option<String>, Option<String>, Option<String>),
+    > = std::collections::HashMap::new();
 
     for caps in collection_regex.captures_iter(prolog_sdna) {
         if let Some(coll_name) = caps.get(1) {
-            collections.entry(coll_name.as_str().to_string())
+            collections
+                .entry(coll_name.as_str().to_string())
                 .or_insert((None, None, None));
         }
     }
@@ -557,7 +573,8 @@ pub fn extract_namespace(uri: &str) -> String {
 
 /// Extract local name from URI (e.g., "recipe://name" -> "name")
 fn extract_local_name(uri: &str) -> String {
-    uri.split('/').last()
+    uri.split('/')
+        .last()
         .filter(|s| !s.is_empty())
         .unwrap_or("unknown")
         .to_string()
@@ -574,16 +591,25 @@ mod tests {
         assert_eq!(extract_namespace("simple://Test"), "simple://");
 
         // W3C-style URIs with hash fragments -> include the hash
-        assert_eq!(extract_namespace("http://example.com/ns#Recipe"), "http://example.com/ns#");
+        assert_eq!(
+            extract_namespace("http://example.com/ns#Recipe"),
+            "http://example.com/ns#"
+        );
 
         // W3C-style URIs with slash paths -> include trailing slash
-        assert_eq!(extract_namespace("http://example.com/ns/Recipe"), "http://example.com/ns/");
+        assert_eq!(
+            extract_namespace("http://example.com/ns/Recipe"),
+            "http://example.com/ns/"
+        );
     }
 
     #[test]
     fn test_extract_local_name() {
         assert_eq!(extract_local_name("recipe://name"), "name");
-        assert_eq!(extract_local_name("http://example.com/property"), "property");
+        assert_eq!(
+            extract_local_name("http://example.com/property"),
+            "property"
+        );
         assert_eq!(extract_local_name("simple://test/path/item"), "item");
     }
 
@@ -611,8 +637,12 @@ mod tests {
         assert!(links.len() >= 11);
 
         // Check for key links (note: ad4m://self -> literal://string:Recipe is NOT here)
-        assert!(links.iter().any(|l| l.source == "recipe://RecipeShape" && l.predicate == Some("sh://targetClass".to_string())));
-        assert!(links.iter().any(|l| l.source == "recipe://Recipe.name" && l.predicate == Some("sh://path".to_string())));
+        assert!(links.iter().any(|l| l.source == "recipe://RecipeShape"
+            && l.predicate == Some("sh://targetClass".to_string())));
+        assert!(links
+            .iter()
+            .any(|l| l.source == "recipe://Recipe.name"
+                && l.predicate == Some("sh://path".to_string())));
     }
 
     #[test]
@@ -648,38 +678,47 @@ mod tests {
         let links = parse_shacl_to_links(shacl_json, "Recipe").unwrap();
 
         // Check for constructor action link
-        assert!(links.iter().any(|l|
-            l.source == "recipe://RecipeShape" &&
-            l.predicate == Some("ad4m://constructor".to_string()) &&
-            l.target.starts_with("literal://string:")
-        ), "Missing constructor action link");
+        assert!(
+            links.iter().any(|l| l.source == "recipe://RecipeShape"
+                && l.predicate == Some("ad4m://constructor".to_string())
+                && l.target.starts_with("literal://string:")),
+            "Missing constructor action link"
+        );
 
         // Check for destructor action link
-        assert!(links.iter().any(|l|
-            l.source == "recipe://RecipeShape" &&
-            l.predicate == Some("ad4m://destructor".to_string()) &&
-            l.target.starts_with("literal://string:")
-        ), "Missing destructor action link");
+        assert!(
+            links.iter().any(|l| l.source == "recipe://RecipeShape"
+                && l.predicate == Some("ad4m://destructor".to_string())
+                && l.target.starts_with("literal://string:")),
+            "Missing destructor action link"
+        );
 
         // Check for property setter action link
-        assert!(links.iter().any(|l|
-            l.source == "recipe://Recipe.name" &&
-            l.predicate == Some("ad4m://setter".to_string()) &&
-            l.target.starts_with("literal://string:")
-        ), "Missing setter action link");
+        assert!(
+            links.iter().any(|l| l.source == "recipe://Recipe.name"
+                && l.predicate == Some("ad4m://setter".to_string())
+                && l.target.starts_with("literal://string:")),
+            "Missing setter action link"
+        );
 
         // Check for collection adder action link
-        assert!(links.iter().any(|l|
-            l.source == "recipe://Recipe.ingredients" &&
-            l.predicate == Some("ad4m://adder".to_string()) &&
-            l.target.starts_with("literal://string:")
-        ), "Missing adder action link");
+        assert!(
+            links
+                .iter()
+                .any(|l| l.source == "recipe://Recipe.ingredients"
+                    && l.predicate == Some("ad4m://adder".to_string())
+                    && l.target.starts_with("literal://string:")),
+            "Missing adder action link"
+        );
 
         // Check for collection remover action link
-        assert!(links.iter().any(|l|
-            l.source == "recipe://Recipe.ingredients" &&
-            l.predicate == Some("ad4m://remover".to_string()) &&
-            l.target.starts_with("literal://string:")
-        ), "Missing remover action link");
+        assert!(
+            links
+                .iter()
+                .any(|l| l.source == "recipe://Recipe.ingredients"
+                    && l.predicate == Some("ad4m://remover".to_string())
+                    && l.target.starts_with("literal://string:")),
+            "Missing remover action link"
+        );
     }
 }

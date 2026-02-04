@@ -1,5 +1,5 @@
 use super::sdna::{generic_link_fact, is_sdna_link};
-use super::shacl_parser::{parse_shacl_to_links, parse_prolog_sdna_to_shacl_links};
+use super::shacl_parser::{parse_prolog_sdna_to_shacl_links, parse_shacl_to_links};
 use super::update_perspective;
 use super::utils::{
     prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string,
@@ -37,7 +37,6 @@ use deno_core::error::AnyError;
 use futures::future;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use urlencoding;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::sync::Arc;
@@ -45,6 +44,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 use tokio::{join, time};
+use urlencoding;
 use uuid;
 use uuid::Uuid;
 
@@ -3187,7 +3187,6 @@ impl PerspectiveInstance {
         })
     }
 
-
     /// Parse actions JSON from a literal target (format: "literal://string:{json}")
     fn parse_actions_from_literal(target: &str) -> Result<Vec<Command>, AnyError> {
         let prefix = "literal://string:";
@@ -3284,22 +3283,22 @@ impl PerspectiveInstance {
         Ok(None)
     }
 
-    async fn get_constructor_actions(
-        &self,
-        class_name: &str,
-    ) -> Result<Vec<Command>, AnyError> {
+    async fn get_constructor_actions(&self, class_name: &str) -> Result<Vec<Command>, AnyError> {
         self.get_shape_actions_from_shacl(class_name, "ad4m://constructor")
             .await?
-            .ok_or(anyhow!("No SHACL constructor found for class: {}. Ensure the class has SHACL definitions.", class_name))
+            .ok_or(anyhow!(
+                "No SHACL constructor found for class: {}. Ensure the class has SHACL definitions.",
+                class_name
+            ))
     }
 
-    async fn get_destructor_actions(
-        &self,
-        class_name: &str,
-    ) -> Result<Vec<Command>, AnyError> {
+    async fn get_destructor_actions(&self, class_name: &str) -> Result<Vec<Command>, AnyError> {
         self.get_shape_actions_from_shacl(class_name, "ad4m://destructor")
             .await?
-            .ok_or(anyhow!("No SHACL destructor found for class: {}. Ensure the class has SHACL definitions.", class_name))
+            .ok_or(anyhow!(
+                "No SHACL destructor found for class: {}. Ensure the class has SHACL definitions.",
+                class_name
+            ))
     }
 
     async fn get_property_setter_actions(
@@ -3394,9 +3393,8 @@ impl PerspectiveInstance {
             if let serde_json::Value::Object(obj) = obj {
                 for (prop, value) in obj.iter() {
                     //let prop_start = std::time::Instant::now();
-                    if let Some(setter_commands) = self
-                        .get_property_setter_actions(&class_name, prop)
-                        .await?
+                    if let Some(setter_commands) =
+                        self.get_property_setter_actions(&class_name, prop).await?
                     {
                         let target_value = self
                             .resolve_property_value(&class_name, prop, value)
@@ -5246,12 +5244,15 @@ mod tests {
         println!("SHACL links added: {} links total", links.len());
 
         // Verify we have the subject class link
-        let class_link_exists = links.iter().any(|l|
-            l.data.source == "ad4m://self" &&
-            l.data.predicate == Some("ad4m://has_subject_class".to_string()) &&
-            l.data.target == "literal://string:Recipe"
+        let class_link_exists = links.iter().any(|l| {
+            l.data.source == "ad4m://self"
+                && l.data.predicate == Some("ad4m://has_subject_class".to_string())
+                && l.data.target == "literal://string:Recipe"
+        });
+        assert!(
+            class_link_exists,
+            "Expected ad4m://has_subject_class link for Recipe"
         );
-        assert!(class_link_exists, "Expected ad4m://has_subject_class link for Recipe");
 
         println!("✓ Recipe SDNA added with SHACL definitions");
 
