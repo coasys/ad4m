@@ -978,23 +978,21 @@ export class PerspectiveProxy {
     /** 
      * Adds Social DNA code to the perspective.
      * 
-     * **Recommended:** Use `shaclJson` parameter for new code. The `sdnaCode` parameter 
-     * accepts legacy Prolog SDNA which is automatically converted to SHACL links.
+     * **Recommended:** Use {@link addShacl} instead, which accepts the `SHACLShape` type directly.
+     * This method is primarily for the GraphQL layer and legacy Prolog code.
      * 
      * @param name - Unique name for this SDNA definition
      * @param sdnaCode - Prolog SDNA code (legacy, can be empty string if shaclJson provided)
      * @param sdnaType - Type of SDNA: "subject_class", "flow", or "custom"
-     * @param shaclJson - SHACL JSON representation (recommended for new code)
+     * @param shaclJson - SHACL JSON string (use addShacl() for type-safe alternative)
      * 
      * @example
-     * // New way (recommended): Use SHACL JSON directly
+     * // Recommended: Use addShacl() with SHACLShape type
      * const shape = new SHACLShape('recipe://Recipe');
-     * await perspective.addSdna('Recipe', '', 'subject_class', JSON.stringify(shape.toJSON()));
-     * 
-     * // Or use the addShacl() convenience method:
+     * shape.addProperty({ name: 'title', path: 'recipe://title', datatype: 'xsd:string' });
      * await perspective.addShacl('Recipe', shape);
      * 
-     * // Legacy way: Prolog code is auto-converted to SHACL
+     * // Legacy: Prolog code is auto-converted to SHACL
      * await perspective.addSdna('Recipe', prologCode, 'subject_class');
      */
     async addSdna(name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string) {
@@ -1002,8 +1000,31 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Store a SHACL shape in this Perspective
-     * Serializes the shape as RDF triples (links) for native AD4M storage
+     * **Recommended way to add SDNA schemas.**
+     * 
+     * Store a SHACL shape in this Perspective using the type-safe `SHACLShape` class.
+     * The shape is serialized as RDF triples (links) for native AD4M storage and querying.
+     * 
+     * @param name - Unique name for this schema (e.g., 'Recipe', 'Task')
+     * @param shape - SHACLShape instance defining the schema
+     * 
+     * @example
+     * import { SHACLShape } from '@coasys/ad4m';
+     * 
+     * const shape = new SHACLShape('recipe://Recipe');
+     * shape.addProperty({ 
+     *   name: 'title', 
+     *   path: 'recipe://title', 
+     *   datatype: 'xsd:string',
+     *   minCount: 1 
+     * });
+     * shape.addProperty({
+     *   name: 'ingredients',
+     *   path: 'recipe://has_ingredient',
+     *   // No maxCount = collection
+     * });
+     * 
+     * await perspective.addShacl('Recipe', shape);
      */
     async addShacl(name: string, shape: import("../shacl/SHACLShape").SHACLShape): Promise<void> {
         // Serialize shape to links
