@@ -112,6 +112,9 @@ export interface SHACLPropertyShape {
   /** AD4M-specific: Writable property */
   writable?: boolean;
 
+  /** AD4M-specific: Language to resolve property values through */
+  resolveLanguage?: string;
+
   /** AD4M-specific: Setter action for this property */
   setter?: AD4MAction[];
 

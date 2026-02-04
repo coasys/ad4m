@@ -879,7 +879,7 @@ export function ModelOptions(opts: ModelOptionsOptions) {
             }
             
             // Convert collections to SHACL property shapes
-            const collections = obj.__collections || {};
+            // (collections variable already declared above for namespace inference)
             for (const collName in collections) {
                 const collMeta = collections[collName];
                 
