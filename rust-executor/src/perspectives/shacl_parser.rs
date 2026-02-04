@@ -684,9 +684,12 @@ pub fn parse_prolog_sdna_to_shacl_links(
     // Extract adders (note: adder name might have extra 's' like "commentss")
     for caps in coll_adder_regex.captures_iter(prolog_sdna) {
         if let (Some(coll_name_with_s), Some(actions)) = (caps.get(1), caps.get(2)) {
-            // Try to match to a collection by removing trailing 's'
-            let coll_name = coll_name_with_s.as_str().trim_end_matches('s');
-            if let Some(entry) = collections.get_mut(coll_name) {
+            let name = coll_name_with_s.as_str();
+            // Try exact match first, then with one trailing 's' removed
+            let entry = collections
+                .get_mut(name)
+                .or_else(|| collections.get_mut(name.strip_suffix('s').unwrap_or(name)));
+            if let Some(entry) = entry {
                 entry.1 = Some(convert_prolog_json_to_json(actions.as_str()));
             }
         }
@@ -695,8 +698,12 @@ pub fn parse_prolog_sdna_to_shacl_links(
     // Extract removers
     for caps in coll_remover_regex.captures_iter(prolog_sdna) {
         if let (Some(coll_name_with_s), Some(actions)) = (caps.get(1), caps.get(2)) {
-            let coll_name = coll_name_with_s.as_str().trim_end_matches('s');
-            if let Some(entry) = collections.get_mut(coll_name) {
+            let name = coll_name_with_s.as_str();
+            // Try exact match first, then with one trailing 's' removed
+            let entry = collections
+                .get_mut(name)
+                .or_else(|| collections.get_mut(name.strip_suffix('s').unwrap_or(name)));
+            if let Some(entry) = entry {
                 entry.2 = Some(convert_prolog_json_to_json(actions.as_str()));
             }
         }

@@ -509,14 +509,20 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "sh://minCount"
       );
       if (minCountLink) {
-        prop.minCount = parseInt(minCountLink.target.replace(/literal:\/\/|^\^.*$/g, ''));
+        // Handle both formats: literal://5^^xsd:integer and literal://number:5
+        let val = minCountLink.target.replace('literal://', '').replace(/\^\^.*$/, '');
+        if (val.startsWith('number:')) val = val.substring(7);
+        prop.minCount = parseInt(val);
       }
       
       const maxCountLink = links.find(l => 
         l.source === propShapeId && l.predicate === "sh://maxCount"
       );
       if (maxCountLink) {
-        prop.maxCount = parseInt(maxCountLink.target.replace(/literal:\/\/|^\^.*$/g, ''));
+        // Handle both formats: literal://5^^xsd:integer and literal://number:5
+        let val = maxCountLink.target.replace('literal://', '').replace(/\^\^.*$/, '');
+        if (val.startsWith('number:')) val = val.substring(7);
+        prop.maxCount = parseInt(val);
       }
       
       const patternLink = links.find(l => 

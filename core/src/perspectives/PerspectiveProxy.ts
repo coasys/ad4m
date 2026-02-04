@@ -1240,12 +1240,19 @@ export class PerspectiveProxy {
         const flowUri = flowUriLinks[0].data.target;
         
         // Get all links related to this flow
+        // flowUri format: {namespace}{Name}Flow
+        // State/transition URIs format: {namespace}{Name}.{stateName}
+        // Replace the trailing 'Flow' with '.' to find state/transition links
+        const flowPrefix = flowUri.endsWith('Flow') 
+            ? flowUri.slice(0, -4) + '.'  // Remove 'Flow', add '.'
+            : flowUri + '.';
+        
         const allLinks = await this.get(new LinkQuery({}));
         const flowLinks = allLinks
             .map(l => l.data)
             .filter(l => 
                 l.source === flowUri || 
-                l.source.startsWith(flowUri.replace('Flow', '.'))
+                l.source.startsWith(flowPrefix)
             );
         
         // Reconstruct flow from links
