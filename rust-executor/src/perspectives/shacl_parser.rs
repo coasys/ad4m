@@ -686,10 +686,12 @@ pub fn parse_prolog_sdna_to_shacl_links(
         if let (Some(coll_name_with_s), Some(actions)) = (caps.get(1), caps.get(2)) {
             let name = coll_name_with_s.as_str();
             // Try exact match first, then with one trailing 's' removed
-            let entry = collections
-                .get_mut(name)
-                .or_else(|| collections.get_mut(name.strip_suffix('s').unwrap_or(name)));
-            if let Some(entry) = entry {
+            let key = if collections.contains_key(name) {
+                name.to_string()
+            } else {
+                name.strip_suffix('s').unwrap_or(name).to_string()
+            };
+            if let Some(entry) = collections.get_mut(&key) {
                 entry.1 = Some(convert_prolog_json_to_json(actions.as_str()));
             }
         }
@@ -700,10 +702,12 @@ pub fn parse_prolog_sdna_to_shacl_links(
         if let (Some(coll_name_with_s), Some(actions)) = (caps.get(1), caps.get(2)) {
             let name = coll_name_with_s.as_str();
             // Try exact match first, then with one trailing 's' removed
-            let entry = collections
-                .get_mut(name)
-                .or_else(|| collections.get_mut(name.strip_suffix('s').unwrap_or(name)));
-            if let Some(entry) = entry {
+            let key = if collections.contains_key(name) {
+                name.to_string()
+            } else {
+                name.strip_suffix('s').unwrap_or(name).to_string()
+            };
+            if let Some(entry) = collections.get_mut(&key) {
                 entry.2 = Some(convert_prolog_json_to_json(actions.as_str()));
             }
         }
