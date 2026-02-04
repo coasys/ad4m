@@ -219,18 +219,22 @@ for link in links {
 - [x] `resolve_property_value()` - Try SHACL for resolve language
 - [x] TypeScript `removeSubject()` - Try SHACL for destructor actions
 
-### Phase 3: Remove Prolog Dependency (Future)
+### Phase 3: Remove Prolog Fallbacks (This PR)
 
-- [ ] Remove Prolog fallbacks once SHACL fully tested
-- [ ] Migrate Flows to same pattern
-- [ ] Remove scryer-prolog dependency
+> **Note:** Prolog engines (scryer-prolog) are kept for complex queries and future
+> advanced features. Only the _fallback pattern_ is removed - SHACL becomes the
+> primary source for SDNA actions.
+
+- [x] Remove Prolog fallbacks for action retrieval (SHACL-first is now SHACL-only)
+- [ ] Migrate Flows to same SHACL link pattern
+- [x] Keep scryer-prolog dependency (for complex Prolog queries later)
 
 ---
 
 ## Benefits
 
 1. **W3C Standard** - Interoperable with SHACL ecosystem
-2. **No Prolog** - Simpler runtime, faster startup
+2. **Cleaner Runtime** - SHACL as single source for SDNA actions (Prolog still available for complex queries)
 3. **Queryable** - All metadata as links in SurrealDB
 4. **Debuggable** - Inspect schema as regular links
 5. **Extensible** - Add new action types without schema changes
