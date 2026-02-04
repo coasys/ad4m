@@ -978,69 +978,55 @@ mod tests {
 
         // Check for flow type link
         assert!(
-            links
-                .iter()
-                .any(|l| l.source == "todo://TODOFlow"
-                    && l.predicate == Some("rdf://type".to_string())
-                    && l.target == "ad4m://Flow"),
+            links.iter().any(|l| l.source == "todo://TODOFlow"
+                && l.predicate == Some("rdf://type".to_string())
+                && l.target == "ad4m://Flow"),
             "Missing flow type link"
         );
 
         // Check for flowable link
         assert!(
-            links
-                .iter()
-                .any(|l| l.source == "todo://TODOFlow"
-                    && l.predicate == Some("ad4m://flowable".to_string())
-                    && l.target == "ad4m://any"),
+            links.iter().any(|l| l.source == "todo://TODOFlow"
+                && l.predicate == Some("ad4m://flowable".to_string())
+                && l.target == "ad4m://any"),
             "Missing flowable link"
         );
 
         // Check for start action link
         assert!(
-            links
-                .iter()
-                .any(|l| l.source == "todo://TODOFlow"
-                    && l.predicate == Some("ad4m://startAction".to_string())
-                    && l.target.starts_with("literal://string:")),
+            links.iter().any(|l| l.source == "todo://TODOFlow"
+                && l.predicate == Some("ad4m://startAction".to_string())
+                && l.target.starts_with("literal://string:")),
             "Missing start action link"
         );
 
         // Check for state links
         assert!(
-            links
-                .iter()
-                .any(|l| l.source == "todo://TODOFlow"
-                    && l.predicate == Some("ad4m://hasState".to_string())
-                    && l.target == "todo://TODO.ready"),
+            links.iter().any(|l| l.source == "todo://TODOFlow"
+                && l.predicate == Some("ad4m://hasState".to_string())
+                && l.target == "todo://TODO.ready"),
             "Missing ready state link"
         );
 
         assert!(
-            links
-                .iter()
-                .any(|l| l.source == "todo://TODOFlow"
-                    && l.predicate == Some("ad4m://hasState".to_string())
-                    && l.target == "todo://TODO.done"),
+            links.iter().any(|l| l.source == "todo://TODOFlow"
+                && l.predicate == Some("ad4m://hasState".to_string())
+                && l.target == "todo://TODO.done"),
             "Missing done state link"
         );
 
         // Check for transition link
         assert!(
-            links
-                .iter()
-                .any(|l| l.source == "todo://TODOFlow"
-                    && l.predicate == Some("ad4m://hasTransition".to_string())
-                    && l.target == "todo://TODO.readyTodone"),
+            links.iter().any(|l| l.source == "todo://TODOFlow"
+                && l.predicate == Some("ad4m://hasTransition".to_string())
+                && l.target == "todo://TODO.readyTodone"),
             "Missing transition link"
         );
 
         // Check for transition action name
         assert!(
-            links
-                .iter()
-                .any(|l| l.source == "todo://TODO.readyTodone"
-                    && l.predicate == Some("ad4m://actionName".to_string())),
+            links.iter().any(|l| l.source == "todo://TODO.readyTodone"
+                && l.predicate == Some("ad4m://actionName".to_string())),
             "Missing action name link"
         );
     }
