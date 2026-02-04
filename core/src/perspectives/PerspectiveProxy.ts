@@ -975,7 +975,28 @@ export class PerspectiveProxy {
         return typeof code === 'string' ? code : null;
     }
 
-    /** Adds the given Social DNA code to the perspective's SDNA code */
+    /** 
+     * Adds Social DNA code to the perspective.
+     * 
+     * **Recommended:** Use `shaclJson` parameter for new code. The `sdnaCode` parameter 
+     * accepts legacy Prolog SDNA which is automatically converted to SHACL links.
+     * 
+     * @param name - Unique name for this SDNA definition
+     * @param sdnaCode - Prolog SDNA code (legacy, can be empty string if shaclJson provided)
+     * @param sdnaType - Type of SDNA: "subject_class", "flow", or "custom"
+     * @param shaclJson - SHACL JSON representation (recommended for new code)
+     * 
+     * @example
+     * // New way (recommended): Use SHACL JSON directly
+     * const shape = new SHACLShape('recipe://Recipe');
+     * await perspective.addSdna('Recipe', '', 'subject_class', JSON.stringify(shape.toJSON()));
+     * 
+     * // Or use the addShacl() convenience method:
+     * await perspective.addShacl('Recipe', shape);
+     * 
+     * // Legacy way: Prolog code is auto-converted to SHACL
+     * await perspective.addSdna('Recipe', prologCode, 'subject_class');
+     */
     async addSdna(name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string) {
         return this.#client.addSdna(this.#handle.uuid, name, sdnaCode, sdnaType, shaclJson)
     }
