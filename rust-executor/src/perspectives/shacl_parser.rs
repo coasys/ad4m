@@ -237,9 +237,296 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
     Ok(links)
 }
 
+/// Parse Prolog SDNA code and generate SHACL links for the class
+/// This enables backward compatibility with Prolog-only SDNA definitions
+pub fn parse_prolog_sdna_to_shacl_links(prolog_sdna: &str, class_name: &str) -> Result<Vec<Link>, AnyError> {
+    use regex::Regex;
+
+    let mut links = Vec::new();
+
+    // Extract namespace from a predicate in the prolog code
+    // Look for patterns like triple(Base, "todo://state", ...) to find the namespace
+    let predicate_regex = Regex::new(r#"triple\([^,]+,\s*"([a-zA-Z][a-zA-Z0-9+.-]*://)[^"]*""#)
+        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+
+    let namespace = predicate_regex.captures(prolog_sdna)
+        .map(|c| c.get(1).map(|m| m.as_str().to_string()))
+        .flatten()
+        .unwrap_or_else(|| "ad4m://".to_string());
+
+    let target_class = format!("{}{}", namespace, class_name);
+    let shape_uri = format!("{}{}Shape", namespace, class_name);
+
+    // Basic class definition links
+    links.push(Link {
+        source: target_class.clone(),
+        predicate: Some("rdf://type".to_string()),
+        target: "ad4m://SubjectClass".to_string(),
+    });
+
+    links.push(Link {
+        source: target_class.clone(),
+        predicate: Some("ad4m://shape".to_string()),
+        target: shape_uri.clone(),
+    });
+
+    links.push(Link {
+        source: shape_uri.clone(),
+        predicate: Some("rdf://type".to_string()),
+        target: "sh://NodeShape".to_string(),
+    });
+
+    links.push(Link {
+        source: shape_uri.clone(),
+        predicate: Some("sh://targetClass".to_string()),
+        target: target_class.clone(),
+    });
+
+    // Parse constructor: constructor(c, '[{action: ...}]').
+    // Note: Prolog uses single quotes for JSON-like content with unquoted keys
+    let constructor_regex = Regex::new(r#"constructor\([^,]+,\s*'(\[.*?\])'\)"#)
+        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+
+    if let Some(caps) = constructor_regex.captures(prolog_sdna) {
+        if let Some(actions_str) = caps.get(1) {
+            // Convert Prolog-style JSON to valid JSON (add quotes to keys)
+            let json_str = convert_prolog_json_to_json(actions_str.as_str());
+            links.push(Link {
+                source: shape_uri.clone(),
+                predicate: Some("ad4m://constructor".to_string()),
+                target: format!("literal://string:{}", json_str),
+            });
+        }
+    }
+
+    // Parse destructor: destructor(c, '[{action: ...}]').
+    let destructor_regex = Regex::new(r#"destructor\([^,]+,\s*'(\[.*?\])'\)"#)
+        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+
+    if let Some(caps) = destructor_regex.captures(prolog_sdna) {
+        if let Some(actions_str) = caps.get(1) {
+            let json_str = convert_prolog_json_to_json(actions_str.as_str());
+            links.push(Link {
+                source: shape_uri.clone(),
+                predicate: Some("ad4m://destructor".to_string()),
+                target: format!("literal://string:{}", json_str),
+            });
+        }
+    }
+
+    // Parse properties and their getters to extract predicates
+    // property(c, "name").
+    let property_regex = Regex::new(r#"property\([^,]+,\s*"([^"]+)"\)"#)
+        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+
+    // property_getter(c, Base, "name", Value) :- triple(Base, "predicate://path", Value).
+    let getter_regex = Regex::new(r#"property_getter\([^,]+,\s*[^,]+,\s*"([^"]+)",\s*[^)]+\)\s*:-\s*triple\([^,]+,\s*"([^"]+)""#)
+        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+
+    // property_setter(c, "name", '[{action: ...}]').
+    let setter_regex = Regex::new(r#"property_setter\([^,]+,\s*"([^"]+)",\s*'(\[.*?\])'\)"#)
+        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+
+    // property_resolve_language(c, "name", "literal").
+    let resolve_lang_regex = Regex::new(r#"property_resolve_language\([^,]+,\s*"([^"]+)",\s*"([^"]+)"\)"#)
+        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+
+    // Collect properties
+    let mut properties: std::collections::HashMap<String, (Option<String>, Option<String>, Option<String>)> =
+        std::collections::HashMap::new();
+
+    for caps in property_regex.captures_iter(prolog_sdna) {
+        if let Some(prop_name) = caps.get(1) {
+            properties.entry(prop_name.as_str().to_string())
+                .or_insert((None, None, None));
+        }
+    }
+
+    // Extract predicate paths from getters
+    for caps in getter_regex.captures_iter(prolog_sdna) {
+        if let (Some(prop_name), Some(predicate)) = (caps.get(1), caps.get(2)) {
+            if let Some(entry) = properties.get_mut(prop_name.as_str()) {
+                entry.0 = Some(predicate.as_str().to_string());
+            }
+        }
+    }
+
+    // Extract setters
+    for caps in setter_regex.captures_iter(prolog_sdna) {
+        if let (Some(prop_name), Some(actions)) = (caps.get(1), caps.get(2)) {
+            if let Some(entry) = properties.get_mut(prop_name.as_str()) {
+                entry.1 = Some(convert_prolog_json_to_json(actions.as_str()));
+            }
+        }
+    }
+
+    // Extract resolve languages
+    for caps in resolve_lang_regex.captures_iter(prolog_sdna) {
+        if let (Some(prop_name), Some(lang)) = (caps.get(1), caps.get(2)) {
+            if let Some(entry) = properties.get_mut(prop_name.as_str()) {
+                entry.2 = Some(lang.as_str().to_string());
+            }
+        }
+    }
+
+    // Generate property shape links
+    for (prop_name, (path, setter, resolve_lang)) in properties.iter() {
+        let prop_shape_uri = format!("{}{}.{}", namespace, class_name, prop_name);
+
+        links.push(Link {
+            source: shape_uri.clone(),
+            predicate: Some("sh://property".to_string()),
+            target: prop_shape_uri.clone(),
+        });
+
+        links.push(Link {
+            source: prop_shape_uri.clone(),
+            predicate: Some("rdf://type".to_string()),
+            target: "sh://PropertyShape".to_string(),
+        });
+
+        if let Some(path) = path {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("sh://path".to_string()),
+                target: path.clone(),
+            });
+        }
+
+        if let Some(setter_json) = setter {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://setter".to_string()),
+                target: format!("literal://string:{}", setter_json),
+            });
+        }
+
+        if let Some(lang) = resolve_lang {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://resolveLanguage".to_string()),
+                target: format!("literal://string:{}", lang),
+            });
+        }
+    }
+
+    // Parse collections
+    // collection(c, "comments").
+    let collection_regex = Regex::new(r#"collection\([^,]+,\s*"([^"]+)"\)"#)
+        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+
+    // collection_getter(c, Base, "comments", List) :- findall(C, triple(Base, "predicate://path", C), List).
+    let coll_getter_regex = Regex::new(r#"collection_getter\([^,]+,\s*[^,]+,\s*"([^"]+)"[^)]*\)\s*:-.*triple\([^,]+,\s*"([^"]+)""#)
+        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+
+    // collection_adder(c, "commentss", '[{action: ...}]').
+    let coll_adder_regex = Regex::new(r#"collection_adder\([^,]+,\s*"([^"]+)",\s*'(\[.*?\])'\)"#)
+        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+
+    // collection_remover(c, "commentss", '[{action: ...}]').
+    let coll_remover_regex = Regex::new(r#"collection_remover\([^,]+,\s*"([^"]+)",\s*'(\[.*?\])'\)"#)
+        .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?;
+
+    // Collect collections: name -> (path, adder, remover)
+    let mut collections: std::collections::HashMap<String, (Option<String>, Option<String>, Option<String>)> =
+        std::collections::HashMap::new();
+
+    for caps in collection_regex.captures_iter(prolog_sdna) {
+        if let Some(coll_name) = caps.get(1) {
+            collections.entry(coll_name.as_str().to_string())
+                .or_insert((None, None, None));
+        }
+    }
+
+    // Extract collection paths from getters
+    for caps in coll_getter_regex.captures_iter(prolog_sdna) {
+        if let (Some(coll_name), Some(predicate)) = (caps.get(1), caps.get(2)) {
+            if let Some(entry) = collections.get_mut(coll_name.as_str()) {
+                entry.0 = Some(predicate.as_str().to_string());
+            }
+        }
+    }
+
+    // Extract adders (note: adder name might have extra 's' like "commentss")
+    for caps in coll_adder_regex.captures_iter(prolog_sdna) {
+        if let (Some(coll_name_with_s), Some(actions)) = (caps.get(1), caps.get(2)) {
+            // Try to match to a collection by removing trailing 's'
+            let coll_name = coll_name_with_s.as_str().trim_end_matches('s');
+            if let Some(entry) = collections.get_mut(coll_name) {
+                entry.1 = Some(convert_prolog_json_to_json(actions.as_str()));
+            }
+        }
+    }
+
+    // Extract removers
+    for caps in coll_remover_regex.captures_iter(prolog_sdna) {
+        if let (Some(coll_name_with_s), Some(actions)) = (caps.get(1), caps.get(2)) {
+            let coll_name = coll_name_with_s.as_str().trim_end_matches('s');
+            if let Some(entry) = collections.get_mut(coll_name) {
+                entry.2 = Some(convert_prolog_json_to_json(actions.as_str()));
+            }
+        }
+    }
+
+    // Generate collection shape links
+    for (coll_name, (path, adder, remover)) in collections.iter() {
+        let coll_shape_uri = format!("{}{}.{}", namespace, class_name, coll_name);
+
+        links.push(Link {
+            source: shape_uri.clone(),
+            predicate: Some("sh://property".to_string()),
+            target: coll_shape_uri.clone(),
+        });
+
+        links.push(Link {
+            source: coll_shape_uri.clone(),
+            predicate: Some("rdf://type".to_string()),
+            target: "ad4m://CollectionShape".to_string(),
+        });
+
+        if let Some(path) = path {
+            links.push(Link {
+                source: coll_shape_uri.clone(),
+                predicate: Some("sh://path".to_string()),
+                target: path.clone(),
+            });
+        }
+
+        if let Some(adder_json) = adder {
+            links.push(Link {
+                source: coll_shape_uri.clone(),
+                predicate: Some("ad4m://adder".to_string()),
+                target: format!("literal://string:{}", adder_json),
+            });
+        }
+
+        if let Some(remover_json) = remover {
+            links.push(Link {
+                source: coll_shape_uri.clone(),
+                predicate: Some("ad4m://remover".to_string()),
+                target: format!("literal://string:{}", remover_json),
+            });
+        }
+    }
+
+    Ok(links)
+}
+
+/// Convert Prolog-style JSON (with unquoted keys) to valid JSON
+/// e.g., '{action: "addLink", source: "this"}' -> '{"action":"addLink","source":"this"}'
+fn convert_prolog_json_to_json(prolog_json: &str) -> String {
+    use regex::Regex;
+
+    // Add quotes around unquoted keys: word: -> "word":
+    let key_regex = Regex::new(r#"(\{|\s|,)([a-zA-Z_][a-zA-Z0-9_]*):"#).unwrap();
+    let result = key_regex.replace_all(prolog_json, r#"$1"$2":"#);
+
+    result.to_string()
+}
+
 /// Extract namespace from URI (e.g., "recipe://Recipe" -> "recipe://")
 /// Matches TypeScript SHACLShape.ts extractNamespace() behavior
-fn extract_namespace(uri: &str) -> String {
+pub fn extract_namespace(uri: &str) -> String {
     // Handle protocol-style URIs (://ending) - for AD4M-style URIs like "recipe://Recipe"
     // We want just the scheme + "://" part
     if let Some(scheme_pos) = uri.find("://") {

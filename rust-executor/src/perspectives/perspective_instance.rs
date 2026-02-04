@@ -1,5 +1,5 @@
 use super::sdna::{generic_link_fact, is_sdna_link};
-use super::shacl_parser::parse_shacl_to_links;
+use super::shacl_parser::{parse_shacl_to_links, parse_prolog_sdna_to_shacl_links};
 use super::update_perspective;
 use super::utils::{
     prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string,
@@ -1514,6 +1514,9 @@ impl PerspectiveInstance {
 
         let mut sdna_links: Vec<Link> = Vec::new();
 
+        // Preserve original Prolog code for SHACL generation if needed
+        let original_prolog_code = sdna_code.clone();
+
         if (Literal::from_url(sdna_code.clone())).is_err() {
             sdna_code = Literal::from_string(sdna_code)
                 .to_url()
@@ -1550,14 +1553,29 @@ impl PerspectiveInstance {
 
         self.add_links(sdna_links, LinkStatus::Shared, None, context)
             .await?;
-        
-        // If SHACL JSON provided, parse and store as RDF links
+
+        // Handle SHACL links:
+        // 1. If SHACL JSON provided explicitly, use it
+        // 2. Otherwise, for subject_class type, parse Prolog SDNA to generate SHACL links
         if let Some(shacl) = shacl_json {
             let shacl_links = parse_shacl_to_links(&shacl, &name)?;
             self.add_links(shacl_links, LinkStatus::Shared, None, context)
                 .await?;
+        } else if matches!(sdna_type, SdnaType::SubjectClass) && !original_prolog_code.is_empty() {
+            // Generate SHACL links from Prolog SDNA for backward compatibility
+            match parse_prolog_sdna_to_shacl_links(&original_prolog_code, &name) {
+                Ok(shacl_links) => {
+                    if !shacl_links.is_empty() {
+                        self.add_links(shacl_links, LinkStatus::Shared, None, context)
+                            .await?;
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to parse Prolog SDNA to SHACL for class '{}': {}. SHACL operations may not work for this class.", name, e);
+                }
+            }
         }
-        
+
         //added = true;
         //}
         // Mutex guard is automatically dropped here
