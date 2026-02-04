@@ -1138,6 +1138,107 @@ export class PerspectiveProxy {
         return shapes;
     }
 
+    /**
+     * **Recommended way to add Flow definitions.**
+     * 
+     * Store a SHACL Flow (state machine) in this Perspective using the type-safe `SHACLFlow` class.
+     * The flow is serialized as RDF triples (links) for native AD4M storage and querying.
+     * 
+     * @param name - Flow name (e.g., 'TODO', 'Approval')
+     * @param flow - SHACLFlow instance defining the state machine
+     * 
+     * @example
+     * ```typescript
+     * import { SHACLFlow } from '@coasys/ad4m';
+     * 
+     * const todoFlow = new SHACLFlow('TODO', 'todo://');
+     * todoFlow.flowable = 'any';
+     * 
+     * // Define states
+     * todoFlow.addState({ name: 'ready', value: 0, stateCheck: { predicate: 'todo://state', target: 'todo://ready' }});
+     * todoFlow.addState({ name: 'done', value: 1, stateCheck: { predicate: 'todo://state', target: 'todo://done' }});
+     * 
+     * // Define start action
+     * todoFlow.startAction = [{ action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }];
+     * 
+     * // Define transitions
+     * todoFlow.addTransition({
+     *   actionName: 'Complete',
+     *   fromState: 'ready',
+     *   toState: 'done',
+     *   actions: [
+     *     { action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://done' },
+     *     { action: 'removeLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }
+     *   ]
+     * });
+     * 
+     * await perspective.addFlow('TODO', todoFlow);
+     * ```
+     */
+    async addFlow(name: string, flow: import("../shacl/SHACLFlow").SHACLFlow): Promise<void> {
+        // Serialize flow to links
+        const links = flow.toLinks();
+        
+        // Add all links to perspective
+        for (const link of links) {
+            await this.add({
+                source: link.source,
+                predicate: link.predicate,
+                target: link.target
+            });
+        }
+        
+        // Create registration link matching ad4m://has_flow pattern
+        const flowNameLiteral = Literal.from(name).toUrl();
+        await this.add({
+            source: "ad4m://self",
+            predicate: "ad4m://has_flow",
+            target: flowNameLiteral
+        });
+        
+        // Create mapping from name to flow URI
+        await this.add({
+            source: flowNameLiteral,
+            predicate: "ad4m://flow_uri",
+            target: flow.flowUri
+        });
+    }
+
+    /**
+     * Retrieve a Flow definition by name from this Perspective
+     * 
+     * @param name - Flow name to retrieve
+     * @returns The SHACLFlow or null if not found
+     */
+    async getFlow(name: string): Promise<import("../shacl/SHACLFlow").SHACLFlow | null> {
+        const flowNameLiteral = Literal.from(name).toUrl();
+        
+        // Find flow URI from name mapping
+        const flowUriLinks = await this.get(new LinkQuery({
+            source: flowNameLiteral,
+            predicate: "ad4m://flow_uri"
+        }));
+        
+        if (flowUriLinks.length === 0) {
+            return null;
+        }
+        
+        const flowUri = flowUriLinks[0].data.target;
+        
+        // Get all links related to this flow
+        const allLinks = await this.get(new LinkQuery({}));
+        const flowLinks = allLinks
+            .map(l => l.data)
+            .filter(l => 
+                l.source === flowUri || 
+                l.source.startsWith(flowUri.replace('Flow', '.'))
+            );
+        
+        // Reconstruct flow from links
+        const { SHACLFlow } = await import("../shacl/SHACLFlow");
+        return SHACLFlow.fromLinks(flowLinks, flowUri);
+    }
+
     /** Returns all the Subject classes defined in this perspectives SDNA */
     async subjectClasses(): Promise<string[]> {
         try {
