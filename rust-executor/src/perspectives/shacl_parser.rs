@@ -50,6 +50,224 @@ pub struct PropertyShape {
     pub remover: Vec<AD4MAction>,
 }
 
+// ============================================================================
+// SHACL Flow structures (state machines without Prolog)
+// ============================================================================
+
+/// Link pattern for state detection
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LinkPattern {
+    /// Optional source pattern (if omitted, uses the expression address)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Required predicate to match
+    pub predicate: String,
+    /// Required target value to match
+    pub target: String,
+}
+
+/// Flow State definition
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FlowState {
+    /// State name (e.g., "ready", "doing", "done")
+    pub name: String,
+    /// Numeric state value for ordering (e.g., 0, 0.5, 1)
+    pub value: f64,
+    /// Link pattern that indicates this state
+    pub state_check: LinkPattern,
+}
+
+/// Flow Transition definition
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FlowTransition {
+    /// Name of this action (shown to users, e.g., "Start", "Finish")
+    pub action_name: String,
+    /// State to transition from
+    pub from_state: String,
+    /// State to transition to
+    pub to_state: String,
+    /// Actions to execute for this transition
+    pub actions: Vec<AD4MAction>,
+}
+
+/// SHACL Flow structure - state machine definition
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SHACLFlow {
+    /// Flow name (e.g., "TODO")
+    pub name: String,
+    /// Namespace for URIs (e.g., "todo://")
+    pub namespace: String,
+    /// Flowable condition - "any" or a LinkPattern
+    #[serde(default = "default_flowable")]
+    pub flowable: serde_json::Value,
+    /// Actions to execute when starting the flow
+    #[serde(default)]
+    pub start_action: Vec<AD4MAction>,
+    /// States in this flow
+    #[serde(default)]
+    pub states: Vec<FlowState>,
+    /// Transitions between states
+    #[serde(default)]
+    pub transitions: Vec<FlowTransition>,
+}
+
+fn default_flowable() -> serde_json::Value {
+    serde_json::Value::String("any".to_string())
+}
+
+/// Parse Flow JSON to RDF links
+pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>, AnyError> {
+    let flow: SHACLFlow = serde_json::from_str(flow_json)
+        .map_err(|e| anyhow::anyhow!("Failed to parse Flow JSON: {}", e))?;
+
+    let mut links = Vec::new();
+
+    let flow_uri = format!("{}{}Flow", flow.namespace, flow_name);
+
+    // Flow type
+    links.push(Link {
+        source: flow_uri.clone(),
+        predicate: Some("rdf://type".to_string()),
+        target: "ad4m://Flow".to_string(),
+    });
+
+    // Flow name
+    links.push(Link {
+        source: flow_uri.clone(),
+        predicate: Some("ad4m://flowName".to_string()),
+        target: format!("literal://string:{}", urlencoding::encode(flow_name)),
+    });
+
+    // Flowable condition
+    let flowable_target = if flow.flowable == serde_json::Value::String("any".to_string()) {
+        "ad4m://any".to_string()
+    } else {
+        format!(
+            "literal://string:{}",
+            urlencoding::encode(&flow.flowable.to_string())
+        )
+    };
+    links.push(Link {
+        source: flow_uri.clone(),
+        predicate: Some("ad4m://flowable".to_string()),
+        target: flowable_target,
+    });
+
+    // Start action
+    if !flow.start_action.is_empty() {
+        let actions_json = serde_json::to_string(&flow.start_action)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize start actions: {}", e))?;
+        links.push(Link {
+            source: flow_uri.clone(),
+            predicate: Some("ad4m://startAction".to_string()),
+            target: format!("literal://string:{}", urlencoding::encode(&actions_json)),
+        });
+    }
+
+    // States
+    for state in &flow.states {
+        let state_uri = format!("{}{}.{}", flow.namespace, flow_name, state.name);
+
+        // Link flow to state
+        links.push(Link {
+            source: flow_uri.clone(),
+            predicate: Some("ad4m://hasState".to_string()),
+            target: state_uri.clone(),
+        });
+
+        // State type
+        links.push(Link {
+            source: state_uri.clone(),
+            predicate: Some("rdf://type".to_string()),
+            target: "ad4m://FlowState".to_string(),
+        });
+
+        // State name
+        links.push(Link {
+            source: state_uri.clone(),
+            predicate: Some("ad4m://stateName".to_string()),
+            target: format!("literal://string:{}", urlencoding::encode(&state.name)),
+        });
+
+        // State value
+        links.push(Link {
+            source: state_uri.clone(),
+            predicate: Some("ad4m://stateValue".to_string()),
+            target: format!("literal://number:{}", state.value),
+        });
+
+        // State check pattern
+        let check_json = serde_json::to_string(&state.state_check)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize state check: {}", e))?;
+        links.push(Link {
+            source: state_uri.clone(),
+            predicate: Some("ad4m://stateCheck".to_string()),
+            target: format!("literal://string:{}", urlencoding::encode(&check_json)),
+        });
+    }
+
+    // Transitions
+    for transition in &flow.transitions {
+        let transition_uri = format!(
+            "{}{}.{}To{}",
+            flow.namespace, flow_name, transition.from_state, transition.to_state
+        );
+        let from_state_uri = format!("{}{}.{}", flow.namespace, flow_name, transition.from_state);
+        let to_state_uri = format!("{}{}.{}", flow.namespace, flow_name, transition.to_state);
+
+        // Link flow to transition
+        links.push(Link {
+            source: flow_uri.clone(),
+            predicate: Some("ad4m://hasTransition".to_string()),
+            target: transition_uri.clone(),
+        });
+
+        // Transition type
+        links.push(Link {
+            source: transition_uri.clone(),
+            predicate: Some("rdf://type".to_string()),
+            target: "ad4m://FlowTransition".to_string(),
+        });
+
+        // Action name
+        links.push(Link {
+            source: transition_uri.clone(),
+            predicate: Some("ad4m://actionName".to_string()),
+            target: format!(
+                "literal://string:{}",
+                urlencoding::encode(&transition.action_name)
+            ),
+        });
+
+        // From state
+        links.push(Link {
+            source: transition_uri.clone(),
+            predicate: Some("ad4m://fromState".to_string()),
+            target: from_state_uri,
+        });
+
+        // To state
+        links.push(Link {
+            source: transition_uri.clone(),
+            predicate: Some("ad4m://toState".to_string()),
+            target: to_state_uri,
+        });
+
+        // Transition actions
+        if !transition.actions.is_empty() {
+            let actions_json = serde_json::to_string(&transition.actions)
+                .map_err(|e| anyhow::anyhow!("Failed to serialize transition actions: {}", e))?;
+            links.push(Link {
+                source: transition_uri.clone(),
+                predicate: Some("ad4m://transitionActions".to_string()),
+                target: format!("literal://string:{}", urlencoding::encode(&actions_json)),
+            });
+        }
+    }
+
+    Ok(links)
+}
+
 /// Parse SHACL JSON to RDF links (Option 3: Named Property Shapes)
 pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Link>, AnyError> {
     let shape: SHACLShape = serde_json::from_str(shacl_json)
@@ -719,6 +937,143 @@ mod tests {
                     && l.predicate == Some("ad4m://remover".to_string())
                     && l.target.starts_with("literal://string:")),
             "Missing remover action link"
+        );
+    }
+
+    #[test]
+    fn test_parse_flow_basic() {
+        let flow_json = r#"{
+            "name": "TODO",
+            "namespace": "todo://",
+            "flowable": "any",
+            "start_action": [
+                {"action": "addLink", "source": "this", "predicate": "todo://state", "target": "todo://ready"}
+            ],
+            "states": [
+                {
+                    "name": "ready",
+                    "value": 0.0,
+                    "state_check": {"predicate": "todo://state", "target": "todo://ready"}
+                },
+                {
+                    "name": "done",
+                    "value": 1.0,
+                    "state_check": {"predicate": "todo://state", "target": "todo://done"}
+                }
+            ],
+            "transitions": [
+                {
+                    "action_name": "Complete",
+                    "from_state": "ready",
+                    "to_state": "done",
+                    "actions": [
+                        {"action": "addLink", "source": "this", "predicate": "todo://state", "target": "todo://done"},
+                        {"action": "removeLink", "source": "this", "predicate": "todo://state", "target": "todo://ready"}
+                    ]
+                }
+            ]
+        }"#;
+
+        let links = parse_flow_to_links(flow_json, "TODO").unwrap();
+
+        // Check for flow type link
+        assert!(
+            links
+                .iter()
+                .any(|l| l.source == "todo://TODOFlow"
+                    && l.predicate == Some("rdf://type".to_string())
+                    && l.target == "ad4m://Flow"),
+            "Missing flow type link"
+        );
+
+        // Check for flowable link
+        assert!(
+            links
+                .iter()
+                .any(|l| l.source == "todo://TODOFlow"
+                    && l.predicate == Some("ad4m://flowable".to_string())
+                    && l.target == "ad4m://any"),
+            "Missing flowable link"
+        );
+
+        // Check for start action link
+        assert!(
+            links
+                .iter()
+                .any(|l| l.source == "todo://TODOFlow"
+                    && l.predicate == Some("ad4m://startAction".to_string())
+                    && l.target.starts_with("literal://string:")),
+            "Missing start action link"
+        );
+
+        // Check for state links
+        assert!(
+            links
+                .iter()
+                .any(|l| l.source == "todo://TODOFlow"
+                    && l.predicate == Some("ad4m://hasState".to_string())
+                    && l.target == "todo://TODO.ready"),
+            "Missing ready state link"
+        );
+
+        assert!(
+            links
+                .iter()
+                .any(|l| l.source == "todo://TODOFlow"
+                    && l.predicate == Some("ad4m://hasState".to_string())
+                    && l.target == "todo://TODO.done"),
+            "Missing done state link"
+        );
+
+        // Check for transition link
+        assert!(
+            links
+                .iter()
+                .any(|l| l.source == "todo://TODOFlow"
+                    && l.predicate == Some("ad4m://hasTransition".to_string())
+                    && l.target == "todo://TODO.readyTodone"),
+            "Missing transition link"
+        );
+
+        // Check for transition action name
+        assert!(
+            links
+                .iter()
+                .any(|l| l.source == "todo://TODO.readyTodone"
+                    && l.predicate == Some("ad4m://actionName".to_string())),
+            "Missing action name link"
+        );
+    }
+
+    #[test]
+    fn test_parse_flow_with_link_pattern_flowable() {
+        let flow_json = r#"{
+            "name": "Approval",
+            "namespace": "approval://",
+            "flowable": {"predicate": "rdf://type", "target": "approval://Document"},
+            "states": [],
+            "transitions": []
+        }"#;
+
+        let links = parse_flow_to_links(flow_json, "Approval").unwrap();
+
+        // Check for flowable link with pattern (not "any")
+        let flowable_link = links
+            .iter()
+            .find(|l| {
+                l.source == "approval://ApprovalFlow"
+                    && l.predicate == Some("ad4m://flowable".to_string())
+            })
+            .expect("Missing flowable link");
+
+        // Should be a literal with JSON, not "ad4m://any"
+        assert!(
+            flowable_link.target.starts_with("literal://string:"),
+            "Flowable should be encoded as literal JSON"
+        );
+        assert!(
+            flowable_link.target.contains("predicate"),
+            "Flowable literal should contain predicate"
         );
     }
 }

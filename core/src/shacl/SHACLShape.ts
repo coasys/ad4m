@@ -590,4 +590,69 @@ export class SHACLShape {
     
     return shape;
   }
+
+  /**
+   * Convert the shape to a JSON-serializable object.
+   * Useful for passing to addSdna() as shaclJson parameter.
+   * 
+   * @returns JSON-serializable object representing the shape
+   */
+  toJSON(): object {
+    return {
+      target_class: this.targetClass,
+      properties: this.properties.map(p => ({
+        path: p.path,
+        name: p.name,
+        datatype: p.datatype,
+        node_kind: p.nodeKind,
+        min_count: p.minCount,
+        max_count: p.maxCount,
+        pattern: p.pattern,
+        has_value: p.hasValue,
+        local: p.local,
+        writable: p.writable,
+        resolve_language: p.resolveLanguage,
+        setter: p.setter,
+        adder: p.adder,
+        remover: p.remover,
+      })),
+      constructor_actions: this.constructor_actions,
+      destructor_actions: this.destructor_actions,
+    };
+  }
+
+  /**
+   * Create a shape from a JSON object (inverse of toJSON)
+   */
+  static fromJSON(json: any): SHACLShape {
+    const shape = new SHACLShape(json.target_class);
+    
+    for (const p of json.properties || []) {
+      shape.addProperty({
+        path: p.path,
+        name: p.name,
+        datatype: p.datatype,
+        nodeKind: p.node_kind,
+        minCount: p.min_count,
+        maxCount: p.max_count,
+        pattern: p.pattern,
+        hasValue: p.has_value,
+        local: p.local,
+        writable: p.writable,
+        resolveLanguage: p.resolve_language,
+        setter: p.setter,
+        adder: p.adder,
+        remover: p.remover,
+      });
+    }
+    
+    if (json.constructor_actions) {
+      shape.constructor_actions = json.constructor_actions;
+    }
+    if (json.destructor_actions) {
+      shape.destructor_actions = json.destructor_actions;
+    }
+    
+    return shape;
+  }
 }

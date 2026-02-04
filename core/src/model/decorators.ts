@@ -747,14 +747,27 @@ export function ModelOptions(opts: ModelOptionsOptions) {
             const subjectName = opts.name;
             const obj = target.prototype;
 
-            // Determine namespace from first property or use default
+            // Determine namespace from first property or collection, or use default
             let namespace = "ad4m://";
             const properties = obj.__properties || {};
+            const collections = obj.__collections || {};
+            
+            // Try properties first
             if (Object.keys(properties).length > 0) {
                 const firstProp = properties[Object.keys(properties)[0]];
                 if (firstProp.through) {
                     // Extract namespace from through predicate (e.g., "recipe://name" -> "recipe://")
                     const match = firstProp.through.match(/^([^:]+:\/\/)/);
+                    if (match) {
+                        namespace = match[1];
+                    }
+                }
+            } 
+            // Fall back to collections if no properties
+            else if (Object.keys(collections).length > 0) {
+                const firstColl = collections[Object.keys(collections)[0]];
+                if (firstColl.through) {
+                    const match = firstColl.through.match(/^([^:]+:\/\/)/);
                     if (match) {
                         namespace = match[1];
                     }
@@ -880,10 +893,15 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                 };
                 
                 // Determine if it's a reference (IRI) or literal
-                if (collMeta.resolveLanguage) {
-                    collShape.nodeKind = 'IRI'; // References to other entities
+                // Collections typically contain references (IRIs) to other entities
+                // They're literals only if explicitly marked or contain primitive values
+                if (collMeta.where?.isInstance) {
+                    // Collection of typed entities - definitely IRIs
+                    collShape.nodeKind = 'IRI';
                 } else {
-                    collShape.nodeKind = 'Literal';
+                    // Default to IRI for collections (most common case)
+                    // Literal collections are rare and would need explicit marking
+                    collShape.nodeKind = 'IRI';
                 }
                 
                 // AD4M-specific metadata

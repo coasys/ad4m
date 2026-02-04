@@ -1088,6 +1088,20 @@ export class PerspectiveProxy {
         }));
         shapeLinks.push(...targetClassLinks.map(l => l.data));
         
+        // Get constructor actions
+        const constructorLinks = await this.get(new LinkQuery({
+            source: shapeUri,
+            predicate: "ad4m://constructor"
+        }));
+        shapeLinks.push(...constructorLinks.map(l => l.data));
+        
+        // Get destructor actions
+        const destructorLinks = await this.get(new LinkQuery({
+            source: shapeUri,
+            predicate: "ad4m://destructor"
+        }));
+        shapeLinks.push(...destructorLinks.map(l => l.data));
+        
         // Get property shapes
         const propertyLinks = await this.get(new LinkQuery({
             source: shapeUri,
@@ -1097,10 +1111,10 @@ export class PerspectiveProxy {
         for (const propLink of propertyLinks) {
             shapeLinks.push(propLink.data);
             
-            // Get all links for this property shape (blank node)
+            // Get all links for this property shape (named URI or blank node)
             const propShapeId = propLink.data.target;
             
-            // Query all links with this blank node as source
+            // Query all links with this property shape as source
             const allLinks = await this.get(new LinkQuery({}));
             const propShapeLinks = allLinks.filter(l => 
                 l.data.source === propShapeId
@@ -1329,11 +1343,13 @@ export class PerspectiveProxy {
      * Returns the parsed action array if found, or null if not found.
      */
     private async getActionsFromSHACL(className: string, predicate: string): Promise<any[] | null> {
-        const shapeSuffix = `${className}Shape`;
+        // Use regex to match exact class name followed by "Shape" at end of URI
+        // This prevents "RecipeShape" from matching "MyRecipeShape"
+        const shapePattern = new RegExp(`[/:#]${className}Shape$`);
         const links = await this.get(new LinkQuery({ predicate }));
 
         for (const link of links) {
-            if (link.data.source.endsWith(shapeSuffix)) {
+            if (shapePattern.test(link.data.source)) {
                 // Parse actions from literal://string:{json}
                 const prefix = "literal://string:";
                 if (link.data.target.startsWith(prefix)) {
