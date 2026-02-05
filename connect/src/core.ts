@@ -188,14 +188,22 @@ export default class Ad4mConnect extends EventTarget {
     } catch (error) {
       console.error('[Ad4m Connect] Authentication check failed:', error);
       const lockedMessage = "Cannot extractByTags from a ciphered wallet. You must unlock first.";
+      
       if (error.message === lockedMessage) {
         // TODO: isLocked throws an error, should just return a boolean. Temp fix
         this.notifyAuthChange("locked");
         return true;
-      } else {
-        this.notifyAuthChange("unauthenticated");
-        return false;
       }
+      
+      // Clear token if it's invalid (signed by different agent)
+      if (error.message === "InvalidSignature") {
+        console.log('[Ad4m Connect] Clearing invalid token due to InvalidSignature');
+        this.token = '';
+        removeLocal('ad4m-token');
+      }
+      
+      this.notifyAuthChange("unauthenticated");
+      return false;
     }
   }
 
@@ -457,7 +465,6 @@ export default class Ad4mConnect extends EventTarget {
   }
 
   private notifyAuthChange(value: AuthStates) {
-    if (this.authState === value) return;
     this.authState = value;
     this.dispatchEvent(new CustomEvent("authstatechange", { detail: value }));
 
