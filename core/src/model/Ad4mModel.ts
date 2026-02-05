@@ -762,8 +762,19 @@ export class Ad4mModel {
     const writableProps = Object.fromEntries(
       Object.entries(propsObject).filter(([key]) => {
         const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(instance), key);
-        // Allow if no descriptor (regular property) or if it has a setter
-        return !descriptor || descriptor.set !== undefined || descriptor.writable !== false;
+        if (!descriptor) {
+          // No descriptor means it's a regular property on the instance, allow it
+          return true;
+        }
+        // Check if it's an accessor descriptor (has get/set) vs data descriptor (has value/writable)
+        const isAccessor = descriptor.get !== undefined || descriptor.set !== undefined;
+        if (isAccessor) {
+          // Accessor descriptor: only allow if it has a setter
+          return descriptor.set !== undefined;
+        } else {
+          // Data descriptor: only allow if writable is not explicitly false
+          return descriptor.writable !== false;
+        }
       })
     );
     // Assign properties to instance
@@ -893,6 +904,26 @@ export class Ad4mModel {
 
       // Evaluate SurrealQL getters
       await ctor.evaluateSurrealGettersForInstance(this, this.#perspective, metadata);
+      
+      // Apply where.isInstance filtering to surrealGetter collections
+      // (non-surrealGetter collections were already filtered above)
+      for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+        if (collMeta.surrealGetter && collMeta.where?.isInstance && (this as any)[collName]?.length > 0) {
+          try {
+            const className = typeof collMeta.where.isInstance === 'string'
+              ? collMeta.where.isInstance
+              : collMeta.where.isInstance.name;
+            
+            const filterMetadata = await this.#perspective.getSubjectClassMetadataFromSDNA(className);
+            if (filterMetadata) {
+              const filtered = await this.#perspective.batchCheckSubjectInstances((this as any)[collName], filterMetadata);
+              (this as any)[collName] = filtered;
+            }
+          } catch (error) {
+            // Keep unfiltered values on error
+          }
+        }
+      }
     } catch (e) {
       console.error(`SurrealDB getData also failed for ${this.#baseExpression}:`, e);
     }
@@ -971,7 +1002,7 @@ export class Ad4mModel {
             // Filter out 'None' from collection results
             const value = result[0].value;
             instance[collName] = Array.isArray(value) 
-              ? value.filter((v: any) => v && v !== '' && v !== 'None')
+              ? value.filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None')
               : value;
           }
         } catch (error) {
@@ -1743,7 +1774,7 @@ WHERE ${whereConditions.join(' AND ')}
             // Replace collection with sorted values, filtering out empty strings and None
             instance[collName] = pairs
               .map(p => p.value)
-              .filter((v: any) => v && v !== '' && v !== 'None');
+              .filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None');
             // Clean up temporary arrays
             delete instance[timestampsKey];
             delete instance[indicesKey];
@@ -1768,13 +1799,14 @@ WHERE ${whereConditions.join(' AND ')}
       }
     }
     
-    // Evaluate SurrealQL getters for all instances
+    // Evaluate SurrealQL getters for all instances (single pass)
+    // This populates collection values needed for where.isInstance filtering
     for (const instance of instances) {
       await this.evaluateSurrealGettersForInstance(instance, perspective, metadata);
     }
     
     // Filter collections by where.isInstance if specified
-    // Do this for all instances that have collections with filters
+    // Do this after initial evaluation so collection values exist for filtering
     for (const instance of instances) {
       for (const [collName, collMeta] of Object.entries(metadata.collections)) {
         if (collMeta.where?.isInstance && instance[collName]?.length > 0) {
@@ -1795,17 +1827,13 @@ WHERE ${whereConditions.join(' AND ')}
             // Check which subjects are instances of the target class
             const validSubjects = await perspective.batchCheckSubjectInstances(subjects, classMetadata);
             
+            // Update the collection with filtered instances
             instance[collName] = validSubjects;
           } catch (error) {
             // On error, leave the collection unfiltered rather than breaking everything
           }
         }
       }
-    }
-    
-    // Evaluate SurrealQL getters for all instances
-    for (const instance of instances) {
-      await this.evaluateSurrealGettersForInstance(instance, perspective, metadata);
     }
     
     // Filter by where conditions that couldn't be filtered in SQL
