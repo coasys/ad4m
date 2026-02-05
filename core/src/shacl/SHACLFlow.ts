@@ -1,21 +1,9 @@
 import { Link } from "../links/Links";
 import { Literal } from "../Literal";
+import { AD4MAction } from "./SHACLShape";
 
-/**
- * AD4M Action - represents a link operation for state transitions
- */
-export interface AD4MAction {
-  /** Action type: addLink, removeLink, setSingleTarget */
-  action: string;
-  /** Source of the link (usually "this" for the flow subject) */
-  source: string;
-  /** Predicate URI for the link */
-  predicate: string;
-  /** Target value or "value" placeholder */
-  target: string;
-  /** Whether this is a local-only link */
-  local?: boolean;
-}
+// Re-export AD4MAction for consumers who import from SHACLFlow
+export { AD4MAction };
 
 /**
  * Link pattern for state detection
