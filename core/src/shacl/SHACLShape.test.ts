@@ -267,4 +267,126 @@ describe('SHACLShape', () => {
       expect(propLink!.target).toMatch(/_:propShape\d+|test:\/\/Model\./);
     });
   });
+
+  describe('toJSON/fromJSON', () => {
+    it('serializes and deserializes basic shape', () => {
+      const original = new SHACLShape('recipe://Recipe');
+      original.addProperty({
+        name: 'name',
+        path: 'recipe://name',
+        datatype: 'xsd:string',
+        minCount: 1,
+      });
+
+      const json = original.toJSON();
+      const reconstructed = SHACLShape.fromJSON(json);
+
+      expect(reconstructed.targetClass).toBe('recipe://Recipe');
+      expect(reconstructed.properties.length).toBe(1);
+      expect(reconstructed.properties[0].name).toBe('name');
+      expect(reconstructed.properties[0].path).toBe('recipe://name');
+      expect(reconstructed.properties[0].datatype).toBe('xsd:string');
+      expect(reconstructed.properties[0].minCount).toBe(1);
+    });
+
+    it('preserves nodeShapeUri in round-trip', () => {
+      const original = new SHACLShape('custom://CustomShape', 'recipe://Recipe');
+
+      const json = original.toJSON();
+      const reconstructed = SHACLShape.fromJSON(json);
+
+      expect(reconstructed.nodeShapeUri).toBe('custom://CustomShape');
+      expect(reconstructed.targetClass).toBe('recipe://Recipe');
+    });
+
+    it('preserves minInclusive and maxInclusive', () => {
+      const original = new SHACLShape('test://Model');
+      original.addProperty({
+        name: 'rating',
+        path: 'test://rating',
+        datatype: 'xsd:integer',
+        minInclusive: 1,
+        maxInclusive: 5,
+      });
+
+      const json = original.toJSON();
+      const reconstructed = SHACLShape.fromJSON(json);
+
+      expect(reconstructed.properties[0].minInclusive).toBe(1);
+      expect(reconstructed.properties[0].maxInclusive).toBe(5);
+    });
+
+    it('preserves resolveLanguage', () => {
+      const original = new SHACLShape('test://Model');
+      original.addProperty({
+        name: 'content',
+        path: 'test://content',
+        resolveLanguage: 'literal',
+      });
+
+      const json = original.toJSON();
+      const reconstructed = SHACLShape.fromJSON(json);
+
+      expect(reconstructed.properties[0].resolveLanguage).toBe('literal');
+    });
+
+    it('preserves constructor and destructor actions', () => {
+      const original = new SHACLShape('test://Model');
+      original.constructor_actions = [
+        { action: 'addLink', source: 'this', predicate: 'rdf://type', target: 'test://Model' }
+      ];
+      original.destructor_actions = [
+        { action: 'removeLink', source: 'this', predicate: 'rdf://type', target: 'test://Model' }
+      ];
+
+      const json = original.toJSON();
+      const reconstructed = SHACLShape.fromJSON(json);
+
+      expect(reconstructed.constructor_actions).toEqual(original.constructor_actions);
+      expect(reconstructed.destructor_actions).toEqual(original.destructor_actions);
+    });
+
+    it('preserves all property attributes', () => {
+      const original = new SHACLShape('test://Model');
+      original.addProperty({
+        name: 'field',
+        path: 'test://field',
+        datatype: 'xsd:string',
+        nodeKind: 'Literal',
+        minCount: 0,
+        maxCount: 5,
+        minInclusive: 0,
+        maxInclusive: 100,
+        pattern: '^[a-z]+$',
+        hasValue: 'default',
+        local: true,
+        writable: true,
+        resolveLanguage: 'literal',
+        setter: [{ action: 'addLink', source: 'this', predicate: 'test://field', target: 'value' }],
+        adder: [{ action: 'addLink', source: 'this', predicate: 'test://items', target: 'value' }],
+        remover: [{ action: 'removeLink', source: 'this', predicate: 'test://items', target: 'value' }],
+      });
+
+      const json = original.toJSON();
+      const reconstructed = SHACLShape.fromJSON(json);
+
+      const prop = reconstructed.properties[0];
+      expect(prop.name).toBe('field');
+      expect(prop.path).toBe('test://field');
+      expect(prop.datatype).toBe('xsd:string');
+      expect(prop.nodeKind).toBe('Literal');
+      expect(prop.minCount).toBe(0);
+      expect(prop.maxCount).toBe(5);
+      expect(prop.minInclusive).toBe(0);
+      expect(prop.maxInclusive).toBe(100);
+      expect(prop.pattern).toBe('^[a-z]+$');
+      expect(prop.hasValue).toBe('default');
+      expect(prop.local).toBe(true);
+      expect(prop.writable).toBe(true);
+      expect(prop.resolveLanguage).toBe('literal');
+      expect(prop.setter).toEqual(original.properties[0].setter);
+      expect(prop.adder).toEqual(original.properties[0].adder);
+      expect(prop.remover).toEqual(original.properties[0].remover);
+    });
+  });
 });
