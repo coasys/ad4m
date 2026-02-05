@@ -840,6 +840,10 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                     propShape.writable = propMeta.writable;
                 }
 
+                if (propMeta.resolveLanguage) {
+                    propShape.resolveLanguage = propMeta.resolveLanguage;
+                }
+
                 // === Extract Setter Actions (same logic as generateSDNA) ===
                 if (propMeta.setter) {
                     // Custom setter defined - not yet supported in SHACL

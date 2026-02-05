@@ -5,19 +5,26 @@ import { Link } from "../links/Links";
  * Examples:
  *   - "recipe://name" -> "recipe://"
  *   - "https://example.com/vocab#term" -> "https://example.com/vocab#"
+ *   - "https://example.com/vocab/term" -> "https://example.com/vocab/"
  *   - "recipe:Recipe" -> "recipe:"
  */
 function extractNamespace(uri: string): string {
-  // Handle hash fragments FIRST (takes priority over protocol)
+  // Handle hash fragments first (highest priority)
   const hashIndex = uri.lastIndexOf('#');
   if (hashIndex !== -1) {
     return uri.substring(0, hashIndex + 1);
   }
   
-  // Handle protocol-style URIs (://ending) - only simple ones without path
-  // e.g., "recipe://name" -> "recipe://"
-  const protocolMatch = uri.match(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^/]+)$/);
+  // Handle protocol-style URIs with paths
+  const protocolMatch = uri.match(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)(.*)$/);
   if (protocolMatch) {
+    const afterScheme = protocolMatch[2];
+    const lastSlash = afterScheme.lastIndexOf('/');
+    if (lastSlash !== -1) {
+      // Has path segments - namespace includes up to last slash
+      return protocolMatch[1] + afterScheme.substring(0, lastSlash + 1);
+    }
+    // Simple protocol URI without path (e.g., "recipe://name")
     return protocolMatch[1];
   }
   
@@ -36,6 +43,7 @@ function extractNamespace(uri: string): string {
  * Examples:
  *   - "recipe://name" -> "name"
  *   - "https://example.com/vocab#term" -> "term"
+ *   - "https://example.com/vocab/term" -> "term"
  *   - "recipe:Recipe" -> "Recipe"
  */
 function extractLocalName(uri: string): string {
@@ -45,10 +53,10 @@ function extractLocalName(uri: string): string {
     return uri.substring(hashIndex + 1);
   }
   
-  // Handle protocol-style URIs
-  const protocolMatch = uri.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/(.+)$/);
-  if (protocolMatch) {
-    return protocolMatch[1];
+  // Handle slash-based namespaces
+  const lastSlash = uri.lastIndexOf('/');
+  if (lastSlash !== -1 && lastSlash < uri.length - 1) {
+    return uri.substring(lastSlash + 1);
   }
   
   // Handle colon-separated
@@ -416,6 +424,14 @@ export class SHACLShape {
         });
       }
 
+      if (prop.resolveLanguage) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://resolveLanguage",
+          target: `literal://string:${prop.resolveLanguage}`
+        });
+      }
+
       // AD4M-specific actions
       if (prop.setter && prop.setter.length > 0) {
         links.push({
@@ -552,6 +568,26 @@ export class SHACLShape {
         prop.pattern = patternLink.target.replace('literal://', '');
       }
       
+      const minInclusiveLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "sh://minInclusive"
+      );
+      if (minInclusiveLink) {
+        // Handle both formats: literal://5 and literal://number:5
+        let val = minInclusiveLink.target.replace('literal://', '');
+        if (val.startsWith('number:')) val = val.substring(7);
+        prop.minInclusive = parseFloat(val);
+      }
+
+      const maxInclusiveLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "sh://maxInclusive"
+      );
+      if (maxInclusiveLink) {
+        // Handle both formats: literal://5 and literal://number:5
+        let val = maxInclusiveLink.target.replace('literal://', '');
+        if (val.startsWith('number:')) val = val.substring(7);
+        prop.maxInclusive = parseFloat(val);
+      }
+      
       const hasValueLink = links.find(l => 
         l.source === propShapeId && l.predicate === "sh://hasValue"
       );
@@ -564,14 +600,27 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "ad4m://local"
       );
       if (localLink) {
-        prop.local = localLink.target.replace('literal://', '') === 'true';
+        // Handle both formats: literal://true and literal://boolean:true
+        let val = localLink.target.replace('literal://', '');
+        if (val.startsWith('boolean:')) val = val.substring(8);
+        prop.local = val === 'true';
       }
       
       const writableLink = links.find(l =>
         l.source === propShapeId && l.predicate === "ad4m://writable"
       );
       if (writableLink) {
-        prop.writable = writableLink.target.replace('literal://', '') === 'true';
+        // Handle both formats: literal://true and literal://boolean:true
+        let val = writableLink.target.replace('literal://', '');
+        if (val.startsWith('boolean:')) val = val.substring(8);
+        prop.writable = val === 'true';
+      }
+
+      const resolveLangLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://resolveLanguage"
+      );
+      if (resolveLangLink) {
+        prop.resolveLanguage = resolveLangLink.target.replace('literal://string:', '');
       }
 
       // Parse action arrays
@@ -625,6 +674,7 @@ export class SHACLShape {
    */
   toJSON(): object {
     return {
+      node_shape_uri: this.nodeShapeUri,
       target_class: this.targetClass,
       properties: this.properties.map(p => ({
         path: p.path,
@@ -633,6 +683,8 @@ export class SHACLShape {
         node_kind: p.nodeKind,
         min_count: p.minCount,
         max_count: p.maxCount,
+        min_inclusive: p.minInclusive,
+        max_inclusive: p.maxInclusive,
         pattern: p.pattern,
         has_value: p.hasValue,
         local: p.local,
@@ -651,7 +703,9 @@ export class SHACLShape {
    * Create a shape from a JSON object (inverse of toJSON)
    */
   static fromJSON(json: any): SHACLShape {
-    const shape = new SHACLShape(json.target_class);
+    const shape = json.node_shape_uri
+      ? new SHACLShape(json.node_shape_uri, json.target_class)
+      : new SHACLShape(json.target_class);
     
     for (const p of json.properties || []) {
       shape.addProperty({
@@ -661,6 +715,8 @@ export class SHACLShape {
         nodeKind: p.node_kind,
         minCount: p.min_count,
         maxCount: p.max_count,
+        minInclusive: p.min_inclusive,
+        maxInclusive: p.max_inclusive,
         pattern: p.pattern,
         hasValue: p.has_value,
         local: p.local,

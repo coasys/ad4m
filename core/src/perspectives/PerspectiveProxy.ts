@@ -870,7 +870,11 @@ export class PerspectiveProxy {
     async startFlow(flowName: string, exprAddr: string) {
         let startAction = await this.infer(`start_action(Action, F), register_sdna_flow("${flowName}", F)`)
         // should always return one solution...
-        startAction = eval(startAction[0].Action)
+        try {
+            startAction = JSON.parse(startAction[0].Action);
+        } catch (e) {
+            throw `Failed to parse start action for flow "${flowName}": ${e}`;
+        }
         await this.executeAction(startAction, exprAddr, undefined)
     }
 
@@ -896,7 +900,11 @@ export class PerspectiveProxy {
     async runFlowAction(flowName: string, exprAddr: string, actionName: string) {
         let action = await this.infer(`register_sdna_flow("${flowName}", Flow), flow_state("${exprAddr}", State, Flow), action(State, "${actionName}", _, Action)`)
         // should find only one
-        action = eval(action[0].Action)
+        try {
+            action = JSON.parse(action[0].Action);
+        } catch (e) {
+            throw `Failed to parse flow action "${actionName}" for flow "${flowName}": ${e}`;
+        }
         await this.executeAction(action, exprAddr, undefined)
     }
 
@@ -1352,7 +1360,8 @@ export class PerspectiveProxy {
     private async getActionsFromSHACL(className: string, predicate: string): Promise<any[] | null> {
         // Use regex to match exact class name followed by "Shape" at end of URI
         // This prevents "RecipeShape" from matching "MyRecipeShape"
-        const shapePattern = new RegExp(`[/:#]${className}Shape$`);
+        const escaped = this.escapeRegExp(className);
+        const shapePattern = new RegExp(`[/:#]${escaped}Shape$`);
         const links = await this.get(new LinkQuery({ predicate }));
 
         for (const link of links) {
@@ -1361,8 +1370,9 @@ export class PerspectiveProxy {
                 const prefix = "literal://string:";
                 if (link.data.target.startsWith(prefix)) {
                     const jsonStr = link.data.target.slice(prefix.length);
-                    // Decode URL-encoded JSON if needed
-                    const decoded = decodeURIComponent(jsonStr);
+                    // Decode URL-encoded JSON if needed, with fallback for raw % characters
+                    let decoded = jsonStr;
+                    try { decoded = decodeURIComponent(jsonStr); } catch {}
                     try {
                         return JSON.parse(decoded);
                     } catch (e) {
@@ -1398,7 +1408,11 @@ export class PerspectiveProxy {
             if(!result.length) {
                 throw "No destructor found for given subject class: " + className
             }
-            actions = result.map(x => eval(x.Actions))[0]
+            try {
+                actions = JSON.parse(result[0].Actions);
+            } catch (e) {
+                throw `Failed to parse destructor actions for class "${className}": ${e}`;
+            }
         }
 
         await this.executeAction(actions, exprAddr, undefined, batchId)
