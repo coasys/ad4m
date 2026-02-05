@@ -432,18 +432,13 @@ export class PerspectiveClient {
 
     /**
      * Adds Social DNA code to a perspective.
-     * 
-     * **Note:** For new code, prefer passing `shaclJson` directly. The `sdnaCode` parameter
-     * accepts legacy Prolog SDNA which is automatically converted to SHACL links on the backend.
-     * 
-     * @param sdnaCode - Prolog SDNA code (legacy - can be empty string if shaclJson provided)
-     * @param shaclJson - SHACL JSON representation (recommended for new code)
      */
-    async addSdna(uuid: string,  name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string): Promise<boolean> {
+    async addSdna(uuid: string,  name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom"): Promise<boolean> {
         return unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveAddSdna($uuid: String!, $name: String!, $sdnaCode: String!, $sdnaType: String!, $shaclJson: String) {
-                perspectiveAddSdna(uuid: $uuid, name: $name, sdnaCode: $sdnaCode, sdnaType: $sdnaType, shaclJson: $shaclJson)
-            }`,            variables: { uuid, name, sdnaCode, sdnaType, shaclJson }
+            mutation: gql`mutation perspectiveAddSdna($uuid: String!, $name: String!, $sdnaCode: String!, $sdnaType: String!) {
+                perspectiveAddSdna(uuid: $uuid, name: $name, sdnaCode: $sdnaCode, sdnaType: $sdnaType)
+            }`,
+            variables: { uuid, name, sdnaCode, sdnaType }
         })).perspectiveAddSdna
     }
 

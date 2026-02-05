@@ -8,16 +8,17 @@ import { Link } from "../links/Links";
  *   - "recipe:Recipe" -> "recipe:"
  */
 function extractNamespace(uri: string): string {
-  // Handle protocol-style URIs (://ending)
-  const protocolMatch = uri.match(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)/);
-  if (protocolMatch) {
-    return protocolMatch[1];
-  }
-  
-  // Handle hash fragments
+  // Handle hash fragments FIRST (takes priority over protocol)
   const hashIndex = uri.lastIndexOf('#');
   if (hashIndex !== -1) {
     return uri.substring(0, hashIndex + 1);
+  }
+  
+  // Handle protocol-style URIs (://ending) - only simple ones without path
+  // e.g., "recipe://name" -> "recipe://"
+  const protocolMatch = uri.match(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^/]+)$/);
+  if (protocolMatch) {
+    return protocolMatch[1];
   }
   
   // Handle colon-separated (namespace:localName)
@@ -145,9 +146,25 @@ export class SHACLShape {
   /** AD4M-specific: Destructor actions for removing instances */
   destructor_actions?: AD4MAction[];
 
-  constructor(nodeShapeUri: string, targetClass?: string) {
-    this.nodeShapeUri = nodeShapeUri;
-    this.targetClass = targetClass;
+  /**
+   * Create a new SHACL Shape
+   * @param targetClassOrShapeUri - If one argument: the target class (shape URI auto-derived as {class}Shape)
+   *                                If two arguments: first is shape URI, second is target class
+   * @param targetClass - Optional target class when first arg is shape URI
+   */
+  constructor(targetClassOrShapeUri: string, targetClass?: string) {
+    if (targetClass !== undefined) {
+      // Two arguments: explicit shape URI and target class
+      this.nodeShapeUri = targetClassOrShapeUri;
+      this.targetClass = targetClass;
+    } else {
+      // One argument: derive shape URI from target class
+      this.targetClass = targetClassOrShapeUri;
+      // Derive shape URI by appending "Shape" to the local name
+      const namespace = extractNamespace(targetClassOrShapeUri);
+      const localName = extractLocalName(targetClassOrShapeUri);
+      this.nodeShapeUri = `${namespace}${localName}Shape`;
+    }
     this.properties = [];
   }
 
