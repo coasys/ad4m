@@ -745,6 +745,38 @@ pub fn get_sdna_facts(
         }
     }
 
+    // Also generate minimal Prolog facts from SHACL links for backward compatibility
+    // This allows infer() queries to find subject classes even when only SHACL links are stored
+    let mut shacl_classes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for link_expression in all_links {
+        let link = &link_expression.data;
+        // Look for sh://targetClass links which indicate a SHACL shape
+        if link.predicate == Some("sh://targetClass".to_string()) {
+            // Extract class name from target URI (e.g., "recipe://Recipe" -> "Recipe")
+            let class_uri = &link.target;
+            let class_name = class_uri
+                .split("://")
+                .last()
+                .unwrap_or(class_uri)
+                .split('/')
+                .last()
+                .unwrap_or(class_uri)
+                .split('#')
+                .last()
+                .unwrap_or(class_uri);
+
+            // Only add if we haven't already seen this class from Prolog code
+            if !seen_subject_classes.contains_key(class_name) && !class_name.is_empty() {
+                shacl_classes.insert(class_name.to_string());
+            }
+        }
+    }
+
+    // Generate minimal subject_class facts for SHACL-only classes
+    for class_name in shacl_classes {
+        lines.push(format!("subject_class(\"{}\", c).", class_name));
+    }
+
     Ok(lines)
 }
 
