@@ -385,6 +385,7 @@ pub struct Notification {
     pub perspective_ids: Vec<String>,
     pub webhook_url: String,
     pub webhook_auth: String,
+    pub user_email: Option<String>, // NULL for main agent, Some(email) for managed users
 }
 
 #[derive(GraphQLObject, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -410,7 +411,11 @@ pub struct AITask {
 }
 
 impl Notification {
-    pub fn from_input_and_id(id: String, input: NotificationInput) -> Self {
+    pub fn from_input_and_id(
+        id: String,
+        input: NotificationInput,
+        user_email: Option<String>,
+    ) -> Self {
         Notification {
             id,
             granted: false,
@@ -422,6 +427,7 @@ impl Notification {
             perspective_ids: input.perspective_ids,
             webhook_url: input.webhook_url,
             webhook_auth: input.webhook_auth,
+            user_email,
         }
     }
 }

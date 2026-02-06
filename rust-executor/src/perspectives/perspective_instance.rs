@@ -1828,21 +1828,25 @@ impl PerspectiveInstance {
         &self,
         query: String,
         use_subscription_engine: bool,
+        context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
         let service = get_prolog_service().await;
 
         // Extract perspective metadata (same for Simple and SdnaOnly)
-        let (perspective_uuid, owner_did, neighbourhood_author) = {
+        let (perspective_uuid, neighbourhood_author) = {
             let persisted_guard = self.persisted.lock().await;
             (
                 persisted_guard.uuid.clone(),
-                persisted_guard.get_primary_owner(),
                 persisted_guard
                     .neighbourhood
                     .as_ref()
                     .map(|n| n.author.clone()),
             )
         };
+
+        // Get the correct user DID based on context (for proper SDNA filtering)
+        // Propagate errors instead of silently converting to None to ensure proper per-user filtering
+        let owner_did = Some(crate::agent::did_for_context(context)?);
 
         // Fetch links based on mode
         let links = match PROLOG_MODE {
@@ -1901,7 +1905,7 @@ impl PerspectiveInstance {
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
             PrologMode::Simple | PrologMode::SdnaOnly => {
-                self.execute_simple_mode_query(query, false).await
+                self.execute_simple_mode_query(query, false, context).await
             }
             PrologMode::Pooled => {
                 // Pooled mode: Use the old pool-based approach
@@ -1940,7 +1944,8 @@ impl PerspectiveInstance {
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
             PrologMode::Simple | PrologMode::SdnaOnly => {
-                self.execute_simple_mode_query(query, true).await
+                self.execute_simple_mode_query(query, true, &AgentContext::main_agent())
+                    .await
             }
             PrologMode::Pooled => {
                 // Pooled mode: Use the old pool-based approach
@@ -1968,12 +1973,12 @@ impl PerspectiveInstance {
     pub async fn prolog_query_subscription_with_context(
         &self,
         query: String,
-        _context: &AgentContext,
+        context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
             PrologMode::Simple | PrologMode::SdnaOnly => {
-                // Note: In Simple/SdnaOnly modes, context is ignored (no context-specific pools)
-                self.execute_simple_mode_query(query, true).await
+                // Context is now properly used for SDNA filtering per-user
+                self.execute_simple_mode_query(query, true, context).await
             }
             PrologMode::Pooled => {
                 // Pooled mode: Use the old pool-based approach with context
@@ -1985,7 +1990,7 @@ impl PerspectiveInstance {
                 self.prolog_query_helper(
                     query,
                     true,
-                    |_uuid| self.get_pool_id_for_context(&perspective_uuid, _context),
+                    |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
                     |service, pool, q| async move { service.run_query_subscription(pool, q).await },
                 )
                 .await
@@ -2301,6 +2306,7 @@ impl PerspectiveInstance {
     pub async fn surreal_query_notification(
         &self,
         query: String,
+        user_email: Option<String>,
     ) -> Result<Vec<serde_json::Value>, AnyError> {
         // Get context data without holding locks
         let perspective_id = {
@@ -2308,8 +2314,14 @@ impl PerspectiveInstance {
             persisted_guard.uuid.clone()
         };
 
-        // Get global agent DID (not perspective-specific owner)
-        let agent_did = crate::agent::did();
+        // Get agent DID for the specific user (main agent if user_email is None)
+        let agent_context = if let Some(email) = user_email {
+            crate::agent::AgentContext::for_user_email(email)
+        } else {
+            crate::agent::AgentContext::main_agent()
+        };
+        let agent_did = crate::agent::did_for_context(&agent_context)
+            .map_err(|e| anyhow!("Failed to get agent DID: {}", e))?;
 
         // Inject context variables using string replacement instead of LET statements
         // This ensures the SELECT query result is at index 0
@@ -2599,7 +2611,9 @@ impl PerspectiveInstance {
             } else {
                 //let query_start = std::time::Instant::now();
                 //log::info!("🔔 NOTIFICATIONS: not cached - Querying notification for perspective {}", uuid);
-                let matches = self.surreal_query_notification(n.trigger.clone()).await?;
+                let matches = self
+                    .surreal_query_notification(n.trigger.clone(), n.user_email.clone())
+                    .await?;
                 trigger_cache.insert(n.trigger.clone(), matches.clone());
                 result_map.insert(n.clone(), matches);
                 //log::info!("🔔 NOTIFICATIONS: Querying notification: {} - took {:?}", n.trigger, query_start.elapsed());

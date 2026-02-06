@@ -744,7 +744,11 @@ impl Query {
         context: &RequestContext,
     ) -> FieldResult<Vec<Notification>> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        let notifications_result = Ad4mDb::with_global_instance(|db| db.get_notifications());
+        // Extract user context from auth token to filter notifications per user
+        let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
+        let user_email = agent_context.user_email;
+        let notifications_result =
+            Ad4mDb::with_global_instance(|db| db.get_notifications_for_user(user_email));
         if let Err(e) = notifications_result {
             return Err(FieldError::new(e.to_string(), Value::null()));
         }
