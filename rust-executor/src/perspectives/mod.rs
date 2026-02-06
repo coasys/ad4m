@@ -1,5 +1,6 @@
 pub mod perspective_instance;
 pub mod sdna;
+pub mod shacl_parser;
 pub mod utils;
 use crate::graphql::graphql_types::{
     LinkQuery, LinkStatus, PerspectiveExpression, PerspectiveHandle, PerspectiveRemovedWithOwner,

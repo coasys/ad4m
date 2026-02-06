@@ -870,7 +870,11 @@ export class PerspectiveProxy {
     async startFlow(flowName: string, exprAddr: string) {
         let startAction = await this.infer(`start_action(Action, F), register_sdna_flow("${flowName}", F)`)
         // should always return one solution...
-        startAction = eval(startAction[0].Action)
+        try {
+            startAction = JSON.parse(startAction[0].Action);
+        } catch (e) {
+            throw `Failed to parse start action for flow "${flowName}": ${e}`;
+        }
         await this.executeAction(startAction, exprAddr, undefined)
     }
 
@@ -896,7 +900,11 @@ export class PerspectiveProxy {
     async runFlowAction(flowName: string, exprAddr: string, actionName: string) {
         let action = await this.infer(`register_sdna_flow("${flowName}", Flow), flow_state("${exprAddr}", State, Flow), action(State, "${actionName}", _, Action)`)
         // should find only one
-        action = eval(action[0].Action)
+        try {
+            action = JSON.parse(action[0].Action);
+        } catch (e) {
+            throw `Failed to parse flow action "${actionName}" for flow "${flowName}": ${e}`;
+        }
         await this.executeAction(action, exprAddr, undefined)
     }
 
@@ -975,9 +983,289 @@ export class PerspectiveProxy {
         return typeof code === 'string' ? code : null;
     }
 
-    /** Adds the given Social DNA code to the perspective's SDNA code */
+    /** 
+     * Adds Social DNA code to the perspective.
+     * 
+     * **Recommended:** Use {@link addShacl} instead, which accepts the `SHACLShape` type directly.
+     * This method is primarily for the GraphQL layer and legacy Prolog code.
+     * 
+     * @param name - Unique name for this SDNA definition
+     * @param sdnaCode - Prolog SDNA code (legacy, can be empty string if shaclJson provided)
+     * @param sdnaType - Type of SDNA: "subject_class", "flow", or "custom"
+     * @param shaclJson - SHACL JSON string (use addShacl() for type-safe alternative)
+     * 
+     * @example
+     * // Recommended: Use addShacl() with SHACLShape type
+     * const shape = new SHACLShape('recipe://Recipe');
+     * shape.addProperty({ name: 'title', path: 'recipe://title', datatype: 'xsd:string' });
+     * await perspective.addShacl('Recipe', shape);
+     * 
+     * // Legacy: Prolog code is auto-converted to SHACL
+     * await perspective.addSdna('Recipe', prologCode, 'subject_class');
+     */
     async addSdna(name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom") {
         return this.#client.addSdna(this.#handle.uuid, name, sdnaCode, sdnaType)
+    }
+
+    /**
+     * **Recommended way to add SDNA schemas.**
+     * 
+     * Store a SHACL shape in this Perspective using the type-safe `SHACLShape` class.
+     * The shape is serialized as RDF triples (links) for native AD4M storage and querying.
+     * 
+     * @param name - Unique name for this schema (e.g., 'Recipe', 'Task')
+     * @param shape - SHACLShape instance defining the schema
+     * 
+     * @example
+     * import { SHACLShape } from '@coasys/ad4m';
+     * 
+     * const shape = new SHACLShape('recipe://Recipe');
+     * shape.addProperty({ 
+     *   name: 'title', 
+     *   path: 'recipe://title', 
+     *   datatype: 'xsd:string',
+     *   minCount: 1 
+     * });
+     * shape.addProperty({
+     *   name: 'ingredients',
+     *   path: 'recipe://has_ingredient',
+     *   // No maxCount = collection
+     * });
+     * 
+     * await perspective.addShacl('Recipe', shape);
+     */
+    async addShacl(name: string, shape: import("../shacl/SHACLShape").SHACLShape): Promise<void> {
+        // Serialize shape to links
+        const links = shape.toLinks();
+        
+        // Add all links to perspective
+        for (const link of links) {
+            await this.add({
+                source: link.source,
+                predicate: link.predicate,
+                target: link.target
+            });
+        }
+        
+        // Create a name -> shape mapping link for easy retrieval
+        const nameMapping = Literal.fromUrl(`literal://string:shacl://${name}`);
+        await this.add({
+            source: "ad4m://self",
+            predicate: "ad4m://has_shacl",
+            target: nameMapping.toUrl()
+        });
+        
+        await this.add({
+            source: nameMapping.toUrl(),
+            predicate: "ad4m://shacl_shape_uri",
+            target: shape.nodeShapeUri
+        });
+    }
+    
+    /**
+     * Retrieve a SHACL shape by name from this Perspective
+     */
+    async getShacl(name: string): Promise<import("../shacl/SHACLShape").SHACLShape | null> {
+        // Find the shape URI from the name mapping
+        const nameMapping = Literal.fromUrl(`literal://string:shacl://${name}`);
+        const shapeUriLinks = await this.get(new LinkQuery({
+            source: nameMapping.toUrl(),
+            predicate: "ad4m://shacl_shape_uri"
+        }));
+        
+        if (shapeUriLinks.length === 0) {
+            return null;
+        }
+        
+        const shapeUri = shapeUriLinks[0].data.target;
+        
+        // Get all links that are part of this shape
+        // This includes the shape itself and all its property shapes
+        const shapeLinks: any[] = [];
+        
+        // Get shape type and target class
+        const shapeTypeLinks = await this.get(new LinkQuery({
+            source: shapeUri,
+            predicate: "rdf://type"
+        }));
+        shapeLinks.push(...shapeTypeLinks.map(l => l.data));
+        
+        const targetClassLinks = await this.get(new LinkQuery({
+            source: shapeUri,
+            predicate: "sh://targetClass"
+        }));
+        shapeLinks.push(...targetClassLinks.map(l => l.data));
+        
+        // Get constructor actions
+        const constructorLinks = await this.get(new LinkQuery({
+            source: shapeUri,
+            predicate: "ad4m://constructor"
+        }));
+        shapeLinks.push(...constructorLinks.map(l => l.data));
+        
+        // Get destructor actions
+        const destructorLinks = await this.get(new LinkQuery({
+            source: shapeUri,
+            predicate: "ad4m://destructor"
+        }));
+        shapeLinks.push(...destructorLinks.map(l => l.data));
+        
+        // Get property shapes
+        const propertyLinks = await this.get(new LinkQuery({
+            source: shapeUri,
+            predicate: "sh://property"
+        }));
+        
+        for (const propLink of propertyLinks) {
+            shapeLinks.push(propLink.data);
+            
+            // Get all links for this property shape (named URI or blank node)
+            const propShapeId = propLink.data.target;
+            
+            // Query all links with this property shape as source
+            const allLinks = await this.get(new LinkQuery({}));
+            const propShapeLinks = allLinks.filter(l => 
+                l.data.source === propShapeId
+            );
+            
+            shapeLinks.push(...propShapeLinks.map(l => l.data));
+        }
+        
+        // Reconstruct shape from links
+        const { SHACLShape } = await import("../shacl/SHACLShape");
+        return SHACLShape.fromLinks(shapeLinks, shapeUri);
+    }
+    
+    /**
+     * Get all SHACL shapes stored in this Perspective
+     */
+    async getAllShacl(): Promise<Array<{name: string, shape: import("../shacl/SHACLShape").SHACLShape}>> {
+        const nameLinks = await this.get(new LinkQuery({
+            source: "ad4m://self",
+            predicate: "ad4m://has_shacl"
+        }));
+        
+        const shapes = [];
+        for (const nameLink of nameLinks) {
+            const nameUrl = nameLink.data.target;
+            const name = Literal.fromUrl(nameUrl).get() as string;
+            const shapeName = name.replace('shacl://', '');
+            
+            const shape = await this.getShacl(shapeName);
+            if (shape) {
+                shapes.push({ name: shapeName, shape });
+            }
+        }
+        
+        return shapes;
+    }
+
+    /**
+     * **Recommended way to add Flow definitions.**
+     * 
+     * Store a SHACL Flow (state machine) in this Perspective using the type-safe `SHACLFlow` class.
+     * The flow is serialized as RDF triples (links) for native AD4M storage and querying.
+     * 
+     * @param name - Flow name (e.g., 'TODO', 'Approval')
+     * @param flow - SHACLFlow instance defining the state machine
+     * 
+     * @example
+     * ```typescript
+     * import { SHACLFlow } from '@coasys/ad4m';
+     * 
+     * const todoFlow = new SHACLFlow('TODO', 'todo://');
+     * todoFlow.flowable = 'any';
+     * 
+     * // Define states
+     * todoFlow.addState({ name: 'ready', value: 0, stateCheck: { predicate: 'todo://state', target: 'todo://ready' }});
+     * todoFlow.addState({ name: 'done', value: 1, stateCheck: { predicate: 'todo://state', target: 'todo://done' }});
+     * 
+     * // Define start action
+     * todoFlow.startAction = [{ action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }];
+     * 
+     * // Define transitions
+     * todoFlow.addTransition({
+     *   actionName: 'Complete',
+     *   fromState: 'ready',
+     *   toState: 'done',
+     *   actions: [
+     *     { action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://done' },
+     *     { action: 'removeLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }
+     *   ]
+     * });
+     * 
+     * await perspective.addFlow('TODO', todoFlow);
+     * ```
+     */
+    async addFlow(name: string, flow: import("../shacl/SHACLFlow").SHACLFlow): Promise<void> {
+        // Serialize flow to links
+        const links = flow.toLinks();
+        
+        // Add all links to perspective
+        for (const link of links) {
+            await this.add({
+                source: link.source,
+                predicate: link.predicate,
+                target: link.target
+            });
+        }
+        
+        // Create registration link matching ad4m://has_flow pattern
+        const flowNameLiteral = Literal.from(name).toUrl();
+        await this.add({
+            source: "ad4m://self",
+            predicate: "ad4m://has_flow",
+            target: flowNameLiteral
+        });
+        
+        // Create mapping from name to flow URI
+        await this.add({
+            source: flowNameLiteral,
+            predicate: "ad4m://flow_uri",
+            target: flow.flowUri
+        });
+    }
+
+    /**
+     * Retrieve a Flow definition by name from this Perspective
+     * 
+     * @param name - Flow name to retrieve
+     * @returns The SHACLFlow or null if not found
+     */
+    async getFlow(name: string): Promise<import("../shacl/SHACLFlow").SHACLFlow | null> {
+        const flowNameLiteral = Literal.from(name).toUrl();
+        
+        // Find flow URI from name mapping
+        const flowUriLinks = await this.get(new LinkQuery({
+            source: flowNameLiteral,
+            predicate: "ad4m://flow_uri"
+        }));
+        
+        if (flowUriLinks.length === 0) {
+            return null;
+        }
+        
+        const flowUri = flowUriLinks[0].data.target;
+        
+        // Get all links related to this flow
+        // flowUri format: {namespace}{Name}Flow
+        // State/transition URIs format: {namespace}{Name}.{stateName}
+        // Replace the trailing 'Flow' with '.' to find state/transition links
+        const flowPrefix = flowUri.endsWith('Flow') 
+            ? flowUri.slice(0, -4) + '.'  // Remove 'Flow', add '.'
+            : flowUri + '.';
+        
+        const allLinks = await this.get(new LinkQuery({}));
+        const flowLinks = allLinks
+            .map(l => l.data)
+            .filter(l => 
+                l.source === flowUri || 
+                l.source.startsWith(flowPrefix)
+            );
+        
+        // Reconstruct flow from links
+        const { SHACLFlow } = await import("../shacl/SHACLFlow");
+        return SHACLFlow.fromLinks(flowLinks, flowUri);
     }
 
     /** Returns all the Subject classes defined in this perspectives SDNA */
@@ -1065,6 +1353,39 @@ export class PerspectiveProxy {
         return JSON.parse(await this.#client.getSubjectData(this.#handle.uuid, JSON.stringify({query}), exprAddr))
     }
 
+    /**
+     * Gets actions from SHACL links for a given predicate (e.g., ad4m://constructor, ad4m://destructor).
+     * Returns the parsed action array if found, or null if not found.
+     */
+    private async getActionsFromSHACL(className: string, predicate: string): Promise<any[] | null> {
+        // Use regex to match exact class name followed by "Shape" at end of URI
+        // This prevents "RecipeShape" from matching "MyRecipeShape"
+        const escaped = this.escapeRegExp(className);
+        const shapePattern = new RegExp(`[/:#]${escaped}Shape$`);
+        const links = await this.get(new LinkQuery({ predicate }));
+
+        for (const link of links) {
+            if (shapePattern.test(link.data.source)) {
+                // Parse actions from literal://string:{json}
+                const prefix = "literal://string:";
+                if (link.data.target.startsWith(prefix)) {
+                    const jsonStr = link.data.target.slice(prefix.length);
+                    // Decode URL-encoded JSON if needed, with fallback for raw % characters
+                    let decoded = jsonStr;
+                    try { decoded = decodeURIComponent(jsonStr); } catch {}
+                    try {
+                        return JSON.parse(decoded);
+                    } catch (e) {
+                        console.warn(`Failed to parse SHACL actions JSON for ${className}:`, e);
+                        return null;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
     /** Removes a subject instance by running its (SDNA defined) destructor,
      * which means removing links around the given expression address
      *
@@ -1077,13 +1398,24 @@ export class PerspectiveProxy {
      */
     async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
-        let result = await this.infer(`subject_class("${className}", C), destructor(C, Actions)`)
-        if(!result.length) {
-            throw "No destructor found for given subject class: " + className
+
+        // Try SHACL links first
+        let actions = await this.getActionsFromSHACL(className, "ad4m://destructor");
+
+        if (!actions) {
+            // Fall back to Prolog
+            let result = await this.infer(`subject_class("${className}", C), destructor(C, Actions)`)
+            if(!result.length) {
+                throw "No destructor found for given subject class: " + className
+            }
+            try {
+                actions = JSON.parse(result[0].Actions);
+            } catch (e) {
+                throw `Failed to parse destructor actions for class "${className}": ${e}`;
+            }
         }
 
-        let actions = result.map(x => eval(x.Actions))
-        await this.executeAction(actions[0], exprAddr, undefined, batchId)
+        await this.executeAction(actions, exprAddr, undefined, batchId)
     }
 
     /** Checks if the given expression is a subject instance of the given subject class
@@ -1758,9 +2090,42 @@ export class PerspectiveProxy {
             return
         }
 
-        const { name, sdna } = jsClass.generateSDNA();
+        // Generate both SHACL and Prolog SDNA
+        if (!jsClass.generateSHACL || !jsClass.generateSDNA) {
+            throw new Error(`Class ${jsClass.name} must have both generateSHACL() and generateSDNA(). Use @ModelOptions decorator.`);
+        }
 
-        await this.addSdna(name, sdna, 'subject_class');
+        // Get Prolog SDNA for backward compatibility (Rust backend still uses Prolog for queries)
+        const { name: sdnaName, sdna: prologSdna } = jsClass.generateSDNA();
+
+        // Get SHACL shape (W3C standard + AD4M action definitions)
+        const { shape } = jsClass.generateSHACL();
+
+        // Serialize SHACL shape to JSON for Rust backend
+        const shaclJson = JSON.stringify({
+            target_class: shape.targetClass,
+            constructor_actions: shape.constructor_actions,
+            destructor_actions: shape.destructor_actions,
+            properties: shape.properties.map((p: any) => ({
+                path: p.path,
+                name: p.name,
+                datatype: p.datatype,
+                min_count: p.minCount,
+                max_count: p.maxCount,
+                writable: p.writable,
+                local: p.local,
+                resolve_language: p.resolveLanguage,
+                node_kind: p.nodeKind,
+                collection: p.collection,
+                setter: p.setter,
+                adder: p.adder,
+                remover: p.remover
+            }))
+        });
+
+        // Pass Prolog SDNA to backend (SHACL JSON prepared for future migration)
+        // TODO: When Rust backend supports SHACL, add shaclJson parameter
+        await this.addSdna(sdnaName, prologSdna, 'subject_class');
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {

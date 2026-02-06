@@ -430,11 +430,15 @@ export class PerspectiveClient {
         return perspectiveRemoveLink
     }
 
+    /**
+     * Adds Social DNA code to a perspective.
+     */
     async addSdna(uuid: string,  name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom"): Promise<boolean> {
         return unwrapApolloResult(await this.#apolloClient.mutate({
             mutation: gql`mutation perspectiveAddSdna($uuid: String!, $name: String!, $sdnaCode: String!, $sdnaType: String!) {
                 perspectiveAddSdna(uuid: $uuid, name: $name, sdnaCode: $sdnaCode, sdnaType: $sdnaType)
-            }`,            variables: { uuid, name, sdnaCode, sdnaType }
+            }`,
+            variables: { uuid, name, sdnaCode, sdnaType }
         })).perspectiveAddSdna
     }
 
