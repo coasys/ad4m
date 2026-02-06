@@ -523,7 +523,7 @@ impl PerspectiveProxy {
         }
     }
 
-    pub async fn get_subject(&self, class: &String, base: &String) -> Result<SubjectProxy> {
+    pub async fn get_subject(&self, class: &String, base: &String) -> Result<SubjectProxy<'_>> {
         if self.is_subject_instance(class, base).await? {
             Ok(SubjectProxy::new(self, class.clone(), base.clone()))
         } else {

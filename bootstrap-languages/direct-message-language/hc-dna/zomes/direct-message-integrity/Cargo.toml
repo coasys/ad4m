@@ -13,6 +13,6 @@ derive_more = "0"
 serde = "1"
 chrono = { version = "0.4.38", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
 
-hdi = { version = "0.7.0", git = "https://github.com/coasys/holochain.git", branch = "0.6.0-coasys" }
+hdi = { version = "0.8.0-dev.4", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.7-coasys" }
 holochain_serialized_bytes = "=0.0.56"
-holo_hash =  { version = "0.6.0", git = "https://github.com/coasys/holochain.git", branch = "0.6.0-coasys" }
+holo_hash =  { version = "0.7.0-dev.3", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.7-coasys" }

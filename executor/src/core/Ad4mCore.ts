@@ -33,6 +33,7 @@ export interface InitHolochainParams {
     passphrase?: string
     hcProxyUrl: string,
     hcBootstrapUrl: string,
+    hcRelayUrl?: string,
     logHolochainMetrics?: boolean
 }
 
@@ -151,6 +152,7 @@ export default class Ad4mCore {
             useMdns: params.hcUseMdns,
             hcProxyUrl: params.hcProxyUrl,
             hcBootstrapUrl: params.hcBootstrapUrl,
+            hcRelayUrl: params.hcRelayUrl,
             logHolochainMetrics: this.#config.logHolochainMetrics
         }
 

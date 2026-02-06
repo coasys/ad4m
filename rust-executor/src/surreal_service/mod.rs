@@ -96,7 +96,7 @@ struct NodeRecord {
 /// This is used with RELATE statements: node->link->node
 /// Note: No 'perspective' field - each perspective has its own isolated database
 #[derive(Debug, Serialize, Deserialize)]
-struct LinkEdge {
+struct _LinkEdge {
     #[serde(skip)]
     #[allow(dead_code)]
     id: Option<serde_json::Value>, // SurrealDB Thing ID
