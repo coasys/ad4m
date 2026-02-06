@@ -246,7 +246,7 @@ pub struct Language {
     pub name: String,
 }
 
-#[derive(GraphQLEnum, Debug, Default, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(GraphQLEnum, Debug, Default, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 pub enum LinkStatus {
     #[default]
     #[serde(rename = "shared")]

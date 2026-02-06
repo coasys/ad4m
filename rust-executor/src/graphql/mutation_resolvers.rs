@@ -619,12 +619,14 @@ impl Mutation {
         let smtp_config_opt = crate::config::SMTP_CONFIG
             .lock()
             .ok()
-            .and_then(|cfg| cfg.clone());
+            .and_then(|cfg| cfg.clone())
+            .filter(|config| config.enabled);
 
         if test_mode || smtp_config_opt.is_some() {
             // In test mode, use dummy config since send_verification_email will capture codes instead
             let smtp_config = if test_mode && smtp_config_opt.is_none() {
                 crate::config::SmtpConfig {
+                    enabled: true,
                     host: "test.localhost".to_string(),
                     port: 587,
                     username: "test".to_string(),
@@ -912,11 +914,13 @@ impl Mutation {
         let smtp_config_opt = crate::config::SMTP_CONFIG
             .lock()
             .ok()
-            .and_then(|cfg| cfg.clone());
+            .and_then(|cfg| cfg.clone())
+            .filter(|config| config.enabled);
 
         let smtp_config = if test_mode && smtp_config_opt.is_none() {
             // In test mode without SMTP config, use dummy config
             crate::config::SmtpConfig {
+                enabled: true,
                 host: "test.localhost".to_string(),
                 port: 587,
                 username: "test".to_string(),
@@ -1108,9 +1112,10 @@ impl Mutation {
             .lock()
             .ok()
             .and_then(|cfg| cfg.clone())
+            .filter(|config| config.enabled)
             .ok_or_else(|| {
                 FieldError::new(
-                    "SMTP is not configured. Please configure email settings in the launcher.",
+                    "SMTP is not configured or is disabled. Please enable email settings in the launcher.",
                     graphql_value!(null),
                 )
             })?;
@@ -2445,7 +2450,7 @@ impl Mutation {
         context: &RequestContext,
         task: AITaskInput,
     ) -> FieldResult<AITask> {
-        check_capability(&context.capabilities, &AI_CREATE_CAPABILITY)?;
+        check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
         Ok(AIService::global_instance()
             .await?
             .add_task(task.clone())

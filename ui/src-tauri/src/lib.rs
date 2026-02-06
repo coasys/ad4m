@@ -297,6 +297,7 @@ pub fn run() {
 
                     let smtp = multi_user_config.smtp_config.as_ref().map(|config| {
                         rust_executor::config::SmtpConfig {
+                            enabled: config.enabled,
                             host: config.host.clone(),
                             port: config.port,
                             username: config.username.clone(),

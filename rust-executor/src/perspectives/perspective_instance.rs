@@ -15,11 +15,12 @@ use crate::languages::language::Language;
 use crate::languages::LanguageController;
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
 use crate::prolog_service::get_prolog_service;
-use crate::prolog_service::types::{QueryMatch, QueryResolution};
+use crate::prolog_service::types::QueryResolution;
 use crate::prolog_service::PrologService;
 use crate::prolog_service::{
     engine_pool::FILTERING_THRESHOLD, DEFAULT_POOL_SIZE, DEFAULT_POOL_SIZE_WITH_FILTERING,
 };
+use crate::prolog_service::{PrologMode, PROLOG_MODE};
 use crate::pubsub::{
     get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC,
     PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
@@ -50,7 +51,7 @@ static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;
 static IMMEDIATE_COMMITS_COUNT: usize = 20;
-static QUERY_SUBSCRIPTION_TIMEOUT: u64 = 300; // 5 minutes in seconds
+static QUERY_SUBSCRIPTION_TIMEOUT: u64 = 60; // 1 minute in seconds (was 5 min)
 static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
 
 fn notification_pool_name(uuid: &str) -> String {
@@ -791,7 +792,9 @@ impl PerspectiveInstance {
                 .collect(),
         };
 
-        self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+        // Update both Prolog engines: subscription (immediate) + query (lazy)
+        self.update_prolog_engines(decorated_diff.clone()).await;
+
         self.update_surreal_cache(&decorated_diff).await;
         self.pubsub_publish_diff(decorated_diff).await;
     }
@@ -896,7 +899,9 @@ impl PerspectiveInstance {
                 let decorated_diff =
                     DecoratedPerspectiveDiff::from_removals(vec![decorated_link.clone()]);
 
-                self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+                // Update both Prolog engines: subscription (immediate) + query (lazy)
+                self.update_prolog_engines(decorated_diff.clone()).await;
+
                 self.update_surreal_cache(&decorated_diff).await;
                 self.pubsub_publish_diff(decorated_diff.clone()).await;
 
@@ -1019,7 +1024,10 @@ impl PerspectiveInstance {
         let decorated_perspective_diff =
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
-        self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
+        // Update both Prolog engines: subscription (immediate) + query (lazy)
+        self.update_prolog_engines(decorated_perspective_diff.clone())
+            .await;
+
         self.update_surreal_cache(&decorated_perspective_diff).await;
 
         if status == LinkStatus::Shared {
@@ -1196,7 +1204,9 @@ impl PerspectiveInstance {
                 vec![decorated_old_link.clone()],
             );
 
-            self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+            // Update both Prolog engines: subscription (immediate) + query (lazy)
+            self.update_prolog_engines(decorated_diff.clone()).await;
+
             self.update_surreal_cache(&decorated_diff).await;
 
             // Publish link updated events - one per owner for proper multi-user isolation
@@ -1300,7 +1310,9 @@ impl PerspectiveInstance {
                 Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, link))?;
             }
 
-            self.spawn_prolog_facts_update(decorated_diff.clone(), None);
+            // Update both Prolog engines: subscription (immediate) + query (lazy)
+            self.update_prolog_engines(decorated_diff.clone()).await;
+
             self.update_surreal_cache(&decorated_diff).await;
             self.pubsub_publish_diff(decorated_diff).await;
 
@@ -1323,6 +1335,48 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Helper function to efficiently fetch only SDNA-related links from the database
+    /// This makes two targeted queries instead of fetching all links:
+    /// 1. Links with source == "ad4m://self" (SDNA declarations)
+    /// 2. Links with predicate == "ad4m://sdna" (SDNA code)
+    async fn get_sdna_links_local(&self) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
+        // Query 1: Get all links from ad4m://self (SDNA declarations)
+        let self_links = self
+            .get_links_local(&LinkQuery {
+                source: Some("ad4m://self".to_string()),
+                ..Default::default()
+            })
+            .await?;
+
+        // Query 2: Get all links with predicate ad4m://sdna (SDNA code)
+        let sdna_code_links = self
+            .get_links_local(&LinkQuery {
+                predicate: Some("ad4m://sdna".to_string()),
+                ..Default::default()
+            })
+            .await?;
+
+        // Combine both result sets (using a HashSet to avoid duplicates)
+        let mut seen = std::collections::HashSet::new();
+        let mut all_sdna_links = Vec::new();
+
+        for link in self_links.into_iter().chain(sdna_code_links) {
+            let key = (
+                link.0.data.source.clone(),
+                link.0.data.predicate.clone(),
+                link.0.data.target.clone(),
+                link.0.author.clone(),
+                link.0.timestamp.clone(),
+                link.1.clone(), // Include LinkStatus
+            );
+            if seen.insert(key) {
+                all_sdna_links.push(link);
+            }
+        }
+
+        Ok(all_sdna_links)
+    }
+
     async fn get_links_local(
         &self,
         query: &LinkQuery,
@@ -1336,14 +1390,7 @@ impl PerspectiveInstance {
             } else if let Some(target) = &query.target {
                 Ad4mDb::with_global_instance(|db| db.get_links_by_target(&uuid, target))?
             } else if let Some(predicate) = &query.predicate {
-                Ad4mDb::with_global_instance(|db| {
-                    Ok::<Vec<(LinkExpression, LinkStatus)>, AnyError>(
-                        db.get_all_links(&uuid)?
-                            .into_iter()
-                            .filter(|(link, _)| link.data.predicate.as_ref() == Some(predicate))
-                            .collect::<Vec<(LinkExpression, LinkStatus)>>(),
-                    )
-                })?
+                Ad4mDb::with_global_instance(|db| db.get_links_by_predicate(&uuid, predicate))?
             } else {
                 vec![]
             };
@@ -1752,6 +1799,98 @@ impl PerspectiveInstance {
     //     .await
     // }
 
+    /// Helper to mark the Prolog engine as dirty (needs update before next query)
+    /// Only applies to Simple mode
+    /// Note: SdnaOnly mode doesn't use dirty flag - it compares SDNA links directly to avoid rebuilding on non-SDNA changes
+    async fn mark_prolog_engine_dirty(&self) {
+        if PROLOG_MODE == PrologMode::Simple {
+            let perspective_uuid = self.persisted.lock().await.uuid.clone();
+            get_prolog_service()
+                .await
+                .mark_dirty(&perspective_uuid)
+                .await;
+        }
+    }
+
+    /// Combined helper: spawns Prolog facts update AND marks query engine as dirty
+    /// This is the common pattern throughout the codebase
+    async fn update_prolog_engines(&self, diff: DecoratedPerspectiveDiff) {
+        // Update subscription engine (immediate via spawned task)
+        self.spawn_prolog_facts_update(diff, None);
+
+        // Mark query engine dirty for lazy update on next query
+        self.mark_prolog_engine_dirty().await;
+    }
+
+    /// Helper for Simple/SdnaOnly modes: extracts perspective metadata, fetches appropriate links,
+    /// and calls the appropriate service method
+    async fn execute_simple_mode_query(
+        &self,
+        query: String,
+        use_subscription_engine: bool,
+    ) -> Result<QueryResolution, AnyError> {
+        let service = get_prolog_service().await;
+
+        // Extract perspective metadata (same for Simple and SdnaOnly)
+        let (perspective_uuid, owner_did, neighbourhood_author) = {
+            let persisted_guard = self.persisted.lock().await;
+            (
+                persisted_guard.uuid.clone(),
+                persisted_guard.get_primary_owner(),
+                persisted_guard
+                    .neighbourhood
+                    .as_ref()
+                    .map(|n| n.author.clone()),
+            )
+        };
+
+        // Fetch links based on mode
+        let links = match PROLOG_MODE {
+            PrologMode::Simple => {
+                // Get all links for Simple mode
+                self.get_links_local(&LinkQuery::default())
+                    .await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect()
+            }
+            PrologMode::SdnaOnly => {
+                // Get only SDNA links for SdnaOnly mode (efficient query)
+                self.get_sdna_links_local()
+                    .await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect()
+            }
+            _ => Vec::new(), // Should never reach here given the callers
+        };
+
+        // Execute the query using the appropriate engine
+        let result = if use_subscription_engine {
+            service
+                .run_query_subscription_simple(
+                    &perspective_uuid,
+                    query,
+                    &links,
+                    neighbourhood_author,
+                    owner_did,
+                )
+                .await
+        } else {
+            service
+                .run_query_simple(
+                    &perspective_uuid,
+                    query,
+                    &links,
+                    neighbourhood_author,
+                    owner_did,
+                )
+                .await
+        };
+
+        result.map_err(|e| anyhow!("{}", e))
+    }
+
     /// Executes a Prolog query with user context - uses context-specific pool
     /// locks the prolog_update_mutex
     /// uses run_query_smart
@@ -1760,21 +1899,36 @@ impl PerspectiveInstance {
         query: String,
         context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
-        let perspective_uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
+        match PROLOG_MODE {
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                self.execute_simple_mode_query(query, false).await
+            }
+            PrologMode::Pooled => {
+                // Pooled mode: Use the old pool-based approach
+                let perspective_uuid = {
+                    let persisted_guard = self.persisted.lock().await;
+                    persisted_guard.uuid.clone()
+                };
 
-        // Ensure the user-specific pool exists
-        self.ensure_prolog_engine_pool_for_context(context).await?;
+                // Ensure the user-specific pool exists
+                self.ensure_prolog_engine_pool_for_context(context).await?;
 
-        self.prolog_query_helper(
-            query,
-            true,
-            |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
-            |service, pool, q| async move { service.run_query_smart(pool, q).await },
-        )
-        .await
+                self.prolog_query_helper(
+                    query,
+                    true,
+                    |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
+                    |service, pool, q| async move { service.run_query_smart(pool, q).await },
+                )
+                .await
+            }
+            PrologMode::Disabled => {
+                log::warn!(
+                    "⚠️ Prolog query received but Prolog is DISABLED (query: {})",
+                    query
+                );
+                Err(anyhow!("Prolog is disabled"))
+            }
+        }
     }
 
     /// Executes a Prolog subscription query against the perspective's main pool
@@ -1784,13 +1938,28 @@ impl PerspectiveInstance {
         &self,
         query: String,
     ) -> Result<QueryResolution, AnyError> {
-        self.prolog_query_helper(
-            query,
-            true,
-            |uuid| uuid.clone(),
-            |service, pool, q| async move { service.run_query_subscription(pool, q).await },
-        )
-        .await
+        match PROLOG_MODE {
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                self.execute_simple_mode_query(query, true).await
+            }
+            PrologMode::Pooled => {
+                // Pooled mode: Use the old pool-based approach
+                self.prolog_query_helper(
+                    query,
+                    true,
+                    |uuid| uuid.clone(),
+                    |service, pool, q| async move { service.run_query_subscription(pool, q).await },
+                )
+                .await
+            }
+            PrologMode::Disabled => {
+                log::warn!(
+                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {})",
+                    query
+                );
+                Err(anyhow!("Prolog is disabled"))
+            }
+        }
     }
 
     /// Executes a Prolog subscription query with user context - uses context-specific pool
@@ -1799,20 +1968,36 @@ impl PerspectiveInstance {
     pub async fn prolog_query_subscription_with_context(
         &self,
         query: String,
-        context: &AgentContext,
+        _context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
-        let perspective_uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
+        match PROLOG_MODE {
+            PrologMode::Simple | PrologMode::SdnaOnly => {
+                // Note: In Simple/SdnaOnly modes, context is ignored (no context-specific pools)
+                self.execute_simple_mode_query(query, true).await
+            }
+            PrologMode::Pooled => {
+                // Pooled mode: Use the old pool-based approach with context
+                let perspective_uuid = {
+                    let persisted_guard = self.persisted.lock().await;
+                    persisted_guard.uuid.clone()
+                };
 
-        self.prolog_query_helper(
-            query,
-            true,
-            |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
-            |service, pool, q| async move { service.run_query_subscription(pool, q).await },
-        )
-        .await
+                self.prolog_query_helper(
+                    query,
+                    true,
+                    |_uuid| self.get_pool_id_for_context(&perspective_uuid, _context),
+                    |service, pool, q| async move { service.run_query_subscription(pool, q).await },
+                )
+                .await
+            }
+            PrologMode::Disabled => {
+                log::warn!(
+                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {})",
+                    query
+                );
+                Err(anyhow!("Prolog is disabled"))
+            }
+        }
     }
 
     /// Executes a Prolog query directly on the SDNA pool for maximum performance
@@ -1824,13 +2009,85 @@ impl PerspectiveInstance {
     /// does not lock the prolog_update_mutex
     /// uses run_query_sdna
     pub async fn prolog_query_sdna(&self, query: String) -> Result<QueryResolution, AnyError> {
-        self.prolog_query_helper(
-            query,
-            false,
-            |uuid| uuid.clone(),
-            |service, pool, q| async move { service.run_query_sdna(pool, q).await },
-        )
-        .await
+        match PROLOG_MODE {
+            PrologMode::Simple => {
+                // In Simple mode, route to Simple engine which has SDNA facts
+                let service = get_prolog_service().await;
+                let (perspective_uuid, owner_did, neighbourhood_author) = {
+                    let persisted_guard = self.persisted.lock().await;
+                    let perspective_uuid = persisted_guard.uuid.clone();
+                    let owner_did = persisted_guard.get_primary_owner();
+                    let neighbourhood_author = persisted_guard
+                        .neighbourhood
+                        .as_ref()
+                        .map(|n| n.author.clone());
+                    (perspective_uuid, owner_did, neighbourhood_author)
+                };
+
+                // Get links for SDNA fact generation
+                let links = self
+                    .get_links_local(&LinkQuery::default())
+                    .await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect::<Vec<_>>();
+
+                service
+                    .run_query_simple(
+                        &perspective_uuid,
+                        query,
+                        &links,
+                        neighbourhood_author,
+                        owner_did,
+                    )
+                    .await
+                    .map_err(|e| anyhow!("{}", e))
+            }
+            PrologMode::SdnaOnly => {
+                // In SdnaOnly mode, route to Simple engine with only SDNA links
+                let service = get_prolog_service().await;
+                let (perspective_uuid, owner_did, neighbourhood_author) = {
+                    let persisted_guard = self.persisted.lock().await;
+                    let perspective_uuid = persisted_guard.uuid.clone();
+                    let owner_did = persisted_guard.get_primary_owner();
+                    let neighbourhood_author = persisted_guard
+                        .neighbourhood
+                        .as_ref()
+                        .map(|n| n.author.clone());
+                    (perspective_uuid, owner_did, neighbourhood_author)
+                };
+
+                // Get only SDNA-related links from database (efficient query)
+                let links = self
+                    .get_sdna_links_local()
+                    .await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect::<Vec<_>>();
+
+                service
+                    .run_query_simple(
+                        &perspective_uuid,
+                        query,
+                        &links,
+                        neighbourhood_author,
+                        owner_did,
+                    )
+                    .await
+                    .map_err(|e| anyhow!("{}", e))
+            }
+            PrologMode::Pooled => {
+                // In pooled mode, use dedicated SDNA pool
+                self.prolog_query_helper(
+                    query,
+                    false,
+                    |uuid| uuid.clone(),
+                    |service, pool, q| async move { service.run_query_sdna(pool, q).await },
+                )
+                .await
+            }
+            PrologMode::Disabled => Err(anyhow!("Prolog is disabled")),
+        }
     }
 
     /// Executes a Prolog query directly on the SDNA pool with user context
@@ -1843,21 +2100,111 @@ impl PerspectiveInstance {
         query: String,
         context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
-        let perspective_uuid = {
-            let persisted_guard = self.persisted.lock().await;
-            persisted_guard.uuid.clone()
-        };
+        match PROLOG_MODE {
+            PrologMode::Simple => {
+                // In Simple mode, route to Simple engine (no per-context pools)
+                // IMPORTANT: Use context user's DID as owner_did so their SDNA links are included
+                let service = get_prolog_service().await;
+                let (perspective_uuid, neighbourhood_author) = {
+                    let persisted_guard = self.persisted.lock().await;
+                    let perspective_uuid = persisted_guard.uuid.clone();
+                    let neighbourhood_author = persisted_guard
+                        .neighbourhood
+                        .as_ref()
+                        .map(|n| n.author.clone());
+                    (perspective_uuid, neighbourhood_author)
+                };
 
-        // Ensure the user-specific pool exists
-        self.ensure_prolog_engine_pool_for_context(context).await?;
+                // Use context DID as owner_did for SDNA filtering
+                let owner_did = Some(if let Some(user_email) = &context.user_email {
+                    crate::agent::AgentService::get_user_did_by_email(user_email)?
+                } else {
+                    crate::agent::AgentService::with_global_instance(|service| {
+                        service.did.clone().unwrap_or_default()
+                    })
+                });
 
-        self.prolog_query_helper(
-            query,
-            false,
-            |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
-            |service, pool, q| async move { service.run_query_sdna(pool, q).await },
-        )
-        .await
+                // Get links for SDNA fact generation
+                let links = self
+                    .get_links_local(&LinkQuery::default())
+                    .await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect::<Vec<_>>();
+
+                service
+                    .run_query_simple(
+                        &perspective_uuid,
+                        query,
+                        &links,
+                        neighbourhood_author,
+                        owner_did,
+                    )
+                    .await
+                    .map_err(|e| anyhow!("{}", e))
+            }
+            PrologMode::SdnaOnly => {
+                // In SdnaOnly mode, route to Simple engine (no per-context pools), only SDNA links
+                // IMPORTANT: Use context user's DID as owner_did so their SDNA links are included
+                let service = get_prolog_service().await;
+                let (perspective_uuid, neighbourhood_author) = {
+                    let persisted_guard = self.persisted.lock().await;
+                    let perspective_uuid = persisted_guard.uuid.clone();
+                    let neighbourhood_author = persisted_guard
+                        .neighbourhood
+                        .as_ref()
+                        .map(|n| n.author.clone());
+                    (perspective_uuid, neighbourhood_author)
+                };
+
+                // Use context DID as owner_did for SDNA filtering
+                let owner_did = Some(if let Some(user_email) = &context.user_email {
+                    crate::agent::AgentService::get_user_did_by_email(user_email)?
+                } else {
+                    crate::agent::AgentService::with_global_instance(|service| {
+                        service.did.clone().unwrap_or_default()
+                    })
+                });
+
+                // Get only SDNA-related links from database (efficient query)
+                let links = self
+                    .get_sdna_links_local()
+                    .await?
+                    .into_iter()
+                    .map(|(link, status)| DecoratedLinkExpression::from((link, status)))
+                    .collect::<Vec<_>>();
+
+                service
+                    .run_query_simple(
+                        &perspective_uuid,
+                        query,
+                        &links,
+                        neighbourhood_author,
+                        owner_did,
+                    )
+                    .await
+                    .map_err(|e| anyhow!("{}", e))
+            }
+            PrologMode::Pooled => {
+                // In pooled mode, use per-context SDNA pool
+                let perspective_uuid = {
+                    let persisted_guard = self.persisted.lock().await;
+                    persisted_guard.uuid.clone()
+                };
+
+                // Ensure the user-specific pool exists
+                self.ensure_prolog_engine_pool_for_context(context).await?;
+
+                self.prolog_query_helper(
+                    query,
+                    false,
+                    |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
+                    |service, pool, q| async move { service.run_query_sdna(pool, q).await },
+                )
+                .await
+            }
+            PrologMode::Disabled => Err(anyhow!("Prolog is disabled")),
+        }
     }
 
     /// Ensure prolog engine pool exists for the given context with correct owner_did
@@ -1949,6 +2296,57 @@ impl PerspectiveInstance {
             })
     }
 
+    /// Executes a SurrealQL query for notifications with context injection
+    /// Auto-injects $agentDid and $perspectiveId variables before execution
+    pub async fn surreal_query_notification(
+        &self,
+        query: String,
+    ) -> Result<Vec<serde_json::Value>, AnyError> {
+        // Get context data without holding locks
+        let perspective_id = {
+            let persisted_guard = self.persisted.lock().await;
+            persisted_guard.uuid.clone()
+        };
+
+        // Get global agent DID (not perspective-specific owner)
+        let agent_did = crate::agent::did();
+
+        // Inject context variables using string replacement instead of LET statements
+        // This ensures the SELECT query result is at index 0
+        let query_with_context = query
+            .replace("$agentDid", &format!("'{}'", agent_did))
+            .replace("$perspectiveId", &format!("'{}'", perspective_id));
+
+        log::debug!("🔔 Notification query original: {}", query);
+        log::debug!(
+            "🔔 Notification query with context (agentDid='{}', perspectiveId='{}'): {}",
+            agent_did,
+            perspective_id,
+            query_with_context
+        );
+
+        let results = self
+            .surreal_service
+            .query_links(&perspective_id, &query_with_context)
+            .await
+            .map_err(|e| {
+                log::error!(
+                    "Failed to execute notification query for perspective {}: {:?}",
+                    perspective_id,
+                    e
+                );
+                anyhow!(
+                    "Notification query failed for perspective {}: {}",
+                    perspective_id,
+                    e
+                )
+            })?;
+
+        log::debug!("🔔 Notification query results: {:?}", results);
+
+        Ok(results)
+    }
+
     async fn retry_surreal_op<F, Fut>(op: F, uuid: &str, op_name: &str)
     where
         F: Fn() -> Fut,
@@ -2024,6 +2422,22 @@ impl PerspectiveInstance {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
+            // In Simple mode, only update subscription engine and trigger subscription rerun
+            if PROLOG_MODE == PrologMode::Simple {
+                log::debug!("Prolog facts update (Simple mode): marking subscription engine dirty");
+
+                // Trigger subscription check to rerun all subscriptions with updated data
+                *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
+
+                self_clone.pubsub_publish_diff(diff).await;
+
+                if let Some(sender) = completion_sender {
+                    let _ = sender.send(());
+                }
+                return;
+            }
+
+            // Pooled mode: original full update logic
             //let spawn_start = std::time::Instant::now();
             //log::info!("🔧 PROLOG UPDATE: Starting prolog facts update task - {} add, {} rem",
             //    diff.additions.len(), diff.removals.len());
@@ -2160,7 +2574,7 @@ impl PerspectiveInstance {
 
     async fn calc_notification_trigger_matches(
         &self,
-    ) -> Result<BTreeMap<Notification, Vec<QueryMatch>>, AnyError> {
+    ) -> Result<BTreeMap<Notification, Vec<serde_json::Value>>, AnyError> {
         // Get UUID without holding lock during operations
         let uuid = {
             let persisted_guard = self.persisted.lock().await;
@@ -2175,7 +2589,7 @@ impl PerspectiveInstance {
         //    .collect::<Vec<String>>()
         //    .join("\n"));
         let mut result_map = BTreeMap::new();
-        let mut trigger_cache: HashMap<String, Vec<QueryMatch>> = HashMap::new();
+        let mut trigger_cache: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
 
         for n in notifications {
             //log::info!("🔔 NOTIFICATIONS: Processing notification for perspective {}: {}", uuid, n.trigger);
@@ -2185,11 +2599,7 @@ impl PerspectiveInstance {
             } else {
                 //let query_start = std::time::Instant::now();
                 //log::info!("🔔 NOTIFICATIONS: not cached - Querying notification for perspective {}", uuid);
-                let query_result = self.prolog_query_notification(n.trigger.clone()).await?;
-                let matches = match query_result {
-                    QueryResolution::Matches(matches) => matches,
-                    _ => Vec::new(), // For True/False results, use empty matches
-                };
+                let matches = self.surreal_query_notification(n.trigger.clone()).await?;
                 trigger_cache.insert(n.trigger.clone(), matches.clone());
                 result_map.insert(n.clone(), matches);
                 //log::info!("🔔 NOTIFICATIONS: Querying notification: {} - took {:?}", n.trigger, query_start.elapsed());
@@ -2199,7 +2609,9 @@ impl PerspectiveInstance {
         Ok(result_map)
     }
 
-    async fn notification_trigger_snapshot(&self) -> BTreeMap<Notification, Vec<QueryMatch>> {
+    async fn notification_trigger_snapshot(
+        &self,
+    ) -> BTreeMap<Notification, Vec<serde_json::Value>> {
         self.calc_notification_trigger_matches()
             .await
             .unwrap_or_else(|e| {
@@ -2209,38 +2621,52 @@ impl PerspectiveInstance {
     }
 
     fn subtract_before_notification_matches(
-        before: &BTreeMap<Notification, Vec<QueryMatch>>,
-        after: &BTreeMap<Notification, Vec<QueryMatch>>,
-    ) -> BTreeMap<Notification, Vec<QueryMatch>> {
+        before: &BTreeMap<Notification, Vec<serde_json::Value>>,
+        after: &BTreeMap<Notification, Vec<serde_json::Value>>,
+    ) -> BTreeMap<Notification, Vec<serde_json::Value>> {
         after
             .iter()
-            .map(|(notification, matches)| {
-                let new_matches: Vec<QueryMatch> =
-                    if let Some(old_matches) = before.get(notification) {
-                        matches
+            .filter_map(|(notification, after_matches)| {
+                let new_matches: Vec<serde_json::Value> =
+                    if let Some(before_matches) = before.get(notification) {
+                        // Find matches that exist in "after" but not in "before"
+                        after_matches
                             .iter()
-                            .filter(|m| !old_matches.contains(m))
+                            .filter(|after_match| {
+                                !before_matches
+                                    .iter()
+                                    .any(|before_match| before_match == *after_match)
+                            })
                             .cloned()
                             .collect()
                     } else {
-                        matches.clone()
+                        // No previous matches, so all current matches are new
+                        after_matches.clone()
                     };
 
-                (notification.clone(), new_matches)
+                if new_matches.is_empty() {
+                    None
+                } else {
+                    Some((notification.clone(), new_matches))
+                }
             })
             .collect()
     }
 
     async fn publish_notification_matches(
         uuid: String,
-        match_map: BTreeMap<Notification, Vec<QueryMatch>>,
+        match_map: BTreeMap<Notification, Vec<serde_json::Value>>,
     ) {
         for (notification, matches) in match_map {
             if !matches.is_empty() {
+                // Convert matches to JSON string
+                let trigger_match =
+                    serde_json::to_string(&matches).unwrap_or_else(|_| "[]".to_string());
+
                 let payload = TriggeredNotification {
                     notification: notification.clone(),
                     perspective_id: uuid.clone(),
-                    trigger_match: prolog_resolution_to_string(QueryResolution::Matches(matches)),
+                    trigger_match,
                 };
 
                 let message = serde_json::to_string(&payload).unwrap();
@@ -3316,19 +3742,20 @@ impl PerspectiveInstance {
         let mut query_futures = Vec::new();
         let now = Instant::now();
 
-        // First collect all the queries and their IDs
+        // Collect only the minimal data needed: ID, query string, and keepalive time
+        // DON'T clone the potentially huge last_result string
         let queries = {
             let queries_guard = self.surreal_subscribed_queries.lock().await;
             queries_guard
                 .iter()
-                .map(|(id, query)| (id.clone(), query.clone()))
+                .map(|(id, query)| (id.clone(), query.query.clone(), query.last_keepalive))
                 .collect::<Vec<_>>()
         };
 
         // Create futures for each query check
-        for (id, query) in queries {
+        for (id, query_string, last_keepalive) in queries {
             // Check for timeout
-            if now.duration_since(query.last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
+            if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
                 queries_to_remove.push(id);
                 continue;
             }
@@ -3336,12 +3763,15 @@ impl PerspectiveInstance {
             // Spawn query check future
             let self_clone = self.clone();
             let query_future = async move {
-                match self_clone.surreal_query(query.query.clone()).await {
+                match self_clone.surreal_query(query_string).await {
                     Ok(result_vec) => {
                         if let Ok(result_string) = serde_json::to_string(&result_vec) {
-                            if result_string != query.last_result {
-                                // Update the query result and send notification immediately
-                                {
+                            // Compare with stored last_result only now, avoiding the clone earlier
+                            let mut queries = self_clone.surreal_subscribed_queries.lock().await;
+                            if let Some(stored_query) = queries.get_mut(&id) {
+                                if result_string != stored_query.last_result {
+                                    // Release lock before sending update
+                                    drop(queries);
                                     self_clone
                                         .send_subscription_update(
                                             id.clone(),
@@ -3349,10 +3779,11 @@ impl PerspectiveInstance {
                                             None,
                                         )
                                         .await;
+                                    // Re-acquire lock to update the result
                                     let mut queries =
                                         self_clone.surreal_subscribed_queries.lock().await;
                                     if let Some(stored_query) = queries.get_mut(&id) {
-                                        stored_query.last_result = result_string.clone();
+                                        stored_query.last_result = result_string;
                                     }
                                 }
                             }
@@ -3389,19 +3820,20 @@ impl PerspectiveInstance {
         let mut query_futures = Vec::new();
         let now = Instant::now();
 
-        // First collect all the queries and their IDs
+        // Collect only the minimal data needed: ID, query string, and keepalive time
+        // DON'T clone the potentially huge last_result string
         let queries = {
             let queries = self.subscribed_queries.lock().await;
             queries
                 .iter()
-                .map(|(id, query)| (id.clone(), query.clone()))
+                .map(|(id, query)| (id.clone(), query.query.clone(), query.last_keepalive))
                 .collect::<Vec<_>>()
         };
 
         // Create futures for each query check
-        for (id, query) in queries {
+        for (id, query_string, last_keepalive) in queries {
             // Check for timeout
-            if now.duration_since(query.last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
+            if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
                 queries_to_remove.push(id);
                 continue;
             }
@@ -3410,21 +3842,22 @@ impl PerspectiveInstance {
             let self_clone = self.clone();
             let query_future = async move {
                 //let this_now = Instant::now();
-                if let Ok(result) = self_clone
-                    .prolog_query_subscription(query.query.clone())
-                    .await
-                {
+                if let Ok(result) = self_clone.prolog_query_subscription(query_string).await {
                     let result_string = prolog_resolution_to_string(result);
-                    if result_string != query.last_result {
-                        //log::info!("Query {} has changed: {}", id, result_string);
-                        // Update the query result and send notification immediately
-                        {
+                    // Compare with stored last_result only now, avoiding the clone earlier
+                    let mut queries = self_clone.subscribed_queries.lock().await;
+                    if let Some(stored_query) = queries.get_mut(&id) {
+                        if result_string != stored_query.last_result {
+                            //log::info!("Query {} has changed: {}", id, result_string);
+                            // Release lock before sending update
+                            drop(queries);
                             self_clone
                                 .send_subscription_update(id.clone(), result_string.clone(), None)
                                 .await;
+                            // Re-acquire lock to update the result
                             let mut queries = self_clone.subscribed_queries.lock().await;
                             if let Some(stored_query) = queries.get_mut(&id) {
-                                stored_query.last_result = result_string.clone();
+                                stored_query.last_result = result_string;
                             }
                         }
                     }
@@ -3466,6 +3899,9 @@ impl PerspectiveInstance {
     }
 
     async fn subscribed_queries_loop(&self) {
+        let mut log_counter = 0;
+        const LOG_INTERVAL: u32 = 300; // Log every ~60 seconds (300 * 200ms)
+
         while !*self.is_teardown.lock().await {
             // Check trigger without holding lock during the operation
             let should_check = { *self.trigger_prolog_subscription_check.lock().await };
@@ -3474,6 +3910,30 @@ impl PerspectiveInstance {
                 self.check_subscribed_queries().await;
                 *self.trigger_prolog_subscription_check.lock().await = false;
             }
+
+            // Periodic subscription logging
+            log_counter += 1;
+            if log_counter >= LOG_INTERVAL {
+                log_counter = 0;
+                let queries = self.subscribed_queries.lock().await;
+                if !queries.is_empty() {
+                    let perspective_uuid = self.persisted.lock().await.uuid.clone();
+                    log::info!(
+                        "📊 Prolog subscriptions [{}]: {} active",
+                        perspective_uuid,
+                        queries.len()
+                    );
+                    for (id, query) in queries.iter() {
+                        let query_preview = if query.query.len() > 100 {
+                            format!("{}...", &query.query[..100])
+                        } else {
+                            query.query.clone()
+                        };
+                        log::info!("   - [{}]: {}", id, query_preview);
+                    }
+                }
+            }
+
             sleep(Duration::from_millis(QUERY_SUBSCRIPTION_CHECK_INTERVAL)).await;
         }
     }
@@ -3712,7 +4172,10 @@ impl PerspectiveInstance {
             //    combined_diff.additions.len(), combined_diff.removals.len());
 
             // Update prolog facts once for all changes and wait for completion
-            self.spawn_prolog_facts_update(combined_diff.clone(), None);
+            // Update Prolog: subscription engine (immediate) + query engine (lazy)
+            // Update both Prolog engines: subscription (immediate) + query (lazy)
+            self.update_prolog_engines(combined_diff.clone()).await;
+
             self.update_surreal_cache(&combined_diff).await;
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());

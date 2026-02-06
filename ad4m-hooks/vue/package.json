@@ -5,7 +5,6 @@
   "module": "./src/index.ts",
   "type": "module",
   "files": [
-    "dist",
     "src"
   ],
   "scripts": {},
@@ -13,16 +12,17 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@coasys/ad4m": "workspace:0.11.2-dev",
-    "@coasys/hooks-helpers": "*"
+    "@coasys/ad4m": "workspace:*",
+    "@coasys/hooks-helpers": "workspace:*"
   },
   "peerDependencies": {
     "vue": "^3.2.47"
   },
   "publishConfig": {
     "dependencies": {
-      "@coasys/ad4m": "*"
+      "@coasys/ad4m": "*",
+      "@coasys/hooks-helpers": "*"
     }
   },
-  "version": "0.11.2-dev"
+  "version": "0.11.2-dev.2"
 }

@@ -1,7 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 import { getCache, setCache, subscribe, unsubscribe, getProfile } from "@coasys/hooks-helpers";
-import { AgentClient, LinkExpression } from "@coasys/ad4m";
-import { Agent } from '@coasys/ad4m'
+import { AgentClient, LinkExpression, Agent } from "@coasys/ad4m";
 
 type Props<T> = {
     client: AgentClient;
@@ -28,7 +27,7 @@ export function useAgent<T>(props: Props<T>) {
   const getData = useCallback(() => {
     if (didRef) {
         if (props.formatter) {
-            getProfile(didRef).then(profile => setProfile(props.formatter(profile.perspective.links)))
+          getProfile(props.client, didRef).then(profile => setProfile(props.formatter(profile.perspective.links)))
         }
 
       props.client
