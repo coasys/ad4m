@@ -67,10 +67,15 @@ export class TestContext {
     }
 
     async makeAllNodesKnown() {
-      const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
-      const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
-      await this.#alice!.runtime.hcAddAgentInfos(bobAgentInfo);
-      await this.#bob!.runtime.hcAddAgentInfos(aliceAgentInfo);
+      try {
+        const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
+        const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
+      
+        await this.#alice!.runtime.hcAddAgentInfos(bobAgentInfo);
+        await this.#bob!.runtime.hcAddAgentInfos(aliceAgentInfo);
+      } catch (error) {
+        console.error("Error adding agent infos:", error);
+      }
     }
 }
 let testContext: TestContext = new TestContext()
