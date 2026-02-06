@@ -76,6 +76,11 @@ pub struct PerspectiveDiffEntryReference {
     pub diff: PerspectiveDiff,
     pub parents: Option<Vec<HoloHash<holo_hash::hash_type::Action>>>,
     pub diffs_since_snapshot: usize,
+    /// Optional hashes of chunked diff entries for large diffs.
+    /// When this is Some and non-empty, the `diff` field should be empty/default
+    /// and the actual diff data is stored in separate chunk entries.
+    #[serde(default)]
+    pub diff_chunks: Option<Vec<HoloHash<holo_hash::hash_type::Action>>>,
 }
 
 app_entry!(PerspectiveDiffEntryReference);
@@ -220,7 +225,27 @@ impl PerspectiveDiffEntryReference {
             diff: diff,
             parents: parents,
             diffs_since_snapshot: 0,
+            diff_chunks: None,
         }
+    }
+
+    /// Create a new entry reference with chunked diffs
+    pub fn new_chunked(
+        diff_chunks: Vec<HoloHash<holo_hash::hash_type::Action>>,
+        parents: Option<Vec<HoloHash<holo_hash::hash_type::Action>>>,
+        diffs_since_snapshot: usize,
+    ) -> Self {
+        Self {
+            diff: PerspectiveDiff::new(), // Empty diff when using chunks
+            parents: parents,
+            diffs_since_snapshot: diffs_since_snapshot,
+            diff_chunks: Some(diff_chunks),
+        }
+    }
+
+    /// Check if this entry uses chunked storage
+    pub fn is_chunked(&self) -> bool {
+        self.diff_chunks.as_ref().map_or(false, |chunks| !chunks.is_empty())
     }
 
     /// Backward compatibility method to extract the diff data
@@ -230,7 +255,7 @@ impl PerspectiveDiffEntryReference {
 
     /// Helper method to get the comparison key for ordering
     // Compare using tuple ordering: entries with parents come first,
-    // then by parent hashes, then by diffs_since_snapshot, 
+    // then by parent hashes, then by diffs_since_snapshot,
     // then by total diff count, then by diff contents
     fn comparison_key(&self) -> (bool, &Option<Vec<HoloHash<holo_hash::hash_type::Action>>>, usize, usize, &PerspectiveDiff) {
         let has_parents = self.parents.is_some();
