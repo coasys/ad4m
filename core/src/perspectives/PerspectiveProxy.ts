@@ -1178,7 +1178,7 @@ export class PerspectiveProxy {
      * Returns required predicates that define what makes something an instance,
      * plus a map of property/collection names to their predicates.
      */
-    private async getSubjectClassMetadataFromSDNA(className: string): Promise<{
+    async getSubjectClassMetadataFromSDNA(className: string): Promise<{
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
         properties: Map<string, { predicate: string, resolveLanguage?: string }>,
@@ -1479,7 +1479,7 @@ export class PerspectiveProxy {
      * Batch-checks multiple expressions against subject class metadata using a single or limited SurrealDB queries.
      * This avoids N+1 query problems by checking all values at once.
      */
-    private async batchCheckSubjectInstances(
+    async batchCheckSubjectInstances(
         expressions: string[],
         metadata: {
             requiredPredicates: string[],
