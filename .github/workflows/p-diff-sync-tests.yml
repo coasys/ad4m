@@ -17,7 +17,7 @@ jobs:
     strategy:
       matrix:
         platform: [ubuntu-22.04]
-        node-version: [16.x]
+        node-version: [22.x]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
     runs-on: ${{ matrix.platform }}
@@ -46,7 +46,7 @@ jobs:
     strategy:
       matrix:
         platform: [ubuntu-22.04]
-        node-version: [16.x]
+        node-version: [22.x]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
     runs-on: ${{ matrix.platform }}
@@ -93,7 +93,7 @@ jobs:
     strategy:
       matrix:
         platform: [ubuntu-22.04]
-        node-version: [16.x]
+        node-version: [22.x]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
     runs-on: ${{ matrix.platform }}
@@ -141,7 +141,7 @@ jobs:
     strategy:
       matrix:
         platform: [ubuntu-22.04]
-        node-version: [16.x]
+        node-version: [22.x]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
     runs-on: ${{ matrix.platform }}
@@ -189,7 +189,7 @@ jobs:
     strategy:
       matrix:
         platform: [ubuntu-22.04]
-        node-version: [16.x]
+        node-version: [22.x]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
     runs-on: ${{ matrix.platform }}
@@ -238,7 +238,7 @@ jobs:
     strategy:
       matrix:
         platform: [ubuntu-22.04]
-        node-version: [16.x]
+        node-version: [22.x]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
     runs-on: ${{ matrix.platform }}
@@ -286,7 +286,7 @@ jobs:
     strategy:
       matrix:
         platform: [ubuntu-22.04]
-        node-version: [16.x]
+        node-version: [22.x]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
     runs-on: ${{ matrix.platform }}
@@ -334,7 +334,7 @@ jobs:
   #   strategy:
   #     matrix:
   #       platform: [ubuntu-22.04]
-  #       node-version: [16.x]
+  #       node-version: [22.x]
   #       # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
   #   runs-on: ${{ matrix.platform }}
