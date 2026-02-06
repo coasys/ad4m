@@ -443,8 +443,6 @@ impl HolochainService {
                     Url2::parse("https://use1-1.relay.n0.iroh-canary.iroh.link./");
             }
 
-            network_config.mem_bootstrap = false;
-
             config.network = network_config;
 
             config
@@ -680,7 +678,7 @@ impl HolochainService {
     }
 
     pub async fn shutdown(&self) -> Result<(), AnyError> {
-        self.conductor.shutdown().await??;
+        self.conductor.clone().shutdown().await??;
         Ok(())
     }
 

@@ -25,8 +25,8 @@ sha2 = "0.10.5"
 getrandom = { version = "0.3" }
 js-sys = "0.3.82"
 
-hdi = { version = "0.8.0-dev.4", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.7-coasys" }
-hdk = { version = "0.7.0-dev.5", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.7-coasys" }
+hdi = { version = "0.8.0-dev.4", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
+hdk = { version = "0.7.0-dev.6", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
 holochain_serialized_bytes = "=0.0.56"
 
 [features]
