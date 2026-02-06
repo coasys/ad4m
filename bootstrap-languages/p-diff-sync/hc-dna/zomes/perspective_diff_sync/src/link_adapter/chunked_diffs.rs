@@ -92,6 +92,26 @@ impl ChunkedDiffs {
     }
 }
 
+/// Load the diff from a PerspectiveDiffEntryReference, handling both inline and chunked storage.
+/// If the entry has diff_chunks, loads and aggregates them. Otherwise, returns the inline diff.
+pub fn load_diff_from_entry<Retriever: PerspectiveDiffRetreiver>(
+    entry: &PerspectiveDiffEntryReference,
+) -> SocialContextResult<PerspectiveDiff> {
+    if entry.is_chunked() {
+        // Load chunks and aggregate them
+        let chunk_hashes = entry.diff_chunks.as_ref().unwrap();
+        debug!(
+            "load_diff_from_entry: Loading {} chunks",
+            chunk_hashes.len()
+        );
+        let chunked_diffs = ChunkedDiffs::from_entries::<Retriever>(chunk_hashes.clone())?;
+        Ok(chunked_diffs.into_aggregated_diff())
+    } else {
+        // Return inline diff
+        Ok(entry.diff.clone())
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

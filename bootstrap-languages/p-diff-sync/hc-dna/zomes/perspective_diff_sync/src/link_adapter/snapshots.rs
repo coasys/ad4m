@@ -4,7 +4,7 @@ use perspective_diff_sync_integrity::{
 };
 
 use crate::errors::{SocialContextError, SocialContextResult};
-use crate::link_adapter::chunked_diffs::ChunkedDiffs;
+use crate::link_adapter::chunked_diffs::{ChunkedDiffs, load_diff_from_entry};
 use crate::retriever::HolochainRetreiver;
 use crate::utils::get_now;
 use crate::{Hash, CHUNK_SIZE};
@@ -144,12 +144,13 @@ fn handle_parents(
     //Check if entry is already in graph
     if !seen.contains(&search_position.hash) {
         seen.insert(search_position.hash.clone());
-        
-        // Access diff data directly from the entry
-        for addition in diff.diff.additions.iter() {
+
+        // Load diff handling both inline and chunked storage
+        let loaded_diff = load_diff_from_entry::<HolochainRetreiver>(&diff)?;
+        for addition in loaded_diff.additions.iter() {
             all_additions.insert(addition.clone());
         }
-        for removal in diff.diff.removals.iter() {
+        for removal in loaded_diff.removals.iter() {
             all_removals.insert(removal.clone());
         }
 
