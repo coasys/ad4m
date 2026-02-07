@@ -393,7 +393,7 @@ jobs:
       - name: Check if string contains prerelease
         run: |
           STRING="${{ steps.extract_version.outputs.version }}"
-          if [[ $STRING == *"prerelease"* ]]; then
+          if [[ $STRING == *-* ]]; then
             echo "CONTAINS_PRERELEASE=true" >> $GITHUB_ENV
           else
             echo "CONTAINS_PRERELEASE=false" >> $GITHUB_ENV
