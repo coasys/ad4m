@@ -400,10 +400,10 @@ jobs:
           fi
 
       - name: Install deps
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install
 
       - name: Install core dependencies
-        run: cd ./core && pnpm install --no-frozen-lockfile
+        run: cd ./core && pnpm install
 
       - name: Build modules
         run: pnpm run build-npm-packages
