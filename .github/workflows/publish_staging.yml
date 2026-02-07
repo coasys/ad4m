@@ -378,16 +378,11 @@ jobs:
         asset_content_type: application/octet-stream
 
   npm-publish:
-    runs-on: GH-hosted-ubuntu
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
     steps:
       - uses: actions/checkout@v3
-      # Setup .npmrc file to publish to npm
-      - name: Use Node.js 18.x
-        uses: actions/setup-node@v1
-        with:
-          node-version: 18.x
-
-      - uses: pnpm/action-setup@v4
 
       - name: Extract version
         id: extract_version
@@ -398,32 +393,17 @@ jobs:
       - name: Check if string contains prerelease
         run: |
           STRING="${{ steps.extract_version.outputs.version }}"
-          if [[ $STRING == *"prerelease"* ]]; then
+          if [[ $STRING == *-* ]]; then
             echo "CONTAINS_PRERELEASE=true" >> $GITHUB_ENV
           else
             echo "CONTAINS_PRERELEASE=false" >> $GITHUB_ENV
           fi
-
-      - name: Install GO
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.22'
-
-      - name: Install Linux Deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake fuse libfuse2 mesa-utils mesa-vulkan-drivers 
 
       - name: Install deps
         run: pnpm install
 
       - name: Install core dependencies
         run: cd ./core && pnpm install
-
-      - name: Install Deno
-        uses: denoland/setup-deno@v1
-        with:
-          deno-version: v1.32.4
 
       - name: Build modules
         run: pnpm run build-npm-packages
