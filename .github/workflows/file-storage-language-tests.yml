@@ -24,6 +24,8 @@ jobs:
       run: rustc --version && cargo --version && hc --version
 
     - name: Install dependencies
+      env:
+        npm_config_build_from_source: true
       run: pnpm install --no-frozen-lockfile
 
     - name: Build languages
@@ -49,6 +51,8 @@ jobs:
       run: rustc --version && cargo --version && hc --version
 
     - name: Install dependencies
+      env:
+        npm_config_build_from_source: true
       run: pnpm install --no-frozen-lockfile
 
     - name: Build
