@@ -205,7 +205,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::AgentInfos(response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3),
+                                        std::time::Duration::from_secs(30),
                                         service.agent_infos()
                                     ).await.map_err(|_| anyhow!("Timeout error; AgentInfos")) {
                                         Ok(result) => {
@@ -218,7 +218,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::AddAgentInfos(agent_infos, response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3),
+                                        std::time::Duration::from_secs(30),
                                         service.add_agent_infos(agent_infos)
                                     ).await.map_err(|_| anyhow!("Timeout error; AddAgentInfos")) {
                                         Ok(result) => {
@@ -724,11 +724,15 @@ impl HolochainService {
         let mut all_agent_infos = Vec::new();
         let mut permanently_failed = Vec::new();
 
+        // Quick retries per DNA - spaces should initialize quickly if they exist
+        // 5 retries × 200ms = 1 second max per DNA
+        // Service-level timeout handles the overall operation
+        const MAX_RETRIES: u32 = 5;
+        const RETRY_DELAY_MS: u64 = 200;
+
         for dna_hash in running_dna_hashes {
             let mut success = false;
             let mut retries = 0;
-            const MAX_RETRIES: u32 = 10;
-            const RETRY_DELAY_MS: u64 = 500;
 
             while !success && retries < MAX_RETRIES {
                 match self
@@ -746,7 +750,10 @@ impl HolochainService {
                     }
                     Err(e) => {
                         let error_str = format!("{:?}", e);
-                        if error_str.contains("K2 Space") && error_str.contains("does not exist") {
+                        if error_str.contains("K2SpaceNotFound")
+                            || (error_str.contains("K2 Space")
+                                && error_str.contains("does not exist"))
+                        {
                             // K2 space not ready yet, retry after a short delay
                             retries += 1;
                             if retries < MAX_RETRIES {
@@ -755,6 +762,10 @@ impl HolochainService {
                                 ))
                                 .await;
                             }
+                        } else if error_str.contains("Timeout") {
+                            // Timeout errors - skip immediately, retrying will just timeout again
+                            permanently_failed.push(dna_hash.clone());
+                            break;
                         } else {
                             // For other errors, don't retry
                             error!("Failed to get agent infos for DNA {:?}: {:?}", dna_hash, e);
@@ -772,7 +783,7 @@ impl HolochainService {
 
         if !permanently_failed.is_empty() {
             info!(
-                "Got agent infos for {} DNAs, {} DNAs had unavailable K2 spaces after retries",
+                "Got agent infos for {} DNAs, {} DNAs had unavailable K2 spaces or timed out",
                 all_agent_infos.len(),
                 permanently_failed.len()
             );
@@ -789,8 +800,11 @@ impl HolochainService {
         let mut success_count = 0;
         let mut skipped_count = 0;
 
-        const MAX_RETRIES: u32 = 10;
-        const RETRY_DELAY_MS: u64 = 500;
+        // Quick retries per agent info - spaces should initialize quickly if they exist
+        // 5 retries × 200ms = 1 second max per agent info
+        // Service-level timeout handles the overall operation
+        const MAX_RETRIES: u32 = 5;
+        const RETRY_DELAY_MS: u64 = 200;
 
         for agent_info in agent_infos {
             let mut success = false;
@@ -808,7 +822,10 @@ impl HolochainService {
                     }
                     Err(e) => {
                         let error_str = format!("{:?}", e);
-                        if error_str.contains("K2 Space") && error_str.contains("does not exist") {
+                        if error_str.contains("K2SpaceNotFound")
+                            || (error_str.contains("K2 Space")
+                                && error_str.contains("does not exist"))
+                        {
                             // K2 space not ready yet, retry after a short delay
                             retries += 1;
                             if retries < MAX_RETRIES {
@@ -817,6 +834,11 @@ impl HolochainService {
                                 ))
                                 .await;
                             }
+                        } else if error_str.contains("Timeout") {
+                            // Timeout errors - skip immediately, retrying will just timeout again
+                            // This happens when trying to add agent info for a DNA with no peers
+                            skipped_count += 1;
+                            break;
                         } else {
                             // For other errors, don't retry
                             error!("Failed to add agent info: {:?}", e);
@@ -834,7 +856,7 @@ impl HolochainService {
 
         if skipped_count > 0 {
             info!(
-                "Added {} agent infos, skipped {} (spaces not available after retries)",
+                "Added {} agent infos, skipped {} (spaces not available or timed out)",
                 success_count, skipped_count
             );
         }
