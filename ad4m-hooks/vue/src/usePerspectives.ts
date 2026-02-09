@@ -1,4 +1,4 @@
-import { ref, effect, shallowRef, watch, triggerRef } from "vue";
+import { ref, effect, shallowRef, watch } from "vue";
 import { Ad4mClient, PerspectiveProxy } from "@coasys/ad4m";
 
 type UUID = string;

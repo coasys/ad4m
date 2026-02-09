@@ -27,6 +27,9 @@ export class PerspectiveHandle {
     @Field(type => NeighbourhoodExpression, {nullable: true})
     neighbourhood?: NeighbourhoodExpression
 
+    @Field(type => [String], {nullable: true})
+    owners?: string[]
+
     constructor(uuid?: string, name?: string, state?: PerspectiveState) {
         this.uuid = uuid
         this.name = name

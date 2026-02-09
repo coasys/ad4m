@@ -7,6 +7,7 @@ extern crate env_logger;
 #[cfg(not(target_os = "windows"))]
 use libc::{rlimit, setrlimit, RLIMIT_NOFILE};
 use log::{debug, error, info};
+use rust_executor::config::TlsConfig as ExecutorTlsConfig;
 use rust_executor::logging::{get_default_log_config, init_launcher_logging};
 use rust_executor::utils::find_port;
 use rust_executor::Ad4mConfig;
@@ -32,6 +33,7 @@ use uuid::Uuid;
 mod app_state;
 mod commands;
 mod config;
+mod encryption;
 mod menu;
 mod system_tray;
 mod util;
@@ -39,8 +41,9 @@ mod util;
 use crate::app_state::LauncherState;
 use crate::commands::app::{
     add_app_agent_state, clear_state, close_application, close_main_window, get_app_agent_list,
-    get_data_path, get_log_config, open_dapp, open_tray, open_tray_message, remove_app_agent_state,
-    set_log_config, set_selected_agent, show_main_window,
+    get_data_path, get_log_config, get_smtp_config, get_tls_config, open_dapp, open_tray,
+    open_tray_message, remove_app_agent_state, set_log_config, set_selected_agent, set_smtp_config,
+    set_tls_config, show_main_window, test_smtp_config,
 };
 use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
@@ -66,8 +69,9 @@ pub struct ProxyService {
 }
 
 pub struct AppState {
-    graphql_port: u16,
+    graphql_port: u16, // Local HTTP port (always for local access)
     req_credential: String,
+    tls_enabled: bool,
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -112,6 +116,26 @@ fn rlim_execute() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = LauncherState::load().unwrap();
+
+    // Validate TLS config if enabled
+    if let Some(tls_cfg) = &state.tls_config {
+        if tls_cfg.enabled {
+            if !std::path::Path::new(&tls_cfg.cert_file_path).exists() {
+                error!(
+                    "TLS is enabled but certificate file not found: {}. \
+                     TLS will be disabled. Please check your TLS settings.",
+                    tls_cfg.cert_file_path
+                );
+            }
+            if !std::path::Path::new(&tls_cfg.key_file_path).exists() {
+                error!(
+                    "TLS is enabled but key file not found: {}. \
+                     TLS will be disabled. Please check your TLS settings.",
+                    tls_cfg.key_file_path
+                );
+            }
+        }
+    }
 
     let selected_agent = state.selected_agent.clone().unwrap();
     let app_path = selected_agent.path;
@@ -183,9 +207,17 @@ pub fn run() {
 
     let req_credential = Uuid::new_v4().to_string();
 
-    let state = AppState {
-        graphql_port: free_port,
+    // Check if TLS is enabled
+    let tls_enabled = state
+        .tls_config
+        .as_ref()
+        .map(|config| config.enabled)
+        .unwrap_or(false);
+
+    let app_state = AppState {
+        graphql_port: free_port, // Always the local HTTP port
         req_credential: req_credential.clone(),
+        tls_enabled,
     };
 
     let builder_result = tauri::Builder::default()
@@ -194,7 +226,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_notification::init())
-        .manage(state)
+        .manage(app_state)
         .manage(ProxyState(Default::default()))
         .invoke_handler(tauri::generate_handler![
             get_port,
@@ -216,7 +248,12 @@ pub fn run() {
             remove_app_agent_state,
             get_data_path,
             get_log_config,
-            set_log_config
+            set_log_config,
+            get_smtp_config,
+            set_smtp_config,
+            test_smtp_config,
+            get_tls_config,
+            set_tls_config
         ])
         .setup(move |app| {
             // Hides the dock icon
@@ -239,6 +276,57 @@ pub fn run() {
             build_menu(app.handle())?;
             build_system_tray(app.handle())?;
 
+            // Convert TlsConfig and SmtpConfig if enabled
+            let launcher_state = LauncherState::load().unwrap();
+
+            // Prefer multi_user_config over deprecated tls_config
+            let (tls_config, smtp_config, enable_multi_user) =
+                if let Some(multi_user_config) = &launcher_state.multi_user_config {
+                    let tls = multi_user_config.tls_config.as_ref().and_then(|config| {
+                        if config.enabled {
+                            let tls_port = config.tls_port.unwrap_or(free_port + 1);
+                            Some(ExecutorTlsConfig {
+                                cert_file_path: config.cert_file_path.clone(),
+                                key_file_path: config.key_file_path.clone(),
+                                tls_port,
+                            })
+                        } else {
+                            None
+                        }
+                    });
+
+                    let smtp = multi_user_config.smtp_config.as_ref().map(|config| {
+                        rust_executor::config::SmtpConfig {
+                            enabled: config.enabled,
+                            host: config.host.clone(),
+                            port: config.port,
+                            username: config.username.clone(),
+                            password: config.password.clone(),
+                            from_address: config.from_address.clone(),
+                        }
+                    });
+
+                    (tls, smtp, Some(multi_user_config.enabled))
+                } else {
+                    // Fallback to deprecated tls_config for backwards compatibility
+                    let tls = launcher_state.tls_config.as_ref().and_then(|config| {
+                        if config.enabled {
+                            let tls_port = config.tls_port.unwrap_or(free_port + 1);
+                            Some(ExecutorTlsConfig {
+                                cert_file_path: config.cert_file_path.clone(),
+                                key_file_path: config.key_file_path.clone(),
+                                tls_port,
+                            })
+                        } else {
+                            None
+                        }
+                    });
+                    (tls, None, None)
+                };
+
+            // TLS enabled = bind to 0.0.0.0, TLS disabled = bind to 127.0.0.1
+            let localhost = tls_config.is_none();
+
             let config = rust_executor::Ad4mConfig {
                 admin_credential: Some(req_credential.to_string()),
                 app_data_path: Some(String::from(app_path.to_str().unwrap())),
@@ -248,6 +336,10 @@ pub fn run() {
                 hc_use_bootstrap: Some(true),
                 hc_use_mdns: Some(false),
                 hc_use_proxy: Some(true),
+                tls: tls_config,
+                localhost: Some(localhost),
+                enable_multi_user,
+                smtp_config,
                 ..Default::default()
             };
 

@@ -6,7 +6,6 @@
   "private": false,
   "type": "module",
   "files": [
-    "dist",
     "src"
   ],
   "scripts": {},
@@ -14,9 +13,16 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@coasys/ad4m": "*",
-    "@coasys/ad4m-connect": "*",
+    "@coasys/ad4m": "workspace:*",
     "uuid": "*"
   },
-  "version": "0.11.1"
+  "devDependencies": {
+    "@types/uuid": "^9.0.0"
+  },
+  "publishConfig": {
+    "dependencies": {
+      "@coasys/ad4m": "*"
+    }
+  },
+  "version": "0.11.2-dev.2"
 }

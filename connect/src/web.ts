@@ -1,315 +1,48 @@
-import { BarcodeDetectorPolyfill } from "@undecaf/barcode-detector-polyfill";
 import { css, html, LitElement } from "lit";
-import { customElement, property, state } from "lit/decorators.js";
-
-import Ad4mConnect, {
-  Ad4mConnectOptions,
-  AuthStates,
-  ConnectionStates,
-} from "./core";
-
+import { customElement, state } from "lit/decorators.js";
 import autoBind from "auto-bind";
-import AgentLocked from "./components/AgentLocked";
-import CouldNotMakeRequest from "./components/CouldNotMakeRequest";
-import Disconnected from "./components/Disconnected";
-import Header from "./components/Header";
-import Hosting from "./components/Hosting";
-import Loading from "./components/Loading";
-import MobileAppLogoButton from "./components/MobileAppLogoButton";
-import RequestCapability from "./components/RequestCapability";
-import ScanQRCode from "./components/ScanQRCode";
-import Settings from "./components/Settings";
-import Start from "./components/Start";
-import VerifyCode from "./components/VerifyCode";
-import { DEFAULT_PORT, getForVersion, removeForVersion, setForVersion } from "./utils";
+import { VerificationRequestResult } from "@coasys/ad4m/lib/src/runtime/RuntimeResolver";
+import { connectWebSocket, setLocal } from "./utils";
+import Ad4mConnect from "./core";
+import { Ad4mLogo } from "./components/icons";
 
-export { getAd4mClient } from "./utils";
+import "./components/views/ConnectionOptions";
+import "./components/views/LocalAuthentication";
+import "./components/views/RemoteAuthentication";
+import "./components/views/CurrentState";
 
-function detectMob() {
-  const toMatch = [
-    /Android/i,
-    /webOS/i,
-    /iPhone/i,
-    /iPad/i,
-    /iPod/i,
-    /BlackBerry/i,
-    /Windows Phone/i,
-  ];
-
-  return toMatch.some((toMatchItem) => {
-    return navigator.userAgent.match(toMatchItem);
-  });
-}
+type Views = 'connection-options' | 'local-authentication' | 'remote-authentication' | 'current-state';
 
 const styles = css`
+  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap');
+
   :host {
-    --primary-color: #fff;
-    --heading-color: #fff;
-    --body-color: #ffffff;
-    --success-color: #88f3b4;
-    --background-color: #131533;
-    --start-color: #a4adff;
-    --end-color: #d273ff;
-    --gradient: #91e3fd;
-  }
-
-  .wrapper {
-    font-family: "Bricolage Grotesque", sans-serif;
-    position: fixed;
-    display: grid;
-    place-content: center;
-    top: 0;
-    left: 0;
-    color: var(--body-color);
-    height: 100vh;
-    width: 100vw;
-    z-index: 100;
-  }
-
-  .mainlogo {
-    position: fixed;
-    bottom: 30px;
-    right: 30px;
-    height: 20px;
-    width: 20px;
+    --ac-primary-color: #91e3fd;
+    --ac-primary-color-light: #acebff;
+    --ac-success-color: #5dd27d;
+    --ac-danger-color: #f4367f;
+    --ac-text-color: #fff;
+    --ac-background-color: #191c3fe0;
+    --ac-border-color-dark: #91d4fd2b;
+    --ac-border-color-light: #91d4fd69;
   }
 
   * {
     box-sizing: border-box;
   }
 
-  .check-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-
-  .check-list li {
-    display: flex;
-    gap: 10px;
-    margin-bottom: 10px;
-  }
-
-  .items {
-    display: flex;
-    flex-direction: column;
-    flex-gap: 50px;
-    gap: 50px;
-  }
-
-  .items--small {
-    flex-gap: 20px;
-    gap: 20px;
-  }
-
-  .button {
-    text-decoration: none;
-    cursor: pointer;
-    border: 0;
-    color: var(--background-color);
-    background: var(--gradient);
-    height: 50px;
-    font-weight: 600;
-    min-width: 100px;
-    padding: 0px 30px;
-    border-radius: 8px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    font-family: inherit;
-    font-size: 15px;
-  }
-
-  @media (min-width: 800px) {
-    .button {
-      min-width: 200px;
-      padding: 0px 40px;
-      font-size: 17px;
-    }
-  }
-
-  .heading {
-    color: var(--heading-color);
-    font-size: 18px;
-    font-weight: 600;
-    margin: 0;
-    margin-bottom: 10px;
-  }
-
-  .heading.nomargin {
-    margin: 0;
-  }
-
-  .body {
-    padding: 0;
-    margin: 0;
-    font-size: 14px;
-    line-height: 1.5;
-  }
-
-  .buttons {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-gap: 10px;
-    gap: 10px;
-  }
-
-  .button--full {
-    width: 100%;
-    display: flex;
-  }
-
-  .button--link {
-    padding: 0;
-    height: auto;
-    background: none;
-    color: var(--primary-color);
-    font-size: inherit;
-    min-width: auto;
-    text-decoration: none;
-  }
-
-  .button--link:hover {
-    text-decoration: underline;
-  }
-
-  .button--secondary {
-    background: var(--background-color);
-    border: 1px solid var(--gradient);
-    color: var(--primary-color);
-  }
-
-  .dialog {
-    background-color: var(--background-color);
-    z-index: 10;
-    border-radius: 8px;
-    width: calc(100vw - 10px);
-    max-width: 500px;
-    max-height: 90vh;
-    overflow-y: auto;
-  }
-
-  .dialog__header {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 20px 30px;
-    gap: 10px;
-    color: var(--primary-color);
-    margin-bottom: 20px;
-    font-size: 14px;
-  }
-
-  .dialog__logo {
-    display: flex;
-    text-align: center;
-    width: 25px;
-  }
-
-  .dialog__content {
-    min-height: 300px;
+  .wrapper {
+    position: fixed;
     display: grid;
     place-content: center;
-    padding-top: 0;
-    padding-left: 30px;
-    padding-right: 30px;
-    padding-bottom: 30px;
-  }
-
-  .dialog__connect {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    flex-gap: 50px;
-    gap: 50px;
-    position: relative;
-  }
-
-  .dialog__logo svg {
-    width: 100%;
-  }
-
-  .dialog__connect-ad4m {
-    width: 80px;
-    height: 80px;
-    background: var(--background-color);
-    padding: 20px;
-    box-shadow: 0px 4px 7px 0px rgb(0 0 0 / 8%);
-    border-radius: 50%;
-    position: relative;
-  }
-
-  .dialog__connect-ad4m:before {
-    content: "";
-    position: absolute;
     top: 0;
-    right: 0;
-    bottom: 0;
     left: 0;
-    z-index: -1;
-    margin: -2px;
-    border-radius: inherit;
-    background: var(--gradient);
+    height: 100vh;
+    width: 100vw;
+    z-index: 100;
   }
 
-  .dialog__connect-app {
-    width: 80px;
-    height: 80px;
-  }
-
-  .dialog__connect-check:before {
-    content: "";
-    display: block;
-    width: 40px;
-    border-bottom: 2px dashed var(--body-color);
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    transform: translateY(-50%) translateX(-50%);
-  }
-
-  .dialog__connect-check svg {
-    position: relative;
-  }
-
-  .text-center {
-    text-align: center;
-  }
-
-  .uppercase {
-    text-transform: uppercase;
-  }
-
-  .input {
-    display: flex;
-    flex-direction: column;
-    flex-gap: 10px;
-    gap: 10px;
-  }
-
-  .input__label {
-    font-size: 12px;
-  }
-
-  .input__field {
-    border-radius: 8px;
-    outline: 0;
-    height: 60px;
-    color: var(--heading-color);
-    background-color: var(--background-color);
-    padding: 0px 30px;
-    font-size: 20px;
-    border: 1px solid var(--body-color);
-  }
-
-  .input__field:focus {
-    border: 1px solid var(--primary-color);
-    box-shadow: 0px 0px 0px 1px var(--primary-color);
-  }
-
-  .ad4mConnect__backdrop {
+  .backdrop {
     position: absolute;
     top: 0;
     left: 0;
@@ -318,129 +51,51 @@ const styles = css`
     background-color: rgba(0, 0, 0, 0.5);
   }
 
-  .ad4mConnect__locked {
-    position: fixed;
-    top: 0;
-    left: 0;
-    background: var(--background-color);
-    height: 100vh;
-    width: 100vw;
-    padding: 36px;
+  .modal {
+    z-index: 10;
+    background-color: var(--ac-background-color);
+    border: 1px solid var(--ac-border-color-dark);
+    border-radius: 12px;
+    padding: 30px;
+    width: calc(100vw - 10px);
+    max-width: 480px;
+    max-height: 90vh;
+    overflow-y: auto;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px); /* Safari */
+  }
+
+  .modal-header {
     display: flex;
     align-items: center;
+    justify-content: center;
+    color: var(--ac-primary-color);
+    margin: 10px 0 30px 0;
+  }
+
+  .modal-header > svg {
+    width: 70px;
+    height: 70px;
+  }
+
+  .modal-content {
+    display: flex;
     flex-direction: column;
-    font-family: "Comfortaa", cursive;
+    justify-content: center;
   }
 
-  .lds-ring {
-    display: block;
-    position: relative;
-    width: 80px;
-    height: 80px;
-    margin: 0 auto;
-    margin-top: 24px;
-  }
-  .lds-ring div {
-    box-sizing: border-box;
-    display: block;
+  .settings-button {
+    appearance: none;
+    border: none;
+    background: transparent;
+    padding: 0;
+    cursor: pointer;
     position: absolute;
-    width: 64px;
-    height: 64px;
-    margin: 4px;
-    border: 4px solid var(--primary-color);
-    border-radius: 50%;
-    animation: lds-ring 1.2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
-    border-color: var(--primary-color) transparent transparent transparent;
-  }
-  .lds-ring div:nth-child(1) {
-    animation-delay: -0.45s;
-  }
-  .lds-ring div:nth-child(2) {
-    animation-delay: -0.3s;
-  }
-  .lds-ring div:nth-child(3) {
-    animation-delay: -0.15s;
-  }
-  @keyframes lds-ring {
-    0% {
-      transform: rotate(0deg);
-    }
-    100% {
-      transform: rotate(360deg);
-    }
-  }
-
-  .md-ring {
-    display: block;
-    position: relative;
-    width: 30px;
-    height: 30px;
-    margin-right: 10px;
-  }
-  .md-ring div {
-    box-sizing: border-box;
-    display: block;
-    position: absolute;
-    width: 24px;
-    height: 24px;
-    margin: 4px;
-    border: 2px solid var(--primary-color);
-    border-radius: 50%;
-    animation: md-ring 1.2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
-    border-color: var(--primary-color) transparent transparent transparent;
-  }
-  .md-ring div:nth-child(1) {
-    animation-delay: -0.45s;
-  }
-  .md-ring div:nth-child(2) {
-    animation-delay: -0.3s;
-  }
-  .md-ring div:nth-child(3) {
-    animation-delay: -0.15s;
-  }
-  @keyframes md-ring {
-    0% {
-      transform: rotate(0deg);
-    }
-    100% {
-      transform: rotate(360deg);
-    }
-  }
-
-  .disconnected {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100vw;
-    padding: 10px 0;
-    text-align: center;
-    background: red;
-  }
-
-  .qr-scanner {
-    background: black;
-    position: fixed;
-    left: 0;
-    top: 0;
-    width: 100%;
-    height: 100%;
-    display: grid;
-    grid-template-columns: 1fr;
-    place-content: center;
-  }
-
-  .qr-scanner .stop {
-    position: absolute;
-    z-index: 10;
-    left: 50%;
-    bottom: 10px;
-    transform: translateX(-50%);
-  }
-
-  .qr-scanner video {
-    height: 100vh;
-    width: 100vw;
-    object-fit: cover;
+    bottom: 20px;
+    right: 20px;
+    color: var(--ac-primary-color);
+    width: 40px;
+    height: 40px;
   }
 `;
 
@@ -448,526 +103,287 @@ const styles = css`
 export class Ad4mConnectElement extends LitElement {
   static styles = [styles];
 
-  @state()
-  private _code = null;
+  core: Ad4mConnect;
 
-  @state()
-  private _isMobile = null;
+  // Global state
+  @state() modalOpen = false;
+  @state() private currentView: Views = "connection-options";
 
-  @state()
-  private _hasClickedDownload = null;
+  // Connection options state
+  @state() private connectingToRemoteNode = false;
+  @state() private remoteNodeError = false;
 
-  @state()
-  private _isRemote = false;
+  // Local authentication state
+  @state() private verificationError = false;
 
-  @state()
-  private _client: Ad4mConnect;
-
-  @state()
-  private _isOpen: boolean = false;
-
-  @state()
-  private _hostingStep = 0;
-
-  @state()
-  private _email = "";
-
-  @state()
-  private _passowrd = "";
-
-  @state()
-  private _passwordError = null;
-
-  @state()
-  private _hostingNotRunningError = null;
-
-  @state()
-  private _verifyCodeError = null;
-
-  @state()
-  private _isHostingLoading = false;
-
-  @state()
-  private uiState:
-    | "settings"
-    | "start"
-    | "qr"
-    | "requestcap"
-    | "verifycode"
-    | "disconnected"
-    | "hosting"
-    | "agentlocked" = "start";
-
-  @property({ type: String, reflect: true })
-  appName = null;
-
-  @property({ type: String, reflect: true })
-  appDesc = null;
-
-  @property({ type: String, reflect: true })
-  appDomain = null;
-
-  @property({ type: String, reflect: true })
-  appIconPath = null;
-
-  @property({ type: Boolean, reflect: true })
-  mobile = null;
-
-  @property({ type: String, reflect: true })
-  capabilities = [];
-
-  @property({ type: Boolean, reflect: true })
-  hosting = getForVersion("ad4mhosting") === "true" || false;
-
-  // TODO: localstorage doesnt work here
-  @property({ type: String })
-  token = getForVersion("ad4mToken") || "";
-
-  // TODO: localstorage doesnt work here
-  @property({ type: String, reflect: true })
-  port = parseInt(getForVersion("ad4mport")) || DEFAULT_PORT;
-
-  // TODO: localstorage doesnt work here
-  @property({ type: String, reflect: true })
-  url = getForVersion("ad4murl") || "";
-
-  get authState(): AuthStates {
-    return this._client.authState;
-  }
-
-  get connectionState(): ConnectionStates {
-    return this._client.connectionState;
-  }
-
-  private injectFont() {
-    const link = document.createElement("link");
-    link.setAttribute("rel", "stylesheet");
-    link.setAttribute(
-      "href",
-      `https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,200..800&display=swap`
-    );
-    document.head.appendChild(link);
-  }
+  // Remote authentication state
+  @state() private remoteAuthLoading = false;
+  @state() private remoteAuthState: VerificationRequestResult | null = null;
+  @state() private emailCodeError = false;
+  @state() private passwordError = false;
+  @state() private accountCreationError = false;
 
   connectedCallback() {
     super.connectedCallback();
     autoBind(this);
 
-    this.injectFont();
-
-    this._isMobile = detectMob();
-
-    this._client = new Ad4mConnect({
-      appName: this.appName,
-      appDesc: this.appDesc,
-      appDomain: this.appDomain,
-      appUrl: window.location.origin,
-      appIconPath: this.appIconPath,
-      capabilities: Array.isArray(this.capabilities)
-        ? this.capabilities
-        : JSON.parse(this.capabilities),
-      port: this.port || parseInt(getForVersion("ad4mport")) || DEFAULT_PORT,
-      token: this.token || getForVersion("ad4mtoken"),
-      url: this.url || getForVersion("ad4murl"),
-      hosting: this.hosting,
+    // Set up auth listener before attempting connection
+    this.core.addEventListener('authstatechange', (e: any) => {
+      if (e.detail === 'unauthenticated') {
+        // Token expired or invalid - show connection options
+        this.currentView = "connection-options";
+        this.modalOpen = true;
+      }
+      // Trigger re-render to update UI based on new auth state
+      this.requestUpdate();
     });
 
-    this._client.on("configstatechange", this.handleConfigChange);
-    this._client.on("authstatechange", this.handleAuthChange);
-    this._client.on("connectionstatechange", this.handleConnectionChange);
-
-    this.loadFont();
-    
-    // Automatically try to connect on component load
-    this._client.connect();
-  }
-
-  private async checkEmail() {
-    try {
-      const exist = await this._client.checkEmail(this._email);
-
-      if (exist) {
-        this._hostingStep = 1;
-      } else {
-        this._hostingStep = 2;
-      }
-    } catch (e) {
-      console.log(e);
-    }
-  }
-
-  private async loginToHosting() {
-    try {
-      await this._client.loginToHosting(this._email, this._passowrd);
-
-      this.changeUIState("connected");
-    } catch (e) {
-      if (e.message.includes("Passwords did not match")) {
-        this._passwordError = "Passwords did not match";
-      } else {
-        this._hostingNotRunningError = "Hosting is not running";
-      }
-    }
-  }
-
-  private changeEmail(email: string) {
-    this._email = email;
-  }
-
-  private changePassword(passowrd: string) {
-    this._passowrd = passowrd;
-  }
-
-  private async unlockAgent(passcode, holochain = true) {
-    await this._client.ad4mClient.agent.unlock(passcode, holochain);
-  }
-
-  private async verifyCode(code) {
-    try {
-      await this._client.verifyCode(code);
-    } catch (e) {
-      this._verifyCodeError = "Invalid code";
-    }
-  }
-
-  private changeUrl(url) {
-    if (url !== this._client.url) {
-      removeForVersion("ad4mtoken");
-      this._client.setToken(null);
-    }
-
-    this._client.setUrl(url);
-  }
-
-  private changePort(port: number) {
-    this._client.setPort(port);
-  }
-
-  private changeUIState(state) {
-    this.uiState = state;
-  }
-
-  private setIsHostingRunning(val) {
-    this._hostingNotRunningError = val;
-  }
-
-  private changeIsRemote(bol: boolean) {
-    this._isRemote = bol;
-  }
-
-  private changeCode(code) {
-    this._code = code;
-  }
-
-  private onDownloaded() {
-    this._hasClickedDownload = true;
-  }
-
-  private handleAuthChange(event: AuthStates) {
-    const customEvent = new CustomEvent("authstatechange", {
-      detail: event,
-    });
-    if (event === "locked") {
-      this._isOpen = true;
-    }
-    if (event === "authenticated") {
-      this._isOpen = false;
-    }
-    this.dispatchEvent(customEvent);
-    this.requestUpdate();
-  }
-
-  private handleConfigChange(name: any, val: string) {
-    this[name] = val;
-    if (val) {
-      setForVersion("ad4m" + name, val);
-    } else {
-      removeForVersion("ad4m" + name);
-    }
-    this.requestUpdate();
-  }
-
-  private handleConnectionChange(event: ConnectionStates) {
-    if (event === "checking_local") {
-      this._isOpen = false; // Don't show dialog while checking
-      return;
-    }
-
-    if (event === "connected") {
-      if (this.authState !== "authenticated") {
-        this.changeUIState("requestcap");
-        this._isOpen = true;
-      } else {
-        this.changeUIState("connected");
-        this._isOpen = false;
-      }
-    }
-    if (event === "disconnected") {
-      this._isOpen = true;
-    }
-    if (event === "not_connected") {
-      this._isOpen = true;
-      this.changeUIState("start");
-    }
-    const customEvent = new CustomEvent("connectionstatechange", {
-      detail: event,
-    });
-    this.dispatchEvent(customEvent);
-    this.requestUpdate();
-  }
-
-  private loadFont() {
-    const link = document.createElement("link");
-    link.rel = "stylesheet";
-    link.type = "text/css";
-    link.crossOrigin = "anonymous";
-    link.href =
-      "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap";
-    document.head.appendChild(link);
-  }
-
-  private async startCamera(e) {
-    try {
-      window["BarcodeDetector"].getSupportedFormats();
-    } catch {
-      window["BarcodeDetector"] = BarcodeDetectorPolyfill;
-    }
-
-    await this.changeUIState("qr");
-
-    setTimeout(async () => {
-      const video = this.shadowRoot.querySelector("video");
-
-      if (!video) return;
-
-      const media = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: { facingMode: "environment" },
+    if (this.core.token) {
+      // Try to auto-connect with stored token
+      this.core.connect().catch((error) => {
+        // Connection failed - show connection options
+        console.error('[Ad4m Connect UI] Auto-connect failed:', error);
+        this.currentView = "connection-options";
+        this.modalOpen = true;
       });
-
-      video.srcObject = media;
-      video.autoplay = true;
-    }, 100);
+    } else {
+      // No token - show connection options
+      this.currentView = "connection-options";
+      this.modalOpen = true;
+    }
   }
 
-  async connect() {
-    this._isOpen = true;
+  private async changePort(event: CustomEvent) {
+    this.core.port = event.detail.port;
+    setLocal("ad4m-port", this.core.port.toString());
     this.requestUpdate();
-    const client = await this._client.connect();
-    try {
-      const status = await client.agent.status();
-      if (status.isUnlocked && status.isInitialized) {
-        window.location.reload();
-      }
-    } catch (e) {
-      console.warn(e);
-    }
-    return client;
   }
 
-  getAd4mClient() {
-    return this._client.ad4mClient;
-  }
-
-  async connectRemote(url) {
+  private async connectLocalNode() {
+    // Update URL to local and persist
+    this.core.url = `ws://localhost:${this.core.port}/graphql`;
+    setLocal("ad4m-url", this.core.url);
+    
     try {
-      this.changeUrl(url);
-      const client = await this._client.connect(url);
-      const status = await client.agent.status();
-      if (status.isUnlocked && status.isInitialized) {
-        return client;
-      }
-
-      this.changeUIState("requestcap");
-      return client;
-    } catch (e) {
-      this.changeUIState("requestcap");
-      this._isOpen = true;
+      await this.core.connect();
+      this.currentView = "local-authentication";
+    } catch (error) {
+      console.error('[Ad4m Connect UI] Local node connection failed:', error);
+      this.currentView = "connection-options";
     }
   }
 
-  async requestCapability(bool) {
+  private async verifyLocalAd4mCode(event: CustomEvent) {
+    const success = await this.core.verifyLocalAd4mCode(event.detail.code);
+    this.verificationError = !success;
+    if (success) this.modalOpen = false;
+  }
+
+  private async connectRemoteNode(e: CustomEvent) {
+    this.remoteNodeError = false;
+    this.connectingToRemoteNode = true;
+    this.core.url = e.detail.remoteUrl;
+    // Persist URL immediately so it's remembered even if validation fails
+    setLocal("ad4m-url", this.core.url);
+
     try {
-      await this._client.requestCapability(bool);
-      this.changeUIState("verifycode");
-    } catch (e) {
-      console.warn(e);
+      // Check if the server is reachable
+      await connectWebSocket(e.detail.remoteUrl);
+      console.log('[Ad4m Connect UI] Remote connection successful');
+  
+      // Verify it's actually an AD4M API
+      const isValidAd4mApi = await this.core.isValidAd4mAPI();
+      if (!isValidAd4mApi) throw new Error("Server is reachable but doesn't appear to be an AD4M executor");
+      console.log('[Ad4m Connect UI] Remote AD4M API verified');
+  
+      // TODO: Handle multi-user flow differently if needed
+      const isMultiUser = await this.core.isMultiUser();
+      console.log('[Ad4m Connect UI] Remote multi-user detected:', isMultiUser);
+
+      // Navigate to remote authentication view
+      this.currentView = "remote-authentication";
+    } catch (error) {
+      console.error('[Ad4m Connect UI] Remote connection failed:', error);
+      this.remoteNodeError = true;
+    } finally {
+      this.connectingToRemoteNode = false;
     }
   }
 
-  async isAuthenticated() {
-    return this._client.checkAuth();
+  private async emailLogin(e: CustomEvent) {
+    try {
+      this.remoteAuthLoading = true;
+      this.remoteAuthState = await this.core.submitEmail(e.detail.email);
+    } finally {
+      this.remoteAuthLoading = false;
+    }
   }
 
-  setOpen(val: boolean) {
-    this._isOpen = val;
+  private async verifyEmailCode(event: CustomEvent) {
+    try {
+      this.remoteAuthLoading = true;
+      const success = await this.core.verifyEmailCode(event.detail.email, event.detail.code);
+      this.emailCodeError = !success;
+      if (success) this.modalOpen = false;
+    } catch (error) {
+      this.emailCodeError = true;
+    } finally {
+      this.remoteAuthLoading = false;
+    }
   }
 
-  setHostingStep(step: number) {
-    this._hostingStep = step;
+  private async passwordLogin(event: CustomEvent) {
+    try {
+      this.remoteAuthLoading = true;
+      const success = await this.core.loginWithPassword(event.detail.email, event.detail.password);
+      this.passwordError = !success;
+      if (success) this.modalOpen = false;
+    } catch (error) {
+      this.passwordError = true;
+    } finally {
+      this.remoteAuthLoading = false;
+    }
   }
 
-  clearState() {
-    this.handleConfigChange("port", null);
-    this.handleConfigChange("url", null);
-    this.handleConfigChange("token", null);
-    // this._isOpen = false;
-    this.handleConnectionChange("not_connected");
-    this.handleAuthChange("unauthenticated");
-    this.changeUIState("start");
+  private async createAccount(event: CustomEvent) {
+    try {
+      this.remoteAuthLoading = true;
+      const success = await this.core.createAccount(event.detail.email, event.detail.password);
+      this.accountCreationError = !success;
+      if (success) this.modalOpen = false;
+      // TODO: request verification instead of auto-login when testing complete
+      // const result = await this.core.createAccount(event.detail.email, event.detail.password);
+      // console.log('*** create account result', result);
+      // this.accountCreationError = !result.success;
+      // if (result.success) {
+      //   await this.emailLogin(new CustomEvent("", { detail: { email: event.detail.email }}));
+      // }
+    } catch (error) {
+      this.accountCreationError = true;
+    } finally {
+      this.remoteAuthLoading = false;
+    }
+  }
 
-    this._client.clearState();
+  private async disconnect() {
+    await this.core.disconnect();
+    window.location.reload();
   }
 
   renderViews() {
-    if (this.connectionState === "connecting") {
-      return Loading();
+    if (this.currentView === "connection-options") {
+      return html`
+        <connection-options
+          .port=${this.core.port}
+          .remoteUrl=${this.core.options.remoteUrl}
+          .connectingToRemoteNode=${this.connectingToRemoteNode}
+          .remoteNodeError=${this.remoteNodeError}
+          .showMultiUserOption=${this.core.options.multiUser}
+          @change-port=${this.changePort}
+          @connect-local-node=${this.connectLocalNode}
+          @connect-remote-node=${this.connectRemoteNode}
+          @clear-remote-node-error=${() => { this.remoteNodeError = false; }}
+        ></connection-options>
+      `;
     }
 
-    if (this.uiState === "hosting") {
-      return Hosting({
-        email: this._email,
-        password: this._passowrd,
-        changeEmail: this.changeEmail,
-        changePassword: this.changePassword,
-        changeState: this.changeUIState,
-        step: this._hostingStep,
-        setHostingStep: this.setHostingStep,
-        login: this.loginToHosting,
-        checkEmail: this.checkEmail,
-        passwordError: this._passwordError,
-        isHostingRunning: this._hostingNotRunningError,
-        setIsHostingRunning: this.setIsHostingRunning,
-      });
+    if (this.currentView === "local-authentication") {
+      return html`
+        <local-authentication 
+          .capabilities=${this.core.options.capabilities}
+          .appname=${this.core.options.appInfo.name}
+          .appiconpath=${this.core.options.appInfo.iconPath}
+          .verificationError=${this.verificationError}
+          @back=${() => { this.currentView = "connection-options" }}
+          @request-capability=${() => this.core.requestCapability(true)}
+          @verify-code=${this.verifyLocalAd4mCode}
+          @clear-verification-error=${() => { this.verificationError = false; }}
+        ></local-authentication>
+      `;
     }
 
-    if (this.uiState === "qr") {
-      return ScanQRCode({
-        changeState: this.changeUIState,
-        onSuccess: (url) => {
-          this.changeUrl(url);
-          this._client.connect(url);
-        },
-        uiState: this.uiState,
-      });
+    if (this.currentView === "remote-authentication") {
+      return html`
+        <remote-authentication
+          .remoteAuthLoading=${this.remoteAuthLoading}
+          .remoteAuthState=${this.remoteAuthState}
+          .emailCodeError=${this.emailCodeError}
+          .passwordError=${this.passwordError}
+          .accountCreationError=${this.accountCreationError}
+          @back=${() => { this.currentView = "connection-options" }}
+          @email-login=${this.emailLogin}
+          @verify-email-code=${this.verifyEmailCode}
+          @password-login=${this.passwordLogin}
+          @create-account=${this.createAccount}
+          @clear-email-code-error=${() => { this.emailCodeError = false; }}
+        ></remote-authentication>
+      `;
     }
 
-    if (this.authState === "locked") {
-      return AgentLocked({
-        unlockAgent: this.unlockAgent,
-        reconnect: this.connect,
-      });
+    if (this.currentView === "current-state") {
+      return html`
+        <current-state
+          .url=${this.core.url}
+          .port=${this.core.port}
+          .authState=${this.core.authState}
+          @close=${() => { this.modalOpen = false; }}
+          @disconnect=${this.disconnect}
+        ></current-state>
+      `;
     }
-
-    if (this.uiState === "settings") {
-      return Settings({
-        port: this.port,
-        changePort: this.changePort,
-        isRemote: this._isRemote,
-        changeIsRemote: this.changeIsRemote,
-        url: this.url,
-        changeState: this.changeUIState,
-        changeUrl: this.changeUrl,
-        connectToPort: this._client.connectToPort,
-        connectRemote: this.connectRemote,
-        clearState: this.clearState,
-      });
-    }
-
-    if (this.connectionState === "not_connected") {
-      return Start({
-        scanQrcode: this.startCamera,
-        connect: this.connect,
-        isMobile: this._isMobile,
-        hasClickedDownload: this._hasClickedDownload,
-        onDownloaded: this.onDownloaded,
-        changeState: this.changeUIState,
-        hosting: this.hosting,
-      });
-    }
-
-    if (this.connectionState === "connected") {
-      if (this.uiState === "verifycode") {
-        return VerifyCode({
-          code: this._code,
-          changeCode: this.changeCode,
-          changeState: this.changeUIState,
-          verifyCode: this.verifyCode,
-          isHosting: this._client.isHosting,
-          verifyCodeError: this._verifyCodeError,
-        });
-      }
-
-      return RequestCapability({
-        changeState: this.changeUIState,
-        requestCapability: this.requestCapability,
-        capabilities: this.capabilities,
-        appname: this.appName,
-        setOpen: this.setOpen,
-        appiconpath: this.appIconPath,
-      });
-    }
-
-    if (this.connectionState === "disconnected") {
-      return Disconnected({
-        reconnect: this.connect,
-      });
-    }
-
-    if (this.connectionState === "port_not_found") {
-      return CouldNotMakeRequest();
-    }
-  }
-
-  mobileView() {
-    if (this.mobile) {
-      return MobileAppLogoButton({
-        openModal: () => {
-          this.changeUIState("settings");
-          this._isOpen = !this._isOpen;
-        },
-      });
-    }
-
-    return null;
   }
 
   render() {
-    console.log(
-      this.authState,
-      this.connectionState,
-      this.uiState,
-      this._isOpen
-    );
-    if (this._isOpen === false) {
-      if (this.authState === "authenticated") {
-        return this.mobileView();
-      }
-
-      return null;
+    if (this.modalOpen) {
+      // Show modal
+      return html`
+        <div class="wrapper">
+          <div class="modal">
+            <header class="modal-header">
+              ${Ad4mLogo()}
+            </header>
+            <main class="modal-content">
+              ${this.renderViews()}
+            </main>
+          </div>
+          <div class="backdrop" />
+        </div>
+      `;
+    } else if (this.core.authState === "authenticated") {
+      // Show settings button when authenticated and modal is closed
+      return html`
+        <button
+          type="button"
+          class="settings-button"
+          aria-label="Open settings"
+          @click=${() => {
+            this.currentView = "current-state";
+            this.modalOpen = true;
+          }}
+        >
+          ${Ad4mLogo()}
+        </button>
+      `;
     }
 
-    return html`
-      <div class="wrapper">
-        <div class="dialog">
-          ${Header()}
-          <main class="dialog__content">${this.renderViews()}</main>
-          ${this.mobileView()}
-        </div>
-        <div class="ad4mConnect__backdrop" />
-      </div>
-    `;
+    // Nothing to render
+    return null;
   }
 }
 
-export default function Ad4mConnectUI(props: Ad4mConnectOptions) {
+export default function Ad4mConnectUI(core: Ad4mConnect): Ad4mConnectElement {
+  // Create element and inject the core
   const element = new Ad4mConnectElement();
-
-  Object.entries(props).forEach(([key, value]) => {
-    element[key] = value;
-  });
-
-  document.body.appendChild(element);
+  element.core = core;
+  
+  if (core.embedded) {
+    // Running in embedded mode - no UI needed
+    console.log('[Ad4m Connect] Running in embedded mode - UI will not be shown');
+  } else {
+    // Not embedded - mount UI to DOM
+    console.log('[Ad4m Connect UI] Mounting UI to DOM');
+    document.body.appendChild(element);
+  }
 
   return element;
 }

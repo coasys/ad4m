@@ -9,12 +9,12 @@ use crate::link_adapter::revisions::{current_revision, update_current_revision};
 use crate::link_adapter::snapshots::generate_snapshot;
 use crate::retriever::holochain::{get_active_agent_anchor, get_active_agents};
 use crate::retriever::PerspectiveDiffRetreiver;
-use crate::telepresence::status::get_my_did;
 use crate::utils::get_now;
 use crate::{Hash, ENABLE_SIGNALS, SNAPSHOT_INTERVAL};
 
 pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     diff: PerspectiveDiff,
+    my_did: String,
 ) -> SocialContextResult<HoloHash<holo_hash::hash_type::Action>> {
     debug!("===PerspectiveDiffSync.commit(): Function start");
     let now_fn_start = get_now()?.time();
@@ -98,7 +98,7 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
             //     reference_hash: diff_entry_reference.clone(),
             // };
             // send_revision_signal(signal_data)?;
-            broadcast_current::<Retriever>()?;
+            broadcast_current::<Retriever>(&my_did)?;
         };
     } else {
         // Concurrent update detected; decide how to handle it
@@ -122,18 +122,39 @@ pub fn add_active_agent_link<Retriever: PerspectiveDiffRetreiver>() -> SocialCon
         Retriever::create_entry(EntryTypes::Anchor(agent_root_entry.clone()))?;
 
     let agent = agent_info()?.agent_initial_pubkey;
-    create_link(
-        hash_entry(agent_root_entry)?,
-        agent,
-        LinkTypes::Index,
-        LinkTag::new("active_agent"),
-    )?;
+    let agent_root_hash = hash_entry(agent_root_entry)?;
+    
+    // Check if the link already exists to avoid duplicates
+    let query = LinkQuery::try_new(
+        agent_root_hash.clone(),
+        LinkTypes::Index
+    )?
+    .tag_prefix(LinkTag::new("active_agent"));
+    let existing_links = get_links(query, GetStrategy::Local)?;
+    
+    // Check if this agent already has an active link
+    let link_exists = existing_links.iter().any(|link| {
+        link.target.clone().into_agent_pub_key() == Some(agent.clone())
+    });
+    
+    if !link_exists {
+        debug!("===PerspectiveDiffSync.add_active_agent_link(): Creating new active agent link");
+        create_link(
+            agent_root_hash,
+            agent,
+            LinkTypes::Index,
+            LinkTag::new("active_agent"),
+        )?;
+    } else {
+        debug!("===PerspectiveDiffSync.add_active_agent_link(): Link already exists, skipping");
+    }
+    
     let after_fn_end = get_now()?.time();
     debug!("===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took {} to complete whole add_active_agent_link()", (after_fn_end - now_fn_start).num_milliseconds());
     Ok(())
 }
 
-pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>() -> SocialContextResult<Option<Hash>>
+pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>(my_did: &str) -> SocialContextResult<Option<Hash>>
 {
     //debug!("Running broadcast_current");
     let current = current_revision::<Retriever>()?;
@@ -147,7 +168,7 @@ pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>() -> SocialContext
         let signal_data = HashBroadcast {
             reference: entry_ref,
             reference_hash: current_revision.hash.clone(),
-            broadcast_author: get_my_did()?.unwrap(),
+            broadcast_author: my_did.to_string(),
         };
 
         let recent_agents = get_active_agents()?;

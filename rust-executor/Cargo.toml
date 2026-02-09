@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-executor"
-version = "0.11.1"
+version = "0.11.2-dev"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
 description = "Runtime implementation of AD4M as library - https://ad4m.dev"
@@ -95,16 +95,16 @@ webbrowser = "0.8.12"
 holochain_cli_run_local_services = { version = "0.5.0-dev.12" }
 kitsune_p2p_types = { version = "0.5.0-dev.9" }
 kitsune2_api = "0.1.15"
-holochain = { version = "0.6.0", features = ["test_utils", "default", "backend-go-pion"], git = "https://github.com/coasys/holochain.git", branch = "0.6.0-coasys" }
-holochain_cli_bundle = { version = "0.6.0", git = "https://github.com/coasys/holochain.git", branch = "0.6.0-coasys" }
-holochain_types = { version = "0.6.0", git = "https://github.com/coasys/holochain.git", branch = "0.6.0-coasys" }
+holochain = { version = "0.6.0", features = ["test_utils", "default", "backend-go-pion"], git = "https://github.com/coasys/holochain.git", branch = "blocked-messages-debugging" }
+holochain_cli_bundle = { version = "0.6.0", git = "https://github.com/coasys/holochain.git", branch = "blocked-messages-debugging" }
+holochain_types = { version = "0.6.0", git = "https://github.com/coasys/holochain.git", branch = "blocked-messages-debugging" }
 lair_keystore_api = { version = "0.6.3", git = "https://github.com/coasys/lair.git", branch = "0.6.3-coasys" }
 sodoken = "=0.1.0"
 
 scryer-prolog = { version = "0.10", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
-ad4m-client = { path = "../rust-client", version="0.11.1" }
+ad4m-client = { path = "../rust-client", version="0.11.2-dev" }
 reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
 
 # rusqlite = { version = "0.29.0", git = "https://github.com/coasys/rusqlite.git", rev = "12ec1330bd4b46411ab9895364da4a3e172d0fbb", features = ["bundled"] }
@@ -114,6 +114,7 @@ sha2 = "0.10.8"
 regex = "1.5.4"
 json5 = "0.4"
 rayon = "1.7.0"  # For parallel processing in filtering optimization
+lettre = "0.11"  # For sending verification emails via SMTP
 
 include_dir = "0.6.0"
 rustls = "0.23"

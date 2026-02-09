@@ -17,6 +17,7 @@ pub struct RequestContext {
     pub capabilities: Result<Vec<Capability>, String>,
     pub js_handle: JsCoreHandle,
     pub auto_permit_cap_requests: bool,
+    pub auth_token: String,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -69,6 +70,8 @@ pub struct AuthInfoInput {
     pub app_url: Option<String>,
     #[graphql(name = "capabilities")]
     pub capabilities: Option<Vec<CapabilityInput>>,
+    #[graphql(name = "userDid")]
+    pub user_did: Option<String>,
 }
 
 #[derive(GraphQLInputObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -243,7 +246,7 @@ pub struct Language {
     pub name: String,
 }
 
-#[derive(GraphQLEnum, Debug, Default, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(GraphQLEnum, Debug, Default, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 pub enum LinkStatus {
     #[default]
     #[serde(rename = "shared")]
@@ -475,9 +478,53 @@ pub struct PerspectiveHandle {
     pub neighbourhood: Option<DecoratedNeighbourhoodExpression>,
     pub shared_url: Option<String>,
     pub state: PerspectiveState,
+    pub owners: Option<Vec<String>>, // List of owner DIDs - supports both single and multi-user ownership
 }
 
 impl PerspectiveHandle {
+    /// Add a user DID to the owners list
+    pub fn add_owner(&mut self, user_did: &str) {
+        if self.owners.is_none() {
+            self.owners = Some(Vec::new());
+        }
+
+        let owners = self.owners.as_mut().unwrap();
+        if !owners.contains(&user_did.to_string()) {
+            owners.push(user_did.to_string());
+        }
+    }
+
+    /// Check if a user DID is in the owners list
+    pub fn is_owned_by(&self, user_did: &str) -> bool {
+        self.owners
+            .as_ref()
+            .map(|owners| owners.contains(&user_did.to_string()))
+            .unwrap_or(false)
+    }
+
+    /// Check if this perspective has no owners (unowned)
+    pub fn is_unowned(&self) -> bool {
+        self.owners
+            .as_ref()
+            .map(|owners| owners.is_empty())
+            .unwrap_or(true)
+    }
+
+    /// Get the primary owner (first owner in the list) for backward compatibility
+    pub fn get_primary_owner(&self) -> Option<String> {
+        self.owners.as_ref()?.first().cloned()
+    }
+
+    /// Get all owners
+    pub fn get_owners(&self) -> Vec<String> {
+        self.owners.clone().unwrap_or_default()
+    }
+
+    /// Check if this is a neighbourhood (shared perspective)
+    pub fn is_neighbourhood(&self) -> bool {
+        self.shared_url.is_some()
+    }
+
     pub fn new(
         uuid: String,
         name: Option<String>,
@@ -491,6 +538,7 @@ impl PerspectiveHandle {
             neighbourhood,
             shared_url,
             state,
+            owners: None,
         }
     }
 
@@ -501,6 +549,18 @@ impl PerspectiveHandle {
             neighbourhood: None,
             shared_url: None,
             state: PerspectiveState::Private,
+            owners: None,
+        }
+    }
+
+    pub fn new_with_owner(name: String, owner_did: String) -> Self {
+        PerspectiveHandle {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            name: Some(name),
+            neighbourhood: None,
+            shared_url: None,
+            state: PerspectiveState::Private,
+            owners: Some(vec![owner_did]), // Initialize with the owner
         }
     }
 }
@@ -559,24 +619,87 @@ pub struct SentMessage {
     pub recipient: String,
 }
 
+// Public UserInfo struct for GraphQL - only contains non-sensitive fields
+// Note: last_seen uses f64 for GraphQL compatibility (GraphQL Int is limited to i32)
+// f64 can safely represent integer timestamps up to 2^53 without precision loss
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInfo {
+    pub username: String,
+    pub did: String,
+    pub last_seen: Option<f64>,
+}
+
+impl From<crate::types::User> for UserInfo {
+    fn from(user: crate::types::User) -> Self {
+        UserInfo {
+            username: user.username,
+            did: user.did,
+            last_seen: user.last_seen.map(|ts| ts as f64),
+        }
+    }
+}
+
+impl From<crate::types::UserInfo> for UserInfo {
+    fn from(user: crate::types::UserInfo) -> Self {
+        UserInfo {
+            username: user.username,
+            did: user.did,
+            last_seen: user.last_seen.map(|ts| ts as f64),
+        }
+    }
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UserCreationResult {
+    pub did: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+#[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UserStatistics {
+    pub email: String,
+    pub did: String,
+    pub last_seen: Option<DateTime>,
+    pub perspective_count: i32,
+}
+
+#[derive(GraphQLObject, Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationRequestResult {
+    pub success: bool,
+    pub message: String,
+    pub requires_password: bool,
+    pub is_existing_user: bool,
+}
+
 #[derive(Default, Debug, Deserialize, Serialize)]
 pub struct NeighbourhoodSignalFilter {
     pub perspective: PerspectiveHandle,
     pub signal: PerspectiveExpression,
+    pub recipient: Option<String>, // DID of the recipient agent for this signal
 }
 
-#[derive(Default, Debug, Deserialize, Serialize)]
-pub struct PerspectiveLinkFilter {
-    pub perspective: PerspectiveHandle,
-    pub link: DecoratedLinkExpression,
-}
-
+// Wrapper for link events with owner filtering (for multi-user isolation)
 #[derive(Default, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PerspectiveLinkUpdatedFilter {
+pub struct PerspectiveLinkWithOwner {
+    pub perspective_uuid: String,
+    pub link: DecoratedLinkExpression,
+    pub owner: String, // DID of the owner
+}
+
+// Wrapper for link updated events with owner filtering (for multi-user isolation)
+#[derive(Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerspectiveLinkUpdatedWithOwner {
+    pub perspective_uuid: String,
     pub new_link: DecoratedLinkExpression,
     pub old_link: DecoratedLinkExpression,
-    pub perspective: PerspectiveHandle,
+    pub owner: String, // DID of the owner
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]
@@ -771,12 +894,17 @@ impl GetValue for NeighbourhoodSignalFilter {
 // Implement the trait for the `NeighbourhoodSignalFilter` struct
 impl GetFilter for NeighbourhoodSignalFilter {
     fn get_filter(&self) -> Option<String> {
-        Some(self.perspective.uuid.clone())
+        // Create a composite filter: perspective_uuid|recipient_did
+        // If recipient is None, just use perspective_uuid for backwards compatibility
+        match &self.recipient {
+            Some(recipient_did) => Some(format!("{}|{}", self.perspective.uuid, recipient_did)),
+            None => Some(self.perspective.uuid.clone()),
+        }
     }
 }
 
-// Implement the trait for the `PerspectiveLinkFilter` struct
-impl GetValue for PerspectiveLinkFilter {
+// Implement GetValue and GetFilter for PerspectiveLinkWithOwner
+impl GetValue for PerspectiveLinkWithOwner {
     type Value = DecoratedLinkExpression;
 
     fn get_value(&self) -> Self::Value {
@@ -784,15 +912,14 @@ impl GetValue for PerspectiveLinkFilter {
     }
 }
 
-// Implement the trait for the `PerspectiveLinkFilter` struct
-impl GetFilter for PerspectiveLinkFilter {
+impl GetFilter for PerspectiveLinkWithOwner {
     fn get_filter(&self) -> Option<String> {
-        Some(self.perspective.uuid.clone())
+        Some(self.owner.clone())
     }
 }
 
-// Implement the trait for the `PerspectiveLinkUpdatedFilter` struct
-impl GetValue for PerspectiveLinkUpdatedFilter {
+// Implement GetValue and GetFilter for PerspectiveLinkUpdatedWithOwner
+impl GetValue for PerspectiveLinkUpdatedWithOwner {
     type Value = LinkUpdated;
 
     fn get_value(&self) -> Self::Value {
@@ -803,10 +930,9 @@ impl GetValue for PerspectiveLinkUpdatedFilter {
     }
 }
 
-// Implement the trait for the `PerspectiveLinkUpdatedFilter` struct
-impl GetFilter for PerspectiveLinkUpdatedFilter {
+impl GetFilter for PerspectiveLinkUpdatedWithOwner {
     fn get_filter(&self) -> Option<String> {
-        Some(self.perspective.uuid.clone())
+        Some(self.owner.clone())
     }
 }
 
@@ -887,6 +1013,50 @@ impl GetValue for PerspectiveHandle {
 impl GetFilter for PerspectiveHandle {
     fn get_filter(&self) -> Option<String> {
         None
+    }
+}
+
+// Wrapper type for perspective subscriptions that includes owner for filtering
+#[derive(Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerspectiveWithOwner {
+    pub perspective: PerspectiveHandle,
+    pub owner: String,
+}
+
+impl GetValue for PerspectiveWithOwner {
+    type Value = PerspectiveHandle;
+
+    fn get_value(&self) -> Self::Value {
+        self.perspective.clone()
+    }
+}
+
+impl GetFilter for PerspectiveWithOwner {
+    fn get_filter(&self) -> Option<String> {
+        Some(self.owner.clone())
+    }
+}
+
+// Wrapper type for perspective removed subscriptions that includes owner for filtering
+#[derive(Default, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerspectiveRemovedWithOwner {
+    pub uuid: String,
+    pub owner: String,
+}
+
+impl GetValue for PerspectiveRemovedWithOwner {
+    type Value = String;
+
+    fn get_value(&self) -> Self::Value {
+        self.uuid.clone()
+    }
+}
+
+impl GetFilter for PerspectiveRemovedWithOwner {
+    fn get_filter(&self) -> Option<String> {
+        Some(self.owner.clone())
     }
 }
 

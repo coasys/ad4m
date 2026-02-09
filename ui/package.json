@@ -4,7 +4,8 @@
   "type": "module",
   "dependencies": {
     "@apollo/client": "3.7.10",
-    "@coasys/ad4m": "link:../core",
+    "@coasys/ad4m": "workspace:*",
+    "@coasys/ad4m-connect": "workspace:*",
     "@coasys/flux-ui": "^0.9.0",
     "@preact/preset-vite": "^2.4.0",
     "@spartan-hc/holo-hash": "0.7.0",
@@ -84,5 +85,5 @@
   "resolutions": {
     "react-error-overlay": "6.0.9"
   },
-  "version": "0.11.1"
+  "version": "0.11.2-dev"
 }

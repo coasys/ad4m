@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use rustyline::Editor;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Style, ThemeSet};
+use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
 

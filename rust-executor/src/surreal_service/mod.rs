@@ -1,6 +1,5 @@
 use crate::types::DecoratedLinkExpression;
 use deno_core::anyhow::Error;
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -9,7 +8,6 @@ use surrealdb::{
     opt::{capabilities::Capabilities, Config},
     Surreal, Value as SurrealValue,
 };
-use tokio::sync::RwLock;
 
 /// Helper function to unwrap SurrealDB's enum-wrapped JSON structure
 /// SurrealDB values serialize with variant names as keys (e.g., {"Strand": "value"})
@@ -323,6 +321,76 @@ impl SurrealDBService {
                     return url;
                 };
             };
+
+            DEFINE FUNCTION IF NOT EXISTS fn::strip_html($html: option<string>) {
+                RETURN function($html) {
+                    const [html] = arguments;
+
+                    if (!html || typeof html !== 'string') {
+                        return html;
+                    }
+
+                    // Remove HTML tags using regex
+                    return html.replace(/<[^>]*>/g, '');
+                };
+            };
+
+            DEFINE FUNCTION IF NOT EXISTS fn::json_path($obj: option<record>, $path: option<string>) {
+                RETURN function($obj, $path) {
+                    const [obj, path] = arguments;
+
+                    if (!obj || !path || typeof path !== 'string') {
+                        return null;
+                    }
+
+                    // Split path by dots and traverse object
+                    const parts = path.split('.');
+                    let current = obj;
+
+                    for (const part of parts) {
+                        if (current && typeof current === 'object' && part in current) {
+                            current = current[part];
+                        } else {
+                            return null;
+                        }
+                    }
+
+                    return current;
+                };
+            };
+
+            DEFINE FUNCTION IF NOT EXISTS fn::contains($str: option<string>, $substring: option<string>) {
+                RETURN function($str, $substring) {
+                    const [str, substring] = arguments;
+                    //console.log('🔍 fn::contains input - str:', str, 'substring:', substring);
+
+                    if (!str || !substring || typeof str !== 'string' || typeof substring !== 'string') {
+                        //console.log('🔍 fn::contains: invalid types, returning false');
+                        return false;
+                    }
+
+                    const result = str.includes(substring);
+                    //console.log('🔍 fn::contains result:', result);
+                    return result;
+                };
+            };
+
+            DEFINE FUNCTION IF NOT EXISTS fn::regex_match($str: option<string>, $pattern: option<string>) {
+                RETURN function($str, $pattern) {
+                    const [str, pattern] = arguments;
+
+                    if (!str || !pattern || typeof str !== 'string' || typeof pattern !== 'string') {
+                        return false;
+                    }
+
+                    try {
+                        const regex = new RegExp(pattern);
+                        return regex.test(str);
+                    } catch (e) {
+                        return false;
+                    }
+                };
+            };
             ",
         )
         .await?;
@@ -531,25 +599,6 @@ impl SurrealDBService {
 
         Ok(())
     }
-}
-
-lazy_static! {
-    static ref SURREAL_SERVICE: Arc<RwLock<Option<SurrealDBService>>> = Arc::new(RwLock::new(None));
-}
-
-pub async fn init_surreal_service() -> Result<(), Error> {
-    // Create a default global service instance for backward compatibility
-    // Note: This is legacy - new code should create per-perspective instances
-    let service = SurrealDBService::new("ad4m", "default").await?;
-    let mut lock = SURREAL_SERVICE.write().await;
-    *lock = Some(service);
-    Ok(())
-}
-
-pub async fn get_surreal_service() -> SurrealDBService {
-    let lock = SURREAL_SERVICE.read().await;
-    lock.clone()
-        .expect("SurrealDBService not initialized. Call init_surreal_service() first.")
 }
 
 #[cfg(test)]

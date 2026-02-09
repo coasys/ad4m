@@ -6,6 +6,7 @@ use perspective_diff_sync_integrity::{
 
 use crate::errors::{SocialContextError, SocialContextResult};
 use crate::retriever::holochain::get_active_agents;
+use crate::utils::dedup;
 
 pub fn set_online_status(status: PerspectiveExpression) -> SocialContextResult<()> {
     let entry = EntryTypes::PrivateOnlineStatus(status);
@@ -65,14 +66,23 @@ pub fn create_did_pub_key_link(did: String) -> SocialContextResult<()> {
     // TODO: should be agent_latest_pubkey, but that was made unstable behind dpki feature flag
     let agent_key = agent_info()?.agent_initial_pubkey;
     debug!("PerspectiveDiffSync.create_did_pub_key_link() agent_key: {:?}", agent_key);
-    let query = LinkQuery::try_new(agent_key.clone(), LinkTypes::DidLink)?;
-    let did_links = get_links(query, GetStrategy::Local)?;
-    debug!("PerspectiveDiffSync.create_did_pub_key_link() did_links: {:?}", did_links);
-    if did_links.len() == 0 {
 
-        let entry = EntryTypes::Anchor(Anchor(did));
-        let _did_entry = create_entry(&entry)?;
-        let did_entry_hash = hash_entry(entry)?;
+    // For multi-user support: check if THIS SPECIFIC DID already has a link, not just any DID
+    let did_entry = EntryTypes::Anchor(Anchor(did.clone()));
+    let did_entry_hash = hash_entry(&did_entry)?;
+
+    let existing_links = get_links(
+        LinkQuery::try_new(did_entry_hash.clone(), LinkTypes::DidLink)?,
+        GetStrategy::Local
+    )?;
+
+    debug!("PerspectiveDiffSync.create_did_pub_key_link() existing_links: {:?}", existing_links);
+
+
+    // Only create the link if this specific DID doesn't already have one
+    if existing_links.len() == 0 {
+        debug!("PerspectiveDiffSync.create_did_pub_key_link() creating new link for DID: {:?}", did);
+        let _did_entry = create_entry(&did_entry)?;
         create_link(
             agent_key.clone(),
             did_entry_hash.clone(),
@@ -85,6 +95,8 @@ pub fn create_did_pub_key_link(did: String) -> SocialContextResult<()> {
             LinkTypes::DidLink,
             LinkTag::new("did_link"),
         )?;
+    } else {
+        debug!("PerspectiveDiffSync.create_did_pub_key_link() link already exists for DID: {:?}", did);
     }
     Ok(())
 }
@@ -165,16 +177,64 @@ pub fn get_agents_did_key(agent: AgentPubKey) -> SocialContextResult<Option<Stri
     }
 }
 
-pub fn get_others() -> SocialContextResult<Vec<String>> {
-    let active_agents = get_active_agents()?;
-    let mut others = Vec::new();
-    for active_agent in active_agents {
-        let did_key = get_agents_did_key(active_agent)?;
-        if did_key.is_some() {
-            others.push(did_key.unwrap());
+/// Get ALL DIDs associated with an agent (for multi-user support)
+/// In multi-user scenarios, one Holochain agent can have multiple DIDs
+pub fn get_agents_did_keys(agent: AgentPubKey) -> SocialContextResult<Vec<String>> {
+    let did_links = get_links(
+        LinkQuery::try_new(
+            agent,
+            LinkTypes::DidLink
+        )?,
+        GetStrategy::Local
+    )?;
+
+    let mut dids = Vec::new();
+    for link in did_links {
+        let entry_hash = link.target.into_entry_hash();
+        if entry_hash.is_none() {
+            continue;
+        }
+
+        let did_result = get(
+            entry_hash.unwrap(),
+            GetOptions::network(),
+        )?;
+
+        if let Some(record) = did_result {
+            if let Some(anchor) = record.entry().to_app_option::<Anchor>()? {
+                dids.push(anchor.0);
+            }
         }
     }
-    Ok(others)
+    
+    // Deduplicate DIDs in case multiple agent keys map to the same DID
+    let deduped_dids = dedup(&dids);
+    Ok(deduped_dids)
+}
+
+pub fn get_others() -> SocialContextResult<Vec<String>> {
+    // Return ALL DIDs from all active agents (including current agent)
+    // The JavaScript layer will filter out the calling user's DID
+    let active_agents = get_active_agents()?;
+    let my_agent = agent_info()?.agent_initial_pubkey;
+    let mut all_dids = Vec::new();
+
+    // Get DIDs from all active agents (remote agents)
+    for active_agent in active_agents {
+        let agent_dids = get_agents_did_keys(active_agent)?;
+        all_dids.extend(agent_dids);
+    }
+
+    // Also get ALL DIDs from OUR agent (for multi-user on same node)
+    // Don't exclude anything here - JavaScript will filter out the calling user's DID
+    let my_agent_dids = get_agents_did_keys(my_agent)?;
+    all_dids.extend(my_agent_dids);
+
+    // Deduplicate the final list - same DID could appear multiple times if:
+    // 1. The same DID is associated with multiple agents
+    // 2. my_agent is also in active_agents
+    let deduped_dids = dedup(&all_dids);
+    Ok(deduped_dids)
 }
 
 pub fn get_online_agents() -> SocialContextResult<Vec<OnlineAgent>> {

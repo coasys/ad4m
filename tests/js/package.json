@@ -11,6 +11,10 @@
     "test-integration": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/integration.test.ts",
     "test-app": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/app.test.ts",
     "test-auth": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/authentication.test.ts",
+    "test-multi-user-connect": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/multi-user-connect.test.ts",
+    "test-multi-user-simple": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/multi-user-simple.test.ts",
+    "test-multi-user-with-setup": "./test-multi-user-with-setup.sh",
+    "test-email-verification": "ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/email-verification.test.ts",
     "test-prolog-and-literals": "ts-mocha -p tsconfig.json --timeout 1200000 --serial --exit tests/prolog-and-literals.test.ts",
     "prepare-test": "run-script-os",
     "prepare-test:macos": "./scripts/build-test-language.sh && ./scripts/prepareTestDirectory.sh && deno run --allow-all scripts/get-builtin-test-langs.js && pnpm run inject-language-language && pnpm run publish-test-languages && pnpm run inject-publishing-agent",
@@ -24,6 +28,7 @@
   "devDependencies": {
     "@apollo/client": "3.7.10",
     "@coasys/ad4m": "link:../../core",
+    "@coasys/ad4m-connect": "link:../../connect",
     "@peculiar/webcrypto": "^1.1.7",
     "@types/chai": "*",
     "@types/chai-as-promised": "*",
@@ -65,5 +70,5 @@
     "fluent-ffmpeg": "^2.1.3",
     "uuid": "*"
   },
-  "version": "0.11.1"
+  "version": "0.11.2-dev"
 }

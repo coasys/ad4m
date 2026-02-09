@@ -2,32 +2,34 @@
   "name": "@coasys/ad4m-connect",
   "description": "Lib for handling everything needed to setup a connection to a local or remote ad4m-executor",
   "license": "CAL-1.0",
-  "main": "dist/web.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "browser": "dist/web.js",
   "files": [
     "dist",
     "public"
   ],
   "exports": {
-    ".": "./dist/web.js",
-    "./electron": {
-      "require": "./dist/electron.js",
-      "type": "commonjs"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./web": {
+      "types": "./dist/web.d.ts",
       "import": "./dist/web.js",
-      "require": "./dist/web.js",
-      "type": "module"
+      "require": "./dist/web.js"
     },
     "./core": {
+      "types": "./dist/core.d.ts",
       "import": "./dist/core.js",
-      "require": "./dist/core.js",
-      "type": "module"
+      "require": "./dist/core.js"
     },
     "./utils": {
+      "types": "./dist/utils.d.ts",
       "import": "./dist/utils.js",
-      "require": "./dist/utils.js",
-      "type": "module"
+      "require": "./dist/utils.js"
     }
   },
   "scripts": {
@@ -35,19 +37,19 @@
     "release:beta": "np --no-2fa --no-tests --tag=beta --any-branch",
     "dev": "NODE_ENV=dev && vite dev",
     "serve": "npx serve",
-    "build": "pnpm run build:core && pnpm run build:web && pnpm run build:electron && pnpm run build:utils && tsc",
+    "build": "pnpm run build:index && pnpm run build:core && pnpm run build:web && pnpm run build:utils && tsc",
+    "build:index": "tsc --project tsconfig.json && node scripts/esbuild_index.js",
     "build:core": "tsc --project tsconfig.json && node scripts/esbuild.js",
     "build:web": "tsc --project tsconfig.json && node scripts/esbuild_web.js",
-    "build:utils": "tsc --project tsconfig.json && node scripts/esbuild_utils.js",
-    "build:electron": "tsc --project tsconfig.json && node scripts/esbuild_electron.js"
+    "build:utils": "tsc --project tsconfig.json && node scripts/esbuild_utils.js"
   },
   "author": {
     "name": "Nicolas Luck",
     "email": "nicolas@coasys.org"
   },
   "devDependencies": {
+    "@coasys/ad4m": "workspace:*",
     "@apollo/client": "3.7.10",
-    "@coasys/ad4m": "workspace:0.11.1",
     "@types/node": "^16.11.11",
     "esbuild": "^0.15.5",
     "esbuild-plugin-lit": "^0.0.10",
@@ -65,5 +67,10 @@
     "esbuild-plugin-replace": "^1.4.0",
     "lit": "^2.3.1"
   },
-  "version": "0.11.1"
+  "publishConfig": {
+    "devDependencies": {
+      "@coasys/ad4m": "*"
+    }
+  },
+  "version": "0.11.2-dev.4"
 }

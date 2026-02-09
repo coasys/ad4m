@@ -2,6 +2,65 @@ version: 2.1
 references:
   ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
 
+commands:
+  setup_integration_test_environment:
+    description: "Setup common integration test environment with caches, installs, and builds"
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - restore_cache:
+          keys:
+            - agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
+            - agent-language-rust-cache-
+      - restore_cache:
+          keys:
+            - direct-message-language-rust-cache-{{ checksum "bootstrap-languages/direct-message-language/hc-dna/Cargo.lock" }}
+            - direct-message-language-rust-cache-
+      - restore_cache:
+          keys:
+            - file-storage-rust-cache-{{ checksum "bootstrap-languages/file-storage/hc-dna/Cargo.lock" }}
+            - file-storage-rust-cache-
+      - restore_cache:
+          keys:
+            - p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
+            - p-diff-sync-rust-cache-
+      - run:
+          name: Install specific pnpm version
+          command: npm install -g pnpm@9.15.0
+      - run:
+          name: Install dependencies
+          command: pnpm install --no-frozen-lockfile
+      - run:
+          name: Install core dependencies
+          command: cd ./core && pnpm install --no-frozen-lockfile
+      - run:
+          name: Build bootstrap languages
+          command: pnpm run build-languages
+      - save_cache:
+          key: agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
+          paths:
+            - ./bootstrap-languages/agent-language/hc-dna/target
+      - save_cache:
+          key: direct-message-language-rust-cache-{{ checksum "bootstrap-languages/direct-message-language/hc-dna/Cargo.lock" }}
+          paths:
+            - ./bootstrap-languages/direct-message-language/hc-dna/target
+      - save_cache:
+          key: file-storage-rust-cache-{{ checksum "bootstrap-languages/file-storage/hc-dna/Cargo.lock" }}
+          paths:
+            - ./bootstrap-languages/file-storage-language/hc-dna/target
+      - save_cache:
+          key: p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
+          paths:
+            - ./bootstrap-languages/p-diff-sync/hc-dna/target
+      - save_cache:
+          key: p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
+          paths:
+            - ./bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/target
+      - run:
+          name: Install ffmpeg for transcription test
+          command: sudo apt-get update && sudo apt-get install ffmpeg --fix-missing
+
 orbs:
   node: circleci/node@5.2.0
   go: circleci/go@1.10.0
@@ -75,59 +134,32 @@ jobs:
       - image: *ad4m_image
     resource_class: xlarge
     steps:
-      - checkout
-      - attach_workspace:
-          at: .
-      - restore_cache:
-          keys:
-            - agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
-            - agent-language-rust-cache-
-      - restore_cache:
-          keys:
-            - direct-message-language-rust-cache-{{ checksum "bootstrap-languages/direct-message-language/hc-dna/Cargo.lock" }}
-            - direct-message-language-rust-cache-
-      - restore_cache:
-          keys:
-            - file-storage-rust-cache-{{ checksum "bootstrap-languages/file-storage/hc-dna/Cargo.lock" }}
-            - file-storage-rust-cache-
-      - restore_cache:
-          keys:
-            - p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
-            - p-diff-sync-rust-cache-
-      - run:
-          name: Install specific pnpm version
-          command: npm install -g pnpm@9.15.0
-      - run:
-          name: Install dependencies
-          command: pnpm install --no-frozen-lockfile
-      - run:
-          name: Install core dependencies
-          command: cd ./core && pnpm install --no-frozen-lockfile
-      - run:
-          name: Build bootstrap languages
-          command: pnpm run build-languages
-      - save_cache:
-          key: agent-language-rust-cache-{{ checksum "bootstrap-languages/agent-language/hc-dna/Cargo.lock" }}
-          paths:
-            - ./bootstrap-languages/agent-language/hc-dna/target
-      - save_cache:
-          key: direct-message-language-rust-cache-{{ checksum "bootstrap-languages/direct-message-language/hc-dna/Cargo.lock" }}
-          paths:
-            - ./bootstrap-languages/direct-message-language/hc-dna/target
-      - save_cache:
-          key: file-storage-rust-cache-{{ checksum "bootstrap-languages/file-storage/hc-dna/Cargo.lock" }}
-          paths:
-            - ./bootstrap-languages/file-storage-language/hc-dna/target
-      - save_cache:
-          key: p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
-          paths:
-            - ./bootstrap-languages/p-diff-sync/hc-dna/target
-      - run:
-          name: Install ffmpeg for transcription test
-          command: sudo apt-get update && sudo apt-get install ffmpeg --fix-missing
+      - setup_integration_test_environment
       - run:
           name: Run integration tests
           command: cd ./tests/js && pnpm run test-main
+          no_output_timeout: 30m
+
+  integration-tests-multi-user-simple:
+    docker:
+      - image: *ad4m_image
+    resource_class: xlarge
+    steps:
+      - setup_integration_test_environment
+      - run:
+          name: Run multi-user-simple integration tests
+          command: cd ./tests/js && ./test-multi-user-with-setup.sh
+          no_output_timeout: 30m
+
+  integration-tests-email-verification:
+    docker:
+      - image: *ad4m_image
+    resource_class: xlarge
+    steps:
+      - setup_integration_test_environment
+      - run:
+          name: Run email-verification integration tests
+          command: cd ./tests/js && ./email-verification-test-with-setup.sh
           no_output_timeout: 30m
 
   integration-tests-cli:
@@ -153,5 +185,11 @@ workflows:
     jobs:
       - build-and-test
       - integration-tests-js:
+          requires:
+            - build-and-test
+      - integration-tests-multi-user-simple:
+          requires:
+            - build-and-test
+      - integration-tests-email-verification:
           requires:
             - build-and-test

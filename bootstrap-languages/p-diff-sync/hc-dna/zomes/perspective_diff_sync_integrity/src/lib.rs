@@ -32,6 +32,12 @@ pub struct PerspectiveDiff {
     pub removals: Vec<LinkExpression>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes)]
+pub struct CommitInput {
+    pub diff: PerspectiveDiff,
+    pub my_did: String,
+}
+
 ///The reference that is sent to other agents, denotes the position in the DAG as well as the data at that position
 #[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes)]
 pub struct HashBroadcast {
@@ -118,6 +124,17 @@ pub struct PerspectiveExpression {
 
 app_entry!(PerspectiveExpression);
 
+/// Signal payload that includes recipient DID for multi-user routing
+/// Flattened structure to avoid Holochain extracting nested PerspectiveExpression
+#[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes)]
+pub struct RoutedSignalPayload {
+    pub recipient_did: String,
+    pub author: String,
+    pub data: Perspective,
+    pub timestamp: DateTime<Utc>,
+    pub proof: ExpressionProof,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes)]
 pub struct OnlineAgent {
     pub did: String,
@@ -174,6 +191,13 @@ impl Anchor {
 }
 
 impl PerspectiveExpression {
+    pub fn get_sb(self) -> ExternResult<SerializedBytes> {
+        self.try_into()
+            .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))
+    }
+}
+
+impl RoutedSignalPayload {
     pub fn get_sb(self) -> ExternResult<SerializedBytes> {
         self.try_into()
             .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))

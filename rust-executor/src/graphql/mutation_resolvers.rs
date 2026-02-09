@@ -1,9 +1,9 @@
 #![allow(non_snake_case)]
 
 use crate::{
-    agent::create_signed_expression,
+    agent::{capabilities::*, create_signed_expression, AgentContext, AgentService},
     ai_service::AIService,
-    neighbourhoods::{self, install_neighbourhood},
+    neighbourhoods::{self, install_neighbourhood_with_context},
     perspectives::{
         self, add_perspective, export_perspective, get_perspective, import_perspective,
         perspective_instance::{PerspectiveInstance, SdnaType},
@@ -17,11 +17,10 @@ use crate::{
     runtime_service::RuntimeService,
     types::Notification,
 };
-use coasys_juniper::{graphql_object, graphql_value, FieldError, FieldResult};
+use coasys_juniper::{graphql_object, graphql_value, FieldError, FieldResult, Value};
 
 use super::graphql_types::*;
 use crate::{
-    agent::{self, capabilities::*, AgentService},
     entanglement_service::{
         add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs,
         sign_device_key,
@@ -30,6 +29,29 @@ use crate::{
     pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC},
 };
 use base64::prelude::*;
+
+// Use the shared can_access_perspective function from query_resolvers
+use super::query_resolvers::can_access_perspective;
+
+// Helper function to get perspective with access control
+async fn get_perspective_with_access_control(
+    uuid: &str,
+    context: &RequestContext,
+) -> FieldResult<PerspectiveInstance> {
+    let perspective = get_perspective_with_uuid_field_error(uuid)?;
+    let user_email = user_email_from_token(context.auth_token.clone());
+
+    // Check access to the perspective
+    let handle = perspective.persisted.lock().await.clone();
+    if !can_access_perspective(&user_email, &handle) {
+        return Err(FieldError::new(
+            "Access denied: You don't have permission to access this perspective",
+            graphql_value!(null),
+        ));
+    }
+
+    Ok(perspective)
+}
 
 pub struct Mutation;
 
@@ -145,6 +167,9 @@ impl Mutation {
             agent_service.create_new_keys();
             agent_service.save(passphrase.clone());
 
+            // Store passphrase so future wallet modifications (e.g., adding user keys) can be saved
+            agent_service.passphrase = Some(passphrase.clone());
+
             agent_service.dump().clone()
         });
 
@@ -175,7 +200,7 @@ impl Mutation {
         _context: &RequestContext,
         passphrase: String,
     ) -> FieldResult<AgentStatus> {
-        let agent = AgentService::with_global_instance(|agent_service| {
+        let agent = AgentService::with_mutable_global_instance(|agent_service| {
             agent_service.lock(passphrase.clone());
             agent_service.dump().clone()
         });
@@ -208,15 +233,14 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
         let auth_info: AuthInfo = auth_info.into();
-        let request_id = agent::capabilities::request_capability(auth_info.clone()).await;
+        let request_id = request_capability(auth_info.clone()).await;
         if context.auto_permit_cap_requests {
             println!("======================================");
             println!("Got capability request: \n{:?}", auth_info);
-            let random_number_challenge =
-                agent::capabilities::permit_capability(AuthInfoExtended {
-                    request_id: request_id.clone(),
-                    auth: auth_info,
-                })?;
+            let random_number_challenge = permit_capability(AuthInfoExtended {
+                request_id: request_id.clone(),
+                auth: auth_info,
+            })?;
             println!("--------------------------------------");
             println!("Random number challenge: {}", random_number_challenge);
             println!("======================================");
@@ -233,7 +257,7 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_PERMIT_CAPABILITY)?;
         let auth: AuthInfoExtended = serde_json::from_str(&auth)?;
-        let random_number_challenge = agent::capabilities::permit_capability(auth)?;
+        let random_number_challenge = permit_capability(auth)?;
         Ok(random_number_challenge)
     }
 
@@ -244,7 +268,7 @@ impl Mutation {
         request_id: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_AUTH_CAPABILITY)?;
-        let cap_token = agent::capabilities::generate_capability_token(request_id, rand).await?;
+        let cap_token = generate_capability_token(request_id, rand).await?;
         Ok(cap_token)
     }
 
@@ -264,7 +288,7 @@ impl Mutation {
         message: String,
     ) -> FieldResult<AgentSignature> {
         check_capability(&context.capabilities, &AGENT_SIGN_CAPABILITY)?;
-        Ok(agent::AgentSignature::from_message(message)?.into())
+        Ok(crate::agent::AgentSignature::from_message(message)?.into())
     }
 
     async fn agent_unlock(
@@ -277,8 +301,8 @@ impl Mutation {
 
         let agent_instance = AgentService::global_instance();
         {
-            let agent_service = agent_instance.lock().expect("agent lock");
-            let agent_ref: &AgentService = agent_service.as_ref().expect("agent instance");
+            let mut agent_service = agent_instance.lock().expect("agent lock");
+            let agent_ref: &mut AgentService = agent_service.as_mut().expect("agent instance");
 
             agent_ref.unlock(passphrase.clone())?
         }
@@ -351,17 +375,70 @@ impl Mutation {
         perspective: PerspectiveInput,
     ) -> FieldResult<Agent> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        let mut js = context.js_handle.clone();
-        let perspective_json = serde_json::to_string(&perspective)?;
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "agentUpdatePublicPerspective", {{ perspective: {} }})
-            )"#,
-            perspective_json
-        );
-        let result = js.execute(script).await?;
-        let result: JsResultType<Agent> = serde_json::from_str(&result)?;
-        result.get_graphql_result()
+
+        // For multi-user mode: extract user email from JWT token if present
+        if let Some(user_email) = user_email_from_token(context.auth_token.clone()) {
+            // Get user agent data
+            let agent_data = AgentService::get_user_agent_data(&user_email).map_err(|e| {
+                FieldError::new(format!("User agent not available: {}", e), Value::null())
+            })?;
+
+            // Convert LinkExpressionInput to DecoratedLinkExpression
+            let decorated_links: Vec<DecoratedLinkExpression> = perspective
+                .links
+                .iter()
+                .map(|link_input| DecoratedLinkExpression::try_from(link_input.clone()))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            // Create agent with updated perspective
+            let agent = Agent {
+                did: agent_data.did,
+                direct_message_language: None,
+                perspective: Some(Perspective {
+                    links: decorated_links,
+                }),
+            };
+
+            // Store the updated profile for the user
+            AgentService::with_global_instance(|agent_service| {
+                agent_service.store_user_agent_profile(&user_email, &agent)
+            })
+            .map_err(|e| {
+                FieldError::new(
+                    format!("Failed to store user profile: {}", e),
+                    Value::null(),
+                )
+            })?;
+
+            // Publish the updated agent to the agent language
+            let mut js_handle = context.js_handle.clone();
+            if let Err(e) =
+                AgentService::publish_user_agent_to_language(&user_email, &agent, &mut js_handle)
+                    .await
+            {
+                log::warn!(
+                    "Failed to publish updated user {} profile to agent language: {}",
+                    agent.did,
+                    e
+                );
+                // Don't fail the profile update, just log the warning
+            }
+
+            Ok(agent)
+        } else {
+            // Fallback to JS implementation for main agent
+            let mut js = context.js_handle.clone();
+            let perspective_json = serde_json::to_string(&perspective)?;
+            let script = format!(
+                r#"JSON.stringify(
+                    await core.callResolver("Mutation", "agentUpdatePublicPerspective", {{ perspective: {} }})
+                )"#,
+                perspective_json
+            );
+            let result = js.execute(script).await?;
+            let result: JsResultType<Agent> = serde_json::from_str(&result)?;
+            result.get_graphql_result()
+        }
     }
 
     async fn delete_trusted_agents(
@@ -381,6 +458,763 @@ impl Mutation {
         })
     }
 
+    // Simple user management mutations for multi-user mode
+    async fn runtime_create_user(
+        &self,
+        context: &RequestContext,
+        email: String,
+        password: String,
+        app_info: Option<AuthInfoInput>,
+    ) -> FieldResult<UserCreationResult> {
+        // Normalize email: trim whitespace and convert to lowercase
+        let email = email.trim().to_lowercase();
+
+        // Check capability (empty tokens get user management caps in multi-user mode)
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_CREATE_CAPABILITY,
+        )?;
+
+        // Check if multi-user mode is enabled
+        let multi_user_enabled =
+            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+
+        if !multi_user_enabled {
+            return Ok(UserCreationResult {
+                did: String::new(),
+                success: false,
+                error: Some("Multi-user mode is not enabled".to_string()),
+            });
+        }
+
+        // Generate DID by creating a keypair in the wallet using email as key name
+        use crate::agent::AgentService;
+        AgentService::ensure_user_key_exists(&email).map_err(|e| {
+            FieldError::new(
+                format!("Failed to create user key: {}", e),
+                graphql_value!(null),
+            )
+        })?;
+
+        let did = AgentService::get_user_did_by_email(&email).map_err(|e| {
+            FieldError::new(
+                format!("Failed to retrieve user DID: {}", e),
+                graphql_value!(null),
+            )
+        })?;
+
+        // Save the wallet to persist the new user key
+        AgentService::with_global_instance(|agent_service| {
+            if let Some(passphrase) = &agent_service.passphrase {
+                agent_service.save(passphrase.clone());
+                log::info!("Saved wallet after creating key for user: {}", email);
+            } else {
+                log::warn!(
+                    "Cannot save wallet - no passphrase stored. User DID may change on restart!"
+                );
+            }
+        });
+
+        // Check if user already exists
+        let db = Ad4mDb::global_instance();
+        let existing_user = {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref.get_user(&email).ok()
+        };
+
+        if existing_user.is_some() {
+            return Ok(UserCreationResult {
+                did: String::new(),
+                success: false,
+                error: Some("User already exists".to_string()),
+            });
+        }
+
+        // Add user to database with hashed password
+        {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref.add_user(&email, &did, &password).map_err(|e| {
+                FieldError::new(format!("Failed to add user: {}", e), graphql_value!(null))
+            })?;
+        }
+
+        // Create initial agent profile for the user
+        let initial_agent = Agent {
+            did: did.clone(),
+            direct_message_language: None,
+            perspective: Some(Perspective { links: vec![] }),
+        };
+
+        // Store the profile locally
+        AgentService::with_global_instance(|agent_service| {
+            agent_service.store_user_agent_profile(&email, &initial_agent)
+        })
+        .map_err(|e| {
+            FieldError::new(
+                format!("Failed to store user profile: {}", e),
+                Value::null(),
+            )
+        })?;
+
+        // Publish the agent to the agent language
+        let mut js_handle = context.js_handle.clone();
+        if let Err(e) =
+            AgentService::publish_user_agent_to_language(&email, &initial_agent, &mut js_handle)
+                .await
+        {
+            log::warn!("Failed to publish user {} to agent language: {}", did, e);
+            // Don't fail the user creation, just log the warning
+        }
+
+        // Check if test mode is enabled (we check this early to use in rate limiting)
+        let test_mode = crate::email_service::EMAIL_TEST_MODE
+            .lock()
+            .ok()
+            .map(|mode| *mode)
+            .unwrap_or(false);
+
+        // Apply rate limiting before generating verification code (but skip in test mode)
+        // This prevents abuse by repeatedly creating accounts to spam the email server
+        // Using atomic check-and-update to prevent TOCTOU race conditions.
+        if !test_mode {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+
+            if let Err(e) = db_ref.check_and_update_rate_limit(&email) {
+                log::warn!("Rate limit exceeded for signup verification: {}", e);
+                return Ok(UserCreationResult {
+                    did,
+                    success: true,
+                    error: Some(format!(
+                        "User created successfully but verification email was not sent due to rate limiting: {}",
+                        e
+                    )),
+                });
+            }
+        }
+
+        // Generate verification code and send email
+        let code = {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref
+                .create_verification_code(&email, "signup")
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to create verification code: {}", e),
+                        graphql_value!(null),
+                    )
+                })?
+        };
+
+        // Get app name and icon from provided app_info for email context
+        let app_name = app_info.as_ref().map(|info| info.app_name.clone());
+        let app_icon = app_info
+            .as_ref()
+            .and_then(|info| info.app_icon_path.clone());
+
+        // Get SMTP config if available OR if test mode is enabled
+        let smtp_config_opt = crate::config::SMTP_CONFIG
+            .lock()
+            .ok()
+            .and_then(|cfg| cfg.clone())
+            .filter(|config| config.enabled);
+
+        if test_mode || smtp_config_opt.is_some() {
+            // In test mode, use dummy config since send_verification_email will capture codes instead
+            let smtp_config = if test_mode && smtp_config_opt.is_none() {
+                crate::config::SmtpConfig {
+                    enabled: true,
+                    host: "test.localhost".to_string(),
+                    port: 587,
+                    username: "test".to_string(),
+                    password: "test".to_string(),
+                    from_address: "test@localhost".to_string(),
+                }
+            } else {
+                smtp_config_opt.unwrap()
+            };
+
+            let email_service = crate::email_service::EmailService::new(smtp_config);
+            if let Err(e) = email_service
+                .send_verification_email(
+                    &email,
+                    &code,
+                    "signup",
+                    app_name.as_deref(),
+                    app_icon.as_deref(),
+                )
+                .await
+            {
+                log::warn!("Failed to send verification email to {}: {}", email, e);
+
+                // Clean up the verification code since email delivery failed
+                // (but not in test mode, where codes need to be preserved for testing)
+                if !test_mode {
+                    let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+                    let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+                    if let Err(cleanup_err) = db_ref.delete_verification_code(&email, "signup") {
+                        log::error!(
+                            "Failed to cleanup verification code for {} after email failure: {}",
+                            email,
+                            cleanup_err
+                        );
+                    }
+                }
+
+                // Don't fail user creation if email sending fails
+                return Ok(UserCreationResult {
+                    did,
+                    success: true,
+                    error: Some(format!(
+                        "User created but failed to send verification email: {}",
+                        e
+                    )),
+                });
+            }
+
+            // Note: Rate limiting for signup is now applied earlier (before verification code creation)
+            // to prevent abuse of the signup endpoint
+        } else {
+            log::warn!(
+                "SMTP not configured - skipping verification email for {}",
+                email
+            );
+
+            // Clean up the verification code since SMTP is not configured
+            {
+                let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+                let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+                if let Err(cleanup_err) = db_ref.delete_verification_code(&email, "signup") {
+                    log::error!(
+                        "Failed to cleanup verification code for {} when SMTP unconfigured: {}",
+                        email,
+                        cleanup_err
+                    );
+                }
+            }
+
+            // Return error message when SMTP is not configured (similar to email failure case)
+            // Note: User can still login with password - email verification is optional
+            return Ok(UserCreationResult {
+                did,
+                success: true,
+                error: Some(
+                    "User created successfully. You can login with your password. Email verification was not sent because SMTP is not configured. To enable email verification, please configure email settings in the launcher.".to_string(),
+                ),
+            });
+        }
+
+        Ok(UserCreationResult {
+            did,
+            success: true,
+            error: None,
+        })
+    }
+
+    async fn runtime_login_user(
+        &self,
+        context: &RequestContext,
+        email: String,
+        password: String,
+    ) -> FieldResult<String> {
+        // Normalize email: trim whitespace and convert to lowercase
+        let email = email.trim().to_lowercase();
+
+        // Check capability (empty tokens get login capability in multi-user mode)
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY,
+        )?;
+
+        // Check if multi-user mode is enabled
+        let multi_user_enabled =
+            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+
+        if !multi_user_enabled {
+            return Err(FieldError::new(
+                "Multi-user mode is not enabled",
+                graphql_value!(null),
+            ));
+        }
+
+        // Verify user credentials
+        let db = Ad4mDb::global_instance();
+        let password_valid = {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref
+                .verify_user_password(&email, &password)
+                .unwrap_or(false)
+        };
+
+        if !password_valid {
+            return Err(FieldError::new("Invalid credentials", graphql_value!(null)));
+        }
+
+        if !AgentService::user_exists(&email) {
+            return Err(FieldError::new(
+                "User key not found on executor",
+                graphql_value!(null),
+            ));
+        }
+
+        // Extract app info from the current capability token if available
+        let auth_info = if context.auth_token.is_empty() {
+            // Default app info - use user-scoped capabilities instead of admin ALL_CAPABILITY
+            AuthInfo {
+                app_name: "multi-user-app".to_string(),
+                app_desc: "Multi-user application".to_string(),
+                app_domain: Some("multi-user".to_string()),
+                app_url: Some("https://multi-user.app".to_string()),
+                app_icon_path: None,
+                capabilities: Some(get_user_default_capabilities()),
+                user_email: Some(email.clone()),
+            }
+        } else {
+            // App context - preserve the original app info and add user supposed to be the same as the caller
+            match decode_jwt(context.auth_token.clone()) {
+                Ok(current_claims) => {
+                    let mut auth_info = current_claims.capabilities;
+                    auth_info.user_email = Some(email.clone());
+                    auth_info
+                }
+                Err(_) => {
+                    // Invalid token - reject the request
+                    return Err(FieldError::new("Invalid auth token", graphql_value!(null)));
+                }
+            }
+        };
+
+        let cap_token = token::generate_jwt(
+            auth_info.app_name.clone(),
+            DEFAULT_TOKEN_VALID_PERIOD,
+            auth_info,
+        )
+        .map_err(|e| {
+            FieldError::new(
+                format!("Failed to generate token: {}", e),
+                graphql_value!(null),
+            )
+        })?;
+
+        Ok(cap_token)
+    }
+
+    async fn runtime_request_login_verification(
+        &self,
+        context: &RequestContext,
+        email: String,
+        app_info: Option<AuthInfoInput>,
+    ) -> FieldResult<VerificationRequestResult> {
+        use crate::graphql::graphql_types::VerificationRequestResult;
+
+        // Normalize email: trim whitespace and convert to lowercase
+        let email = email.trim().to_lowercase();
+
+        // Check capability
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY,
+        )?;
+
+        // Check if multi-user mode is enabled
+        let multi_user_enabled =
+            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+
+        if !multi_user_enabled {
+            return Ok(VerificationRequestResult {
+                success: false,
+                message: "Multi-user mode is not enabled".to_string(),
+                requires_password: false,
+                is_existing_user: false,
+            });
+        }
+
+        // Get DB handle for subsequent operations
+        let db = Ad4mDb::global_instance();
+
+        // Check if user exists first (we need to know this to decide how to handle rate limiting)
+        let user_exists = {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref.get_user(&email).is_ok()
+        };
+
+        if !user_exists {
+            // New user - check rate limit but don't update it since no email is sent yet.
+            // The rate limit will be updated in runtime_create_user when the email is actually sent.
+            // This prevents user enumeration while avoiding the rate limit conflict in the signup flow.
+            {
+                let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+                let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+                if let Err(e) = db_ref.check_rate_limit(&email) {
+                    return Ok(VerificationRequestResult {
+                        success: false,
+                        message: e.to_string(),
+                        requires_password: false,
+                        is_existing_user: false,
+                    });
+                }
+            }
+            // New user - they need to sign up with password
+            return Ok(VerificationRequestResult {
+                success: true,
+                message: "New user - please provide a password to sign up".to_string(),
+                requires_password: true,
+                is_existing_user: false,
+            });
+        }
+
+        // Existing user - check and update rate limit since we will send an email
+        // Using atomic check-and-update to prevent TOCTOU race conditions.
+        {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            if let Err(e) = db_ref.check_and_update_rate_limit(&email) {
+                return Ok(VerificationRequestResult {
+                    success: false,
+                    message: e.to_string(),
+                    requires_password: false,
+                    is_existing_user: true,
+                });
+            }
+        }
+
+        // Generate verification code
+        let code = {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            db_ref
+                .create_verification_code(&email, "login")
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to create verification code: {}", e),
+                        graphql_value!(null),
+                    )
+                })?
+        };
+
+        // Get app name and icon from provided app_info for email context
+        let app_name = app_info.as_ref().map(|info| info.app_name.clone());
+        let app_icon = app_info
+            .as_ref()
+            .and_then(|info| info.app_icon_path.clone());
+
+        // Check if test mode is enabled
+        let test_mode = crate::email_service::EMAIL_TEST_MODE
+            .lock()
+            .ok()
+            .map(|mode| *mode)
+            .unwrap_or(false);
+
+        // Get SMTP config from global instance OR use dummy config in test mode
+        let smtp_config_opt = crate::config::SMTP_CONFIG
+            .lock()
+            .ok()
+            .and_then(|cfg| cfg.clone())
+            .filter(|config| config.enabled);
+
+        let smtp_config = if test_mode && smtp_config_opt.is_none() {
+            // In test mode without SMTP config, use dummy config
+            crate::config::SmtpConfig {
+                enabled: true,
+                host: "test.localhost".to_string(),
+                port: 587,
+                username: "test".to_string(),
+                password: "test".to_string(),
+                from_address: "test@localhost".to_string(),
+            }
+        } else if let Some(config) = smtp_config_opt {
+            config
+        } else {
+            // SMTP not configured - return requires_password so UI can show password field for login
+            log::warn!(
+                "SMTP not configured - requiring password login for {}",
+                email
+            );
+
+            // Clean up the verification code since SMTP is not configured
+            {
+                let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+                let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+                if let Err(cleanup_err) = db_ref.delete_verification_code(&email, "login") {
+                    log::error!(
+                        "Failed to cleanup verification code for {} when SMTP unconfigured: {}",
+                        email,
+                        cleanup_err
+                    );
+                }
+            }
+
+            return Ok(VerificationRequestResult {
+                success: true,
+                message: "Email verification is not available. Please login with your password."
+                    .to_string(),
+                requires_password: true,
+                is_existing_user: true,
+            });
+        };
+
+        // Send verification email
+        let email_service = crate::email_service::EmailService::new(smtp_config);
+        if let Err(e) = email_service
+            .send_verification_email(
+                &email,
+                &code,
+                "login",
+                app_name.as_deref(),
+                app_icon.as_deref(),
+            )
+            .await
+        {
+            log::warn!("Failed to send verification email to {}: {}", email, e);
+
+            // Clean up the verification code since email delivery failed
+            // (but not in test mode, where codes need to be preserved for testing)
+            if !test_mode {
+                let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+                let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+                if let Err(cleanup_err) = db_ref.delete_verification_code(&email, "login") {
+                    log::error!(
+                        "Failed to cleanup verification code for {} after email failure: {}",
+                        email,
+                        cleanup_err
+                    );
+                }
+            }
+
+            return Err(FieldError::new(
+                format!("Failed to send verification email: {}", e),
+                graphql_value!(null),
+            ));
+        }
+
+        Ok(VerificationRequestResult {
+            success: true,
+            message: "Verification email sent".to_string(),
+            requires_password: false,
+            is_existing_user: true,
+        })
+    }
+
+    async fn runtime_verify_email_code(
+        &self,
+        context: &RequestContext,
+        email: String,
+        code: String,
+        verification_type: String,
+    ) -> FieldResult<String> {
+        use crate::agent::capabilities::{
+            get_user_default_capabilities, token, AuthInfo, DEFAULT_TOKEN_VALID_PERIOD,
+        };
+
+        // Normalize email: trim whitespace and convert to lowercase
+        let email = email.trim().to_lowercase();
+
+        // Check capability
+        check_capability(
+            &context.capabilities,
+            &RUNTIME_USER_MANAGEMENT_VERIFY_CAPABILITY,
+        )?;
+
+        // Check if multi-user mode is enabled
+        let multi_user_enabled =
+            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+
+        if !multi_user_enabled {
+            return Err(FieldError::new(
+                "Multi-user mode is not enabled",
+                graphql_value!(null),
+            ));
+        }
+
+        // Verify the code
+        let db = Ad4mDb::global_instance();
+        let code_valid = {
+            let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+            let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+            match db_ref.verify_code(&email, &code, &verification_type) {
+                Ok(valid) => valid,
+                Err(e) => {
+                    // Code was invalidated due to too many failed attempts
+                    return Err(FieldError::new(e.to_string(), graphql_value!(null)));
+                }
+            }
+        };
+
+        if !code_valid {
+            return Err(FieldError::new(
+                "Invalid or expired verification code",
+                graphql_value!(null),
+            ));
+        }
+
+        // Verify user exists
+        if !AgentService::user_exists(&email) {
+            return Err(FieldError::new(
+                "User key not found on executor",
+                graphql_value!(null),
+            ));
+        }
+
+        // Generate JWT token for the user
+        let auth_info = if context.auth_token.is_empty() {
+            // Default app info - use user-scoped capabilities instead of admin ALL_CAPABILITY
+            AuthInfo {
+                app_name: "multi-user-app".to_string(),
+                app_desc: "Multi-user application".to_string(),
+                app_domain: Some("multi-user".to_string()),
+                app_url: Some("https://multi-user.app".to_string()),
+                app_icon_path: None,
+                capabilities: Some(get_user_default_capabilities()),
+                user_email: Some(email.clone()),
+            }
+        } else {
+            // Preserve app context
+            match token::decode_jwt(context.auth_token.clone()) {
+                Ok(current_claims) => {
+                    let mut auth_info = current_claims.capabilities;
+                    auth_info.user_email = Some(email.clone());
+                    auth_info
+                }
+                Err(_) => {
+                    return Err(FieldError::new("Invalid auth token", graphql_value!(null)));
+                }
+            }
+        };
+
+        let cap_token = token::generate_jwt(
+            auth_info.app_name.clone(),
+            DEFAULT_TOKEN_VALID_PERIOD,
+            auth_info,
+        )
+        .map_err(|e| {
+            FieldError::new(
+                format!("Failed to generate token: {}", e),
+                graphql_value!(null),
+            )
+        })?;
+
+        Ok(cap_token)
+    }
+
+    async fn runtime_test_email(&self, context: &RequestContext, to: String) -> FieldResult<bool> {
+        use crate::agent::capabilities::ALL_CAPABILITY;
+
+        // Check capability - admin only
+        check_capability(&context.capabilities, &ALL_CAPABILITY)?;
+
+        // Get SMTP config from global instance
+        let smtp_config = crate::config::SMTP_CONFIG
+            .lock()
+            .ok()
+            .and_then(|cfg| cfg.clone())
+            .filter(|config| config.enabled)
+            .ok_or_else(|| {
+                FieldError::new(
+                    "SMTP is not configured or is disabled. Please enable email settings in the launcher.",
+                    graphql_value!(null),
+                )
+            })?;
+
+        // Send test email
+        let email_service = crate::email_service::EmailService::new(smtp_config);
+        email_service.send_test_email(&to).await.map_err(|e| {
+            FieldError::new(
+                format!("Failed to send test email: {}", e),
+                graphql_value!(null),
+            )
+        })?;
+
+        Ok(true)
+    }
+
+    /// Enable email test mode (for testing only - captures codes instead of sending)
+    async fn runtime_email_test_mode_enable(&self, context: &RequestContext) -> FieldResult<bool> {
+        use crate::agent::capabilities::ALL_CAPABILITY;
+
+        // Check capability - admin only
+        check_capability(&context.capabilities, &ALL_CAPABILITY)?;
+
+        crate::email_service::enable_test_mode();
+        Ok(true)
+    }
+
+    /// Disable email test mode
+    async fn runtime_email_test_mode_disable(&self, context: &RequestContext) -> FieldResult<bool> {
+        use crate::agent::capabilities::ALL_CAPABILITY;
+
+        // Check capability - admin only
+        check_capability(&context.capabilities, &ALL_CAPABILITY)?;
+
+        crate::email_service::disable_test_mode();
+        Ok(true)
+    }
+
+    /// Get captured verification code from test mode
+    async fn runtime_email_test_get_code(
+        &self,
+        context: &RequestContext,
+        email: String,
+    ) -> FieldResult<Option<String>> {
+        use crate::agent::capabilities::ALL_CAPABILITY;
+
+        // Check capability - admin only
+        check_capability(&context.capabilities, &ALL_CAPABILITY)?;
+
+        // Normalize email: trim whitespace and convert to lowercase
+        // This ensures consistency with how emails are stored by runtime_create_user
+        // and runtime_request_login_verification
+        let email = email.trim().to_lowercase();
+
+        Ok(crate::email_service::get_test_code(&email))
+    }
+
+    /// Clear all captured test codes
+    async fn runtime_email_test_clear_codes(&self, context: &RequestContext) -> FieldResult<bool> {
+        use crate::agent::capabilities::ALL_CAPABILITY;
+
+        // Check capability - admin only
+        check_capability(&context.capabilities, &ALL_CAPABILITY)?;
+
+        crate::email_service::clear_test_codes();
+        Ok(true)
+    }
+
+    /// Test helper: Set expiry time for a verification code to simulate expiration
+    async fn runtime_email_test_set_expiry(
+        &self,
+        context: &RequestContext,
+        email: String,
+        verification_type: String,
+        expires_at: i32,
+    ) -> FieldResult<bool> {
+        use crate::agent::capabilities::ALL_CAPABILITY;
+
+        // Check capability - admin only
+        check_capability(&context.capabilities, &ALL_CAPABILITY)?;
+
+        // Normalize email: trim whitespace and convert to lowercase
+        // This ensures consistency with how emails are stored by runtime_create_user
+        // and runtime_request_login_verification
+        let email = email.trim().to_lowercase();
+
+        let db = Ad4mDb::global_instance();
+        let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+        let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+        // Convert i32 to i64 for database storage
+        db_ref
+            .set_verification_code_expiry(&email, &verification_type, expires_at as i64)
+            .map_err(|e| {
+                FieldError::new(format!("Failed to set expiry: {}", e), graphql_value!(null))
+            })?;
+
+        Ok(true)
+    }
+
     async fn expression_create(
         &self,
         context: &RequestContext,
@@ -389,12 +1223,37 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &EXPRESSION_CREATE_CAPABILITY)?;
         let mut js = context.js_handle.clone();
-        let script = format!(
-            r#"JSON.stringify(
-                await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }})
-            )"#,
-            content, language_address
-        );
+
+        // Get user context from JWT token
+        let user_email =
+            crate::agent::capabilities::user_email_from_token(context.auth_token.clone());
+
+        let script = if let Some(user_email) = user_email {
+            // User context: set agent service context temporarily
+            format!(
+                r#"JSON.stringify(
+                    await (async () => {{
+                        const originalContext = core.agentService.getUserContext();
+                        core.agentService.setUserContext("{}");
+                        try {{
+                            return await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }});
+                        }} finally {{
+                            core.agentService.setUserContext(originalContext);
+                        }}
+                    }})()
+                )"#,
+                user_email, content, language_address
+            )
+        } else {
+            // Main agent context: call directly
+            format!(
+                r#"JSON.stringify(
+                    await core.callResolver("Mutation", "expressionCreate", {{ content: {}, languageAddress: "{}" }})
+                )"#,
+                content, language_address
+            )
+        };
+
         let result = js.execute(script).await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
         result.get_graphql_result()
@@ -408,16 +1267,45 @@ impl Mutation {
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &EXPRESSION_UPDATE_CAPABILITY)?;
         let mut js = context.js_handle.clone();
+
+        // Get user context from JWT token
+        let user_email =
+            crate::agent::capabilities::user_email_from_token(context.auth_token.clone());
+
         let interaction_call_json = serde_json::to_string(&interaction_call)?;
-        let script = format!(
-            r#"JSON.stringify(
-            await core.callResolver(
-                "Mutation",
-                "expressionInteract",
-                {{ interactionCall: {}, url: "{}" }},
-            ))"#,
-            interaction_call_json, url
-        );
+        let script = if let Some(user_email) = user_email {
+            // User context: set agent service context temporarily
+            format!(
+                r#"JSON.stringify(
+                    await (async () => {{
+                        const originalContext = core.agentService.getUserContext();
+                        core.agentService.setUserContext("{}");
+                        try {{
+                            return await core.callResolver(
+                                "Mutation",
+                                "expressionInteract",
+                                {{ interactionCall: {}, url: "{}" }},
+                            );
+                        }} finally {{
+                            core.agentService.setUserContext(originalContext);
+                        }}
+                    }})()
+                )"#,
+                user_email, interaction_call_json, url
+            )
+        } else {
+            // Main agent context: call directly
+            format!(
+                r#"JSON.stringify(
+                await core.callResolver(
+                    "Mutation",
+                    "expressionInteract",
+                    {{ interactionCall: {}, url: "{}" }},
+                ))"#,
+                interaction_call_json, url
+            )
+        };
+
         let result = js.execute(script).await?;
         let result: JsResultType<String> = serde_json::from_str(&result)?;
         result.get_graphql_result()
@@ -520,7 +1408,8 @@ impl Mutation {
         url: String,
     ) -> FieldResult<PerspectiveHandle> {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)?;
-        Ok(install_neighbourhood(url).await?)
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        Ok(install_neighbourhood_with_context(url, &agent_context).await?)
     }
 
     async fn neighbourhood_publish_from_perspective(
@@ -531,10 +1420,12 @@ impl Mutation {
         #[allow(non_snake_case)] perspectiveUUID: String,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &NEIGHBOURHOOD_CREATE_CAPABILITY)?;
-        let url = neighbourhoods::neighbourhood_publish_from_perspective(
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        let url = neighbourhoods::neighbourhood_publish_from_perspective_with_context(
             &perspectiveUUID,
             link_language,
             meta.into(),
+            &agent_context,
         )
         .await?;
 
@@ -551,7 +1442,8 @@ impl Mutation {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
         let perspective = Perspective::from(payload);
-        let perspective = create_signed_expression(perspective)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -572,18 +1464,19 @@ impl Mutation {
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let perspective = Perspective {
             links: payload
                 .links
                 .into_iter()
                 .map(Link::from)
-                .map(create_signed_expression)
+                .map(|l| create_signed_expression(l, &agent_context))
                 .filter_map(Result::ok)
                 .map(LinkExpression::from)
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
-        let perspective = create_signed_expression(perspective)?;
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -605,7 +1498,8 @@ impl Mutation {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
         let perspective = Perspective::from(payload);
-        let perspective = create_signed_expression(perspective)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -626,18 +1520,19 @@ impl Mutation {
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let perspective = Perspective {
             links: payload
                 .links
                 .into_iter()
                 .map(Link::from)
-                .map(create_signed_expression)
+                .map(|l| create_signed_expression(l, &agent_context))
                 .filter_map(Result::ok)
                 .map(LinkExpression::from)
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
-        let perspective = create_signed_expression(perspective)?;
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -658,7 +1553,8 @@ impl Mutation {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
         let perspective = Perspective::from(status);
-        let perspective = create_signed_expression(perspective)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -678,18 +1574,19 @@ impl Mutation {
     ) -> FieldResult<bool> {
         let uuid = perspectiveUUID;
         check_capability(&context.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let perspective = Perspective {
             links: status
                 .links
                 .into_iter()
                 .map(|l| Link::from(l).normalize())
-                .map(create_signed_expression)
+                .map(|l| create_signed_expression(l, &agent_context))
                 .filter_map(Result::ok)
                 .map(LinkExpression::from)
                 .map(|l| DecoratedLinkExpression::from((l, LinkStatus::Shared)))
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
-        let perspective = create_signed_expression(perspective)?;
+        let perspective = create_signed_expression(perspective, &agent_context)?;
         get_perspective(&uuid)
             .ok_or(FieldError::from(format!(
                 "No perspective found with uuid {}",
@@ -707,7 +1604,33 @@ impl Mutation {
         name: String,
     ) -> FieldResult<PerspectiveHandle> {
         check_capability(&context.capabilities, &PERSPECTIVE_CREATE_CAPABILITY)?;
-        let handle = PerspectiveHandle::new_from_name(name.clone());
+
+        // Determine owner DID based on user context
+        let user_email_opt = user_email_from_token(context.auth_token.clone());
+
+        let owner_did = if let Some(user_email) = user_email_opt {
+            // Multi-user mode: set owner to the authenticated user's DID
+            Some(
+                AgentService::get_user_did_by_email(&user_email).map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to get user DID: {}", e),
+                        graphql_value!(null),
+                    )
+                })?,
+            )
+        } else {
+            // Main agent mode: don't set owner for regular perspectives
+            // Owner will be set when/if the perspective becomes a neighbourhood
+            None
+        };
+
+        let handle = if let Some(owner) = &owner_did {
+            PerspectiveHandle::new_with_owner(name.clone(), owner.clone())
+        } else {
+            // Fallback: create without owner (shouldn't happen now)
+            PerspectiveHandle::new_from_name(name.clone())
+        };
+
         add_perspective(handle.clone(), None).await?;
         Ok(handle)
     }
@@ -725,9 +1648,15 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
-            .add_link(link.into(), link_status_from_input(status)?, batch_id)
+            .add_link(
+                link.into(),
+                link_status_from_input(status)?,
+                batch_id,
+                &agent_context,
+            )
             .await?)
     }
 
@@ -743,7 +1672,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let link = crate::types::LinkExpression::try_from(link)?;
         Ok(perspective
             .add_link_expression(link, link_status_from_input(status)?, batch_id)
@@ -762,12 +1691,14 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
             .add_links(
                 links.into_iter().map(|l| l.into()).collect(),
                 link_status_from_input(status)?,
                 batch_id,
+                &agent_context,
             )
             .await?)
     }
@@ -783,9 +1714,10 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
-            .link_mutations(mutations, link_status_from_input(status)?)
+            .link_mutations(mutations, link_status_from_input(status)?, &agent_context)
             .await?)
     }
 
@@ -824,7 +1756,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let link = crate::types::LinkExpression::try_from(link)?;
         perspective.remove_link(link, batch_id).await?;
         Ok(true)
@@ -841,7 +1773,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
         let links = links
             .into_iter()
             .map(LinkExpression::try_from)
@@ -860,7 +1792,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let perspective = get_perspective_with_access_control(&uuid, context).await?;
         let mut handle = perspective.persisted.lock().await.clone();
         handle.name = Some(name);
         update_perspective(&handle).await?;
@@ -879,12 +1811,14 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         Ok(perspective
             .update_link(
                 LinkExpression::from_input_without_proof(old_link),
                 new_link.into(),
                 batch_id,
+                &agent_context,
             )
             .await?)
     }
@@ -901,10 +1835,13 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
         let sdna_type = SdnaType::from_string(&sdna_type)
             .map_err(|e| FieldError::new(e, graphql_value!({ "invalid_sdna_type": sdna_type })))?;
-        perspective.add_sdna(name, sdna_code, sdna_type).await?;
+        perspective
+            .add_sdna(name, sdna_code, sdna_type, &agent_context)
+            .await?;
         Ok(true)
     }
 
@@ -922,7 +1859,8 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
         let commands: Vec<Command> = serde_json::from_str(&commands)?;
         let parameters: Vec<Parameter> = if let Some(parameters) = parameters {
@@ -932,7 +1870,7 @@ impl Mutation {
         };
 
         perspective
-            .execute_commands(commands, expression, parameters, batch_id)
+            .execute_commands(commands, expression, parameters, batch_id, &agent_context)
             .await?;
 
         Ok(true)
@@ -952,7 +1890,8 @@ impl Mutation {
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
 
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
         let subject_class: SubjectClassOption = serde_json::from_str(&subject_class)?;
         let initial_values = if let Some(initial_values) = initial_values {
@@ -962,7 +1901,13 @@ impl Mutation {
         };
 
         perspective
-            .create_subject(subject_class, expression_address, initial_values, batch_id)
+            .create_subject(
+                subject_class,
+                expression_address,
+                initial_values,
+                batch_id,
+                &agent_context,
+            )
             .await?;
 
         Ok(true)
@@ -988,10 +1933,11 @@ impl Mutation {
                 )
             })?;
 
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
 
         let result = perspective
-            .get_subject_data(subject_class, expression_address)
+            .get_subject_data(subject_class, expression_address, &agent_context)
             .await?;
         Ok(result)
     }
@@ -1007,7 +1953,7 @@ impl Mutation {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let perspective = get_perspective_with_access_control(&uuid, context).await?;
         let (subscription_id, result_string) = perspective.subscribe_and_query(query).await?;
 
         Ok(QuerySubscription {
@@ -1048,7 +1994,7 @@ impl Mutation {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let perspective = get_perspective_with_access_control(&uuid, context).await?;
         perspective.keepalive_query(subscription_id).await?;
         Ok(true)
     }
@@ -1080,7 +2026,7 @@ impl Mutation {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let perspective = get_perspective_with_access_control(&uuid, context).await?;
         Ok(perspective
             .dispose_query_subscription(subscription_id)
             .await?)
@@ -1292,6 +2238,19 @@ impl Mutation {
         result.get_graphql_result()
     }
 
+    async fn runtime_set_multi_user_enabled(
+        &self,
+        context: &RequestContext,
+        enabled: bool,
+    ) -> FieldResult<bool> {
+        check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+        Ad4mDb::with_global_instance(|db| {
+            db.set_multi_user_enabled(enabled)
+                .map_err(|e| FieldError::new(e.to_string(), Value::null()))?;
+            Ok(enabled)
+        })
+    }
+
     async fn runtime_request_install_notification(
         &self,
         context: &RequestContext,
@@ -1491,7 +2450,7 @@ impl Mutation {
         context: &RequestContext,
         task: AITaskInput,
     ) -> FieldResult<AITask> {
-        check_capability(&context.capabilities, &AI_CREATE_CAPABILITY)?;
+        check_capability(&context.capabilities, &AI_PROMPT_CAPABILITY)?;
         Ok(AIService::global_instance()
             .await?
             .add_task(task.clone())
@@ -1691,7 +2650,7 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let perspective = get_perspective_with_uuid_field_error(&uuid)?;
+        let perspective = get_perspective_with_access_control(&uuid, context).await?;
         Ok(perspective.create_batch().await)
     }
 
@@ -1705,8 +2664,9 @@ impl Mutation {
             &context.capabilities,
             &perspective_update_capability(vec![uuid.clone()]),
         )?;
-        let mut perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        Ok(perspective.commit_batch(batch_id).await?)
+        let mut perspective = get_perspective_with_access_control(&uuid, context).await?;
+        let agent_context = AgentContext::from_auth_token(context.auth_token.clone());
+        Ok(perspective.commit_batch(batch_id, &agent_context).await?)
     }
 
     async fn runtime_restart_holochain(&self, context: &RequestContext) -> FieldResult<bool> {

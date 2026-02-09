@@ -50,31 +50,12 @@ export class Subject {
             Object.defineProperty(this, p, {
                 configurable: true,
                 get: async () => {
-                    let results = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), property_getter(C, "${this.#baseExpression}", "${p}", Value)`)
-                    if(results && results.length > 0) {
-                        let expressionURI = results[0].Value
-                        if(resolveExpressionURI) {
-                            try {
-                                if (expressionURI) {
-                                    const expression = await this.#perspective.getExpression(expressionURI)
-                                    try {
-                                        return JSON.parse(expression.data)
-                                    } catch(e) {
-                                        return expression.data
-                                    }
-                                } else {
-                                    return expressionURI
-                                }
-                            } catch (err) {
-                                return expressionURI
-                            }
-                        } else {
-                            return expressionURI
-                        }
-                    } else if(results) {
-                        return results
-                    } else {
-                        return undefined
+                    // Use SurrealDB for data queries
+                    try {
+                        return await this.#perspective.getPropertyValueViaSurreal(this.#baseExpression, this.#subjectClassName, p);
+                    } catch (err) {
+                        console.warn(`Failed to get property ${p} via SurrealDB:`, err);
+                        return undefined;
                     }
                 }
             })
@@ -110,12 +91,12 @@ export class Subject {
             Object.defineProperty(this, c, {
                 configurable: true,
                 get: async () => {
-                    let results = await this.#perspective.infer(`subject_class("${this.#subjectClassName}", C), collection_getter(C, "${this.#baseExpression}", "${c}", Value)`)
-                    if(results && results.length > 0 && results[0].Value) {
-                        let collectionContent = results[0].Value.filter((v: any) => v !== "" && v !== '')
-                        return collectionContent
-                    } else {
-                        return []
+                    // Use SurrealDB for data queries
+                    try {
+                        return await this.#perspective.getCollectionValuesViaSurreal(this.#baseExpression, this.#subjectClassName, c);
+                    } catch (err) {
+                        console.warn(`Failed to get collection ${c} via SurrealDB:`, err);
+                        return [];
                     }
                 }
             })

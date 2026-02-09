@@ -4,14 +4,23 @@ use crate::graphql::graphql_types::{
 };
 use crate::types::{
     AIPromptExamples, AITask, Expression, ExpressionProof, Link, LinkExpression, LocalModel, Model,
-    ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff, TokenizerSource,
+    ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff, TokenizerSource, User,
+    UserInfo,
+};
+use crate::utils::constant_time_eq;
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
 };
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
+use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
 
@@ -228,9 +237,84 @@ impl Ad4mDb {
             "CREATE TABLE IF NOT EXISTS default_models (
                 model_type TEXT PRIMARY KEY,
                 model_id TEXT NOT NULL
-            )",
+             )",
             [],
         )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                did TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                last_seen INTEGER
+             )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+             )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS email_verifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                code_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                verified BOOLEAN DEFAULT 0,
+                verification_type TEXT NOT NULL,
+                UNIQUE(email, verification_type)
+             )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_email_verifications_email ON email_verifications(email)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_email_verifications_expires ON email_verifications(expires_at)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS email_rate_limits (
+                email TEXT PRIMARY KEY,
+                last_sent_at INTEGER NOT NULL
+             )",
+            [],
+        )?;
+
+        // Add failed_attempts column to email_verifications table if it doesn't exist
+        // This column tracks failed verification attempts to prevent brute force attacks
+        let _ = conn.execute(
+            "ALTER TABLE email_verifications ADD COLUMN failed_attempts INTEGER DEFAULT 0",
+            [],
+        );
+
+        // Add owner_did column to existing perspective_handle table if it doesn't exist
+        let _ = conn.execute(
+            "ALTER TABLE perspective_handle ADD COLUMN owner_did TEXT",
+            [],
+        );
+
+        // Add owners column for multi-user neighbourhood support
+        let _ = conn.execute(
+            "ALTER TABLE perspective_handle ADD COLUMN owners TEXT DEFAULT '[]'",
+            [],
+        );
+
+        // Migrate existing owner_did values to owners array
+        let _ = conn.execute(
+            "UPDATE perspective_handle SET owners = json_array(owner_did) WHERE owner_did IS NOT NULL AND owners = '[]'",
+            [],
+        );
 
         Ok(Self { conn })
     }
@@ -369,10 +453,181 @@ impl Ad4mDb {
         Ok(result > 0)
     }
 
+    /// Validates that a notification query is safe and well-formed
+    fn validate_notification_query(query: &str) -> Result<(), String> {
+        let query_trimmed = query.trim();
+        let query_upper = query_trimmed.to_uppercase();
+
+        // Check for empty query
+        if query_trimmed.is_empty() {
+            return Err("Query cannot be empty".to_string());
+        }
+
+        // Check query length (prevent extremely long queries)
+        if query_trimmed.len() > 10000 {
+            return Err("Query is too long (max 10000 characters)".to_string());
+        }
+
+        // Validate that query starts with SELECT, RETURN, LET, or WITH
+        let first_word = query_upper.split_whitespace().next().unwrap_or("");
+        if !matches!(first_word, "SELECT" | "RETURN" | "LET" | "WITH") {
+            return Err(format!(
+                "Query must start with SELECT, RETURN, LET, or WITH. Got: {}",
+                first_word
+            ));
+        }
+
+        // Check for mutating operations
+        // Use a single pass that tracks string literals to avoid false positives
+        let mutating_operations = [
+            "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "REMOVE", "DEFINE", "ALTER", "RELATE",
+            "BEGIN", "COMMIT", "CANCEL",
+        ];
+
+        let query_bytes = query_upper.as_bytes();
+
+        for operation in &mutating_operations {
+            let op_bytes = operation.as_bytes();
+            let mut search_pos = 0;
+
+            while let Some(pos) = query_upper[search_pos..].find(operation) {
+                let absolute_pos = search_pos + pos;
+
+                // Re-track string state up to this position
+                let mut in_string = false;
+                let mut escaped = false;
+                let mut string_char: u8 = 0;
+
+                for i in 0..absolute_pos {
+                    let byte = query_bytes[i];
+
+                    match byte {
+                        b'\\' if in_string => {
+                            escaped = !escaped;
+                        }
+                        b'\'' | b'"' => {
+                            if !escaped {
+                                if in_string {
+                                    if byte == string_char {
+                                        in_string = false;
+                                    }
+                                } else {
+                                    in_string = true;
+                                    string_char = byte;
+                                }
+                            }
+                            if escaped {
+                                escaped = false;
+                            }
+                        }
+                        _ => {
+                            if escaped {
+                                escaped = false;
+                            }
+                        }
+                    }
+                }
+
+                // Skip if inside a string literal
+                if in_string {
+                    search_pos = absolute_pos + 1;
+                    continue;
+                }
+
+                // Check what comes before (byte-based)
+                let before_ok = if absolute_pos == 0 {
+                    true
+                } else {
+                    let before_byte = query_bytes[absolute_pos - 1];
+                    matches!(before_byte, b' ' | b'\t' | b'\n' | b'\r' | b';' | b'(')
+                };
+
+                // Check what comes after (byte-based)
+                let after_pos = absolute_pos + op_bytes.len();
+                let after_ok = if after_pos >= query_bytes.len() {
+                    true
+                } else {
+                    let after_byte = query_bytes[after_pos];
+                    matches!(after_byte, b' ' | b'\t' | b'\n' | b'\r' | b';' | b'(')
+                };
+
+                if before_ok && after_ok {
+                    return Err(format!(
+                        "Query contains mutating operation '{}' which is not allowed",
+                        operation
+                    ));
+                }
+
+                search_pos = absolute_pos + 1;
+            }
+        }
+
+        // Basic syntax check - ensure balanced parentheses
+        // Skip counting parentheses inside string literals
+        let mut paren_count = 0;
+        let mut in_string = false;
+        let mut string_char = ' '; // Track which quote character started the string
+        let mut escaped = false;
+
+        for c in query_trimmed.chars() {
+            match c {
+                '\\' if in_string => {
+                    // Toggle escaped state for backslashes inside strings
+                    // If already escaped, this is a literal backslash (\\)
+                    // If not escaped, next char will be escaped
+                    escaped = !escaped;
+                }
+                '\'' | '"' => {
+                    if !escaped {
+                        if in_string {
+                            // Check if this closes the current string
+                            if c == string_char {
+                                in_string = false;
+                            }
+                        } else {
+                            // Start a new string
+                            in_string = true;
+                            string_char = c;
+                        }
+                    }
+                    // Clear escaped state after processing
+                    if escaped {
+                        escaped = false;
+                    }
+                }
+                '(' if !in_string => paren_count += 1,
+                ')' if !in_string => paren_count -= 1,
+                _ => {
+                    // Any other character clears the escaped state
+                    if escaped {
+                        escaped = false;
+                    }
+                }
+            }
+
+            if paren_count < 0 {
+                return Err("Unbalanced parentheses in query".to_string());
+            }
+        }
+        if paren_count != 0 {
+            return Err("Unbalanced parentheses in query".to_string());
+        }
+
+        Ok(())
+    }
+
     pub fn add_notification(
         &self,
         notification: NotificationInput,
     ) -> Result<String, rusqlite::Error> {
+        // Validate the trigger query before storing
+        if let Err(e) = Self::validate_notification_query(&notification.trigger) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "Invalid notification query: {}",
+                e
+            )));
+        }
+
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
             "INSERT INTO notifications (id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -451,6 +706,14 @@ impl Ad4mDb {
         id: String,
         updated_notification: &Notification,
     ) -> Result<bool, rusqlite::Error> {
+        // Validate the trigger query before updating
+        if let Err(e) = Self::validate_notification_query(&updated_notification.trigger) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "Invalid notification query: {}",
+                e
+            )));
+        }
+
         let result = self.conn.execute(
             "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10 WHERE id = ?1",
             params![
@@ -640,9 +903,11 @@ impl Ad4mDb {
     }
 
     pub fn add_perspective(&self, perspective: &PerspectiveHandle) -> Ad4mDbResult<()> {
+        let owners_json = serde_json::to_string(&perspective.owners.clone().unwrap_or_default())?;
+
         self.conn.execute(
-            "INSERT INTO perspective_handle (name, uuid, neighbourhood, shared_url, state)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO perspective_handle (name, uuid, neighbourhood, shared_url, state, owners)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 perspective.name,
                 perspective.uuid,
@@ -652,6 +917,7 @@ impl Ad4mDb {
                     .and_then(|n| serde_json::to_string(n).ok()),
                 perspective.shared_url,
                 serde_json::to_string(&perspective.state)?,
+                owners_json,
             ],
         )?;
         Ok(())
@@ -659,20 +925,24 @@ impl Ad4mDb {
 
     pub fn _get_perspective(&self, uuid: &str) -> Ad4mDbResult<Option<PerspectiveHandle>> {
         let mut stmt = self.conn.prepare(
-            "SELECT name, uuid, neighbourhood, shared_url, state FROM perspective_handle WHERE uuid = ?1",
+            "SELECT name, uuid, neighbourhood, shared_url, state, owners FROM perspective_handle WHERE uuid = ?1",
         )?;
 
         let found_perspective = stmt
             .query_map([uuid], |row| {
+                let owners_json: Option<String> = row.get(5)?;
+                let owners = owners_json.and_then(|json| serde_json::from_str(&json).ok());
+
                 Ok(PerspectiveHandle {
                     name: row.get(0)?,
                     uuid: row.get(1)?,
                     neighbourhood: row
-                        .get::<usize, Option<String>>(3)?
+                        .get::<usize, Option<String>>(2)?
                         .and_then(|n| serde_json::from_str(&n).ok()),
-                    shared_url: row.get(4)?,
-                    state: serde_json::from_str(row.get::<usize, String>(5)?.as_str())
+                    shared_url: row.get(3)?,
+                    state: serde_json::from_str(row.get::<usize, String>(4)?.as_str())
                         .expect("Could not deserialize perspective state from DB"),
+                    owners,
                 })
             })?
             .map(|p| p.ok())
@@ -685,9 +955,12 @@ impl Ad4mDb {
 
     pub fn get_all_perspectives(&self) -> Ad4mDbResult<Vec<PerspectiveHandle>> {
         let mut stmt = self.conn.prepare(
-            "SELECT name, uuid, neighbourhood, shared_url, state FROM perspective_handle",
+            "SELECT name, uuid, neighbourhood, shared_url, state, owners FROM perspective_handle",
         )?;
         let perspective_iter = stmt.query_map([], |row| {
+            let owners_json: Option<String> = row.get(5)?;
+            let owners = owners_json.and_then(|json| serde_json::from_str(&json).ok());
+
             Ok(PerspectiveHandle {
                 name: row.get(0)?,
                 uuid: row.get(1)?,
@@ -697,6 +970,7 @@ impl Ad4mDb {
                 shared_url: row.get(3)?,
                 state: serde_json::from_str(row.get::<usize, String>(4)?.as_str())
                     .expect("Could not deserialize perspective state from DB"),
+                owners,
             })
         })?;
 
@@ -709,17 +983,99 @@ impl Ad4mDb {
     }
 
     pub fn update_perspective(&self, perspective: &PerspectiveHandle) -> Ad4mDbResult<()> {
+        let owners_json = serde_json::to_string(&perspective.owners.clone().unwrap_or_default())?;
+
         self.conn.execute(
-            "UPDATE perspective_handle SET name = ?1, neighbourhood = ?2, shared_url = ?3, state = ?4 WHERE uuid = ?5",
+            "UPDATE perspective_handle SET name = ?1, neighbourhood = ?2, shared_url = ?3, state = ?4, owners = ?5 WHERE uuid = ?6",
             params![
                 perspective.name,
                 perspective.neighbourhood.as_ref().and_then(|n| serde_json::to_string(n).ok()),
                 perspective.shared_url,
                 serde_json::to_string(&perspective.state)?,
+                owners_json,
                 perspective.uuid,
             ],
         )?;
         Ok(())
+    }
+
+    pub fn add_owner_to_neighbourhood(
+        &self,
+        neighbourhood_url: &str,
+        user_did: &str,
+    ) -> Ad4mDbResult<()> {
+        // First verify the perspective exists
+        let perspective_exists: bool = self
+            .conn
+            .prepare("SELECT EXISTS(SELECT 1 FROM perspective_handle WHERE shared_url = ?1)")?
+            .query_row([neighbourhood_url], |row| row.get(0))
+            .map_err(|e| anyhow!("Failed to check if perspective exists: {}", e))?;
+
+        if !perspective_exists {
+            return Err(anyhow!(
+                "Perspective with shared_url '{}' not found",
+                neighbourhood_url
+            ));
+        }
+
+        // Get current owners - propagate query errors instead of using unwrap_or_default
+        let current_owners: Vec<String> = self
+            .conn
+            .prepare("SELECT owners FROM perspective_handle WHERE shared_url = ?1")?
+            .query_row([neighbourhood_url], |row| {
+                let owners_json: String = row.get(0)?;
+                serde_json::from_str(&owners_json).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })
+            })
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    anyhow!(
+                        "Perspective with shared_url '{}' not found",
+                        neighbourhood_url
+                    )
+                }
+                e => anyhow!("Failed to fetch owners: {}", e),
+            })?;
+
+        // Add new owner if not already present
+        let mut updated_owners = current_owners;
+        if !updated_owners.contains(&user_did.to_string()) {
+            updated_owners.push(user_did.to_string());
+        }
+
+        // Update database and check affected row count
+        let owners_json = serde_json::to_string(&updated_owners)?;
+        let affected_rows = self.conn.execute(
+            "UPDATE perspective_handle SET owners = ?1 WHERE shared_url = ?2",
+            params![owners_json, neighbourhood_url],
+        )?;
+
+        if affected_rows == 0 {
+            return Err(anyhow!(
+                "Failed to add owner: perspective with shared_url '{}' not found or could not be updated",
+                neighbourhood_url
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub fn get_neighbourhood_owners(&self, neighbourhood_url: &str) -> Ad4mDbResult<Vec<String>> {
+        let owners: Vec<String> = self
+            .conn
+            .prepare("SELECT owners FROM perspective_handle WHERE shared_url = ?1")?
+            .query_row([neighbourhood_url], |row| {
+                let owners_json: String = row.get(0)?;
+                Ok(serde_json::from_str(&owners_json).unwrap_or_default())
+            })
+            .unwrap_or_default();
+
+        Ok(owners)
     }
 
     pub fn remove_perspective(&self, uuid: &str) -> Ad4mDbResult<()> {
@@ -738,6 +1094,19 @@ impl Ad4mDb {
         )?;
 
         Ok(())
+    }
+
+    /// Helper function to normalize predicate values from the database.
+    /// Converts empty strings to None to maintain consistency with the Link type.
+    ///
+    /// In the database, None predicates are stored as empty strings ("").
+    /// This function ensures that when reading from the database, empty strings
+    /// are converted back to None, maintaining consistency across all link operations.
+    fn normalize_predicate(predicate: Option<String>) -> Option<String> {
+        match predicate.as_deref() {
+            Some("") => None,
+            _ => predicate,
+        }
     }
 
     pub fn add_link(
@@ -864,10 +1233,7 @@ impl Ad4mDb {
                     let link = LinkExpression {
                         data: Link {
                             source: row.get(1)?,
-                            predicate: row.get(2).map(|p: Option<String>| match p.as_deref() {
-                                Some("") => None,
-                                _ => p,
-                            })?,
+                            predicate: Self::normalize_predicate(row.get(2)?),
                             target: row.get(3)?,
                         },
                         proof: ExpressionProof {
@@ -905,7 +1271,7 @@ impl Ad4mDb {
             let link_expression = LinkExpression {
                 data: Link {
                     source: row.get(1)?,
-                    predicate: row.get(2)?,
+                    predicate: Self::normalize_predicate(row.get(2)?),
                     target: row.get(3)?,
                 },
                 proof: ExpressionProof {
@@ -942,7 +1308,7 @@ impl Ad4mDb {
             let link_expression = LinkExpression {
                 data: Link {
                     source: row.get(1)?,
-                    predicate: row.get(2)?,
+                    predicate: Self::normalize_predicate(row.get(2)?),
                     target: row.get(3)?,
                 },
                 proof: ExpressionProof {
@@ -979,7 +1345,44 @@ impl Ad4mDb {
             let link_expression = LinkExpression {
                 data: Link {
                     source: row.get(1)?,
-                    predicate: row.get(2)?,
+                    predicate: Self::normalize_predicate(row.get(2)?),
+                    target: row.get(3)?,
+                },
+                proof: ExpressionProof {
+                    signature: row.get(6)?,
+                    key: row.get(7)?,
+                },
+                author: row.get(4)?,
+                timestamp: row.get(5)?,
+                status: Some(status.clone()),
+            };
+            Ok((link_expression, status))
+        })?;
+        let links: Result<Vec<_>, _> = link_iter.collect();
+        Ok(links?)
+    }
+
+    pub fn get_links_by_predicate(
+        &self,
+        perspective_uuid: &str,
+        predicate: &str,
+    ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND predicate = ?2 ORDER BY timestamp, source, target, author",
+        )?;
+        let link_iter = stmt.query_map(params![perspective_uuid, predicate], |row| {
+            let status: LinkStatus =
+                serde_json::from_str(&row.get::<_, String>(8)?).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+            let link_expression = LinkExpression {
+                data: Link {
+                    source: row.get(1)?,
+                    predicate: Self::normalize_predicate(row.get(2)?),
                     target: row.get(3)?,
                 },
                 proof: ExpressionProof {
@@ -1371,14 +1774,19 @@ impl Ad4mDb {
         // Export perspectives
         let perspectives: Vec<serde_json::Value> = self
             .conn
-            .prepare("SELECT uuid, name, neighbourhood, shared_url, state FROM perspective_handle")?
+            .prepare("SELECT uuid, name, neighbourhood, shared_url, state, owners FROM perspective_handle")?
             .query_map([], |row| {
+                let owners_json: Option<String> = row.get(5)?;
+                let owners: Vec<String> = owners_json
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .unwrap_or_default();
                 Ok(serde_json::json!({
                     "uuid": row.get::<_, String>(0)?,
                     "name": row.get::<_, Option<String>>(1)?,
                     "neighbourhood": row.get::<_, Option<String>>(2)?,
                     "shared_url": row.get::<_, Option<String>>(3)?,
-                    "state": row.get::<_, String>(4)?
+                    "state": row.get::<_, String>(4)?,
+                    "owners": owners
                 }))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1602,14 +2010,28 @@ impl Ad4mDb {
                             }
                             .expect("to serialize PerspectiveState");
 
+                            let owners_json =
+                                match perspective.get("owners").and_then(|o| o.as_array()) {
+                                    Some(arr) => {
+                                        let owners: Vec<String> = arr
+                                            .iter()
+                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                            .collect();
+                                        serde_json::to_string(&owners)
+                                            .unwrap_or_else(|_| "[]".to_string())
+                                    }
+                                    None => "[]".to_string(),
+                                };
+
                             self.conn.execute(
-                                "INSERT INTO perspective_handle (uuid, name, neighbourhood, shared_url, state) VALUES (?1, ?2, ?3, ?4, ?5)",
+                                "INSERT INTO perspective_handle (uuid, name, neighbourhood, shared_url, state, owners) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                                 params![
                                     perspective["uuid"].as_str().unwrap_or(Uuid::new_v4().to_string().as_str()),
                                     perspective["name"].as_str(),
                                     perspective.get("neighbourhood").and_then(|n| n.as_str()),
                                     perspective["shared_url"].as_str(),
-                                    perspective["state"].as_str().unwrap_or(state.as_str())
+                                    perspective["state"].as_str().unwrap_or(state.as_str()),
+                                    owners_json
                                 ],
                             )
                         };
@@ -2089,11 +2511,435 @@ impl Ad4mDb {
 
         Ok(result)
     }
+
+    // Password hashing and verification helpers
+    fn hash_password(password: &str) -> Ad4mDbResult<String> {
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2
+            .hash_password(password.as_bytes(), &salt)
+            .map_err(|e| anyhow!("Failed to hash password: {}", e))?
+            .to_string();
+        Ok(password_hash)
+    }
+
+    fn verify_password(password: &str, password_hash: &str) -> Ad4mDbResult<bool> {
+        let parsed_hash = PasswordHash::new(password_hash)
+            .map_err(|e| anyhow!("Failed to parse password hash: {}", e))?;
+        let argon2 = Argon2::default();
+        Ok(argon2
+            .verify_password(password.as_bytes(), &parsed_hash)
+            .is_ok())
+    }
+
+    // User management functions
+    pub fn add_user(&self, username: &str, did: &str, password: &str) -> Ad4mDbResult<()> {
+        let password_hash = Self::hash_password(password)?;
+        self.conn.execute(
+            "INSERT INTO users (username, did, password_hash) VALUES (?1, ?2, ?3)",
+            params![username, did, password_hash],
+        )?;
+        Ok(())
+    }
+
+    // Internal function to get user with password_hash - only for internal use
+    fn get_user_internal(&self, username: &str) -> Ad4mDbResult<User> {
+        let mut stmt = self.conn.prepare(
+            "SELECT username, did, password_hash, last_seen FROM users WHERE username = ?1",
+        )?;
+        let user = stmt.query_row([username], |row| {
+            Ok(User {
+                username: row.get(0)?,
+                did: row.get(1)?,
+                password_hash: row.get(2)?,
+                last_seen: row.get(3).ok(),
+            })
+        })?;
+        Ok(user)
+    }
+
+    // Public function to get user without password_hash
+    pub fn get_user(&self, username: &str) -> Ad4mDbResult<UserInfo> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT username, did, last_seen FROM users WHERE username = ?1")?;
+        let user = stmt.query_row([username], |row| {
+            Ok(UserInfo {
+                username: row.get(0)?,
+                did: row.get(1)?,
+                last_seen: row.get(2).ok(),
+            })
+        })?;
+        Ok(user)
+    }
+
+    pub fn update_user_last_seen(&self, email: &str) -> Ad4mDbResult<()> {
+        let timestamp = chrono::Utc::now().timestamp();
+        self.conn.execute(
+            "UPDATE users SET last_seen = ?1 WHERE username = ?2",
+            params![timestamp, email],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_users(&self) -> Ad4mDbResult<Vec<UserInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT username, did, last_seen FROM users ORDER BY last_seen DESC NULLS LAST",
+        )?;
+
+        let users = stmt
+            .query_map([], |row| {
+                Ok(UserInfo {
+                    username: row.get(0)?,
+                    did: row.get(1)?,
+                    last_seen: row.get(2).ok(),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(users)
+    }
+
+    // Verify user password against stored hash
+    // Uses internal function to access password_hash
+    pub fn verify_user_password(&self, username: &str, password: &str) -> Ad4mDbResult<bool> {
+        let user = self.get_user_internal(username)?;
+        Self::verify_password(password, &user.password_hash)
+    }
+
+    // Settings management functions
+    pub fn get_setting(&self, key: &str) -> Ad4mDbResult<Option<String>> {
+        let result = self
+            .conn
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(result)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_multi_user_enabled(&self) -> Ad4mDbResult<bool> {
+        match self.get_setting("multi_user_enabled")? {
+            Some(value) => Ok(value == "true"),
+            None => Ok(false), // Default to disabled
+        }
+    }
+
+    pub fn set_multi_user_enabled(&self, enabled: bool) -> Ad4mDbResult<()> {
+        self.set_setting("multi_user_enabled", if enabled { "true" } else { "false" })
+    }
+
+    // Email verification functions
+
+    /// Generates a 6-digit verification code, stores its SHA-256 hash, and returns the plaintext code
+    pub fn create_verification_code(
+        &self,
+        email: &str,
+        verification_type: &str,
+    ) -> Ad4mDbResult<String> {
+        // Generate random 6-digit code
+        let code = rand::thread_rng().gen_range(100000..1000000).to_string();
+
+        // Hash the code
+        let mut hasher = Sha256::new();
+        hasher.update(code.as_bytes());
+        let code_hash = format!("{:x}", hasher.finalize());
+
+        // Get current timestamp
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let expires_at = now + (15 * 60); // 15 minutes
+
+        // Delete any existing verification for this email+type combination
+        self.conn.execute(
+            "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+            params![email, verification_type],
+        )?;
+
+        // Insert new verification (initialize failed_attempts to 0)
+        self.conn.execute(
+            "INSERT INTO email_verifications (email, code_hash, created_at, expires_at, verified, verification_type, failed_attempts)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, 0)",
+            params![email, code_hash, now, expires_at, verification_type],
+        )?;
+
+        Ok(code)
+    }
+
+    /// Verifies a code against the stored hash for a given email and verification type
+    /// Returns Ok(true) on success, Ok(false) on failure, or Err if code is invalidated due to too many attempts
+    pub fn verify_code(
+        &self,
+        email: &str,
+        code: &str,
+        verification_type: &str,
+    ) -> Ad4mDbResult<bool> {
+        // Maximum allowed failed attempts before invalidating the code
+        const MAX_FAILED_ATTEMPTS: i32 = 5;
+
+        // Hash the provided code
+        let mut hasher = Sha256::new();
+        hasher.update(code.as_bytes());
+        let code_hash = format!("{:x}", hasher.finalize());
+
+        // Get current timestamp
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Query for matching verification that hasn't expired, including failed_attempts
+        // Use COALESCE to handle NULL values for existing rows created before the migration
+        let result: Result<(String, i64, i32), _> = self.conn.query_row(
+            "SELECT code_hash, expires_at, COALESCE(failed_attempts, 0) FROM email_verifications
+             WHERE email = ?1 AND verification_type = ?2 AND verified = 0",
+            params![email, verification_type],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        );
+
+        match result {
+            Ok((stored_hash, expires_at, failed_attempts)) => {
+                // Check if code has been invalidated due to too many failed attempts
+                if failed_attempts >= MAX_FAILED_ATTEMPTS {
+                    // Delete the invalidated code
+                    self.conn.execute(
+                        "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+                        params![email, verification_type],
+                    )?;
+                    return Err(anyhow!(
+                        "Verification code has been invalidated due to too many failed attempts. Please request a new code."
+                    ));
+                }
+
+                // Check if expired
+                if now > expires_at {
+                    // Clean up expired code
+                    self.conn.execute(
+                        "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+                        params![email, verification_type],
+                    )?;
+                    return Ok(false);
+                }
+
+                // Constant-time comparison to prevent timing attacks
+                if constant_time_eq(&stored_hash, &code_hash) {
+                    // Mark as verified and delete
+                    self.conn.execute(
+                        "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+                        params![email, verification_type],
+                    )?;
+                    Ok(true)
+                } else {
+                    // Increment failed attempts counter
+                    let new_failed_attempts = failed_attempts + 1;
+                    self.conn.execute(
+                        "UPDATE email_verifications SET failed_attempts = ?1 WHERE email = ?2 AND verification_type = ?3",
+                        params![new_failed_attempts, email, verification_type],
+                    )?;
+
+                    // If we've reached the max attempts, invalidate the code
+                    if new_failed_attempts >= MAX_FAILED_ATTEMPTS {
+                        self.conn.execute(
+                            "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+                            params![email, verification_type],
+                        )?;
+                        return Err(anyhow!(
+                            "Verification code has been invalidated due to too many failed attempts. Please request a new code."
+                        ));
+                    }
+
+                    Ok(false)
+                }
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Removes all expired verification codes
+    pub fn cleanup_expired_codes(&self) -> Ad4mDbResult<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        self.conn.execute(
+            "DELETE FROM email_verifications WHERE expires_at < ?1",
+            params![now],
+        )?;
+
+        Ok(())
+    }
+
+    /// Deletes a specific verification code for an email and type
+    /// Used for cleanup when email sending fails or SMTP is unconfigured
+    pub fn delete_verification_code(
+        &self,
+        email: &str,
+        verification_type: &str,
+    ) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "DELETE FROM email_verifications WHERE email = ?1 AND verification_type = ?2",
+            params![email, verification_type],
+        )?;
+
+        Ok(())
+    }
+
+    /// Check if a verification code exists for the given email (for any verification type)
+    /// Returns true if an active (non-expired, non-verified) code exists
+    pub fn has_verification_code(&self, email: &str) -> Ad4mDbResult<bool> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let result: Result<i32, _> = self.conn.query_row(
+            "SELECT COUNT(*) FROM email_verifications
+             WHERE email = ?1 AND verified = 0 AND expires_at > ?2",
+            params![email, now],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(count) => Ok(count > 0),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Checks if an email is rate-limited (returns error if rate-limited)
+    pub fn check_rate_limit(&self, email: &str) -> Ad4mDbResult<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let result: Result<i64, _> = self.conn.query_row(
+            "SELECT last_sent_at FROM email_rate_limits WHERE email = ?1",
+            params![email],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(last_sent_at) => {
+                let seconds_since_last = now - last_sent_at;
+                if seconds_since_last < 60 {
+                    return Err(anyhow!(
+                        "Please wait {} seconds before requesting another verification code",
+                        60 - seconds_since_last
+                    ));
+                }
+                Ok(())
+            }
+            Err(_) => Ok(()), // No rate limit entry exists yet
+        }
+    }
+
+    /// Updates the rate limit timestamp for an email
+    pub fn update_rate_limit(&self, email: &str) -> Ad4mDbResult<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        self.conn.execute(
+            "INSERT INTO email_rate_limits (email, last_sent_at) VALUES (?1, ?2)
+             ON CONFLICT(email) DO UPDATE SET last_sent_at = excluded.last_sent_at",
+            params![email, now],
+        )?;
+
+        Ok(())
+    }
+
+    /// Atomically checks and updates the rate limit for an email
+    /// This prevents TOCTOU race conditions where concurrent requests could bypass rate limiting
+    /// by checking before any of them update the timestamp.
+    ///
+    /// Returns an error if the email is rate-limited (within 60 seconds of last request),
+    /// otherwise updates the timestamp and returns Ok(()).
+    pub fn check_and_update_rate_limit(&self, email: &str) -> Ad4mDbResult<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Use a transaction to make check-and-update atomic
+        let tx = self.conn.unchecked_transaction()?;
+
+        // Check if rate limited
+        let result: Result<i64, _> = tx.query_row(
+            "SELECT last_sent_at FROM email_rate_limits WHERE email = ?1",
+            params![email],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(last_sent_at) => {
+                let seconds_since_last = now - last_sent_at;
+                if seconds_since_last < 60 {
+                    // Rate limited - rollback transaction and return error
+                    tx.rollback()?;
+                    return Err(anyhow!(
+                        "Please wait {} seconds before requesting another verification code",
+                        60 - seconds_since_last
+                    ));
+                }
+            }
+            Err(_) => {
+                // No rate limit entry exists yet, will be created below
+            }
+        }
+
+        // Update the rate limit timestamp
+        tx.execute(
+            "INSERT INTO email_rate_limits (email, last_sent_at) VALUES (?1, ?2)
+             ON CONFLICT(email) DO UPDATE SET last_sent_at = excluded.last_sent_at",
+            params![email, now],
+        )?;
+
+        // Commit the transaction
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Test helper: Set expiry time for a verification code (for testing expiration)
+    pub fn set_verification_code_expiry(
+        &self,
+        email: &str,
+        verification_type: &str,
+        expires_at: i64,
+    ) -> Ad4mDbResult<()> {
+        let rows_affected = self.conn.execute(
+            "UPDATE email_verifications SET expires_at = ?1 WHERE email = ?2 AND verification_type = ?3",
+            params![expires_at, email, verification_type],
+        )?;
+
+        if rows_affected == 0 {
+            return Err(anyhow!(
+                "No verification code found for email {} and type {}",
+                email,
+                verification_type
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graphql::graphql_types::{PerspectiveHandle, PerspectiveState};
     use crate::{
         graphql::graphql_types::{LocalModelInput, ModelApiInput, TokenizerSourceInput},
         types::{ExpressionProof, Link, LinkExpression, ModelApiType, ModelType},
@@ -2168,6 +3014,7 @@ mod tests {
             neighbourhood: None,
             shared_url: None,
             state: PerspectiveState::Private,
+            owners: None,
         };
         let perspective2 = PerspectiveHandle {
             uuid: Uuid::new_v4().to_string(),
@@ -2175,6 +3022,7 @@ mod tests {
             neighbourhood: Some(test_neighbourhood),
             shared_url: Some("test-shared-url".to_string()),
             state: PerspectiveState::Synced,
+            owners: None,
         };
 
         db.add_perspective(&perspective1).unwrap();
@@ -2195,7 +3043,7 @@ mod tests {
             app_name: "Test App".to_string(),
             app_url: "http://test.app".to_string(),
             app_icon_path: "/test/icon.png".to_string(),
-            trigger: "test-trigger".to_string(),
+            trigger: "SELECT * FROM link WHERE predicate = 'test://trigger'".to_string(),
             perspective_ids: vec![perspective1.uuid.clone()],
             webhook_url: "http://test.webhook".to_string(),
             webhook_auth: "test-auth".to_string(),
@@ -2420,6 +3268,29 @@ mod tests {
     }
 
     #[test]
+    fn can_get_links_by_predicate() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let p_uuid = Uuid::new_v4().to_string();
+
+        // Create two links with different predicates
+        let mut link1 = construct_dummy_link_expression(LinkStatus::Shared);
+        link1.data.predicate = Some("predicate1".to_string());
+        db.add_link(&p_uuid, &link1, &LinkStatus::Shared).unwrap();
+
+        let mut link2 = construct_dummy_link_expression(LinkStatus::Shared);
+        link2.data.predicate = Some("predicate2".to_string());
+        db.add_link(&p_uuid, &link2, &LinkStatus::Shared).unwrap();
+
+        // Query by predicate1 should only return link1
+        let result = db.get_links_by_predicate(&p_uuid, "predicate1").unwrap();
+        assert_eq!(result, vec![(link1, LinkStatus::Shared)]);
+
+        // Query by predicate2 should only return link2
+        let result = db.get_links_by_predicate(&p_uuid, "predicate2").unwrap();
+        assert_eq!(result, vec![(link2, LinkStatus::Shared)]);
+    }
+
+    #[test]
     fn can_update_link() {
         let db = Ad4mDb::new(":memory:").unwrap();
         let p_uuid = Uuid::new_v4().to_string();
@@ -2516,7 +3387,7 @@ mod tests {
             app_name: "Test App Name".to_string(),
             app_url: "Test App URL".to_string(),
             app_icon_path: "Test App Icon Path".to_string(),
-            trigger: "Test Trigger".to_string(),
+            trigger: "SELECT * FROM link WHERE predicate = 'test://trigger'".to_string(),
             perspective_ids: vec!["Test Perspective ID".to_string()],
             webhook_url: "Test Webhook URL".to_string(),
             webhook_auth: "Test Webhook Auth".to_string(),
@@ -2539,7 +3410,10 @@ mod tests {
             test_notification.app_icon_path,
             "Test App Icon Path".to_string()
         );
-        assert_eq!(test_notification.trigger, "Test Trigger");
+        assert_eq!(
+            test_notification.trigger,
+            "SELECT * FROM link WHERE predicate = 'test://trigger'"
+        );
         assert_eq!(
             test_notification.perspective_ids,
             vec!["Test Perspective ID".to_string()]
@@ -2555,7 +3429,7 @@ mod tests {
             app_name: "Test App Name".to_string(),
             app_url: "Test App URL".to_string(),
             app_icon_path: "Test App Icon Path".to_string(),
-            trigger: "Test Trigger".to_string(),
+            trigger: "SELECT * FROM link WHERE predicate = 'test://updated'".to_string(),
             perspective_ids: vec!["Test Perspective ID".to_string()],
             webhook_url: "Test Webhook URL".to_string(),
             webhook_auth: "Test Webhook Auth".to_string(),
@@ -2585,6 +3459,57 @@ mod tests {
         assert!(notifications_after_removal
             .iter()
             .all(|n| n.id != notification_id));
+    }
+
+    #[test]
+    fn test_notification_query_validation_with_string_literals() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Should accept: keyword inside string literal
+        let notification1 = NotificationInput {
+            description: "Test".to_string(),
+            app_name: "Test".to_string(),
+            app_url: "Test".to_string(),
+            app_icon_path: "Test".to_string(),
+            trigger: "SELECT * FROM link WHERE data = 'DELETE this'".to_string(),
+            perspective_ids: vec!["test".to_string()],
+            webhook_url: "".to_string(),
+            webhook_auth: "".to_string(),
+        };
+
+        let result1 = db.add_notification(notification1);
+        assert!(result1.is_ok(), "Should allow DELETE inside string literal");
+
+        // Should reject: actual DELETE operation
+        let notification2 = NotificationInput {
+            description: "Test".to_string(),
+            app_name: "Test".to_string(),
+            app_url: "Test".to_string(),
+            app_icon_path: "Test".to_string(),
+            trigger: "DELETE FROM link WHERE id = 123".to_string(),
+            perspective_ids: vec!["test".to_string()],
+            webhook_url: "".to_string(),
+            webhook_auth: "".to_string(),
+        };
+
+        let result2 = db.add_notification(notification2);
+        assert!(result2.is_err(), "Should reject actual DELETE operation");
+        assert!(result2.unwrap_err().to_string().contains("DELETE"));
+
+        // Should accept: escaped quotes with keyword
+        let notification3 = NotificationInput {
+            description: "Test".to_string(),
+            app_name: "Test".to_string(),
+            app_url: "Test".to_string(),
+            app_icon_path: "Test".to_string(),
+            trigger: r#"SELECT * FROM link WHERE data = "Don\'t DELETE this""#.to_string(),
+            perspective_ids: vec!["test".to_string()],
+            webhook_url: "".to_string(),
+            webhook_auth: "".to_string(),
+        };
+
+        let result3 = db.add_notification(notification3);
+        assert!(result3.is_ok(), "Should allow DELETE inside escaped string");
     }
 
     #[test]
@@ -3035,5 +3960,321 @@ mod tests {
         assert_eq!(full_ids.len(), 10);
         assert_eq!(full_diffs.additions.len(), 50); // 10 diffs * 5 additions
         assert_eq!(full_diffs.removals.len(), 50); // 10 diffs * 5 removals
+    }
+
+    #[test]
+    fn test_user_management() {
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Test user creation
+        let test_username = "test@example.com";
+        let test_did = "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp";
+        let test_password = "testpassword123";
+
+        // Add user should succeed
+        let add_result = db.add_user(test_username, test_did, test_password);
+        assert!(
+            add_result.is_ok(),
+            "Failed to add user: {:?}",
+            add_result.err()
+        );
+
+        // Get user should return the same user (without password_hash)
+        let retrieved_user = db.get_user(test_username).unwrap();
+        assert_eq!(retrieved_user.username, test_username);
+        assert_eq!(retrieved_user.did, test_did);
+        // Password verification should work (tests that password is properly hashed)
+
+        // Verify password should work
+        assert!(db
+            .verify_user_password(test_username, test_password)
+            .unwrap());
+        assert!(!db
+            .verify_user_password(test_username, "wrongpassword")
+            .unwrap());
+
+        // Test duplicate user creation should fail
+        let duplicate_result = db.add_user(test_username, test_did, test_password);
+        assert!(
+            duplicate_result.is_err(),
+            "Duplicate user creation should fail"
+        );
+
+        // Test getting non-existent user should fail
+        let non_existent_result = db.get_user("nonexistent@example.com");
+        assert!(
+            non_existent_result.is_err(),
+            "Getting non-existent user should fail"
+        );
+
+        println!("✅ User management tests passed");
+    }
+
+    #[test]
+    fn test_multiple_users() {
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create multiple test users
+        let user1_username = "user1@example.com";
+        let user1_did = "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp";
+        let user1_password = "password1";
+
+        let user2_username = "user2@example.com";
+        let user2_did = "did:key:z6MkjRagNiMu4CWTaH5SBDeKHyYoPP2ooXqPoy3GmASHLtF6";
+        let user2_password = "password2";
+
+        // Add both users
+        db.add_user(user1_username, user1_did, user1_password)
+            .unwrap();
+        db.add_user(user2_username, user2_did, user2_password)
+            .unwrap();
+
+        // Verify both users can be retrieved independently
+        let retrieved_user1 = db.get_user(user1_username).unwrap();
+        let retrieved_user2 = db.get_user(user2_username).unwrap();
+
+        assert_eq!(retrieved_user1.username, user1_username);
+        assert_eq!(retrieved_user1.did, user1_did);
+        // Verify password hashing works
+        assert!(db
+            .verify_user_password(user1_username, user1_password)
+            .unwrap());
+
+        assert_eq!(retrieved_user2.username, user2_username);
+        assert_eq!(retrieved_user2.did, user2_did);
+        // Verify password hashing works
+        assert!(db
+            .verify_user_password(user2_username, user2_password)
+            .unwrap());
+
+        // Verify users have different DIDs
+        assert_ne!(retrieved_user1.did, retrieved_user2.did);
+
+        println!("✅ Multiple users management tests passed");
+    }
+
+    #[test]
+    fn test_user_table_schema() {
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Verify the users table was created by trying to query it
+        let result = db
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'");
+        assert!(result.is_ok(), "Users table should exist");
+
+        let mut stmt = result.unwrap();
+        let table_exists = stmt.query_row([], |row| {
+            let table_name: String = row.get(0)?;
+            Ok(table_name == "users")
+        });
+
+        assert!(
+            table_exists.is_ok() && table_exists.unwrap(),
+            "Users table should exist and be named 'users'"
+        );
+
+        // Verify table schema by checking column info
+        let schema_result = db.conn.prepare("PRAGMA table_info(users)");
+        assert!(
+            schema_result.is_ok(),
+            "Should be able to get users table schema"
+        );
+
+        println!("✅ User table schema tests passed");
+    }
+
+    #[test]
+    fn test_user_password_handling() {
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Test user with various password formats
+        let users = vec![
+            (
+                "user_simple@example.com",
+                "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp",
+                "simple",
+            ),
+            (
+                "user_complex@example.com",
+                "did:key:z6MkjRagNiMu4CWTaH5SBDeKHyYoPP2ooXqPoy3GmASHLtF6",
+                "Complex!Password123@#$",
+            ),
+            (
+                "user_unicode@example.com",
+                "did:key:z6MkrJVnaZjsXc2WrVjsXc2WrVjsXc2WrVjsXc2WrVjsXc2W",
+                "пароль🔐密码",
+            ),
+        ];
+
+        // Add all users
+        for (username, did, password) in &users {
+            let result = db.add_user(username, did, password);
+            assert!(
+                result.is_ok(),
+                "Failed to add user {}: {:?}",
+                username,
+                result.err()
+            );
+        }
+
+        // Verify all users can be retrieved and passwords can be verified
+        for (username, _did, password) in &users {
+            let retrieved = db.get_user(username).unwrap();
+            // Verify user info is correct
+            assert_eq!(
+                retrieved.username, *username,
+                "Username should match for {}",
+                username
+            );
+
+            // Password verification should work (tests that password is properly hashed)
+            assert!(
+                db.verify_user_password(username, password).unwrap(),
+                "Password verification should succeed for {}",
+                username
+            );
+            assert!(
+                !db.verify_user_password(username, "wrongpassword").unwrap(),
+                "Wrong password should fail for {}",
+                username
+            );
+        }
+
+        println!("✅ User password handling tests passed");
+    }
+
+    #[test]
+    fn test_neighbourhood_owners_management() {
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create a neighbourhood perspective
+        let neighbourhood_url = "neighbourhood://test123";
+        let perspective = PerspectiveHandle {
+            uuid: Uuid::new_v4().to_string(),
+            name: Some("Test Neighbourhood".to_string()),
+            neighbourhood: None,
+            shared_url: Some(neighbourhood_url.to_string()),
+            state: PerspectiveState::Synced,
+            owners: Some(vec!["did:key:user1".to_string()]),
+        };
+
+        // Add perspective to database
+        db.add_perspective(&perspective).unwrap();
+
+        // Test adding owners
+        db.add_owner_to_neighbourhood(neighbourhood_url, "did:key:user2")
+            .unwrap();
+        db.add_owner_to_neighbourhood(neighbourhood_url, "did:key:user3")
+            .unwrap();
+
+        // Test duplicate owner (should not add twice)
+        db.add_owner_to_neighbourhood(neighbourhood_url, "did:key:user2")
+            .unwrap();
+
+        // Retrieve owners
+        let owners = db.get_neighbourhood_owners(neighbourhood_url).unwrap();
+
+        // Verify owners
+        assert_eq!(owners.len(), 3);
+        assert!(owners.contains(&"did:key:user1".to_string()));
+        assert!(owners.contains(&"did:key:user2".to_string()));
+        assert!(owners.contains(&"did:key:user3".to_string()));
+
+        // Test retrieving perspective with owners
+        let all_perspectives = db.get_all_perspectives().unwrap();
+        let retrieved_perspective = all_perspectives
+            .iter()
+            .find(|p| p.shared_url.as_ref() == Some(&neighbourhood_url.to_string()))
+            .unwrap();
+
+        assert_eq!(retrieved_perspective.get_owners().len(), 3);
+        assert!(retrieved_perspective.is_owned_by("did:key:user2"));
+        assert!(!retrieved_perspective.is_owned_by("did:key:user4"));
+
+        println!("✅ Neighbourhood owners management tests passed");
+    }
+
+    #[test]
+    fn test_user_last_seen_tracking() {
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create test user
+        db.add_user("test@example.com", "did:key:test123", "testpassword")
+            .unwrap();
+
+        // Verify initial last_seen is None
+        let user = db.get_user("test@example.com").unwrap();
+        assert!(user.last_seen.is_none(), "Initial last_seen should be None");
+
+        // Update last_seen
+        db.update_user_last_seen("test@example.com").unwrap();
+
+        // Verify last_seen was updated
+        let user = db.get_user("test@example.com").unwrap();
+        assert!(
+            user.last_seen.is_some(),
+            "last_seen should be set after update"
+        );
+
+        let last_seen_timestamp = user.last_seen.unwrap();
+        let now = chrono::Utc::now().timestamp();
+        assert!(
+            (now - last_seen_timestamp).abs() < 2,
+            "last_seen should be within 2 seconds of now"
+        );
+
+        // Update again and verify it changes
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        db.update_user_last_seen("test@example.com").unwrap();
+
+        let user_updated = db.get_user("test@example.com").unwrap();
+        assert!(
+            user_updated.last_seen.unwrap() > last_seen_timestamp,
+            "last_seen should be updated to newer timestamp"
+        );
+
+        println!("✅ User last_seen tracking tests passed");
+    }
+
+    #[test]
+    fn test_list_users_ordering() {
+        // Initialize test database
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        // Create users with different last_seen times
+        db.add_user("user1@example.com", "did:key:user1", "pass1")
+            .unwrap();
+        db.add_user("user2@example.com", "did:key:user2", "pass2")
+            .unwrap();
+        db.add_user("user3@example.com", "did:key:user3", "pass3")
+            .unwrap();
+
+        // Update last_seen for users in specific order
+        db.update_user_last_seen("user2@example.com").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(2)); // Sleep 2 seconds to ensure different timestamps (i32 seconds)
+        db.update_user_last_seen("user3@example.com").unwrap();
+        // user1 has no last_seen
+
+        // List users - should be ordered by last_seen DESC (most recent first, nulls last)
+        let users = db.list_users().unwrap();
+        assert_eq!(users.len(), 3);
+        assert_eq!(
+            users[0].username, "user3@example.com",
+            "Most recent should be first"
+        );
+        assert_eq!(users[1].username, "user2@example.com", "Second most recent");
+        assert_eq!(
+            users[2].username, "user1@example.com",
+            "Null last_seen should be last"
+        );
+
+        println!("✅ User list ordering tests passed");
     }
 }
