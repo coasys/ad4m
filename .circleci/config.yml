@@ -74,7 +74,7 @@ jobs:
       - checkout
       - restore_cache:
           keys:
-            - rust-cache-{{ checksum "Cargo.lock" }}-1.88
+            - rust-cache-{{ checksum "Cargo.lock" }}-1.92
             - rust-cache-
       - run:
           name: cargo fmt --check
@@ -104,7 +104,7 @@ jobs:
           no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
       - save_cache:
-          key: rust-cache-{{ checksum "Cargo.lock" }}-1.88
+          key: rust-cache-{{ checksum "Cargo.lock" }}-1.92
           paths:
             - ./target
             - ~/.cargo/registry
