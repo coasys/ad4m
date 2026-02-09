@@ -62,10 +62,10 @@ jobs:
         path: ui
 
     - name: pnpm Install
-      run: pnpm install
+      run: pnpm install --no-frozen-lockfile
 
     - name: Install core dependencies
-      run: cd ./core && pnpm install
+      run: cd ./core && pnpm install --no-frozen-lockfile
 
     - name: Build AD4M-CLI
       run: pnpm build-libs
@@ -408,10 +408,10 @@ jobs:
           fi
 
       - name: Install deps
-        run: pnpm install
+        run: pnpm install --no-frozen-lockfile
 
       - name: Install core dependencies
-        run: cd ./core && pnpm install
+        run: cd ./core && pnpm install --no-frozen-lockfile
 
       - name: Build modules
         run: pnpm run build-npm-packages
@@ -495,8 +495,11 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
+      - name: Set default Rust toolchain
+        run: rustup default stable
+
       - run: rustup target add wasm32-unknown-unknown
-      - run: pnpm install
+      - run: pnpm install --no-frozen-lockfile
       - run: pnpm build-core-executor
       - run: ls -al executor/lib
       - run: cargo install cargo-workspaces || echo "cargo-workspaces already installed"
