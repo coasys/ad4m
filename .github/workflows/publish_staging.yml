@@ -61,6 +61,9 @@ jobs:
       with:
         path: ui
 
+    - name: Set default Rust toolchain
+      run: rustup default stable && rustup target add wasm32-unknown-unknown
+
     - name: pnpm Install
       run: pnpm install --no-frozen-lockfile
 
@@ -406,6 +409,9 @@ jobs:
           else
             echo "CONTAINS_PRERELEASE=false" >> $GITHUB_ENV
           fi
+
+      - name: Set default Rust toolchain
+        run: rustup default stable && rustup target add wasm32-unknown-unknown
 
       - name: Install deps
         run: pnpm install --no-frozen-lockfile
