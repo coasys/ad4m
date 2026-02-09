@@ -30,7 +30,10 @@ jobs:
       run: pnpm run build-languages
 
     - name: Run tests
-      run: cd bootstrap-languages/file-storage/hc-dna/tests && pnpm install --no-frozen-lockfile && pnpm run test
+      run: |
+        cd bootstrap-languages/file-storage/hc-dna/tests
+        pnpm install --no-frozen-lockfile --shamefully-hoist
+        pnpm run test
 
   integration:
     name: Integration Test

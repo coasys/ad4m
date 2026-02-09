@@ -30,4 +30,7 @@ jobs:
       run: pnpm run build-languages
 
     - name: Run tests
-      run: cd bootstrap-languages/agent-language/hc-dna/zomes/tests && pnpm install --no-frozen-lockfile && pnpm run test
+      run: |
+        cd bootstrap-languages/agent-language/hc-dna/zomes/tests
+        pnpm install --no-frozen-lockfile --shamefully-hoist
+        pnpm run test
