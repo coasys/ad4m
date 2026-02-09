@@ -1,5 +1,4 @@
-# This workflow will do a clean install of node dependencies, cache/restore them, build the source code and run tests across different versions of node
-# For more information see: https://help.github.com/actions/language-and-framework-guides/using-nodejs-with-github-actions
+# File Storage Language Tests - Uses Docker container for consistent environment
 
 name: File Storage
 
@@ -13,94 +12,44 @@ on:
 jobs:
   holochain:
     name: Holochain Tests
-
-    strategy:
-      matrix:
-        platform: [ubuntu-22.04]
-        node-version: [18.x]
-        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
-
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
 
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: 1.77.0
+    - uses: actions/checkout@v3
 
-    - name: Cache cargo
-      id: cache-cargo
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo
+    # Rust toolchain configured via rust-toolchain.toml
+    - name: Verify Rust toolchain
+      run: rustc --version && cargo --version && hc --version
 
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v2
-      with:
-        node-version: ${{ matrix.node-version }}
+    - name: Install dependencies
+      run: pnpm install --no-frozen-lockfile
 
-    - uses: pnpm/action-setup@v4
+    - name: Build languages
+      run: pnpm run build-languages
 
-    - name: Install Deno
-      uses: denoland/setup-deno@v1
-      with:
-        deno-version: v1.32.4
-
-    - run: rustup target add wasm32-unknown-unknown
-    - run: pnpm install
-    - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
-    - run: pnpm run build-languages
-    - run: cd bootstrap-languages/file-storage/hc-dna/tests && pnpm install && pnpm run test
+    - name: Run tests
+      run: cd bootstrap-languages/file-storage/hc-dna/tests && pnpm install --no-frozen-lockfile && pnpm run test
 
   integration:
     name: Integration Test
-    
-    strategy:
-      matrix:
-        platform: [ubuntu-22.04]
-        node-version: [18.x]
-        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
-
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
 
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: 1.77.0
+    - uses: actions/checkout@v3
 
-    - name: Cache cargo
-      id: cache-cargo
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo
+    # Rust toolchain configured via rust-toolchain.toml
+    - name: Verify Rust toolchain
+      run: rustc --version && cargo --version && hc --version
 
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v2
-      with:
-        node-version: ${{ matrix.node-version }}
+    - name: Install dependencies
+      run: pnpm install --no-frozen-lockfile
 
-    - uses: pnpm/action-setup@v4
+    - name: Build
+      run: pnpm run build
 
-    - name: Install Deno
-      uses: denoland/setup-deno@v1
-      with:
-        deno-version: v1.32.4
-
-    - run: rustup target add wasm32-unknown-unknown
-    - run: pnpm install
-    - run: cargo install holochain_cli --version 0.3.0-beta-dev.27 || echo "hc already installed"
-    - run: pnpm run build
-    - run: cd bootstrap-languages/file-storage && pnpm run integration-test
+    - name: Run integration tests
+      run: cd bootstrap-languages/file-storage && pnpm run integration-test

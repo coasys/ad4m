@@ -1,5 +1,4 @@
-# This workflow will do a clean install of node dependencies, cache/restore them, build the source code and run tests across different versions of node
-# For more information see: https://help.github.com/actions/language-and-framework-guides/using-nodejs-with-github-actions
+# P-Diff-Sync Language Tests - Uses Docker container for consistent environment
 
 name: P Diff Sync
 
@@ -13,362 +12,163 @@ on:
 jobs:
   unit:
     name: Rust Unit Test
-
-    strategy:
-      matrix:
-        platform: [ubuntu-22.04]
-        node-version: [18.x]
-        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
-
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
 
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: 1.77.0
-    - name: Cache cargo
-      id: cache-cargo
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo
-    - run: cd bootstrap-languages/p-diff-sync/hc-dna && cargo test -- --test-threads=1
+    - uses: actions/checkout@v3
+
+    # Rust toolchain configured via rust-toolchain.toml
+    - name: Verify Rust toolchain
+      run: rustc --version && cargo --version
+
+    - name: Run unit tests
+      run: cd bootstrap-languages/p-diff-sync/hc-dna && cargo test -- --test-threads=1
 
   pull:
     name: Pull Test
-
-    strategy:
-      matrix:
-        platform: [ubuntu-22.04]
-        node-version: [18.x]
-        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
-
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
 
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: 1.77.0
-    - name: Cache cargo
-      id: cache-cargo
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo
+    - uses: actions/checkout@v3
 
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v2
-      with:
-        node-version: ${{ matrix.node-version }}
+    - name: Verify Rust toolchain
+      run: rustc --version && cargo --version && hc --version
 
-    - uses: pnpm/action-setup@v4
+    - name: Install dependencies
+      run: pnpm install --no-frozen-lockfile
 
+    - name: Build languages
+      run: pnpm run build-languages
 
-    - name: Install Deno
-      uses: denoland/setup-deno@v1
-      with:
-        deno-version: v1.32.4
-
-    - run: rustup target add wasm32-unknown-unknown
-    - run: pnpm install
-    - run: cargo install holochain_cli --version 0.3.0-beta-dev.27 || echo "hc already installed"
-    - run: pnpm run build-languages
-    - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && pnpm install && pnpm run test-pull
+    - name: Run tests
+      run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && pnpm install --no-frozen-lockfile && pnpm run test-pull
 
   render:
     name: Render Test
-
-    strategy:
-      matrix:
-        platform: [ubuntu-22.04]
-        node-version: [18.x]
-        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
-
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
 
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: 1.77.0
+    - uses: actions/checkout@v3
 
-    - name: Cache cargo
-      id: cache-cargo
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo
+    - name: Verify Rust toolchain
+      run: rustc --version && cargo --version && hc --version
 
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v2
-      with:
-        node-version: ${{ matrix.node-version }}
+    - name: Install dependencies
+      run: pnpm install --no-frozen-lockfile
 
-    - uses: pnpm/action-setup@v4
+    - name: Build languages
+      run: pnpm run build-languages
 
-
-    - name: Install Deno
-      uses: denoland/setup-deno@v1
-      with:
-        deno-version: v1.32.4
-
-    - run: rustup target add wasm32-unknown-unknown
-    - run: pnpm install
-    - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
-    - run: pnpm run build-languages
-    - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && pnpm install && pnpm run test-render
+    - name: Run tests
+      run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && pnpm install --no-frozen-lockfile && pnpm run test-render
 
   revisions:
     name: Revisions Test
-
-    strategy:
-      matrix:
-        platform: [ubuntu-22.04]
-        node-version: [18.x]
-        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
-
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
 
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: 1.77.0
+    - uses: actions/checkout@v3
 
-    - name: Cache cargo
-      id: cache-cargo
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo
+    - name: Verify Rust toolchain
+      run: rustc --version && cargo --version && hc --version
 
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v2
-      with:
-        node-version: ${{ matrix.node-version }}
+    - name: Install dependencies
+      run: pnpm install --no-frozen-lockfile
 
-    - uses: pnpm/action-setup@v4
+    - name: Build languages
+      run: pnpm run build-languages
 
-
-    - name: Install Deno
-      uses: denoland/setup-deno@v1
-      with:
-        deno-version: v1.32.4
-
-    - run: rustup target add wasm32-unknown-unknown
-    - run: pnpm install
-    - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
-    - run: pnpm run build-languages
-    - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && pnpm install && pnpm run test-revisions
+    - name: Run tests
+      run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && pnpm install --no-frozen-lockfile && pnpm run test-revisions
 
   signals:
     name: Signals Test
-
-    strategy:
-      matrix:
-        platform: [ubuntu-22.04]
-        node-version: [18.x]
-        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
-
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
 
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: 1.77.0
+    - uses: actions/checkout@v3
 
-    - name: Cache cargo
-      id: cache-cargo
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo
+    - name: Verify Rust toolchain
+      run: rustc --version && cargo --version && hc --version
 
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v2
-      with:
-        node-version: ${{ matrix.node-version }}
+    - name: Install dependencies
+      run: pnpm install --no-frozen-lockfile
 
-    - uses: pnpm/action-setup@v4
+    - name: Build languages
+      run: pnpm run build-languages
 
-
-    - name: Install Deno
-      uses: denoland/setup-deno@v1
-      with:
-        deno-version: v1.32.4
-
-    - run: rustup target add wasm32-unknown-unknown
-    - run: pnpm install
-    - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
-    - run: pnpm run build-languages
-    - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && pnpm install && pnpm run test-signals
-
+    - name: Run tests
+      run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && pnpm install --no-frozen-lockfile && pnpm run test-signals
 
   stress:
     name: Stress Test
-
-    strategy:
-      matrix:
-        platform: [ubuntu-22.04]
-        node-version: [18.x]
-        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
-
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
 
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: 1.77.0
+    - uses: actions/checkout@v3
 
-    - name: Cache cargo
-      id: cache-cargo
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo
+    - name: Verify Rust toolchain
+      run: rustc --version && cargo --version && hc --version
 
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v2
-      with:
-        node-version: ${{ matrix.node-version }}
+    - name: Install dependencies
+      run: pnpm install --no-frozen-lockfile
 
-    - uses: pnpm/action-setup@v4
+    - name: Build languages
+      run: pnpm run build-languages
 
-
-    - name: Install Deno
-      uses: denoland/setup-deno@v1
-      with:
-        deno-version: v1.32.4
-
-    - run: rustup target add wasm32-unknown-unknown
-    - run: pnpm install
-    - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
-    - run: pnpm run build-languages
-    - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && pnpm install && pnpm run test-stress
+    - name: Run tests
+      run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && pnpm install --no-frozen-lockfile && pnpm run test-stress
 
   telepresence:
-    name: Telepresence
-
-    strategy:
-      matrix:
-        platform: [ubuntu-22.04]
-        node-version: [18.x]
-        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
-
-    runs-on: ${{ matrix.platform }}
+    name: Telepresence Test
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
 
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: 1.77.0
+    - uses: actions/checkout@v3
 
-    - name: Cache cargo
-      id: cache-cargo
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo
+    - name: Verify Rust toolchain
+      run: rustc --version && cargo --version && hc --version
 
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v2
-      with:
-        node-version: ${{ matrix.node-version }}
+    - name: Install dependencies
+      run: pnpm install --no-frozen-lockfile
 
-    - uses: pnpm/action-setup@v4
+    - name: Build languages
+      run: pnpm run build-languages
 
-
-    - name: Install Deno
-      uses: denoland/setup-deno@v1
-      with:
-        deno-version: v1.32.4
-
-    - run: rustup target add wasm32-unknown-unknown
-    - run: pnpm install
-    - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
-    - run: pnpm run build-languages
-    - run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && pnpm install && pnpm run test-telepresence
+    - name: Run tests
+      run: cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests && pnpm install --no-frozen-lockfile && pnpm run test-telepresence
 
   # integration:
   #   name: Integration Test
-    
-  #   strategy:
-  #     matrix:
-  #       platform: [ubuntu-22.04]
-  #       node-version: [18.x]
-  #       # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
-
-  #   runs-on: ${{ matrix.platform }}
-
+  #   runs-on: ubuntu-latest
+  #   container:
+  #     image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
+  #
   #   steps:
-  #   - uses: actions/checkout@v2
-  #   - uses: actions-rs/toolchain@v1
-  #     with:
-  #       toolchain: 1.77.0
-
-  #   - name: Cache cargo
-  #     id: cache-cargo
-  #     uses: actions/cache@v3
-  #     with:
-  #       path: |
-  #         ~/.cargo/bin/
-  #         ~/.cargo/registry/index/
-  #         ~/.cargo/registry/cache/
-  #         ~/.cargo/git/db/
-  #         target/
-  #       key: ${{ runner.os }}-cargo
-
-  #   - name: Use Node.js ${{ matrix.node-version }}
-  #     uses: actions/setup-node@v2
-  #     with:
-  #       node-version: ${{ matrix.node-version }}
-
-  #   - name: Install Deno
-  #     uses: denoland/setup-deno@v1
-  #     with:
-  #       deno-version: v1.32.4
-
-  #   - run: rustup target add wasm32-unknown-unknown
-  #   - run: pnpm install
-  #   - run: cargo install holochain_cli --version 0.2.2 || echo "hc already installed"
-  #   - run: pnpm run build
-  #   - run: cd bootstrap-languages/p-diff-sync && pnpm run integration-test
+  #   - uses: actions/checkout@v3
+  #
+  #   - name: Verify Rust toolchain
+  #     run: rustc --version && cargo --version && hc --version
+  #
+  #   - name: Install dependencies
+  #     run: pnpm install --no-frozen-lockfile
+  #
+  #   - name: Build
+  #     run: pnpm run build
+  #
+  #   - name: Run integration tests
+  #     run: cd bootstrap-languages/p-diff-sync && pnpm run integration-test
