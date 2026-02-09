@@ -61,8 +61,10 @@ jobs:
       with:
         path: ui
 
-    - name: Set default Rust toolchain
-      run: rustup default stable && rustup target add wasm32-unknown-unknown
+    # Rust toolchain configured via rust-toolchain.toml (auto-detected by rustup)
+    # The toml file specifies stable channel with wasm32-unknown-unknown target
+    - name: Verify Rust toolchain
+      run: rustc --version && cargo --version && rustup target list --installed | grep wasm
 
     - name: pnpm Install
       run: pnpm install --no-frozen-lockfile
@@ -155,11 +157,11 @@ jobs:
     - name: Fetch source code
       uses: actions/checkout@v3
 
-    - name: Install Rust stable
+    # Rust toolchain configured via rust-toolchain.toml
+    - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: 1.86.0
-        targets: wasm32-unknown-unknown,x86_64-apple-darwin,aarch64-apple-darwin
+        targets: x86_64-apple-darwin,aarch64-apple-darwin
 
     # Aggressive Rust caching - biggest time saver for macOS
     - name: Cache Rust dependencies
@@ -410,8 +412,9 @@ jobs:
             echo "CONTAINS_PRERELEASE=false" >> $GITHUB_ENV
           fi
 
-      - name: Set default Rust toolchain
-        run: rustup default stable && rustup target add wasm32-unknown-unknown
+      # Rust toolchain configured via rust-toolchain.toml (auto-detected by rustup)
+      - name: Verify Rust toolchain
+        run: rustc --version && cargo --version
 
       - name: Install deps
         run: pnpm install --no-frozen-lockfile
@@ -501,10 +504,10 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Set default Rust toolchain
-        run: rustup default stable
+      # Rust toolchain configured via rust-toolchain.toml (auto-detected by rustup)
+      - name: Verify Rust toolchain
+        run: rustc --version && cargo --version
 
-      - run: rustup target add wasm32-unknown-unknown
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm build-core-executor
       - run: ls -al executor/lib
