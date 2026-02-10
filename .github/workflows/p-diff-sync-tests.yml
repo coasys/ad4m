@@ -31,6 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
+    env:
+      npm_config_build_from_source: true
 
     steps:
     - uses: actions/checkout@v3
@@ -39,8 +41,6 @@ jobs:
       run: rustc --version && cargo --version && hc --version
 
     - name: Install dependencies
-      env:
-        npm_config_build_from_source: true
       run: pnpm install --no-frozen-lockfile
 
     - name: Build languages
@@ -54,6 +54,8 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
+    env:
+      npm_config_build_from_source: true
 
     steps:
     - uses: actions/checkout@v3
@@ -62,8 +64,6 @@ jobs:
       run: rustc --version && cargo --version && hc --version
 
     - name: Install dependencies
-      env:
-        npm_config_build_from_source: true
       run: pnpm install --no-frozen-lockfile
 
     - name: Build languages
@@ -77,6 +77,8 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
+    env:
+      npm_config_build_from_source: true
 
     steps:
     - uses: actions/checkout@v3
@@ -85,8 +87,6 @@ jobs:
       run: rustc --version && cargo --version && hc --version
 
     - name: Install dependencies
-      env:
-        npm_config_build_from_source: true
       run: pnpm install --no-frozen-lockfile
 
     - name: Build languages
@@ -100,6 +100,8 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
+    env:
+      npm_config_build_from_source: true
 
     steps:
     - uses: actions/checkout@v3
@@ -108,8 +110,6 @@ jobs:
       run: rustc --version && cargo --version && hc --version
 
     - name: Install dependencies
-      env:
-        npm_config_build_from_source: true
       run: pnpm install --no-frozen-lockfile
 
     - name: Build languages
@@ -123,6 +123,8 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
+    env:
+      npm_config_build_from_source: true
 
     steps:
     - uses: actions/checkout@v3
@@ -131,8 +133,6 @@ jobs:
       run: rustc --version && cargo --version && hc --version
 
     - name: Install dependencies
-      env:
-        npm_config_build_from_source: true
       run: pnpm install --no-frozen-lockfile
 
     - name: Build languages
@@ -146,6 +146,8 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
+    env:
+      npm_config_build_from_source: true
 
     steps:
     - uses: actions/checkout@v3
@@ -154,8 +156,6 @@ jobs:
       run: rustc --version && cargo --version && hc --version
 
     - name: Install dependencies
-      env:
-        npm_config_build_from_source: true
       run: pnpm install --no-frozen-lockfile
 
     - name: Build languages
