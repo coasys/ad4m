@@ -11502,7 +11502,8 @@ dependencies = [
 [[package]]
 name = "kitsune2_api"
 version = "0.4.0-dev.2"
-source = "git+https://github.com/lucksus/kitsune2.git?branch=debug-logs#6899d5949f8658067897bd1cc9923b2551037c41"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d238cf93e1df4e89016ed527cc7f5cb0e3394c6a6a125d2057aa6b3561d084b3"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -11518,7 +11519,8 @@ dependencies = [
 [[package]]
 name = "kitsune2_bootstrap_client"
 version = "0.4.0-dev.2"
-source = "git+https://github.com/lucksus/kitsune2.git?branch=debug-logs#6899d5949f8658067897bd1cc9923b2551037c41"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25d2bb2d26ef8b85e8f0925d3a98e3376b07e2e0e89d40a8123604339a1d92d2"
 dependencies = [
  "base64 0.22.1",
  "kitsune2_api 0.4.0-dev.2",
@@ -11563,7 +11565,8 @@ dependencies = [
 [[package]]
 name = "kitsune2_core"
 version = "0.4.0-dev.2"
-source = "git+https://github.com/lucksus/kitsune2.git?branch=debug-logs#6899d5949f8658067897bd1cc9923b2551037c41"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cbf3747935d371106d3b430de306d9567531a8a071d46bcbccea44b0016a5bf8"
 dependencies = [
  "bytes",
  "ed25519-dalek 2.2.0",
@@ -11615,7 +11618,8 @@ dependencies = [
 [[package]]
 name = "kitsune2_transport_iroh"
 version = "0.4.0-dev.2"
-source = "git+https://github.com/lucksus/kitsune2.git?branch=debug-logs#6899d5949f8658067897bd1cc9923b2551037c41"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83152c8c69f2038ce39710bb15e4e779cd69dcb93a9226f3b703d7aa780c20c2"
 dependencies = [
  "bytes",
  "iroh",
