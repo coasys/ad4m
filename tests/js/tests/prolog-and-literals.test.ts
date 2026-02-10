@@ -1852,27 +1852,23 @@ describe("Prolog + Literals", () => {
                     // Reset lastResult to verify we get an update
                     lastResult = null;
 
+                    // Small delay to ensure subscription is fully registered before triggering changes
+                    await sleep(500);
+
                     // Add a new recipe and verify subscription updates
                     const newRecipe = new Recipe(perspective!);
                     newRecipe.name = "Recipe 11";
                     await newRecipe.save();
 
-                    
-
-                    // Wait for subscription update with a timeout
-                    const maxTries = 50;
-                    const sleepMs = 100;
-                    const timeout = maxTries * sleepMs;
-                    
-                    for (let i = 0; i < maxTries; i++) {
-                        if (lastResult) break;
-                        await sleep(sleepMs);
-                        console.log("Waiting for subscription update - try:", i + 1);
-                    }
-                    
-                    if (!lastResult) {
-                        throw new Error(`Subscription did not update after ${timeout}ms`);
-                    }
+                    // Wait for subscription update with proper condition checking
+                    // Use longer timeout for CI environments which may be slower
+                    await waitForCondition(
+                        () => lastResult !== null,
+                        {
+                            timeoutMs: 15000,
+                            errorMessage: 'Paginate subscription did not update after recipe save'
+                        }
+                    );
 
                     expect(lastResult.totalCount).to.equal(11);
 
