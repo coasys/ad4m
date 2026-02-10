@@ -2297,7 +2297,7 @@ impl Mutation {
         // Build updated notification after ownership check
         // if managed user, preserve the granted status
         let mut notification =
-            Notification::from_input_and_id(id.clone(), notification, user_email);
+            Notification::from_input_and_id(id.clone(), notification, user_email.clone());
         if user_email.is_some() {
             notification.granted = existing_notification.granted;
         }
