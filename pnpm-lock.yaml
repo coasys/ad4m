@@ -9,7 +9,7 @@ patchedDependencies:
     hash: i6f4fdawxlwk2ulgcpjpsixrei
     path: patches/@mattrglobal__bbs-signatures@0.5.0.patch
   '@mattrglobal/node-bbs-signatures@0.11.0':
-    hash: du3euicl4oreiseb3vykbrzjji
+    hash: psgyblrlqlp6alx37uat46btzq
     path: patches/@mattrglobal__node-bbs-signatures@0.11.0.patch
   '@peculiar/webcrypto@1.4.5':
     hash: saeohqf4hlpnnys7brc6umjxqq
@@ -16610,7 +16610,7 @@ snapshots:
 
   '@mattrglobal/bbs-signatures@0.5.0(patch_hash=i6f4fdawxlwk2ulgcpjpsixrei)':
     optionalDependencies:
-      '@mattrglobal/node-bbs-signatures': 0.11.0(patch_hash=du3euicl4oreiseb3vykbrzjji)
+      '@mattrglobal/node-bbs-signatures': 0.11.0(patch_hash=psgyblrlqlp6alx37uat46btzq)
     transitivePeerDependencies:
       - supports-color
 
@@ -16622,7 +16622,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@mattrglobal/node-bbs-signatures@0.11.0(patch_hash=du3euicl4oreiseb3vykbrzjji)':
+  '@mattrglobal/node-bbs-signatures@0.11.0(patch_hash=psgyblrlqlp6alx37uat46btzq)':
     dependencies:
       neon-cli: 0.4.0
       node-pre-gyp: 0.14.0
