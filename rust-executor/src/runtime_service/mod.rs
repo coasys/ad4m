@@ -143,9 +143,10 @@ impl RuntimeService {
         notification_input: NotificationInput,
         user_email: Option<String>,
     ) -> Result<String, String> {
-        let notification_id =
-            Ad4mDb::with_global_instance(|db| db.add_notification(notification_input, user_email.clone()))
-                .map_err(|e| e.to_string())?;
+        let notification_id = Ad4mDb::with_global_instance(|db| {
+            db.add_notification(notification_input, user_email.clone())
+        })
+        .map_err(|e| e.to_string())?;
 
         // For managed users (user_email is Some), auto-grant the notification
         // Only the main agent (user_email is None) needs manual approval
