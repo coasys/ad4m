@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::errors::{SocialContextError, SocialContextResult};
+use crate::link_adapter::chunked_diffs::load_diff_from_entry;
 use crate::link_adapter::topo_sort::topo_sort_diff_references;
 use crate::retriever::{hash_to_node_id, PerspectiveDiffRetreiver};
 use crate::utils::get_now;
@@ -776,9 +777,10 @@ impl Workspace {
             if _key == &NULL_NODE() {
                 continue;
             }
-            // Access diff data directly from the embedded field
-            out.additions.append(&mut value.diff.additions.clone());
-            out.removals.append(&mut value.diff.removals.clone());
+            // Load diff handling both inline and chunked storage
+            let mut loaded_diff = load_diff_from_entry::<Retriever>(value)?;
+            out.additions.append(&mut loaded_diff.additions);
+            out.removals.append(&mut loaded_diff.removals);
         }
 
         //let fn_end = get_now()?.time();
