@@ -2295,7 +2295,12 @@ impl Mutation {
         }
 
         // Build updated notification after ownership check
-        let notification = Notification::from_input_and_id(id.clone(), notification, user_email);
+        // if managed user, preserve the granted status
+        let mut notification =
+            Notification::from_input_and_id(id.clone(), notification, user_email);
+        if user_email.is_some() {
+            notification.granted = existing_notification.granted;
+        }
 
         Ad4mDb::with_global_instance(|db| db.update_notification(id, &notification))?;
 
