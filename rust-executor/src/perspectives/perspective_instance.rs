@@ -2616,11 +2616,27 @@ impl PerspectiveInstance {
             } else {
                 //let query_start = std::time::Instant::now();
                 //log::info!("🔔 NOTIFICATIONS: not cached - Querying notification for perspective {}", uuid);
-                let matches = self
+                // Handle errors per-notification to prevent one user's DID failure from
+                // silencing all notifications. This can happen with orphaned notifications
+                // from deleted users or corrupted data.
+                match self
                     .surreal_query_notification(n.trigger.clone(), n.user_email.clone())
-                    .await?;
-                trigger_cache.insert(cache_key, matches.clone());
-                result_map.insert(n.clone(), matches);
+                    .await
+                {
+                    Ok(matches) => {
+                        trigger_cache.insert(cache_key, matches.clone());
+                        result_map.insert(n.clone(), matches);
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "Failed to query notification for user {:?} in perspective {}: {:?}. Skipping this notification.",
+                            n.user_email,
+                            uuid,
+                            e
+                        );
+                        // Skip this notification but continue processing others
+                    }
+                }
                 //log::info!("🔔 NOTIFICATIONS: Querying notification: {} - took {:?}", n.trigger, query_start.elapsed());
             }
         }
