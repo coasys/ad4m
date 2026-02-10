@@ -27,6 +27,11 @@ jobs:
     - name: Install dependencies
       run: pnpm install --no-frozen-lockfile
 
+    - name: Build zomes
+      run: |
+        cd bootstrap-languages/direct-message-language/hc-dna
+        cargo build --release --target wasm32-unknown-unknown
+
     - name: Build DNA
       run: |
         cd bootstrap-languages/direct-message-language/hc-dna
