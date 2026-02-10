@@ -2431,33 +2431,30 @@ describe("Multi-User Simple integration tests", () => {
                 webhookAuth: "user2-auth"
             };
 
-            // Install notifications
+            // Install notifications - managed users get auto-granted
             const notif1Id = await client1.runtime.requestInstallNotification(user1Notification);
             const notif2Id = await client2.runtime.requestInstallNotification(user2Notification);
 
             await sleep(500);
 
-            // Grant notifications
-            await client1.runtime.grantNotification(notif1Id);
-            await client2.runtime.grantNotification(notif2Id);
-
-            await sleep(500);
-
-            // User 1 retrieves notifications - should only see their own
+            // User 1 retrieves notifications - should only see their own and it should be auto-granted
             const user1Notifications = await client1.runtime.notifications();
             console.log(`User 1 sees ${user1Notifications.length} notification(s)`);
             expect(user1Notifications.length).to.equal(1);
             expect(user1Notifications[0].description).to.equal("User 1's notification");
             expect(user1Notifications[0].id).to.equal(notif1Id);
+            expect(user1Notifications[0].granted).to.be.true;
 
-            // User 2 retrieves notifications - should only see their own
+            // User 2 retrieves notifications - should only see their own and it should be auto-granted
             const user2Notifications = await client2.runtime.notifications();
             console.log(`User 2 sees ${user2Notifications.length} notification(s)`);
             expect(user2Notifications.length).to.equal(1);
             expect(user2Notifications[0].description).to.equal("User 2's notification");
             expect(user2Notifications[0].id).to.equal(notif2Id);
+            expect(user2Notifications[0].granted).to.be.true;
 
             console.log("✅ Notification isolation verified - each user sees only their own notifications");
+            console.log("✅ Managed user notifications are auto-granted");
         });
 
         it("should use correct agent DID for each user's notification queries", async () => {
@@ -2526,17 +2523,14 @@ describe("Multi-User Simple integration tests", () => {
                 webhookAuth: "user2-auth"
             };
 
+            // Install notifications - managed users get auto-granted
             const notif1Id = await client1.runtime.requestInstallNotification(user1Notification);
             const notif2Id = await client2.runtime.requestInstallNotification(user2Notification);
 
             await sleep(500);
 
-            await client1.runtime.grantNotification(notif1Id);
-            await client2.runtime.grantNotification(notif2Id);
-
-            await sleep(500);
-
             // Verify that both notifications contain the $agentDid variable in their triggers
+            // and are auto-granted for managed users
             const user1Notifs = await client1.runtime.notifications();
             const user2Notifs = await client2.runtime.notifications();
 
@@ -2586,18 +2580,64 @@ describe("Multi-User Simple integration tests", () => {
                 webhookAuth: "secret-auth"
             };
 
+            // Install notification - managed users get auto-granted
             const notificationId = await client1.runtime.requestInstallNotification(notification);
             await sleep(500);
 
-            // User 1 can see their notification
+            // User 1 can see their notification and it should be auto-granted
             const user1Notifs = await client1.runtime.notifications();
-            expect(user1Notifs.some(n => n.id === notificationId)).to.be.true;
+            const user1Notif = user1Notifs.find(n => n.id === notificationId);
+            expect(user1Notif).to.not.be.undefined;
+            expect(user1Notif!.granted).to.be.true;
 
             // User 2 cannot see User 1's notification
             const user2Notifs = await client2.runtime.notifications();
             expect(user2Notifs.some(n => n.id === notificationId)).to.be.false;
 
             console.log("✅ Notification access control verified");
+        });
+
+        it("should prevent managed users from calling grantNotification", async () => {
+            console.log("\n=== Testing that managed users cannot call grantNotification ===");
+
+            // Create a managed user
+            await adminAd4mClient!.agent.createUser("grant-test@example.com", "password1");
+            const token = await adminAd4mClient!.agent.loginUser("grant-test@example.com", "password1");
+
+            // @ts-ignore
+            const managedClient = new Ad4mClient(apolloClient(gqlPort, token), false);
+
+            const perspective = await managedClient.perspective.add("Grant Test");
+
+            // Create a notification (which will be auto-granted)
+            const notification: NotificationInput = {
+                description: "Test notification",
+                appName: "Test App",
+                appUrl: "https://test.app",
+                appIconPath: "/test.png",
+                trigger: `SELECT * FROM link WHERE predicate = 'test://grant'`,
+                perspectiveIds: [perspective.uuid],
+                webhookUrl: "https://webhook.test",
+                webhookAuth: "test-auth"
+            };
+
+            const notificationId = await managedClient.runtime.requestInstallNotification(notification);
+            await sleep(500);
+
+            // Verify the notification is auto-granted
+            const notifs = await managedClient.runtime.notifications();
+            const notif = notifs.find(n => n.id === notificationId);
+            expect(notif).to.not.be.undefined;
+            expect(notif!.granted).to.be.true;
+
+            // Managed user should NOT be able to call grantNotification
+            try {
+                await managedClient.runtime.grantNotification(notificationId);
+                expect.fail("Managed user should not be able to call grantNotification");
+            } catch (error: any) {
+                expect(error.message).to.include("Permission denied");
+                console.log("✅ Managed user correctly blocked from calling grantNotification");
+            }
         });
     });
 })

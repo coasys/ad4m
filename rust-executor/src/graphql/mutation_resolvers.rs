@@ -2343,6 +2343,17 @@ impl Mutation {
         id: String,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+
+        // Only the main agent can grant notifications
+        // Managed users have their notifications auto-granted on creation
+        let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
+        if !agent_context.is_main_agent {
+            return Err(FieldError::new(
+                "Permission denied: Only the main agent can grant notifications",
+                Value::null(),
+            ));
+        }
+
         let mut notification = Ad4mDb::with_global_instance(|db| db.get_notification(id.clone()))
             .map_err(|e| e.to_string())?
             .ok_or("Notification with given id not found")?;

@@ -144,31 +144,48 @@ impl RuntimeService {
         user_email: Option<String>,
     ) -> Result<String, String> {
         let notification_id =
-            Ad4mDb::with_global_instance(|db| db.add_notification(notification_input, user_email))
+            Ad4mDb::with_global_instance(|db| db.add_notification(notification_input, user_email.clone()))
                 .map_err(|e| e.to_string())?;
 
-        let notification =
-            Ad4mDb::with_global_instance(|db| db.get_notification(notification_id.clone()))
-                .map_err(|e| e.to_string())?
-                .ok_or("Notification with given id not found")?;
+        // For managed users (user_email is Some), auto-grant the notification
+        // Only the main agent (user_email is None) needs manual approval
+        if user_email.is_some() {
+            let mut notification =
+                Ad4mDb::with_global_instance(|db| db.get_notification(notification_id.clone()))
+                    .map_err(|e| e.to_string())?
+                    .ok_or("Notification with given id not found")?;
 
-        let exception_info = ExceptionInfo {
-            title: "Request to install notifications for the app".to_string(),
-            message: format!(
-                "{} is waiting for notifications to be authenticated, open the ADAM Launcher for more information.",
-                notification.app_name
-            ),
-            r#type: ExceptionType::InstallNotificationRequest,
-            addon: Some(serde_json::to_string(&notification).unwrap()),
-        };
+            notification.granted = true;
 
-        get_global_pubsub()
-            .await
-            .publish(
-                &EXCEPTION_OCCURRED_TOPIC,
-                &serde_json::to_string(&exception_info).unwrap(),
-            )
-            .await;
+            Ad4mDb::with_global_instance(|db| {
+                db.update_notification(notification_id.clone(), &notification)
+            })
+            .map_err(|e| e.to_string())?;
+        } else {
+            // Main agent needs manual approval via ADAM Launcher
+            let notification =
+                Ad4mDb::with_global_instance(|db| db.get_notification(notification_id.clone()))
+                    .map_err(|e| e.to_string())?
+                    .ok_or("Notification with given id not found")?;
+
+            let exception_info = ExceptionInfo {
+                title: "Request to install notifications for the app".to_string(),
+                message: format!(
+                    "{} is waiting for notifications to be authenticated, open the ADAM Launcher for more information.",
+                    notification.app_name
+                ),
+                r#type: ExceptionType::InstallNotificationRequest,
+                addon: Some(serde_json::to_string(&notification).unwrap()),
+            };
+
+            get_global_pubsub()
+                .await
+                .publish(
+                    &EXCEPTION_OCCURRED_TOPIC,
+                    &serde_json::to_string(&exception_info).unwrap(),
+                )
+                .await;
+        }
 
         Ok(notification_id)
     }
