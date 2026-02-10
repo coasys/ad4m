@@ -1654,14 +1654,10 @@ describe("Multi-User Simple integration tests", () => {
 
             // Make nodes known to each other (for Holochain peer discovery)
             console.log("\n=== Making nodes known to each other ===");
-            try {
             const node1AgentInfos = await adminAd4mClient!.runtime.hcAgentInfos();
-                const node2AgentInfos = await node2AdminClient.runtime.hcAgentInfos();
-                await adminAd4mClient!.runtime.hcAddAgentInfos(node2AgentInfos);
-                await node2AdminClient.runtime.hcAddAgentInfos(node1AgentInfos);
-            } catch (error) {
-                console.error("Error making nodes known to each other:", error);
-            }
+            const node2AgentInfos = await node2AdminClient.runtime.hcAgentInfos();
+            await adminAd4mClient!.runtime.hcAddAgentInfos(node2AgentInfos);
+            await node2AdminClient.runtime.hcAddAgentInfos(node1AgentInfos);
 
             console.log("\n=== Setup complete ===\n");
         });
