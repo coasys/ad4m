@@ -35,7 +35,7 @@ RUN ~/.cargo/bin/rustup target add wasm32-unknown-unknown
 
 # Install hc
 RUN ~/.cargo/bin/cargo install holochain_cli@0.7.0-dev.10
-RUN ~/.cargo/bin/cargo install kitsune2_bootstrap_srv@0.4.0-dev.2 --features "iroh-relay"
+RUN ~/.cargo/bin/cargo install kitsune2_bootstrap_srv --git https://github.com/holochain/kitsune2.git --rev ea3c2d42dde92f0889672a41f02f186ad9e75e4c --features "iroh-relay"
 
 # Install Deno
 RUN curl -fsSL https://deno.land/install.sh | sh

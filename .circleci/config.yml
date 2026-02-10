@@ -1,6 +1,6 @@
 version: 2.1
 references:
-  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:b9531fd4261e4545550e0514192598e799b0a6060af04beff03c1e0023a95a65
+  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:d0c3e9683811505955185782a5cd683952f846f1abc520c35c1293ad7f046593
 
 commands:
   setup_integration_test_environment:
