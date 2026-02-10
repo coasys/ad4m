@@ -2601,11 +2601,16 @@ impl PerspectiveInstance {
         //    .collect::<Vec<String>>()
         //    .join("\n"));
         let mut result_map = BTreeMap::new();
-        let mut trigger_cache: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+        // Cache key must include both trigger and user_email since surreal_query_notification
+        // uses user_email to determine $agentDid substitution - otherwise users with identical
+        // triggers would incorrectly share cached results
+        let mut trigger_cache: HashMap<(String, Option<String>), Vec<serde_json::Value>> =
+            HashMap::new();
 
         for n in notifications {
             //log::info!("🔔 NOTIFICATIONS: Processing notification for perspective {}: {}", uuid, n.trigger);
-            if let Some(cached_matches) = trigger_cache.get(&n.trigger) {
+            let cache_key = (n.trigger.clone(), n.user_email.clone());
+            if let Some(cached_matches) = trigger_cache.get(&cache_key) {
                 //log::info!("🔔 NOTIFICATIONS: Using cached matches for notification for perspective {}: {}", uuid, n.trigger);
                 result_map.insert(n.clone(), cached_matches.clone());
             } else {
@@ -2614,7 +2619,7 @@ impl PerspectiveInstance {
                 let matches = self
                     .surreal_query_notification(n.trigger.clone(), n.user_email.clone())
                     .await?;
-                trigger_cache.insert(n.trigger.clone(), matches.clone());
+                trigger_cache.insert(cache_key, matches.clone());
                 result_map.insert(n.clone(), matches);
                 //log::info!("🔔 NOTIFICATIONS: Querying notification: {} - took {:?}", n.trigger, query_start.elapsed());
             }
