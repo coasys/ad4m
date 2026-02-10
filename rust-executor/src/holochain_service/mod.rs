@@ -575,7 +575,8 @@ impl HolochainService {
         }
 
         let app_info = self.conductor.get_app_info(&app_id).await?;
-        Ok(app_info.unwrap())
+        let app_info = app_info.ok_or_else(|| anyhow!("App not found: {}", app_id))?;
+        Ok(app_info)
     }
 
     pub async fn call_zome_function(
