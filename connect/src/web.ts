@@ -91,11 +91,11 @@ const styles = css`
     padding: 0;
     cursor: pointer;
     position: fixed;
-    bottom: 20px;
-    right: 20px;
+    bottom: 10px;
+    right: 10px;
     color: var(--ac-primary-color);
-    width: 40px;
-    height: 40px;
+    width: 34px;
+    height: 34px;
     z-index: 99999;
   }
 `;
