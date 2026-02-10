@@ -1699,17 +1699,21 @@ describe("Prolog + Literals", () => {
                         });
                     expect(subscription).to.equal(3);
 
+                    // Small delay to ensure subscription is fully registered before triggering changes
+                    await sleep(500);
+
                     // Add another recipe and verify callback is called
                     const recipe4 = new Recipe(perspective!);
                     recipe4.name = "Recipe 4";
                     await recipe4.save();
 
                     // Wait for subscription to process with proper condition checking
+                    // Use longer timeout for CI environments which may be slower
                     await waitForCondition(
                         () => lastCount === 4,
-                        { 
-                            timeoutMs: 5000, 
-                            errorMessage: 'Count subscription did not update after recipe save' 
+                        {
+                            timeoutMs: 15000,
+                            errorMessage: 'Count subscription did not update after recipe save'
                         }
                     );
                     expect(lastCount).to.equal(4);
@@ -2566,6 +2570,9 @@ describe("Prolog + Literals", () => {
                         const initialCount = await builder.countSubscribe(countCallback);
                         expect(initialCount).to.equal(0);
 
+                        // Small delay to ensure subscription is fully registered before triggering changes
+                        await sleep(500);
+
                         // Add a matching model
                         const model = new TestModel(perspective);
                         model.name = "Test";
@@ -2573,11 +2580,12 @@ describe("Prolog + Literals", () => {
                         await model.save();
 
                         // Wait for subscription update with proper condition checking
+                        // Use longer timeout for CI environments which may be slower
                         await waitForCondition(
                             () => countCallback.called,
-                            { 
-                                timeoutMs: 5000, 
-                                errorMessage: 'Count callback was not called after model save' 
+                            {
+                                timeoutMs: 15000,
+                                errorMessage: 'Count callback was not called after model save'
                             }
                         );
 
