@@ -43,10 +43,26 @@ export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bo
     let relayPort: string | null = null;
 
     let servicesReady = new Promise<void>((resolve, reject) => {
-        servicesProcess.stdout!.on('data', (data) => {
+        const SERVICES_READY_TIMEOUT_MS = 60000; // 60 seconds timeout
+        const stdoutBuffer: string[] = [];
+        const stderrBuffer: string[] = [];
+        let timeoutId: NodeJS.Timeout | null = null;
+        let resolved = false;
+
+        const cleanup = () => {
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+                timeoutId = null;
+            }
+            servicesProcess.stdout!.removeListener('data', stdoutHandler);
+            servicesProcess.stderr!.removeListener('data', stderrHandler);
+        };
+
+        const stdoutHandler = (data: Buffer) => {
             const dataStr = data.toString();
+            stdoutBuffer.push(dataStr);
             console.log("Bootstrap server output: ", dataStr);
-            
+
             // Look for the bootstrap server listening message
             if (dataStr.includes("#kitsune2_bootstrap_srv#listening#")) {
                 const lines = dataStr.split("\n");
@@ -63,7 +79,7 @@ export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bo
                     console.log("Proxy URL: ", proxyUrl);
                 }
             }
-            
+
             // Look for the iroh relay server message
             if (dataStr.includes("Internal iroh relay server started at")) {
                 const match = dataStr.match(/Internal iroh relay server started at ([\d.]+:\d+)/);
@@ -75,16 +91,50 @@ export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bo
                     console.log("Relay URL: ", relayUrl);
                 }
             }
-            
+
             // Resolve when we have both ports
-            if (bootstrapPort && relayPort) {
+            if (bootstrapPort && relayPort && !resolved) {
+                resolved = true;
+                cleanup();
                 resolve();
             }
-        });
-        
-        servicesProcess.stderr!.on('data', (data) => {
-            console.log("Bootstrap server stderr: ", data.toString());
-        });
+        };
+
+        const stderrHandler = (data: Buffer) => {
+            const dataStr = data.toString();
+            stderrBuffer.push(dataStr);
+            console.log("Bootstrap server stderr: ", dataStr);
+        };
+
+        servicesProcess.stdout!.on('data', stdoutHandler);
+        servicesProcess.stderr!.on('data', stderrHandler);
+
+        // Set up timeout to prevent hanging forever
+        timeoutId = setTimeout(() => {
+            if (!resolved) {
+                resolved = true;
+                cleanup();
+
+                console.error("=== Services startup timeout ===");
+                console.error(`Timeout after ${SERVICES_READY_TIMEOUT_MS}ms waiting for bootstrap and relay services`);
+                console.error(`Bootstrap port found: ${bootstrapPort ?? 'NO'}`);
+                console.error(`Relay port found: ${relayPort ?? 'NO'}`);
+                console.error("--- Collected stdout ---");
+                console.error(stdoutBuffer.join(''));
+                console.error("--- Collected stderr ---");
+                console.error(stderrBuffer.join(''));
+                console.error("========================");
+
+                // Kill the services process
+                try {
+                    servicesProcess.kill('SIGKILL');
+                } catch (killErr) {
+                    console.error("Error killing services process:", killErr);
+                }
+
+                reject(new Error(`Services startup timeout: bootstrapPort=${bootstrapPort}, relayPort=${relayPort}`));
+            }
+        }, SERVICES_READY_TIMEOUT_MS);
     });
 
     await servicesReady;
