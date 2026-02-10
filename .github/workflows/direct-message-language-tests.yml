@@ -1,4 +1,5 @@
 # Direct Message Language Tests - Uses Docker container for consistent environment
+# Migrated from Tryorama (TypeScript) to sweettest (Rust) for stability
 
 name: Direct Message Language
 
@@ -10,13 +11,11 @@ on:
       - bootstrap-languages
 
 jobs:
-  test:
-    name: Test
+  sweettest:
+    name: Sweettest
     runs-on: ubuntu-latest
     container:
       image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
-    env:
-      npm_config_build_from_source: true
 
     steps:
     - uses: actions/checkout@v3
@@ -28,11 +27,12 @@ jobs:
     - name: Install dependencies
       run: pnpm install --no-frozen-lockfile
 
-    - name: Build languages
-      run: pnpm run build-languages
-
-    - name: Run tests
+    - name: Build DNA
       run: |
-        cd bootstrap-languages/direct-message-language/hc-dna/tests
-        pnpm install --no-frozen-lockfile --shamefully-hoist
-        pnpm run test
+        cd bootstrap-languages/direct-message-language/hc-dna
+        hc dna pack workdir
+
+    - name: Run sweettest
+      run: |
+        cd bootstrap-languages/direct-message-language/hc-dna/tests/sweettest
+        cargo test --release -- --nocapture
