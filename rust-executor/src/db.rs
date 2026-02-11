@@ -1923,7 +1923,7 @@ impl Ad4mDb {
 
         // Export notifications
         let notifications: Vec<serde_json::Value> = self.conn.prepare(
-            "SELECT id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted FROM notifications"
+            "SELECT id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted, user_email FROM notifications"
         )?.query_map([], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
@@ -1935,7 +1935,8 @@ impl Ad4mDb {
                 "perspective_ids": row.get::<_, String>(6)?,
                 "webhook_url": row.get::<_, String>(7)?,
                 "webhook_auth": row.get::<_, String>(8)?,
-                "granted": row.get::<_, bool>(9)?
+                "granted": row.get::<_, bool>(9)?,
+                "user_email": row.get::<_, Option<String>>(10)?
             }))
         })?.collect::<Result<Vec<_>, _>>()?;
         export_data.insert(
@@ -2282,8 +2283,8 @@ impl Ad4mDb {
                             .and_then(|id| id.as_str())
                             .unwrap_or("<unknown>");
                         match self.conn.execute(
-                            "INSERT INTO notifications (id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted) 
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                            "INSERT INTO notifications (id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted, user_email)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                             params![
                                 notification["id"].as_str().unwrap_or(""),
                                 notification["description"].as_str().unwrap_or(""),
@@ -2294,7 +2295,8 @@ impl Ad4mDb {
                                 notification["perspective_ids"].as_str().unwrap_or(""),
                                 notification["webhook_url"].as_str().unwrap_or(""),
                                 notification["webhook_auth"].as_str().unwrap_or(""),
-                                notification["granted"].as_bool().unwrap_or(false)
+                                notification["granted"].as_bool().unwrap_or(false),
+                                notification["user_email"].as_str()
                             ],
                         ) {
                             Ok(_) => result.notifications.imported += 1,
