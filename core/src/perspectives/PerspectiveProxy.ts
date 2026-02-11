@@ -1003,8 +1003,8 @@ export class PerspectiveProxy {
      * // Legacy: Prolog code is auto-converted to SHACL
      * await perspective.addSdna('Recipe', prologCode, 'subject_class');
      */
-    async addSdna(name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom") {
-        return this.#client.addSdna(this.#handle.uuid, name, sdnaCode, sdnaType)
+    async addSdna(name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string) {
+        return this.#client.addSdna(this.#handle.uuid, name, sdnaCode, sdnaType, shaclJson)
     }
 
     /**
@@ -2123,9 +2123,9 @@ export class PerspectiveProxy {
             }))
         });
 
-        // Pass Prolog SDNA to backend (SHACL JSON prepared for future migration)
-        // TODO: When Rust backend supports SHACL, add shaclJson parameter
-        await this.addSdna(sdnaName, prologSdna, 'subject_class');
+        // Pass both Prolog SDNA and SHACL JSON to backend
+        // Rust backend stores SHACL links which are then converted to Prolog facts for queries
+        await this.addSdna(sdnaName, prologSdna, 'subject_class', shaclJson);
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {
