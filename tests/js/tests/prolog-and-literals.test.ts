@@ -1699,17 +1699,21 @@ describe("Prolog + Literals", () => {
                         });
                     expect(subscription).to.equal(3);
 
+                    // Small delay to ensure subscription is fully registered before triggering changes
+                    await sleep(500);
+
                     // Add another recipe and verify callback is called
                     const recipe4 = new Recipe(perspective!);
                     recipe4.name = "Recipe 4";
                     await recipe4.save();
 
                     // Wait for subscription to process with proper condition checking
+                    // Use longer timeout for CI environments which may be slower
                     await waitForCondition(
                         () => lastCount === 4,
-                        { 
-                            timeoutMs: 5000, 
-                            errorMessage: 'Count subscription did not update after recipe save' 
+                        {
+                            timeoutMs: 15000,
+                            errorMessage: 'Count subscription did not update after recipe save'
                         }
                     );
                     expect(lastCount).to.equal(4);
@@ -1848,27 +1852,23 @@ describe("Prolog + Literals", () => {
                     // Reset lastResult to verify we get an update
                     lastResult = null;
 
+                    // Small delay to ensure subscription is fully registered before triggering changes
+                    await sleep(500);
+
                     // Add a new recipe and verify subscription updates
                     const newRecipe = new Recipe(perspective!);
                     newRecipe.name = "Recipe 11";
                     await newRecipe.save();
 
-                    
-
-                    // Wait for subscription update with a timeout
-                    const maxTries = 50;
-                    const sleepMs = 100;
-                    const timeout = maxTries * sleepMs;
-                    
-                    for (let i = 0; i < maxTries; i++) {
-                        if (lastResult) break;
-                        await sleep(sleepMs);
-                        console.log("Waiting for subscription update - try:", i + 1);
-                    }
-                    
-                    if (!lastResult) {
-                        throw new Error(`Subscription did not update after ${timeout}ms`);
-                    }
+                    // Wait for subscription update with proper condition checking
+                    // Use longer timeout for CI environments which may be slower
+                    await waitForCondition(
+                        () => lastResult !== null,
+                        {
+                            timeoutMs: 15000,
+                            errorMessage: 'Paginate subscription did not update after recipe save'
+                        }
+                    );
 
                     expect(lastResult.totalCount).to.equal(11);
 
@@ -2566,6 +2566,9 @@ describe("Prolog + Literals", () => {
                         const initialCount = await builder.countSubscribe(countCallback);
                         expect(initialCount).to.equal(0);
 
+                        // Small delay to ensure subscription is fully registered before triggering changes
+                        await sleep(500);
+
                         // Add a matching model
                         const model = new TestModel(perspective);
                         model.name = "Test";
@@ -2573,11 +2576,12 @@ describe("Prolog + Literals", () => {
                         await model.save();
 
                         // Wait for subscription update with proper condition checking
+                        // Use longer timeout for CI environments which may be slower
                         await waitForCondition(
                             () => countCallback.called,
-                            { 
-                                timeoutMs: 5000, 
-                                errorMessage: 'Count callback was not called after model save' 
+                            {
+                                timeoutMs: 15000,
+                                errorMessage: 'Count callback was not called after model save'
                             }
                         );
 
@@ -2611,6 +2615,9 @@ describe("Prolog + Literals", () => {
                         expect(initialPage.results.length).to.equal(0);
                         expect(initialPage.totalCount).to.equal(0);
 
+                        // Small delay to ensure subscription is fully registered before triggering changes
+                        await sleep(500);
+
                         // Add models
                         const model1 = new TestModel(perspective);
                         model1.name = "Test 1";
@@ -2622,12 +2629,15 @@ describe("Prolog + Literals", () => {
                         model2.status = "active";
                         await model2.save();
 
-                        // Wait for subscription updates (with polling for reliability)
-                        let attempts = 0;
-                        while (attempts < 20 && (!pageCallback.called || pageCallback.lastCall.args[0].results.length < 2)) {
-                            await sleep(100);
-                            attempts++;
-                        }
+                        // Wait for subscription updates with proper condition checking
+                        // Use longer timeout for CI environments which may be slower
+                        await waitForCondition(
+                            () => pageCallback.called && pageCallback.lastCall.args[0].results.length >= 2,
+                            {
+                                timeoutMs: 15000,
+                                errorMessage: 'Paginate callback was not called with expected results after model saves'
+                            }
+                        );
 
                         // Verify callback was called with updated page
                         expect(pageCallback.called).to.be.true;

@@ -45,7 +45,8 @@
     "package-ad4m": "run-script-os",
     "package-ad4m:windows": "cargo clean && pnpm run build && pnpm tauri build --verbose",
     "package-ad4m:macos": "pnpm run build && pnpm tauri build --verbose --features metal",
-    "package-ad4m:linux": "pnpm run build && pnpm tauri build --verbose"
+    "package-ad4m:linux": "pnpm run build && pnpm tauri build --verbose",
+    "package-ad4m:cuda": "pnpm run build && pnpm tauri build --verbose --features cuda"
   },
   "eslintConfig": {
     "extends": [

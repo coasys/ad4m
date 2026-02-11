@@ -2021,8 +2021,8 @@ dependencies = [
 
 [[package]]
 name = "hdi"
-version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.8.0-dev.4"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "getrandom 0.3.4",
  "hdk_derive",
@@ -2040,8 +2040,8 @@ dependencies = [
 
 [[package]]
 name = "hdk"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.6"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "getrandom 0.3.4",
  "hdi",
@@ -2057,8 +2057,8 @@ dependencies = [
 
 [[package]]
 name = "hdk_derive"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.4"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "darling 0.21.3",
  "heck",
@@ -2105,8 +2105,8 @@ dependencies = [
 
 [[package]]
 name = "holo_hash"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.3"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "base64 0.22.1",
  "blake2b_simd",
@@ -2324,8 +2324,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_integrity_types"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.4"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "derive_builder",
  "holo_hash",
@@ -2383,8 +2383,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_nonce"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.0"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "getrandom 0.3.4",
  "holochain_secure_primitive",
@@ -2433,8 +2433,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_secure_primitive"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.0"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "paste",
  "serde",
@@ -2567,8 +2567,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_timestamp"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.0"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -2645,8 +2645,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_util"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.0"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "backtrace",
  "cfg-if",
@@ -2736,8 +2736,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_zome_types"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "contrafact",
  "derive_builder",
