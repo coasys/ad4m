@@ -1591,7 +1591,7 @@ describe("Multi-User Simple integration tests", () => {
         let node2User2Did: string = "";
 
         before(async function() {
-            this.timeout(60000); // Increase timeout for setup
+            this.timeout(300000); // Increase timeout for setup with Holochain 0.7.0
 
             console.log("\n=== Setting up Node 2 ===");
             if (!fs.existsSync(node2AppDataPath)) {
@@ -1674,7 +1674,7 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         it("should return all DIDs in 'others()' for each user", async function() {
-            this.timeout(120000); // Increased to allow initial wait + polling time
+            this.timeout(240000); // Increased for Holochain 0.7.0 - allow initial wait + polling time
 
             console.log("\n=== Testing 'others()' functionality ===");
 
@@ -1714,6 +1714,26 @@ describe("Multi-User Simple integration tests", () => {
             console.log("Node 2 User 2 joining...");
             await node2User2Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
             await sleep(2000); // Wait for join to complete
+
+            // Re-exchange agent infos with retry to handle K2 space initialization delays (Holochain 0.7.0)
+            // After users join and link language is installed, new DNA/K2 spaces are created
+            // We need to retry agent info exchange to allow K2 spaces to become ready
+            console.log("Re-exchanging agent infos with retry for K2 space readiness...");
+            for (let attempt = 1; attempt <= 5; attempt++) {
+                try {
+                    console.log(`Agent info exchange attempt ${attempt}/5`);
+                    const node1AgentInfos = await adminAd4mClient!.runtime.hcAgentInfos();
+                    const node2AgentInfos = await node2AdminClient!.runtime.hcAgentInfos();
+                    await adminAd4mClient!.runtime.hcAddAgentInfos(node2AgentInfos);
+                    await node2AdminClient!.runtime.hcAddAgentInfos(node1AgentInfos);
+                    console.log(`✅ Agent info exchange attempt ${attempt} successful`);
+                } catch (error) {
+                    console.log(`⚠️  Agent info exchange attempt ${attempt} failed:`, error);
+                }
+                if (attempt < 5) {
+                    await sleep(3000); // Wait before retry
+                }
+            }
 
             // Wait for neighbourhood to sync and owners lists to be updated
             console.log("Waiting for neighbourhood sync and owners list updates...");
@@ -1822,7 +1842,7 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         it("should route p2p signals correctly between users across nodes", async function() {
-            this.timeout(60000);
+            this.timeout(120000); // Increased for Holochain 0.7.0
 
             console.log("\n=== Testing cross-node p2p signal routing ===");
 
@@ -1947,7 +1967,7 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         it("should sync links correctly between all users across nodes", async function() {
-            this.timeout(60000);
+            this.timeout(180000); // Increased for Holochain 0.7.0 - link sync takes longer
 
             console.log("\n=== Testing cross-node link synchronization ===");
 
