@@ -5,12 +5,18 @@ use perspective_diff_sync_integrity::{
 };
 
 use crate::errors::{SocialContextResult, SocialContextError};
+use crate::link_adapter::chunked_diffs::ChunkedDiffs;
 use crate::link_adapter::revisions::{current_revision, update_current_revision};
 use crate::link_adapter::snapshots::generate_snapshot;
 use crate::retriever::holochain::{get_active_agent_anchor, get_active_agents};
 use crate::retriever::PerspectiveDiffRetreiver;
 use crate::utils::get_now;
-use crate::{Hash, ENABLE_SIGNALS, SNAPSHOT_INTERVAL};
+use crate::{Hash, CHUNK_SIZE, ENABLE_SIGNALS, SNAPSHOT_INTERVAL};
+
+/// Threshold for when to use chunked storage.
+/// If total_diff_number exceeds this, we split into chunks to avoid exceeding
+/// Holochain's 4MB entry size limit.
+const CHUNKING_THRESHOLD: usize = 500;
 
 pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     diff: PerspectiveDiff,
@@ -42,14 +48,48 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     };
 
     let now = get_now()?.time();
-    let diff_entry_ref_entry = PerspectiveDiffEntryReference {
-        diff: diff.clone(),
-        parents: initial_current_revision.clone().map(|val| vec![val.hash]),
-        diffs_since_snapshot: entries_since_snapshot,
+
+    // Check if we need to use chunked storage for large diffs
+    let (diff_entry_ref_entry, diff_entry_reference) = if diff.total_diff_number() > CHUNKING_THRESHOLD {
+        debug!(
+            "===PerspectiveDiffSync.commit(): Diff size {} exceeds threshold {}, using chunked storage",
+            diff.total_diff_number(),
+            CHUNKING_THRESHOLD
+        );
+
+        // Create chunked diff entries
+        let mut chunked_diffs = ChunkedDiffs::new(*CHUNK_SIZE);
+        chunked_diffs.add_additions(diff.additions.clone());
+        chunked_diffs.add_removals(diff.removals.clone());
+
+        // Store the chunk entries and get their hashes
+        let chunk_hashes = chunked_diffs.into_entries::<Retriever>()?;
+        debug!(
+            "===PerspectiveDiffSync.commit(): Created {} chunk entries",
+            chunk_hashes.len()
+        );
+
+        // Create the main entry reference with chunk hashes instead of inline diff
+        let entry = PerspectiveDiffEntryReference {
+            diff: PerspectiveDiff::new(), // Empty diff when using chunks
+            parents: initial_current_revision.clone().map(|val| vec![val.hash]),
+            diffs_since_snapshot: entries_since_snapshot,
+            diff_chunks: Some(chunk_hashes),
+        };
+        let hash = Retriever::create_entry(EntryTypes::PerspectiveDiffEntryReference(entry.clone()))?;
+        (entry, hash)
+    } else {
+        // Small diff - use inline storage as before
+        let entry = PerspectiveDiffEntryReference {
+            diff: diff.clone(),
+            parents: initial_current_revision.clone().map(|val| vec![val.hash]),
+            diffs_since_snapshot: entries_since_snapshot,
+            diff_chunks: None,
+        };
+        let hash = Retriever::create_entry(EntryTypes::PerspectiveDiffEntryReference(entry.clone()))?;
+        (entry, hash)
     };
-    let diff_entry_reference = Retriever::create_entry(EntryTypes::PerspectiveDiffEntryReference(
-        diff_entry_ref_entry.clone(),
-    ))?;
+
     let after = get_now()?.time();
     // debug!(
     //     "===PerspectiveDiffSync.commit(): Created diff entry ref: {:#?}",
