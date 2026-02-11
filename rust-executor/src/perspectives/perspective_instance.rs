@@ -3173,9 +3173,12 @@ impl PerspectiveInstance {
                 "SubjectClassOption needs to either have `name` or `query` set"
             ))?;
 
-            //log::info!("🔍 SUBJECT CLASS: Running prolog query to resolve class name: {}", query);
-            //let query_start = std::time::Instant::now();
+            // Try SHACL-based lookup first (works when Prolog is disabled)
+            if let Some(class_name) = self.find_subject_class_from_shacl_by_query(&query).await? {
+                return Ok(class_name);
+            }
 
+            // Fall back to Prolog query (if Prolog is enabled)
             let result = self
                 .prolog_query_sdna_with_context(query.to_string(), context)
                 .await
@@ -3184,11 +3187,169 @@ impl PerspectiveInstance {
                     e
                 })?;
 
-            //log::info!("🔍 SUBJECT CLASS: Prolog query completed in {:?}", query_start.elapsed());
-
             prolog_get_first_string_binding(&result, "Class")
                 .ok_or(anyhow!("No matching subject class found!"))?
         })
+    }
+
+    /// Find a subject class from SHACL links by parsing a Prolog-like query
+    /// Supports queries like: subject_class(Class, C), property(C, "name"), property(C, "rating").
+    async fn find_subject_class_from_shacl_by_query(
+        &self,
+        query: &str,
+    ) -> Result<Option<String>, AnyError> {
+        use regex::Regex;
+        
+        // Extract required properties from query like: property(C, "name"), property(C, "rating")
+        let property_regex = Regex::new(r#"property\([^,]+,\s*"([^"]+)"\)"#)?;
+        let required_properties: Vec<String> = property_regex
+            .captures_iter(query)
+            .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+            .collect();
+        
+        // Extract required collections from query like: collection(C, "items")
+        let collection_regex = Regex::new(r#"collection\([^,]+,\s*"([^"]+)"\)"#)?;
+        let required_collections: Vec<String> = collection_regex
+            .captures_iter(query)
+            .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+            .collect();
+
+        // Get all subject classes from ad4m://has_subject_class links
+        let class_links = self
+            .get_links_local(&LinkQuery {
+                predicate: Some("ad4m://has_subject_class".to_string()),
+                ..Default::default()
+            })
+            .await?;
+
+        // For each class, check if it has all required properties
+        for (link, _status) in class_links {
+            let class_name = crate::types::Literal::from_url(link.data.target.clone())?
+                .get()
+                .unwrap_or_default()
+                .to_string();
+
+            if class_name.is_empty() {
+                continue;
+            }
+
+            // Get properties for this class from SHACL links
+            let class_properties = self.get_shacl_properties_for_class(&class_name).await?;
+            let class_collections = self.get_shacl_collections_for_class(&class_name).await?;
+
+            // Check if all required properties are present
+            let has_all_properties = required_properties.iter().all(|p| class_properties.contains(p));
+            let has_all_collections = required_collections.iter().all(|c| class_collections.contains(c));
+
+            if has_all_properties && has_all_collections {
+                return Ok(Some(class_name));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Get property names for a subject class from SHACL links
+    async fn get_shacl_properties_for_class(&self, class_name: &str) -> Result<Vec<String>, AnyError> {
+        let mut properties = Vec::new();
+        let shape_suffix = format!("{}Shape", class_name);
+
+        // Get sh://property links for this shape
+        let property_links = self
+            .get_links_local(&LinkQuery {
+                predicate: Some("sh://property".to_string()),
+                ..Default::default()
+            })
+            .await?;
+
+        for (link, _status) in &property_links {
+            if link.data.source.ends_with(&shape_suffix) {
+                let prop_shape_uri = &link.data.target;
+                
+                // Get the property name from sh://path link
+                let path_links = self
+                    .get_links_local(&LinkQuery {
+                        source: Some(prop_shape_uri.clone()),
+                        predicate: Some("sh://path".to_string()),
+                        ..Default::default()
+                    })
+                    .await?;
+
+                for (path_link, _) in path_links {
+                    // Extract property name from path URI (e.g., "recipe://name" -> "name")
+                    let path = &path_link.data.target;
+                    if let Some(name) = path.split("://").last().and_then(|s| s.split('/').last()) {
+                        // Check if this is a collection (has rdf://type = ad4m://CollectionShape)
+                        let type_links = self
+                            .get_links_local(&LinkQuery {
+                                source: Some(prop_shape_uri.clone()),
+                                predicate: Some("rdf://type".to_string()),
+                                ..Default::default()
+                            })
+                            .await?;
+
+                        let is_collection = type_links.iter().any(|(l, _)| l.data.target == "ad4m://CollectionShape");
+                        
+                        if !is_collection {
+                            properties.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(properties)
+    }
+
+    /// Get collection names for a subject class from SHACL links
+    async fn get_shacl_collections_for_class(&self, class_name: &str) -> Result<Vec<String>, AnyError> {
+        let mut collections = Vec::new();
+        let shape_suffix = format!("{}Shape", class_name);
+
+        // Get sh://property links for this shape
+        let property_links = self
+            .get_links_local(&LinkQuery {
+                predicate: Some("sh://property".to_string()),
+                ..Default::default()
+            })
+            .await?;
+
+        for (link, _status) in &property_links {
+            if link.data.source.ends_with(&shape_suffix) {
+                let prop_shape_uri = &link.data.target;
+                
+                // Check if this is a collection
+                let type_links = self
+                    .get_links_local(&LinkQuery {
+                        source: Some(prop_shape_uri.clone()),
+                        predicate: Some("rdf://type".to_string()),
+                        ..Default::default()
+                    })
+                    .await?;
+
+                let is_collection = type_links.iter().any(|(l, _)| l.data.target == "ad4m://CollectionShape");
+                
+                if is_collection {
+                    // Get the collection name from sh://path link
+                    let path_links = self
+                        .get_links_local(&LinkQuery {
+                            source: Some(prop_shape_uri.clone()),
+                            predicate: Some("sh://path".to_string()),
+                            ..Default::default()
+                        })
+                        .await?;
+
+                    for (path_link, _) in path_links {
+                        let path = &path_link.data.target;
+                        if let Some(name) = path.split("://").last().and_then(|s| s.split('/').last()) {
+                            collections.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(collections)
     }
 
     /// Parse actions JSON from a literal target (format: "literal://string:{json}")
