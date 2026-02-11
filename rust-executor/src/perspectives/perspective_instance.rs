@@ -3199,14 +3199,14 @@ impl PerspectiveInstance {
         query: &str,
     ) -> Result<Option<String>, AnyError> {
         use regex::Regex;
-        
+
         // Extract required properties from query like: property(C, "name"), property(C, "rating")
         let property_regex = Regex::new(r#"property\([^,]+,\s*"([^"]+)"\)"#)?;
         let required_properties: Vec<String> = property_regex
             .captures_iter(query)
             .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
             .collect();
-        
+
         // Extract required collections from query like: collection(C, "items")
         let collection_regex = Regex::new(r#"collection\([^,]+,\s*"([^"]+)"\)"#)?;
         let required_collections: Vec<String> = collection_regex
@@ -3224,10 +3224,11 @@ impl PerspectiveInstance {
 
         // For each class, check if it has all required properties
         for (link, _status) in class_links {
-            let class_name = crate::types::Literal::from_url(link.data.target.clone())?
-                .get()
-                .unwrap_or_default()
-                .to_string();
+            let class_name =
+                match Literal::from_url(link.data.target.clone()).and_then(|lit| lit.get()) {
+                    Ok(val) => val.to_string(),
+                    Err(_) => continue,
+                };
 
             if class_name.is_empty() {
                 continue;
@@ -3238,8 +3239,12 @@ impl PerspectiveInstance {
             let class_collections = self.get_shacl_collections_for_class(&class_name).await?;
 
             // Check if all required properties are present
-            let has_all_properties = required_properties.iter().all(|p| class_properties.contains(p));
-            let has_all_collections = required_collections.iter().all(|c| class_collections.contains(c));
+            let has_all_properties = required_properties
+                .iter()
+                .all(|p| class_properties.contains(p));
+            let has_all_collections = required_collections
+                .iter()
+                .all(|c| class_collections.contains(c));
 
             if has_all_properties && has_all_collections {
                 return Ok(Some(class_name));
@@ -3250,7 +3255,10 @@ impl PerspectiveInstance {
     }
 
     /// Get property names for a subject class from SHACL links
-    async fn get_shacl_properties_for_class(&self, class_name: &str) -> Result<Vec<String>, AnyError> {
+    async fn get_shacl_properties_for_class(
+        &self,
+        class_name: &str,
+    ) -> Result<Vec<String>, AnyError> {
         let mut properties = Vec::new();
         let shape_suffix = format!("{}Shape", class_name);
 
@@ -3265,7 +3273,7 @@ impl PerspectiveInstance {
         for (link, _status) in &property_links {
             if link.data.source.ends_with(&shape_suffix) {
                 let prop_shape_uri = &link.data.target;
-                
+
                 // Get the property name from sh://path link
                 let path_links = self
                     .get_links_local(&LinkQuery {
@@ -3288,8 +3296,10 @@ impl PerspectiveInstance {
                             })
                             .await?;
 
-                        let is_collection = type_links.iter().any(|(l, _)| l.data.target == "ad4m://CollectionShape");
-                        
+                        let is_collection = type_links
+                            .iter()
+                            .any(|(l, _)| l.data.target == "ad4m://CollectionShape");
+
                         if !is_collection {
                             properties.push(name.to_string());
                         }
@@ -3302,7 +3312,10 @@ impl PerspectiveInstance {
     }
 
     /// Get collection names for a subject class from SHACL links
-    async fn get_shacl_collections_for_class(&self, class_name: &str) -> Result<Vec<String>, AnyError> {
+    async fn get_shacl_collections_for_class(
+        &self,
+        class_name: &str,
+    ) -> Result<Vec<String>, AnyError> {
         let mut collections = Vec::new();
         let shape_suffix = format!("{}Shape", class_name);
 
@@ -3317,7 +3330,7 @@ impl PerspectiveInstance {
         for (link, _status) in &property_links {
             if link.data.source.ends_with(&shape_suffix) {
                 let prop_shape_uri = &link.data.target;
-                
+
                 // Check if this is a collection
                 let type_links = self
                     .get_links_local(&LinkQuery {
@@ -3327,8 +3340,10 @@ impl PerspectiveInstance {
                     })
                     .await?;
 
-                let is_collection = type_links.iter().any(|(l, _)| l.data.target == "ad4m://CollectionShape");
-                
+                let is_collection = type_links
+                    .iter()
+                    .any(|(l, _)| l.data.target == "ad4m://CollectionShape");
+
                 if is_collection {
                     // Get the collection name from sh://path link
                     let path_links = self
@@ -3341,7 +3356,9 @@ impl PerspectiveInstance {
 
                     for (path_link, _) in path_links {
                         let path = &path_link.data.target;
-                        if let Some(name) = path.split("://").last().and_then(|s| s.split('/').last()) {
+                        if let Some(name) =
+                            path.split("://").last().and_then(|s| s.split('/').last())
+                        {
                             collections.push(name.to_string());
                         }
                     }

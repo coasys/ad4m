@@ -747,11 +747,13 @@ pub fn get_sdna_facts(
 
     // Generate comprehensive Prolog facts from SHACL links for backward compatibility
     // This allows infer() queries and template matching to work with SHACL-only classes
-    
+
     // First pass: collect shape → class mappings and class info
-    let mut shape_to_class: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut class_shapes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    
+    let mut shape_to_class: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut class_shapes: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
     for link_expression in all_links {
         let link = &link_expression.data;
         // sh://targetClass links map shapes to classes
@@ -768,25 +770,27 @@ pub fn get_sdna_facts(
                 .split('#')
                 .last()
                 .unwrap_or(class_uri);
-            
+
             if !class_name.is_empty() && !seen_subject_classes.contains_key(class_name) {
                 shape_to_class.insert(shape_uri.clone(), class_name.to_string());
                 class_shapes.insert(class_name.to_string(), shape_uri.clone());
             }
         }
     }
-    
+
     // Second pass: collect properties for each shape
-    let mut shape_properties: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    let mut property_to_shape: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    
+    let mut shape_properties: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut property_to_shape: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
     for link_expression in all_links {
         let link = &link_expression.data;
         // sh://property links connect shapes to property shapes
         if link.predicate == Some("sh://property".to_string()) {
             let shape_uri = &link.source;
             let prop_shape_uri = &link.target;
-            
+
             if shape_to_class.contains_key(shape_uri) {
                 shape_properties
                     .entry(shape_uri.clone())
@@ -796,16 +800,19 @@ pub fn get_sdna_facts(
             }
         }
     }
-    
+
     // Third pass: collect property names and setters
-    let mut prop_shape_to_name: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut prop_shape_to_name: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut prop_has_setter: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut prop_is_collection: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut shape_has_constructor: std::collections::HashSet<String> = std::collections::HashSet::new();
-    
+    let mut prop_is_collection: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut shape_has_constructor: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
     for link_expression in all_links {
         let link = &link_expression.data;
-        
+
         // sh://path links give property names
         if link.predicate == Some("sh://path".to_string()) {
             let prop_shape_uri = &link.source;
@@ -821,37 +828,38 @@ pub fn get_sdna_facts(
                 .split('#')
                 .last()
                 .unwrap_or(path_uri);
-            
+
             if !prop_name.is_empty() {
                 prop_shape_to_name.insert(prop_shape_uri.clone(), prop_name.to_string());
             }
         }
-        
+
         // ad4m://setter links indicate writable properties
         if link.predicate == Some("ad4m://setter".to_string()) {
             prop_has_setter.insert(link.source.clone());
         }
-        
+
         // ad4m://CollectionShape type indicates a collection
-        if link.predicate == Some("rdf://type".to_string()) 
-            && link.target == "ad4m://CollectionShape" {
+        if link.predicate == Some("rdf://type".to_string())
+            && link.target == "ad4m://CollectionShape"
+        {
             prop_is_collection.insert(link.source.clone());
         }
-        
+
         // ad4m://constructor links indicate the shape has a constructor
         if link.predicate == Some("ad4m://constructor".to_string()) {
             shape_has_constructor.insert(link.source.clone());
         }
     }
-    
+
     // Generate Prolog facts for each SHACL class
     for (class_name, shape_uri) in &class_shapes {
         // Generate a Prolog-safe identifier for the shape
         let shape_id = format!("shacl_{}", class_name.to_lowercase());
-        
+
         // subject_class/2 fact
         lines.push(format!("subject_class(\"{}\", {}).", class_name, shape_id));
-        
+
         // Generate property facts
         if let Some(prop_shapes) = shape_properties.get(shape_uri) {
             for prop_shape in prop_shapes {
@@ -859,24 +867,30 @@ pub fn get_sdna_facts(
                     if prop_is_collection.contains(prop_shape) {
                         // collection/2 fact
                         lines.push(format!("collection({}, \"{}\").", shape_id, prop_name));
-                        
+
                         // collection_adder/3 if it has a setter (which doubles as adder for collections)
                         if prop_has_setter.contains(prop_shape) {
-                            lines.push(format!("collection_adder({}, \"{}\", _).", shape_id, prop_name));
+                            lines.push(format!(
+                                "collection_adder({}, \"{}\", _).",
+                                shape_id, prop_name
+                            ));
                         }
                     } else {
                         // property/2 fact
                         lines.push(format!("property({}, \"{}\").", shape_id, prop_name));
-                        
+
                         // property_setter/3 if writable
                         if prop_has_setter.contains(prop_shape) {
-                            lines.push(format!("property_setter({}, \"{}\", _).", shape_id, prop_name));
+                            lines.push(format!(
+                                "property_setter({}, \"{}\", _).",
+                                shape_id, prop_name
+                            ));
                         }
                     }
                 }
             }
         }
-        
+
         // constructor/2 if shape has constructor
         if shape_has_constructor.contains(shape_uri) {
             lines.push(format!("constructor({}, _).", shape_id));
