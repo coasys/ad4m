@@ -2839,6 +2839,323 @@ describe("Prolog + Literals", () => {
                     });
                 });
             })
+
+            describe("surrealGetter feature tests", () => {
+                @ModelOptions({ name: "BlogPost" })
+                class BlogPost extends Ad4mModel {
+                    @Property({ 
+                        through: "blog://title",
+                        resolveLanguage: "literal"
+                    })
+                    title: string = "";
+
+                    @Optional({
+                        through: "blog://parent",
+                        surrealGetter: "(->link[WHERE perspective = $perspective AND predicate = 'blog://reply_to'].out.uri)[0]"
+                    })
+                    parentPost: string | undefined;
+
+                    @Collection({
+                        through: "blog://tags",
+                        surrealGetter: "(->link[WHERE perspective = $perspective AND predicate = 'blog://tagged_with'].out.uri)"
+                    })
+                    tags: string[] = [];
+                }
+
+                beforeEach(async () => {
+                    if(perspective) {
+                        await ad4m!.perspective.remove(perspective.uuid)
+                    }
+                    perspective = await ad4m!.perspective.add("surrealGetter-test")
+                    const { name, sdna } = (BlogPost as any).generateSDNA();
+                    await perspective!.addSdna(name, sdna, 'subject_class')
+                });
+
+                it("should evaluate surrealGetter for property", async () => {
+                    const postRoot = Literal.from("Blog post for surrealGetter property test").toUrl();
+                    const parentRoot = Literal.from("Parent blog post").toUrl();
+
+                    const post = new BlogPost(perspective!, postRoot);
+                    post.title = "Reply Post";
+                    await post.save();
+
+                    const parent = new BlogPost(perspective!, parentRoot);
+                    parent.title = "Original Post";
+                    await parent.save();
+
+                    // Create the link that surrealGetter should find
+                    await perspective!.add(new Link({
+                        source: postRoot,
+                        predicate: "blog://reply_to",
+                        target: parentRoot
+                    }));
+
+                    // Get the post and check if surrealGetter resolved the parent
+                    const retrievedPost = new BlogPost(perspective!, postRoot);
+                    await retrievedPost.get();
+
+                    expect(retrievedPost.parentPost).to.equal(parentRoot);
+                });
+
+                it("should evaluate surrealGetter for collection", async () => {
+                    const postRoot = Literal.from("Blog post for surrealGetter collection test").toUrl();
+                    const tag1 = Literal.from("tag:javascript").toUrl();
+                    const tag2 = Literal.from("tag:typescript").toUrl();
+
+                    const post = new BlogPost(perspective!, postRoot);
+                    post.title = "Test Post";
+                    await post.save();
+
+                    // Create links that surrealGetter should find
+                    await perspective!.add(new Link({
+                        source: postRoot,
+                        predicate: "blog://tagged_with",
+                        target: tag1
+                    }));
+                    await perspective!.add(new Link({
+                        source: postRoot,
+                        predicate: "blog://tagged_with",
+                        target: tag2
+                    }));
+
+                    // Get the post and check if surrealGetter resolved the tags
+                    const retrievedPost = new BlogPost(perspective!, postRoot);
+                    await retrievedPost.get();
+
+                    expect(retrievedPost.tags).to.include(tag1);
+                    expect(retrievedPost.tags).to.include(tag2);
+                    expect(retrievedPost.tags.length).to.equal(2);
+                });
+
+                it("should filter out 'None' and empty values from surrealGetter results", async () => {
+                    const postRoot = Literal.from("Blog post for None filtering test").toUrl();
+
+                    const post = new BlogPost(perspective!, postRoot);
+                    post.title = "Post without parent";
+                    await post.save();
+
+                    // Don't create any reply_to link, so surrealGetter should return None/empty
+
+                    const retrievedPost = new BlogPost(perspective!, postRoot);
+                    await retrievedPost.get();
+
+                    // Property should be undefined, not 'None' or empty string
+                    expect(retrievedPost.parentPost).to.be.undefined;
+                });
+            })
+
+            describe("isInstance filtering tests", () => {
+                @ModelOptions({ name: "Comment" })
+                class Comment extends Ad4mModel {
+                    @Flag({
+                        through: "ad4m://type",
+                        value: "ad4m://comment"
+                    })
+                    type!: string;
+
+                    @Property({ 
+                        through: "comment://text",
+                        resolveLanguage: "literal"
+                    })
+                    text: string = "";
+                }
+
+                @ModelOptions({ name: "Article" })
+                class Article extends Ad4mModel {
+                    @Property({ 
+                        through: "article://title",
+                        resolveLanguage: "literal"
+                    })
+                    title: string = "";
+
+                    @Collection({
+                        through: "article://has_comment",
+                        where: { isInstance: Comment }
+                    })
+                    comments: string[] = [];
+                }
+
+                @ModelOptions({ name: "ArticleWithString" })
+                class ArticleWithString extends Ad4mModel {
+                    @Property({ 
+                        through: "article://title",
+                        resolveLanguage: "literal"
+                    })
+                    title: string = "";
+
+                    @Collection({
+                        through: "article://has_comment",
+                        where: { isInstance: "Comment" }
+                    })
+                    comments: string[] = [];
+                }
+
+                beforeEach(async () => {
+                    if(perspective) {
+                        await ad4m!.perspective.remove(perspective.uuid)
+                    }
+                    perspective = await ad4m!.perspective.add("isInstance-test")
+                    
+                    // Register both Comment and Article classes using ensureSDNASubjectClass
+                    await perspective!.ensureSDNASubjectClass(Comment);
+                    await perspective!.ensureSDNASubjectClass(Article);
+                    await perspective!.ensureSDNASubjectClass(ArticleWithString);
+
+                    // Give perspective time to fully index the SDNA classes
+                    await sleep(200);
+                });
+
+                it("should filter collection by isInstance with class reference", async () => {
+                    const articleRoot = Literal.from("Article for isInstance test").toUrl();
+                    const validComment1 = Literal.from("Valid comment 1").toUrl();
+                    const validComment2 = Literal.from("Valid comment 2").toUrl();
+                    const invalidItem = Literal.from("Invalid item").toUrl();
+
+                    const article = new Article(perspective!, articleRoot);
+                    article.title = "Test Article";
+                    await article.save();
+
+                    // Create valid comments
+                    const comment1 = new Comment(perspective!, validComment1);
+                    comment1.text = "This is a valid comment";
+                    await comment1.save();
+
+                    const comment2 = new Comment(perspective!, validComment2);
+                    comment2.text = "This is another valid comment";
+                    await comment2.save();
+
+                    // Add delay to allow SurrealDB to finish indexing
+                    await sleep(1500);
+
+                    // Add links to article
+                    await perspective!.add(new Link({
+                        source: articleRoot,
+                        predicate: "article://has_comment",
+                        target: validComment1
+                    }));
+                    await perspective!.add(new Link({
+                        source: articleRoot,
+                        predicate: "article://has_comment",
+                        target: invalidItem
+                    }));
+                    await perspective!.add(new Link({
+                        source: articleRoot,
+                        predicate: "article://has_comment",
+                        target: validComment2
+                    }));
+
+                    const retrievedArticle = new Article(perspective!, articleRoot);
+                    await retrievedArticle.get();
+
+                    // Should only contain valid Comments, not the invalid item
+                    expect(retrievedArticle.comments).to.have.lengthOf(2);
+                    expect(retrievedArticle.comments).to.include(validComment1);
+                    expect(retrievedArticle.comments).to.include(validComment2);
+                    expect(retrievedArticle.comments).to.not.include(invalidItem);
+                });
+
+                it("should filter collection by isInstance with string class name", async () => {
+                    const articleRoot = Literal.from("Article for string isInstance test").toUrl();
+                    const validComment = Literal.from("Valid comment").toUrl();
+                    const invalidItem = Literal.from("Invalid item").toUrl();
+
+                    const article = new ArticleWithString(perspective!, articleRoot);
+                    article.title = "Test Article with String";
+                    await article.save();
+
+                    // Create one valid comment
+                    const comment = new Comment(perspective!, validComment);
+                    comment.text = "Valid comment text";
+                    await comment.save();
+
+                    // Add both to article
+                    await perspective!.add(new Link({
+                        source: articleRoot,
+                        predicate: "article://has_comment",
+                        target: validComment
+                    }));
+                    await perspective!.add(new Link({
+                        source: articleRoot,
+                        predicate: "article://has_comment",
+                        target: invalidItem
+                    }));
+
+                    const retrievedArticle = new ArticleWithString(perspective!, articleRoot);
+                    await retrievedArticle.get();
+
+                    expect(retrievedArticle.comments).to.have.lengthOf(1);
+                    expect(retrievedArticle.comments[0]).to.equal(validComment);
+                });
+
+                it("should filter results in findAll() by isInstance", async () => {
+                    // Create two articles
+                    const article1Root = Literal.from("Article 1 for findAll isInstance").toUrl();
+                    const article2Root = Literal.from("Article 2 for findAll isInstance").toUrl();
+                    
+                    const comment1 = Literal.from("Comment 1").toUrl();
+                    const invalid1 = Literal.from("Invalid 1").toUrl();
+                    const comment2 = Literal.from("Comment 2").toUrl();
+                    const invalid2 = Literal.from("Invalid 2").toUrl();
+
+                    // Create articles
+                    const article1 = new Article(perspective!, article1Root);
+                    article1.title = "Article 1";
+                    await article1.save();
+
+                    const article2 = new Article(perspective!, article2Root);
+                    article2.title = "Article 2";
+                    await article2.save();
+
+                    // Create valid comments
+                    const c1 = new Comment(perspective!, comment1);
+                    c1.text = "Comment 1 text";
+                    await c1.save();
+
+                    const c2 = new Comment(perspective!, comment2);
+                    c2.text = "Comment 2 text";
+                    await c2.save();
+
+                    // Add comments to articles (mix of valid and invalid)
+                    await perspective!.add(new Link({
+                        source: article1Root,
+                        predicate: "article://has_comment",
+                        target: comment1
+                    }));
+                    await perspective!.add(new Link({
+                        source: article1Root,
+                        predicate: "article://has_comment",
+                        target: invalid1
+                    }));
+                    await perspective!.add(new Link({
+                        source: article2Root,
+                        predicate: "article://has_comment",
+                        target: comment2
+                    }));
+                    await perspective!.add(new Link({
+                        source: article2Root,
+                        predicate: "article://has_comment",
+                        target: invalid2
+                    }));
+
+                    // Use findAll and verify filtering
+                    const articles = await Article.findAll(perspective!);
+                    
+                    expect(articles).to.have.lengthOf(2);
+                    
+                    const foundArticle1 = articles.find(a => a.title === "Article 1");
+                    const foundArticle2 = articles.find(a => a.title === "Article 2");
+                    
+                    expect(foundArticle1).to.not.be.undefined;
+                    expect(foundArticle2).to.not.be.undefined;
+                    
+                    // Each article should only have valid comments
+                    expect(foundArticle1!.comments).to.have.lengthOf(1);
+                    expect(foundArticle1!.comments[0]).to.equal(comment1);
+                    
+                    expect(foundArticle2!.comments).to.have.lengthOf(1);
+                    expect(foundArticle2!.comments[0]).to.equal(comment2);
+                });
+            })
         })
     })
 

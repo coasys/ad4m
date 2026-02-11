@@ -1511,10 +1511,12 @@ export class PerspectiveProxy {
             if (triple.target) {
                 // Flag: must match both predicate AND exact target value
                 const escapedTarget = escapeSurrealString(triple.target);
-                checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] AND predicate = '${escapedPredicate}' AND out.uri = '${escapedTarget}' GROUP BY in.uri`;
+                // Note: Removed GROUP BY because it was causing SurrealDB to only return one result
+                checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] AND predicate = '${escapedPredicate}' AND out.uri = '${escapedTarget}'`;
             } else {
                 // Property: just check predicate exists
-                checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] AND predicate = '${escapedPredicate}' GROUP BY in.uri`;
+                // Note: Removed GROUP BY because it was causing SurrealDB to only return one result
+                checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] AND predicate = '${escapedPredicate}'`;
             }
             
             const result = await this.querySurrealDB(checkQuery);
