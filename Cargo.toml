@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "cli",
+    "mcp-server",
     "rust-client",
     "rust-executor",
     "ui/src-tauri"
