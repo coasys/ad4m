@@ -1,0 +1,37 @@
+[package]
+name = "ad4m-mcp-server"
+version = "0.1.0"
+edition = "2021"
+description = "MCP (Model Context Protocol) server for AD4M"
+license = "MIT"
+repository = "https://github.com/coasys/ad4m"
+
+[[bin]]
+name = "ad4m-mcp-server"
+path = "src/main.rs"
+
+[dependencies]
+# MCP SDK
+rmcp = { version = "0.15", features = ["server", "transport-io"] }
+
+# AD4M client  
+ad4m-client = { path = "../rust-client" }
+
+# Async runtime
+tokio = { version = "1", features = ["full", "io-std"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1.0"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }

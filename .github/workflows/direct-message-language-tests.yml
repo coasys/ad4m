@@ -1,5 +1,5 @@
-# This workflow will do a clean install of node dependencies, cache/restore them, build the source code and run tests across different versions of node
-# For more information see: https://help.github.com/actions/language-and-framework-guides/using-nodejs-with-github-actions
+# Direct Message Language Tests - Uses Docker container for consistent environment
+# Migrated from Tryorama (TypeScript) to sweettest (Rust) for stability
 
 name: Direct Message Language
 
@@ -11,49 +11,33 @@ on:
       - bootstrap-languages
 
 jobs:
-  pull:
-    name: Test
-
-    strategy:
-      matrix:
-        platform: [ubuntu-22.04]
-        node-version: [22.x]
-        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
-
-    runs-on: ${{ matrix.platform }}
+  sweettest:
+    name: Sweettest
+    runs-on: ubuntu-latest
+    container:
+      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
 
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: 1.77.0
+    - uses: actions/checkout@v3
 
-    - name: Cache cargo
-      id: cache-cargo
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo
+    # Rust toolchain configured via rust-toolchain.toml
+    - name: Verify Rust toolchain
+      run: rustc --version && cargo --version && hc --version
 
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v2
-      with:
-        node-version: ${{ matrix.node-version }}
+    - name: Install dependencies
+      run: pnpm install --no-frozen-lockfile
 
-    - uses: pnpm/action-setup@v4
+    - name: Build zomes
+      run: |
+        cd bootstrap-languages/direct-message-language/hc-dna
+        cargo build --release --target wasm32-unknown-unknown
 
-    - name: Install Deno
-      uses: denoland/setup-deno@v1
-      with:
-        deno-version: v1.32.4
+    - name: Build DNA
+      run: |
+        cd bootstrap-languages/direct-message-language/hc-dna
+        hc dna pack workdir
 
-    - run: rustup target add wasm32-unknown-unknown
-    - run: pnpm install
-    - run: cargo install holochain_cli --version 0.3.0-beta-dev.27 || echo "hc already installed"
-    - run: pnpm run build-languages
-    - run: cd bootstrap-languages/direct-message-language/hc-dna/tests && pnpm install && pnpm run test
+    - name: Run sweettest
+      run: |
+        cd bootstrap-languages/direct-message-language/hc-dna/tests/sweettest
+        cargo test --release -- --nocapture
