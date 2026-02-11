@@ -7,6 +7,7 @@ pub mod entanglement_service;
 mod globals;
 pub mod graphql;
 pub mod holochain_service;
+pub mod mcp;
 pub mod js_core;
 mod prolog_service;
 pub mod runtime_service;
