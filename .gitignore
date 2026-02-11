@@ -21,7 +21,6 @@ docs-src/typedoc
 docs-src/_book
 docs-src/.next
 docs-src/pages/jsdoc
-/docs
 host/dist
 host/build
 
