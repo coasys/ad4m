@@ -30,7 +30,7 @@ impl PubSub {
         let mut subscribers = self.subscribers.lock().await;
         let sender = subscribers
             .entry(topic.to_owned())
-            .or_insert_with(|| broadcast::channel(100).0); // 100 message buffer
+            .or_insert_with(|| broadcast::channel(10000).0); // 10000 message buffer
         sender.subscribe()
     }
 

@@ -2449,12 +2449,18 @@ impl PerspectiveInstance {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
-            // In Simple mode, only update subscription engine and trigger subscription rerun
-            if PROLOG_MODE == PrologMode::Simple {
-                log::debug!("Prolog facts update (Simple mode): marking subscription engine dirty");
+            // In Simple or SdnaOnly mode, just trigger subscription checks
+            // (Pooled mode prolog updates don't apply - run_query_all only works in Pooled mode)
+            if PROLOG_MODE == PrologMode::Simple || PROLOG_MODE == PrologMode::SdnaOnly {
+                log::debug!(
+                    "Prolog facts update ({:?} mode): triggering subscription checks",
+                    PROLOG_MODE
+                );
 
-                // Trigger subscription check to rerun all subscriptions with updated data
+                // Trigger notification, prolog subscription, and surreal subscription checks
+                *(self_clone.trigger_notification_check.lock().await) = true;
                 *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
+                *(self_clone.trigger_surreal_subscription_check.lock().await) = true;
 
                 self_clone.pubsub_publish_diff(diff).await;
 
