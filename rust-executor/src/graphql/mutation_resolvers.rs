@@ -1953,8 +1953,13 @@ impl Mutation {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
+        // Extract user context from auth token
+        let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
+        let user_email = agent_context.user_email;
+
         let perspective = get_perspective_with_access_control(&uuid, context).await?;
-        let (subscription_id, result_string) = perspective.subscribe_and_query(query).await?;
+        let (subscription_id, result_string) =
+            perspective.subscribe_and_query(query, user_email).await?;
 
         Ok(QuerySubscription {
             subscription_id,
@@ -1973,9 +1978,14 @@ impl Mutation {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
+        // Extract user context from auth token
+        let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
+        let user_email = agent_context.user_email;
+
         let perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        let (subscription_id, result_string) =
-            perspective.subscribe_and_query_surreal(query).await?;
+        let (subscription_id, result_string) = perspective
+            .subscribe_and_query_surreal(query, user_email)
+            .await?;
 
         Ok(QuerySubscription {
             subscription_id,

@@ -159,6 +159,7 @@ struct SubscribedQuery {
     query: String,
     last_result: String,
     last_keepalive: Instant,
+    user_email: Option<String>,
 }
 
 #[derive(Clone)]
@@ -166,6 +167,7 @@ struct SurrealSubscribedQuery {
     query: String,
     last_result: String,
     last_keepalive: Instant,
+    user_email: Option<String>,
 }
 
 #[derive(Clone)]
@@ -3582,13 +3584,17 @@ impl PerspectiveInstance {
         });
     }
 
-    pub async fn subscribe_and_query(&self, query: String) -> Result<(String, String), AnyError> {
-        // Check if we already have a subscription with the same query
+    pub async fn subscribe_and_query(
+        &self,
+        query: String,
+        user_email: Option<String>,
+    ) -> Result<(String, String), AnyError> {
+        // Check if we already have a subscription with the same query and user
         let existing_subscription = {
             let queries = self.subscribed_queries.lock().await;
             queries
                 .iter()
-                .find(|(_, q)| q.query == query)
+                .find(|(_, q)| q.query == query && q.user_email == user_email)
                 .map(|(id, _)| id.clone())
         };
 
@@ -3615,14 +3621,22 @@ impl PerspectiveInstance {
 
         let subscription_id = uuid::Uuid::new_v4().to_string();
 
-        // Execute prolog query without holding any locks
-        let initial_result = self.prolog_query_subscription(query.clone()).await?;
+        // Execute prolog query with user context
+        let agent_context = if let Some(email) = user_email.as_ref() {
+            crate::agent::AgentContext::for_user_email(email.clone())
+        } else {
+            crate::agent::AgentContext::main_agent()
+        };
+        let initial_result = self
+            .prolog_query_subscription_with_context(query.clone(), &agent_context)
+            .await?;
         let result_string = prolog_resolution_to_string(initial_result);
 
         let subscribed_query = SubscribedQuery {
             query,
             last_result: result_string.clone(),
             last_keepalive: Instant::now(),
+            user_email,
         };
 
         // Now insert the subscription
@@ -3683,13 +3697,14 @@ impl PerspectiveInstance {
     pub async fn subscribe_and_query_surreal(
         &self,
         query: String,
+        user_email: Option<String>,
     ) -> Result<(String, String), AnyError> {
-        // Check if we already have a subscription with the same query
+        // Check if we already have a subscription with the same query and user
         let existing_subscription = {
             let queries = self.surreal_subscribed_queries.lock().await;
             queries
                 .iter()
-                .find(|(_, q)| q.query == query)
+                .find(|(_, q)| q.query == query && q.user_email == user_email)
                 .map(|(id, _)| id.clone())
         };
 
@@ -3716,14 +3731,17 @@ impl PerspectiveInstance {
 
         let subscription_id = Uuid::new_v4().to_string();
 
-        // Execute surreal query without holding any locks
-        let initial_result_vec = self.surreal_query(query.clone()).await?;
+        // Execute surreal query with user context for $agentDid and $perspectiveId substitution
+        let initial_result_vec = self
+            .surreal_query_notification(query.clone(), user_email.clone())
+            .await?;
         let result_string = serde_json::to_string(&initial_result_vec)?;
 
         let subscribed_query = SurrealSubscribedQuery {
             query,
             last_result: result_string.clone(),
             last_keepalive: Instant::now(),
+            user_email,
         };
 
         // Now insert the subscription
@@ -3783,18 +3801,25 @@ impl PerspectiveInstance {
         let mut query_futures = Vec::new();
         let now = Instant::now();
 
-        // Collect only the minimal data needed: ID, query string, and keepalive time
+        // Collect only the minimal data needed: ID, query string, user_email, and keepalive time
         // DON'T clone the potentially huge last_result string
         let queries = {
             let queries_guard = self.surreal_subscribed_queries.lock().await;
             queries_guard
                 .iter()
-                .map(|(id, query)| (id.clone(), query.query.clone(), query.last_keepalive))
+                .map(|(id, query)| {
+                    (
+                        id.clone(),
+                        query.query.clone(),
+                        query.user_email.clone(),
+                        query.last_keepalive,
+                    )
+                })
                 .collect::<Vec<_>>()
         };
 
         // Create futures for each query check
-        for (id, query_string, last_keepalive) in queries {
+        for (id, query_string, user_email, last_keepalive) in queries {
             // Check for timeout
             if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
                 queries_to_remove.push(id);
@@ -3804,7 +3829,10 @@ impl PerspectiveInstance {
             // Spawn query check future
             let self_clone = self.clone();
             let query_future = async move {
-                match self_clone.surreal_query(query_string).await {
+                match self_clone
+                    .surreal_query_notification(query_string, user_email)
+                    .await
+                {
                     Ok(result_vec) => {
                         if let Ok(result_string) = serde_json::to_string(&result_vec) {
                             // Compare with stored last_result only now, avoiding the clone earlier
@@ -3861,18 +3889,25 @@ impl PerspectiveInstance {
         let mut query_futures = Vec::new();
         let now = Instant::now();
 
-        // Collect only the minimal data needed: ID, query string, and keepalive time
+        // Collect only the minimal data needed: ID, query string, user_email, and keepalive time
         // DON'T clone the potentially huge last_result string
         let queries = {
             let queries = self.subscribed_queries.lock().await;
             queries
                 .iter()
-                .map(|(id, query)| (id.clone(), query.query.clone(), query.last_keepalive))
+                .map(|(id, query)| {
+                    (
+                        id.clone(),
+                        query.query.clone(),
+                        query.user_email.clone(),
+                        query.last_keepalive,
+                    )
+                })
                 .collect::<Vec<_>>()
         };
 
         // Create futures for each query check
-        for (id, query_string, last_keepalive) in queries {
+        for (id, query_string, user_email, last_keepalive) in queries {
             // Check for timeout
             if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
                 queries_to_remove.push(id);
@@ -3883,7 +3918,15 @@ impl PerspectiveInstance {
             let self_clone = self.clone();
             let query_future = async move {
                 //let this_now = Instant::now();
-                if let Ok(result) = self_clone.prolog_query_subscription(query_string).await {
+                let agent_context = if let Some(email) = user_email {
+                    crate::agent::AgentContext::for_user_email(email)
+                } else {
+                    crate::agent::AgentContext::main_agent()
+                };
+                if let Ok(result) = self_clone
+                    .prolog_query_subscription_with_context(query_string, &agent_context)
+                    .await
+                {
                     let result_string = prolog_resolution_to_string(result);
                     // Compare with stored last_result only now, avoiding the clone earlier
                     let mut queries = self_clone.subscribed_queries.lock().await;
