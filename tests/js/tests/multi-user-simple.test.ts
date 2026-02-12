@@ -424,12 +424,12 @@ describe("Multi-User Simple integration tests", () => {
 
         it("should handle perspective access control for operations", async () => {
             // Create two users
-            const user1Result = await adminAd4mClient!.agent.createUser("access1@example.com", "password1");
-            const user2Result = await adminAd4mClient!.agent.createUser("access2@example.com", "password2");
-            
-            const token1 = await adminAd4mClient!.agent.loginUser("access1@example.com", "password1");
-            const token2 = await adminAd4mClient!.agent.loginUser("access2@example.com", "password2");
-            
+            const user1Result = await adminAd4mClient!.agent.createUser("accessctrl1@example.com", "password1");
+            const user2Result = await adminAd4mClient!.agent.createUser("accessctrl2@example.com", "password2");
+
+            const token1 = await adminAd4mClient!.agent.loginUser("accessctrl1@example.com", "password1");
+            const token2 = await adminAd4mClient!.agent.loginUser("accessctrl2@example.com", "password2");
+
             // @ts-ignore - Suppress Apollo type mismatch
             const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
             // @ts-ignore - Suppress Apollo type mismatch
