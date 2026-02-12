@@ -1396,9 +1396,17 @@ impl PerspectiveInstance {
                 ..Default::default()
             })
             .await?;
-        log::info!("get_subject_classes_from_shacl: Found {} links", shacl_class_links.len());
+        log::info!(
+            "get_subject_classes_from_shacl: Found {} links",
+            shacl_class_links.len()
+        );
         for (link, _status) in &shacl_class_links {
-            log::debug!("get_subject_classes_from_shacl: Link: {} -> {:?} -> {}", link.data.source, link.data.predicate, link.data.target);
+            log::debug!(
+                "get_subject_classes_from_shacl: Link: {} -> {:?} -> {}",
+                link.data.source,
+                link.data.predicate,
+                link.data.target
+            );
         }
 
         // Extract class names from source URIs
@@ -1612,17 +1620,32 @@ impl PerspectiveInstance {
                 .await?;
         } else if matches!(sdna_type, SdnaType::SubjectClass) && !original_prolog_code.is_empty() {
             // Generate SHACL links from Prolog SDNA for backward compatibility
-            log::info!("add_sdna: Generating SHACL links from Prolog SDNA for class '{}'", name);
+            log::info!(
+                "add_sdna: Generating SHACL links from Prolog SDNA for class '{}'",
+                name
+            );
             match parse_prolog_sdna_to_shacl_links(&original_prolog_code, &name) {
                 Ok(shacl_links) => {
-                    log::info!("add_sdna: Generated {} SHACL links for class '{}'", shacl_links.len(), name);
+                    log::info!(
+                        "add_sdna: Generated {} SHACL links for class '{}'",
+                        shacl_links.len(),
+                        name
+                    );
                     for link in &shacl_links {
-                        log::debug!("add_sdna: SHACL link: {} -> {:?} -> {}", link.source, link.predicate, link.target);
+                        log::debug!(
+                            "add_sdna: SHACL link: {} -> {:?} -> {}",
+                            link.source,
+                            link.predicate,
+                            link.target
+                        );
                     }
                     if !shacl_links.is_empty() {
                         self.add_links(shacl_links, LinkStatus::Shared, None, context)
                             .await?;
-                        log::info!("add_sdna: SHACL links stored successfully for class '{}'", name);
+                        log::info!(
+                            "add_sdna: SHACL links stored successfully for class '{}'",
+                            name
+                        );
                     }
                 }
                 Err(e) => {
@@ -3230,22 +3253,10 @@ impl PerspectiveInstance {
                 "SubjectClassOption needs to either have `name` or `query` set"
             ))?;
 
-            // Try SHACL-based lookup first (works when Prolog is disabled)
-            if let Some(class_name) = self.find_subject_class_from_shacl_by_query(&query).await? {
-                return Ok(class_name);
-            }
-
-            // Fall back to Prolog query (if Prolog is enabled)
-            let result = self
-                .prolog_query_sdna_with_context(query.to_string(), context)
-                .await
-                .map_err(|e| {
-                    log::error!("Error creating subject: {:?}", e);
-                    e
-                })?;
-
-            prolog_get_first_string_binding(&result, "Class")
-                .ok_or(anyhow!("No matching subject class found!"))?
+            // Use SHACL-based lookup (Prolog-free)
+            self.find_subject_class_from_shacl_by_query(&query)
+                .await?
+                .ok_or_else(|| anyhow!("No matching subject class found for query: {}", query))?
         })
     }
 

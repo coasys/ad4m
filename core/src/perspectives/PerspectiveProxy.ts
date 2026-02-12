@@ -1270,25 +1270,15 @@ export class PerspectiveProxy {
 
     /** Returns all the Subject classes defined in this perspectives SDNA 
      * 
-     * Tries SHACL-based lookup first (works when Prolog is disabled),
-     * falls back to Prolog infer if SHACL returns empty.
+     * Uses SHACL-based lookup (Prolog-free implementation).
      */
     async subjectClasses(): Promise<string[]> {
-        // Try SHACL-based lookup first (Prolog-free implementation)
         try {
             const shaclClasses = await this.#client.subjectClassesFromSHACL(this.#handle.uuid);
-            if (shaclClasses && shaclClasses.length > 0) {
-                return shaclClasses;
-            }
+            return shaclClasses || [];
         } catch (e) {
-            // SHACL query failed, try Prolog fallback
-        }
-
-        // Fall back to Prolog infer
-        try {
-            return (await this.infer("subject_class(X, _)")).map(x => x.X)
-        } catch (e) {
-            return []
+            console.warn('subjectClasses: SHACL lookup failed:', e);
+            return [];
         }
     }
 
@@ -1414,20 +1404,11 @@ export class PerspectiveProxy {
     async removeSubject<T>(subjectClass: T, exprAddr: string, batchId?: string) {
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
 
-        // Try SHACL links first
+        // Get destructor actions from SHACL links (Prolog-free)
         let actions = await this.getActionsFromSHACL(className, "ad4m://destructor");
 
         if (!actions) {
-            // Fall back to Prolog
-            let result = await this.infer(`subject_class("${className}", C), destructor(C, Actions)`)
-            if(!result.length) {
-                throw "No destructor found for given subject class: " + className
-            }
-            try {
-                actions = JSON.parse(result[0].Actions);
-            } catch (e) {
-                throw `Failed to parse destructor actions for class "${className}": ${e}`;
-            }
+            throw `No destructor found for subject class: ${className}. Make sure the class was registered with SHACL.`;
         }
 
         await this.executeAction(actions, exprAddr, undefined, batchId)
@@ -1442,20 +1423,11 @@ export class PerspectiveProxy {
     async isSubjectInstance<T>(expression: string, subjectClass: T): Promise<boolean> {
         let className = await this.stringOrTemplateObjectToSubjectClassName(subjectClass)
 
-        // Get metadata from SDNA using Prolog metaprogramming
+        // Get metadata from SHACL links
         const metadata = await this.getSubjectClassMetadataFromSDNA(className);
         if (!metadata) {
-            // Fallback to Prolog check if SDNA metadata isn't available
-            // This handles cases where classes exist in Prolog but not in SDNA
-            try {
-                const escapedClassName = className.replace(/"/g, '\\"');
-                const escapedExpression = expression.replace(/"/g, '\\"');
-                const result = await this.infer(`subject_class("${escapedClassName}", C), instance(C, "${escapedExpression}")`);
-                return result && result.length > 0;
-            } catch (e) {
-                console.warn(`Failed to check instance via Prolog for class ${className}:`, e);
-                return false;
-            }
+            console.warn(`isSubjectInstance: No SHACL metadata found for class ${className}`);
+            return false;
         }
 
         // If no required triples, any expression with links is an instance
@@ -1525,6 +1497,14 @@ export class PerspectiveProxy {
      * Returns required predicates that define what makes something an instance,
      * plus a map of property/collection names to their predicates.
      */
+    /**
+     * Gets subject class metadata from SHACL links (Prolog-free implementation).
+     * 
+     * Queries SHACL links stored by addSdna to extract:
+     * - Required predicates for instance identification
+     * - Property metadata (predicate, resolveLanguage)
+     * - Collection metadata (predicate, instanceFilter)
+     */
     private async getSubjectClassMetadataFromSDNA(className: string): Promise<{
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
@@ -1532,174 +1512,119 @@ export class PerspectiveProxy {
         collections: Map<string, { predicate: string, instanceFilter?: string }>
     } | null> {
         try {
-            // Get SDNA code from perspective - it's stored as a link
-            // Use canonical Literal.from() to construct the source URL
-            const sdnaLinks = await this.get(new LinkQuery({
-                source: Literal.from(className).toUrl(),
-                predicate: "ad4m://sdna"
-            }));
-
-            //console.log(`getSubjectClassMetadataFromSDNA: sdnaLinks for ${className}:`, sdnaLinks);
-
-            if (!sdnaLinks || sdnaLinks.length === 0) {
-                console.warn(`No SDNA found for class ${className}`);
+            // Find the shape URI for this class by looking for the rdf://type -> ad4m://SubjectClass link
+            // The source of that link is the class URI (e.g., "recipe://Recipe")
+            const classQuery = `
+                SELECT in.uri AS class_uri 
+                FROM link 
+                WHERE predicate = 'rdf://type' 
+                  AND out.uri = 'ad4m://SubjectClass' 
+                  AND in.uri CONTAINS '${escapeSurrealString(className)}'
+                LIMIT 1
+            `;
+            const classResult = await this.querySurrealDB(classQuery);
+            
+            if (!classResult || classResult.length === 0) {
+                console.warn(`No SHACL class found for ${className}`);
                 return null;
             }
-
-            if (!sdnaLinks[0].data.target) {
-                console.error(`SDNA link for ${className} has no target:`, sdnaLinks[0]);
-                return null;
-            }
-
-            // Extract SDNA code from the literal
-            const sdnaCode = Literal.fromUrl(sdnaLinks[0].data.target).get();
-            //console.log("sdnaCode for", className, ":", sdnaCode.substring(0, 200));
-
-            // Store required triples as {predicate, target?}
-            // target is only set for flags (exact matches), otherwise undefined
+            
+            const classUri = classResult[0].class_uri;
+            // Extract namespace from class URI (e.g., "recipe://Recipe" -> "recipe://")
+            const namespaceMatch = classUri.match(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)/);
+            const namespace = namespaceMatch ? namespaceMatch[1] : 'ad4m://';
+            const shapeUri = `${namespace}${className}Shape`;
+            
+            const requiredPredicates: string[] = [];
             const requiredTriples: Array<{predicate: string, target?: string}> = [];
-
-            // Parse the instance rule from the SDNA code
-            // Format: instance(c, Base) :- triple(Base, "pred1", _), triple(Base, "pred2", "exact_value").
-            // Use a more robust pattern that handles complex rule bodies
-            // Match from "instance(" to the closing "." using non-greedy matching
-            const instanceRulePattern = /instance\([^)]+\)\s*:-\s*([^.]+)\./g;
-            let instanceRuleMatch;
-            let foundInstanceRule = false;
-
-            while ((instanceRuleMatch = instanceRulePattern.exec(sdnaCode)) !== null) {
-                foundInstanceRule = true;
-                const ruleBody = instanceRuleMatch[1];
-
-                // Extract all triple(Base, "predicate", Target) patterns
-                // Match both: triple(Base, "pred", _) and triple(Base, "pred", "value")
-                const tripleRegex = /triple\([^,]+,\s*"([^"]+)",\s*(?:"([^"]+)"|_)\)/g;
-                let match;
-
-                while ((match = tripleRegex.exec(ruleBody)) !== null) {
-                    const predicate = match[1];
-                    const target = match[2]; // undefined if matched "_"
-                    requiredTriples.push({ predicate, target });
-                }
-            }
-
-            if (!foundInstanceRule) {
-                console.warn(`No instance rule found in SDNA for ${className}`);
-            }
-
-            // For backward compatibility, also maintain requiredPredicates array
-            const requiredPredicates = requiredTriples.map(t => t.predicate);
-
-            // Extract property metadata
             const properties = new Map<string, { predicate: string, resolveLanguage?: string }>();
-            const propertyResults = await this.infer(`subject_class("${className}", C), property(C, P)`);
-            //console.log("propertyResults", propertyResults);
-
-            if (propertyResults) {
-                for (const result of propertyResults) {
-                    const propName = result.P;
-                    let predicate: string | null = null;
-
-                    // Try to extract predicate from property_setter first
-                    const setterResults = await this.infer(`subject_class("${className}", C), property_setter(C, "${propName}", Setter)`);
-                    if (setterResults && setterResults.length > 0) {
-                        const setterString = setterResults[0].Setter;
-                        const predicateMatch = setterString.match(/predicate:\s*"([^"]+)"|predicate:\s*([^,}\]]+)/);
-                        if (predicateMatch) {
-                            predicate = predicateMatch[1] || predicateMatch[2];
-                        }
-                    }
-
-                    // If no setter, try to extract from SDNA property_getter Prolog code
-                    if (!predicate) {
-                        // Parse the SDNA code for property_getter definition
-                        // Escape propName to prevent regex injection and ReDoS attacks
-                        const escapedPropName = this.escapeRegExp(propName);
-                        const getterMatch = sdnaCode.match(new RegExp(`property_getter\\([^,]+,\\s*[^,]+,\\s*"${escapedPropName}"[^)]*\\)\\s*:-\\s*triple\\([^,]+,\\s*"([^"]+)"`));
-                        if (getterMatch) {
-                            predicate = getterMatch[1];
-                        }
-                    }
-
-                    if (predicate) {
-                        // Check if property has resolveLanguage
-                        const resolveResults = await this.infer(`subject_class("${className}", C), property_resolve_language(C, "${propName}", Lang)`);
-                        const resolveLanguage = resolveResults && resolveResults.length > 0 ? resolveResults[0].Lang : undefined;
-
-                        properties.set(propName, { predicate, resolveLanguage });
-                    }
-                }
-            }
-            //console.log("properties", properties);
-
-            // Extract collection metadata
             const collections = new Map<string, { predicate: string, instanceFilter?: string }>();
-            const collectionResults = await this.infer(`subject_class("${className}", C), collection(C, Coll)`);
-            //console.log("collectionResults", collectionResults);
-            if (collectionResults) {
-                for (const result of collectionResults) {
-                    const collName = result.Coll;
-                    let predicate: string | null = null;
-                    let instanceFilter: string | undefined = undefined;
-
-                    // Try to extract predicate from collection_adder first
-                    const adderResults = await this.infer(`subject_class("${className}", C), collection_adder(C, "${collName}", Adder)`);
-                    if (adderResults && adderResults.length > 0) {
-                        const adderString = adderResults[0].Adder;
-                        const predicateMatch = adderString.match(/predicate:\s*"([^"]+)"|predicate:\s*([^,}\]]+)/);
-                        if (predicateMatch) {
-                            predicate = predicateMatch[1] || predicateMatch[2];
-                        }
-                    }
-
-                    // Parse collection_getter from SDNA to extract predicate and instanceFilter
-                    // Format 1 (findall): collection_getter(c, Base, "comments", List) :- findall(C, triple(Base, "todo://comment", C), List).
-                    // Format 2 (setof): collection_getter(c, Base, "messages", List) :- setof(Target, (triple(Base, "flux://entry_type", Target), ...), List).
-                    // Use a line-based match to avoid capturing multiple collections
-                    // Escape collName to prevent regex injection and ReDoS attacks
-                    const escapedCollName = this.escapeRegExp(collName);
-                    const getterLinePattern = new RegExp(`collection_getter\\([^,]+,\\s*[^,]+,\\s*"${escapedCollName}"[^)]*\\)\\s*:-[^.]+\\.`);
-                    const getterLineMatch = sdnaCode.match(getterLinePattern);
-
-                    if (getterLineMatch) {
-                        const getterLine = getterLineMatch[0];
-                        // Extract the body between setof/findall and the final ).
-                        // Pattern: findall(Var, Body, List) or setof(Var, (Body), List)
-                        const bodyPattern = /(?:setof|findall)\([^,]+,\s*(.+),\s*\w+\)\./;
-                        const bodyMatch = getterLine.match(bodyPattern);
-
-                        if (bodyMatch) {
-                            let getterBody = bodyMatch[1];
-                            // Remove outer parentheses if present (setof case)
-                            if (getterBody.startsWith('(') && getterBody.endsWith(')')) {
-                                getterBody = getterBody.substring(1, getterBody.length - 1);
-                            }
-
-                            // Extract predicate from triple(Base, "predicate", Target)
-                            if (!predicate) {
-                                const tripleMatch = getterBody.match(/triple\([^,]+,\s*"([^"]+)"/);
-                                if (tripleMatch) {
-                                    predicate = tripleMatch[1];
+            
+            // Get constructor actions to extract required predicates (for instance identification)
+            const constructorQuery = `
+                SELECT out.uri AS target 
+                FROM link 
+                WHERE in.uri = '${escapeSurrealString(shapeUri)}' 
+                  AND predicate = 'ad4m://constructor'
+            `;
+            const constructorResult = await this.querySurrealDB(constructorQuery);
+            
+            if (constructorResult && constructorResult.length > 0) {
+                const constructorTarget = constructorResult[0].target;
+                // Parse constructor actions from literal://string:[{...}]
+                if (constructorTarget && constructorTarget.startsWith('literal://string:')) {
+                    try {
+                        const actionsJson = constructorTarget.substring('literal://string:'.length);
+                        const actions = JSON.parse(actionsJson);
+                        for (const action of actions) {
+                            if (action.predicate) {
+                                requiredPredicates.push(action.predicate);
+                                // If target is a specific value (not "value"), it's a flag
+                                if (action.target && action.target !== 'value') {
+                                    requiredTriples.push({ predicate: action.predicate, target: action.target });
+                                } else {
+                                    requiredTriples.push({ predicate: action.predicate });
                                 }
                             }
-
-                            // Check for instance filter: subject_class("ClassName", OtherClass)
-                            const instanceMatch = getterBody.match(/subject_class\("([^"]+)"/);
-                            if (instanceMatch) {
-                                instanceFilter = instanceMatch[1];
-                            }
                         }
-                    }
-
-                    if (predicate) {
-                        collections.set(collName, { predicate, instanceFilter });
+                    } catch (e) {
+                        console.warn(`Failed to parse constructor actions for ${className}:`, e);
                     }
                 }
             }
-            //console.log("collections", collections);
+            
+            // Get all property shapes
+            const propertiesQuery = `
+                SELECT out.uri AS prop_uri 
+                FROM link 
+                WHERE in.uri = '${escapeSurrealString(shapeUri)}' 
+                  AND predicate = 'sh://property'
+            `;
+            const propertiesResult = await this.querySurrealDB(propertiesQuery);
+            
+            if (propertiesResult) {
+                for (const propRow of propertiesResult) {
+                    const propUri = propRow.prop_uri;
+                    // Extract property name from URI (e.g., "recipe://Recipe.name" -> "name")
+                    const propNameMatch = propUri.match(/\.([^.]+)$/);
+                    if (!propNameMatch) continue;
+                    const propName = propNameMatch[1];
+                    
+                    // Get property details (path, resolveLanguage, collection flag)
+                    const propDetailsQuery = `
+                        SELECT predicate, out.uri AS target 
+                        FROM link 
+                        WHERE in.uri = '${escapeSurrealString(propUri)}'
+                    `;
+                    const propDetails = await this.querySurrealDB(propDetailsQuery);
+                    
+                    let predicate: string | undefined;
+                    let resolveLanguage: string | undefined;
+                    let isCollection = false;
+                    
+                    for (const detail of propDetails || []) {
+                        if (detail.predicate === 'sh://path') {
+                            predicate = detail.target;
+                        } else if (detail.predicate === 'ad4m://resolveLanguage') {
+                            resolveLanguage = detail.target?.replace('literal://string:', '');
+                        } else if (detail.predicate === 'rdf://type' && detail.target === 'ad4m://Collection') {
+                            isCollection = true;
+                        }
+                    }
+                    
+                    if (predicate) {
+                        if (isCollection) {
+                            collections.set(propName, { predicate });
+                        } else {
+                            properties.set(propName, { predicate, resolveLanguage });
+                        }
+                    }
+                }
+            }
+            
             return { requiredPredicates, requiredTriples, properties, collections };
         } catch (e) {
-            console.error(`Error getting metadata for ${className}:`, e);
+            console.error(`Error getting SHACL metadata for ${className}:`, e);
             return null;
         }
     }
@@ -2084,19 +2009,7 @@ export class PerspectiveProxy {
      * @param obj The template object
      */
     async subjectClassesByTemplate(obj: object): Promise<string[]> {
-        // Try Prolog-based template matching first
-        try {
-            const query = this.buildQueryFromTemplate(obj);
-            let result = await this.infer(query)
-            if(result && result.length > 0) {
-                return result.map(x => x.Class)
-            }
-        } catch (e) {
-            // Prolog disabled or failed
-        }
-
-        // Fall back to SHACL-based lookup by className
-        // This is less precise (doesn't match by template) but works when Prolog is disabled
+        // SHACL-based lookup by className (Prolog-free)
         try {
             // @ts-ignore - className is added dynamically by decorators
             const className = obj.className || obj.constructor?.className || obj.constructor?.prototype?.className;
@@ -2107,10 +2020,10 @@ export class PerspectiveProxy {
                 }
             }
         } catch (e) {
-            // SHACL lookup also failed
+            console.warn('subjectClassesByTemplate: SHACL lookup failed:', e);
         }
 
-        return []
+        return [];
     }
 
     /** Takes a JS class (its constructor) and assumes that it was decorated by
@@ -2123,33 +2036,20 @@ export class PerspectiveProxy {
         // Get the class name from the JS class
         const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
         
-        // First try SHACL-based lookup (works when Prolog is disabled)
+        // Check if class already exists via SHACL lookup
         try {
             const existingClasses = await this.#client.subjectClassesFromSHACL(this.#handle.uuid);
             if (existingClasses.includes(className)) {
                 return; // Class already exists
             }
         } catch (e) {
-            // SHACL lookup failed, try template-based fallback
+            // SHACL lookup failed, continue to add the class
         }
 
-        // Fall back to Prolog template-based check
-        try {
-            const subjectClass = await this.subjectClassesByTemplate(new jsClass)
-            if(subjectClass.length > 0) {
-                return
-            }
-        } catch (e) {
-            // Prolog disabled or failed, continue to add the class
+        // Generate SHACL SDNA (Prolog-free)
+        if (!jsClass.generateSHACL) {
+            throw new Error(`Class ${jsClass.name} must have generateSHACL(). Use @ModelOptions decorator.`);
         }
-
-        // Generate both SHACL and Prolog SDNA
-        if (!jsClass.generateSHACL || !jsClass.generateSDNA) {
-            throw new Error(`Class ${jsClass.name} must have both generateSHACL() and generateSDNA(). Use @ModelOptions decorator.`);
-        }
-
-        // Get Prolog SDNA for backward compatibility (Rust backend still uses Prolog for queries)
-        const { name: sdnaName, sdna: prologSdna } = jsClass.generateSDNA();
 
         // Get SHACL shape (W3C standard + AD4M action definitions)
         const { shape } = jsClass.generateSHACL();
@@ -2176,9 +2076,9 @@ export class PerspectiveProxy {
             }))
         });
 
-        // Pass both Prolog SDNA and SHACL JSON to backend
-        // Rust backend stores SHACL links which are then converted to Prolog facts for queries
-        await this.addSdna(sdnaName, prologSdna, 'subject_class', shaclJson);
+        // Pass SHACL JSON to backend (Prolog-free)
+        // Backend stores SHACL links directly
+        await this.addSdna(className, '', 'subject_class', shaclJson);
     }
 
     getNeighbourhoodProxy(): NeighbourhoodProxy {
