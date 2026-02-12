@@ -1871,13 +1871,16 @@ impl PerspectiveInstance {
             _ => Vec::new(), // Should never reach here given the callers
         };
 
-
         // Filter to only show SDNA links created by this user
         links.retain(|link| {
             // Keep SDNA links only if authored by this user
-            link.data.source == "ad4m://self" && ( link.author == user_did || Some(&link.author) == neighbourhood_author.as_ref())
-                || link.data.predicate.as_ref().map(|p| p.as_str()) == Some("ad4m://sdna") && ( link.author == user_did || Some(&link.author) == neighbourhood_author.as_ref())
-                || (link.data.source != "ad4m://self" && link.data.predicate.as_ref().map(|p| p.as_str()) != Some("ad4m://sdna"))
+            link.data.source == "ad4m://self"
+                && (link.author == user_did || Some(&link.author) == neighbourhood_author.as_ref())
+                || link.data.predicate.as_ref().map(|p| p.as_str()) == Some("ad4m://sdna")
+                    && (link.author == user_did
+                        || Some(&link.author) == neighbourhood_author.as_ref())
+                || (link.data.source != "ad4m://self"
+                    && link.data.predicate.as_ref().map(|p| p.as_str()) != Some("ad4m://sdna"))
         });
 
         // Execute the query using the appropriate engine
