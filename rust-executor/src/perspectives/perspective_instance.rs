@@ -1387,6 +1387,7 @@ impl PerspectiveInstance {
     /// The source of these links is the class URI (e.g., "recipe://Recipe")
     /// We extract the class name from the URI.
     pub async fn get_subject_classes_from_shacl(&self) -> Result<Vec<String>, AnyError> {
+        log::info!("get_subject_classes_from_shacl: Querying for SHACL class links");
         // Query for SHACL class definition links
         let shacl_class_links = self
             .get_links_local(&LinkQuery {
@@ -1395,6 +1396,10 @@ impl PerspectiveInstance {
                 ..Default::default()
             })
             .await?;
+        log::info!("get_subject_classes_from_shacl: Found {} links", shacl_class_links.len());
+        for (link, _status) in &shacl_class_links {
+            log::debug!("get_subject_classes_from_shacl: Link: {} -> {:?} -> {}", link.data.source, link.data.predicate, link.data.target);
+        }
 
         // Extract class names from source URIs
         let mut class_names: Vec<String> = shacl_class_links
@@ -1607,11 +1612,17 @@ impl PerspectiveInstance {
                 .await?;
         } else if matches!(sdna_type, SdnaType::SubjectClass) && !original_prolog_code.is_empty() {
             // Generate SHACL links from Prolog SDNA for backward compatibility
+            log::info!("add_sdna: Generating SHACL links from Prolog SDNA for class '{}'", name);
             match parse_prolog_sdna_to_shacl_links(&original_prolog_code, &name) {
                 Ok(shacl_links) => {
+                    log::info!("add_sdna: Generated {} SHACL links for class '{}'", shacl_links.len(), name);
+                    for link in &shacl_links {
+                        log::debug!("add_sdna: SHACL link: {} -> {:?} -> {}", link.source, link.predicate, link.target);
+                    }
                     if !shacl_links.is_empty() {
                         self.add_links(shacl_links, LinkStatus::Shared, None, context)
                             .await?;
+                        log::info!("add_sdna: SHACL links stored successfully for class '{}'", name);
                     }
                 }
                 Err(e) => {
