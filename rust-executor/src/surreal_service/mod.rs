@@ -1,6 +1,7 @@
 use crate::graphql::graphql_types::LinkStatus;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
 use deno_core::anyhow::Error;
+use log::warn;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -770,11 +771,20 @@ impl SurrealDBService {
         let results = self.query_links(_perspective_uuid, query).await?;
 
         // Convert JSON results to SurrealLink then to DecoratedLinkExpression
-        let links: Vec<DecoratedLinkExpression> = results
-            .into_iter()
-            .filter_map(|value| serde_json::from_value::<SurrealLink>(value).ok())
-            .map(|surreal_link| surreal_link.into())
-            .collect();
+        let mut links: Vec<DecoratedLinkExpression> = Vec::new();
+        for value in results {
+            match serde_json::from_value::<SurrealLink>(value.clone()) {
+                Ok(surreal_link) => {
+                    links.push(surreal_link.into());
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to deserialize SurrealLink in get_all_links: {}. Offending value: {}",
+                        e, value
+                    );
+                }
+            }
+        }
 
         Ok(links)
     }
@@ -826,8 +836,16 @@ impl SurrealDBService {
 
         if let Value::Array(arr) = unwrapped {
             if let Some(first) = arr.into_iter().next() {
-                if let Ok(surreal_link) = serde_json::from_value::<SurrealLink>(first) {
-                    return Ok(Some(surreal_link.into()));
+                match serde_json::from_value::<SurrealLink>(first.clone()) {
+                    Ok(surreal_link) => {
+                        return Ok(Some(surreal_link.into()));
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to deserialize SurrealLink in get_link: {}. Offending value: {}",
+                            e, first
+                        );
+                    }
                 }
             }
         }
@@ -861,11 +879,20 @@ impl SurrealDBService {
         let unwrapped = unwrap_surreal_json(json_value);
 
         if let Value::Array(arr) = unwrapped {
-            let links: Vec<DecoratedLinkExpression> = arr
-                .into_iter()
-                .filter_map(|value| serde_json::from_value::<SurrealLink>(value).ok())
-                .map(|surreal_link| surreal_link.into())
-                .collect();
+            let mut links: Vec<DecoratedLinkExpression> = Vec::new();
+            for value in arr {
+                match serde_json::from_value::<SurrealLink>(value.clone()) {
+                    Ok(surreal_link) => {
+                        links.push(surreal_link.into());
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to deserialize SurrealLink in get_links_by_source: {}. Offending value: {}",
+                            e, value
+                        );
+                    }
+                }
+            }
             return Ok(links);
         }
 
@@ -898,11 +925,20 @@ impl SurrealDBService {
         let unwrapped = unwrap_surreal_json(json_value);
 
         if let Value::Array(arr) = unwrapped {
-            let links: Vec<DecoratedLinkExpression> = arr
-                .into_iter()
-                .filter_map(|value| serde_json::from_value::<SurrealLink>(value).ok())
-                .map(|surreal_link| surreal_link.into())
-                .collect();
+            let mut links: Vec<DecoratedLinkExpression> = Vec::new();
+            for value in arr {
+                match serde_json::from_value::<SurrealLink>(value.clone()) {
+                    Ok(surreal_link) => {
+                        links.push(surreal_link.into());
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to deserialize SurrealLink in get_links_by_target: {}. Offending value: {}",
+                            e, value
+                        );
+                    }
+                }
+            }
             return Ok(links);
         }
 
@@ -939,11 +975,20 @@ impl SurrealDBService {
         let unwrapped = unwrap_surreal_json(json_value);
 
         if let Value::Array(arr) = unwrapped {
-            let links: Vec<DecoratedLinkExpression> = arr
-                .into_iter()
-                .filter_map(|value| serde_json::from_value::<SurrealLink>(value).ok())
-                .map(|surreal_link| surreal_link.into())
-                .collect();
+            let mut links: Vec<DecoratedLinkExpression> = Vec::new();
+            for value in arr {
+                match serde_json::from_value::<SurrealLink>(value.clone()) {
+                    Ok(surreal_link) => {
+                        links.push(surreal_link.into());
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to deserialize SurrealLink in get_links_by_predicate: {}. Offending value: {}",
+                            e, value
+                        );
+                    }
+                }
+            }
             return Ok(links);
         }
 
