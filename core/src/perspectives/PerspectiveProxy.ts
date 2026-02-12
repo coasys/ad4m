@@ -1515,11 +1515,11 @@ export class PerspectiveProxy {
             // Find the shape URI for this class by looking for the rdf://type -> ad4m://SubjectClass link
             // The source of that link is the class URI (e.g., "recipe://Recipe")
             const classQuery = `
-                SELECT in.uri AS class_uri 
+                SELECT source AS class_uri 
                 FROM link 
                 WHERE predicate = 'rdf://type' 
-                  AND out.uri = 'ad4m://SubjectClass' 
-                  AND in.uri CONTAINS '${escapeSurrealString(className)}'
+                  AND target = 'ad4m://SubjectClass' 
+                  AND source CONTAINS '${escapeSurrealString(className)}'
                 LIMIT 1
             `;
             const classResult = await this.querySurrealDB(classQuery);
@@ -1542,9 +1542,9 @@ export class PerspectiveProxy {
             
             // Get constructor actions to extract required predicates (for instance identification)
             const constructorQuery = `
-                SELECT out.uri AS target 
+                SELECT target 
                 FROM link 
-                WHERE in.uri = '${escapeSurrealString(shapeUri)}' 
+                WHERE source = '${escapeSurrealString(shapeUri)}' 
                   AND predicate = 'ad4m://constructor'
             `;
             const constructorResult = await this.querySurrealDB(constructorQuery);
@@ -1575,9 +1575,9 @@ export class PerspectiveProxy {
             
             // Get all property shapes
             const propertiesQuery = `
-                SELECT out.uri AS prop_uri 
+                SELECT target AS prop_uri 
                 FROM link 
-                WHERE in.uri = '${escapeSurrealString(shapeUri)}' 
+                WHERE source = '${escapeSurrealString(shapeUri)}' 
                   AND predicate = 'sh://property'
             `;
             const propertiesResult = await this.querySurrealDB(propertiesQuery);
@@ -1592,9 +1592,9 @@ export class PerspectiveProxy {
                     
                     // Get property details (path, resolveLanguage, collection flag)
                     const propDetailsQuery = `
-                        SELECT predicate, out.uri AS target 
+                        SELECT predicate, target 
                         FROM link 
-                        WHERE in.uri = '${escapeSurrealString(propUri)}'
+                        WHERE source = '${escapeSurrealString(propUri)}'
                     `;
                     const propDetails = await this.querySurrealDB(propDetailsQuery);
                     
