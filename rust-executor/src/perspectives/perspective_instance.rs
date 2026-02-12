@@ -1604,9 +1604,14 @@ impl PerspectiveInstance {
             target: literal_name.clone(),
         });
 
-        // NOTE: Prolog code storage removed - SHACL links are now the source of truth
-        // The ad4m://sdna link with Prolog code is no longer stored
-        // All SDNA operations should work via SHACL links
+        // Store the Prolog code for backward compatibility with getSdna()
+        // SHACL links are the source of truth for schema operations,
+        // but Prolog code is still stored for retrieval
+        sdna_links.push(Link {
+            source: literal_name.clone(),
+            predicate: Some("ad4m://sdna".to_string()),
+            target: sdna_code.clone(),
+        });
 
         self.add_links(sdna_links, LinkStatus::Shared, None, context)
             .await?;
