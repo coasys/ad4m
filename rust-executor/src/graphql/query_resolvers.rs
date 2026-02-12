@@ -506,6 +506,29 @@ impl Query {
         ))
     }
 
+    /// Get all subject class names from SHACL links (Prolog-free implementation)
+    ///
+    /// This is the preferred method when Prolog is disabled.
+    /// It queries SHACL links directly to find all registered subject classes.
+    async fn perspective_subject_classes_from_shacl(
+        &self,
+        context: &RequestContext,
+        uuid: String,
+    ) -> FieldResult<Vec<String>> {
+        check_capability(
+            &context.capabilities,
+            &perspective_query_capability(vec![uuid.clone()]),
+        )?;
+
+        Ok(get_perspective(&uuid)
+            .ok_or(FieldError::from(format!(
+                "No perspective found with uuid {}",
+                uuid
+            )))?
+            .get_subject_classes_from_shacl()
+            .await?)
+    }
+
     async fn perspective_query_surreal_db(
         &self,
         context: &RequestContext,

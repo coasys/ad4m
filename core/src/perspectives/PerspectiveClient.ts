@@ -157,6 +157,26 @@ export class PerspectiveClient {
     }
 
     /**
+     * Get all subject class names from SHACL links (Prolog-free implementation).
+     * 
+     * This is the preferred method when Prolog is disabled or unavailable.
+     * It queries SHACL links directly to find all registered subject classes.
+     * 
+     * @param uuid The perspective UUID
+     * @returns Array of subject class names
+     */
+    async subjectClassesFromSHACL(uuid: string): Promise<string[]> {
+        const { perspectiveSubjectClassesFromShacl } = unwrapApolloResult(await this.#apolloClient.query({
+            query: gql`query perspectiveSubjectClassesFromShacl($uuid: String!) {
+                perspectiveSubjectClassesFromShacl(uuid: $uuid)
+            }`,
+            variables: { uuid }
+        }))
+
+        return perspectiveSubjectClassesFromShacl
+    }
+
+    /**
      * Executes a read-only SurrealQL query against a perspective's link cache.
      * 
      * Security: Only SELECT, RETURN, and other read-only queries are permitted.

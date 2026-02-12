@@ -1378,6 +1378,52 @@ impl PerspectiveInstance {
         Ok(all_sdna_links)
     }
 
+    /// Get all subject class names from SHACL links (Prolog-free implementation)
+    ///
+    /// This queries links with:
+    /// - predicate = "rdf://type"
+    /// - target = "ad4m://SubjectClass"
+    ///
+    /// The source of these links is the class URI (e.g., "recipe://Recipe")
+    /// We extract the class name from the URI.
+    pub async fn get_subject_classes_from_shacl(&self) -> Result<Vec<String>, AnyError> {
+        // Query for SHACL class definition links
+        let shacl_class_links = self
+            .get_links_local(&LinkQuery {
+                predicate: Some("rdf://type".to_string()),
+                target: Some("ad4m://SubjectClass".to_string()),
+                ..Default::default()
+            })
+            .await?;
+
+        // Extract class names from source URIs
+        let mut class_names: Vec<String> = shacl_class_links
+            .iter()
+            .filter_map(|(link, _status)| {
+                let source = &link.data.source;
+                // Class URI format: "namespace://ClassName" (e.g., "recipe://Recipe")
+                // We want to extract "ClassName"
+                if let Some(idx) = source.rfind("://") {
+                    let after_scheme = &source[idx + 3..];
+                    // Handle paths like "namespace://path/ClassName"
+                    if let Some(last_slash) = after_scheme.rfind('/') {
+                        Some(after_scheme[last_slash + 1..].to_string())
+                    } else {
+                        Some(after_scheme.to_string())
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Remove duplicates
+        class_names.sort();
+        class_names.dedup();
+
+        Ok(class_names)
+    }
+
     async fn get_links_local(
         &self,
         query: &LinkQuery,

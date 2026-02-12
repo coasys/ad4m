@@ -1268,11 +1268,26 @@ export class PerspectiveProxy {
         return SHACLFlow.fromLinks(flowLinks, flowUri);
     }
 
-    /** Returns all the Subject classes defined in this perspectives SDNA */
+    /** Returns all the Subject classes defined in this perspectives SDNA 
+     * 
+     * Tries SHACL-based lookup first (works when Prolog is disabled),
+     * falls back to Prolog infer if SHACL returns empty.
+     */
     async subjectClasses(): Promise<string[]> {
+        // Try SHACL-based lookup first (Prolog-free implementation)
+        try {
+            const shaclClasses = await this.#client.subjectClassesFromSHACL(this.#handle.uuid);
+            if (shaclClasses && shaclClasses.length > 0) {
+                return shaclClasses;
+            }
+        } catch (e) {
+            // SHACL query failed, try Prolog fallback
+        }
+
+        // Fall back to Prolog infer
         try {
             return (await this.infer("subject_class(X, _)")).map(x => x.X)
-        }catch(e) {
+        } catch (e) {
             return []
         }
     }
@@ -2069,13 +2084,33 @@ export class PerspectiveProxy {
      * @param obj The template object
      */
     async subjectClassesByTemplate(obj: object): Promise<string[]> {
-        const query = this.buildQueryFromTemplate(obj);
-        let result = await this.infer(query)
-        if(!result) {
-            return []
-        } else {
-            return result.map(x => x.Class)
+        // Try Prolog-based template matching first
+        try {
+            const query = this.buildQueryFromTemplate(obj);
+            let result = await this.infer(query)
+            if(result && result.length > 0) {
+                return result.map(x => x.Class)
+            }
+        } catch (e) {
+            // Prolog disabled or failed
         }
+
+        // Fall back to SHACL-based lookup by className
+        // This is less precise (doesn't match by template) but works when Prolog is disabled
+        try {
+            // @ts-ignore - className is added dynamically by decorators
+            const className = obj.className || obj.constructor?.className || obj.constructor?.prototype?.className;
+            if (className) {
+                const existingClasses = await this.#client.subjectClassesFromSHACL(this.#handle.uuid);
+                if (existingClasses.includes(className)) {
+                    return [className];
+                }
+            }
+        } catch (e) {
+            // SHACL lookup also failed
+        }
+
+        return []
     }
 
     /** Takes a JS class (its constructor) and assumes that it was decorated by
@@ -2085,9 +2120,27 @@ export class PerspectiveProxy {
      * static generateSDNA() function and adds it to the perspective's SDNA.
      */
     async ensureSDNASubjectClass(jsClass: any): Promise<void> {
-        const subjectClass = await this.subjectClassesByTemplate(new jsClass)
-        if(subjectClass.length > 0) {
-            return
+        // Get the class name from the JS class
+        const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
+        
+        // First try SHACL-based lookup (works when Prolog is disabled)
+        try {
+            const existingClasses = await this.#client.subjectClassesFromSHACL(this.#handle.uuid);
+            if (existingClasses.includes(className)) {
+                return; // Class already exists
+            }
+        } catch (e) {
+            // SHACL lookup failed, try template-based fallback
+        }
+
+        // Fall back to Prolog template-based check
+        try {
+            const subjectClass = await this.subjectClassesByTemplate(new jsClass)
+            if(subjectClass.length > 0) {
+                return
+            }
+        } catch (e) {
+            // Prolog disabled or failed, continue to add the class
         }
 
         // Generate both SHACL and Prolog SDNA
