@@ -1619,30 +1619,30 @@ impl PerspectiveInstance {
     }
 
     async fn ensure_prolog_engine_pool(&self) -> Result<(), AnyError> {
-        // Take write lock and check if we need to initialize
-        let _guard = self.prolog_update_mutex.write().await;
-
-        // Get service reference before taking any locks
+        // Get service reference and perspective data BEFORE acquiring write lock
         let service = get_prolog_service().await;
-        let persisted = self.persisted.lock().await;
-        let uuid = persisted.uuid.clone();
-        let owner_did = persisted.get_primary_owner();
-        drop(persisted); // Release the lock early
+        let (uuid, owner_did, neighbourhood_author) = {
+            let persisted = self.persisted.lock().await;
+            let uuid = persisted.uuid.clone();
+            let owner_did = persisted.get_primary_owner();
+            let neighbourhood_author = persisted
+                .neighbourhood
+                .as_ref()
+                .map(|n| n.author.clone());
+            (uuid, owner_did, neighbourhood_author)
+        };
 
+        // Check if initialization is needed WITHOUT holding any locks
         if !service.has_perspective_pool(uuid.clone()).await
             || !service
                 .has_perspective_pool(notification_pool_name(&uuid))
                 .await
         {
-            // Initialize with links for optimized filtering
+            // Get all links BEFORE acquiring write lock to avoid deadlock
             let all_links = self.get_links(&LinkQuery::default()).await?;
-            let neighbourhood_author = self
-                .persisted
-                .lock()
-                .await
-                .neighbourhood
-                .as_ref()
-                .map(|n| n.author.clone());
+
+            // NOW take write lock after all async operations that might need locks are done
+            let _guard = self.prolog_update_mutex.write().await;
 
             // Check if pool exists under the write lock
             if !service.has_perspective_pool(uuid.clone()).await {
