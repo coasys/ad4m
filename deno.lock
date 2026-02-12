@@ -686,7 +686,7 @@
           ]
         }
       },
-      "docs": {
+      "docs-src": {
         "packageJson": {
           "dependencies": [
             "npm:@types/node@18.11.10",
