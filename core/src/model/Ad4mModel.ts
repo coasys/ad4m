@@ -112,7 +112,7 @@ export interface CollectionMetadata {
   /** The predicate URI (through value) */
   predicate: string;
   /** Filter conditions */
-  where?: { isInstance?: any; condition?: string };
+  where?: { isInstance?: any; condition?: string; surrealCondition?: string };
   /** Custom SurrealQL getter code */
   surrealGetter?: string;
   /** Whether stored locally only */
@@ -870,6 +870,41 @@ export class Ad4mModel {
           // Collections preserve chronological order: links are sorted ASC by timestamp,
           // so the collection reflects the order in which items were added (oldest to newest).
           let values = matching.map((l: any) => l.target);
+          
+          // Apply where.surrealCondition filtering if present
+          if (collMeta.where?.surrealCondition && values.length > 0) {
+            try {
+              // Filter values by evaluating condition for each value
+              const filteredValues: string[] = [];
+              
+              for (const value of values) {
+                let condition = collMeta.where.surrealCondition
+                  .replace(/\$perspective/g, `'${this.#perspective.uuid}'`)
+                  .replace(/\$base/g, `'${this.#baseExpression}'`)
+                  .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
+                
+                // If condition starts with WHERE, wrap it in array length check pattern
+                // Using array::len() to properly count matching links
+                if (condition.trim().startsWith('WHERE')) {
+                  condition = `array::len(SELECT * FROM link ${condition}) > 0`;
+                }
+                
+                const filterQuery = `RETURN ${condition}`;
+                const result = await this.#perspective.querySurrealDB(filterQuery);
+                
+                // RETURN can return the value directly or in an array
+                const isTrue = result === true || (Array.isArray(result) && result.length > 0 && result[0] === true);
+                if (isTrue) {
+                  filteredValues.push(value);
+                }
+              }
+              
+              values = filteredValues;
+            } catch (error) {
+              console.warn(`Failed to apply surrealCondition filter for ${collName}:`, error);
+              // Keep unfiltered values on error
+            }
+          }
           
           // Apply where.isInstance filtering if present
           if (collMeta.where?.isInstance && values.length > 0) {

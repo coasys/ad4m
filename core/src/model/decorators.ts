@@ -406,6 +406,7 @@ export function Flag(opts: FlagOptions) {
 interface WhereOptions {
     isInstance?: any
     condition?: string
+    surrealCondition?: string
 }
 
 export interface CollectionOptions {
@@ -468,12 +469,19 @@ export interface CollectionOptions {
  *   })
  *   comments: string[] = [];
  * 
- *   // Collection with custom filter condition
+ *   // Collection with custom Prolog filter condition
  *   @Collection({
  *     through: "recipe://step",
  *     where: { condition: `triple(Target, "step://order", Order), Order < 3` }
  *   })
  *   firstSteps: string[] = [];
+ * 
+ *   // Collection with custom SurrealDB filter condition
+ *   @Collection({
+ *     through: "recipe://entries",
+ *     where: { surrealCondition: `WHERE in.uri = Target AND predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test')`
+ *   })
+ *   ingredients: string[] = [];
  * 
  *   // Local-only collection not shared with network
  *   @Collection({
@@ -679,8 +687,8 @@ export function ModelOptions(opts: ModelOptionsOptions) {
 
                 if(through) {
                     if(where) {
-                        if(!where.isInstance && !where.condition) {
-                            throw "'where' needs one of 'isInstance' or 'condition'"
+                        if(!where.isInstance && !where.condition && !where.surrealCondition) {
+                            throw "'where' needs one of 'isInstance', 'condition', or 'surrealCondition'"
                         }
 
                         let conditions = []
@@ -699,9 +707,15 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                             conditions.push(where.condition)
                         }
 
-                        const conditionString = conditions.join(", ")
-
-                        collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- setof(Target, (triple(Base, "${through}", Target), ${conditionString}), List).\n`
+                        // If there are Prolog conditions (isInstance or condition), use setof with conditions
+                        // If only surrealCondition is present, use simple findall (SurrealDB will filter later)
+                        if(conditions.length > 0) {
+                            const conditionString = conditions.join(", ")
+                            collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- setof(Target, (triple(Base, "${through}", Target), ${conditionString}), List).\n`
+                        } else {
+                            // Only surrealCondition present (no Prolog filtering)
+                            collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
+                        }
                     } else {
                         collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
                     }

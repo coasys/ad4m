@@ -492,27 +492,6 @@ describe("Prolog + Literals", () => {
                 //console.log((await perspective!.getSdna())[1])
             })
 
-            it.skip("can constrain collection entries through 'where' clause with prolog condition", async () => {
-                let root = Literal.from("Collection where test with prolog condition").toUrl()
-                let todo = await perspective!.createSubject(new Todo(), root)
-
-                let messageEntry = Literal.from("test message").toUrl()
-
-                // @ts-ignore
-                await todo.addEntries(messageEntry)
-
-                let entries = await todo.entries
-                expect(entries.length).to.equal(1)
-
-                let messageEntries = await todo.likedMessages
-                expect(messageEntries.length).to.equal(0)
-
-                await perspective?.add(new Link({source: messageEntry, predicate: "flux://has_reaction", target: "flux://thumbsup"}))
-
-                messageEntries = await todo.likedMessages
-                expect(messageEntries.length).to.equal(1)
-            })
-
             it.skip("can use properties with custom getter prolog code", async () => {
                 let root = Literal.from("Custom getter test").toUrl()
                 let todo = await perspective!.createSubject(new Todo(), root)
@@ -804,6 +783,63 @@ describe("Prolog + Literals", () => {
                     await recipe2.get();
 
                     expect(recipe2.ingredients.length).to.equal(1);
+                })
+
+                it("can constrain collection entries through 'where' clause with surrealCondition", async () => {
+                    // Define a Recipe model with surrealCondition filtering
+                    @ModelOptions({ name: "RecipeWithSurrealFilter" })
+                    class RecipeWithSurrealFilter extends Ad4mModel {
+                        @Optional({
+                            through: "recipe://name",
+                            resolveLanguage: "literal"
+                        })
+                        name: string = "";
+
+                        @Collection({ through: "recipe://entries" })
+                        entries: string[] = [];
+
+                        @Collection({
+                            through: "recipe://entries",
+                            where: { 
+                                surrealCondition: `WHERE in.uri = Target AND predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test'` 
+                            }
+                        })
+                        ingredients: string[] = [];
+                    }
+
+                    // Register the class
+                    await perspective!.ensureSDNASubjectClass(RecipeWithSurrealFilter);
+
+                    let root = Literal.from("Active record surreal condition test").toUrl();
+                    const recipe = new RecipeWithSurrealFilter(perspective!, root);
+
+                    let entry1 = Literal.from("entry with ingredient").toUrl();
+                    let entry2 = Literal.from("entry without ingredient").toUrl();
+
+                    recipe.entries = [entry1, entry2];
+                    recipe.name = "SurrealCondition test";
+
+                    await recipe.save();
+
+                    // Add the ingredient link to entry1 only
+                    await perspective?.add(new Link({
+                        source: entry1, 
+                        predicate: "recipe://has_ingredient", 
+                        target: "recipe://test"
+                    }));
+
+                    // Small delay for SurrealDB indexing
+                    await sleep(500);
+
+                    const recipe2 = new RecipeWithSurrealFilter(perspective!, root);
+                    await recipe2.get();
+
+                    // Should have 2 entries total
+                    expect(recipe2.entries.length).to.equal(2);
+                    
+                    // But only 1 ingredient (entry1 which has the ingredient link)
+                    expect(recipe2.ingredients.length).to.equal(1);
+                    expect(recipe2.ingredients[0]).to.equal(entry1);
                 })
 
                 it("can implement the resolveLanguage property type", async () => {
