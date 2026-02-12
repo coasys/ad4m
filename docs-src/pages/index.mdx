@@ -1,0 +1,366 @@
+import { Callout } from "nextra-theme-docs";
+import { Tab, Tabs } from "nextra-theme-docs";
+
+# Introduction
+
+The internet has evolved from a platform for creating and sharing simple documents to highly social digital experiences, 
+and now to an era dominated by centralized artificial intelligence systems. Yet, no social infrastructure is woven into its core. 
+Without a universal social protocol, companies have erected siloed networks, harvesting and profiting from user content—a problem 
+intensified by centralized AI, which concentrates power and insight extraction, deepening data monopolies and eroding agency.
+
+**AD4M** (*Agent-centric Distributed Application Meta-ontology*) counters this by centering agents—primarily human users with 
+Decentralized Identifiers (DIDs), though extensible to synthetic entities—and their social contexts in digital communication. 
+
+Built on [Holochain](https://www.holochain.org/), AD4M forms an agent-centric *spanning layer* on top of the internet, harmonizing fragmented ecosystems into a distributed 
+Collective Intelligence network. This deep implementation empowers agents to choose which Language they speak—bridging currently 
+competing P2P, federated, and centralized approaches in synergy, whether it’s a P2P protocol, a federated API, or HTTP itself.
+
+If you’re versed in Holochain’s distributed design and the semantic web’s linked data paradigm (e.g., RDF, Solid), AD4M blends 
+the best of both, crafting an agent-centric semantic web where social relationships fuel a decentralized alternative to centralized 
+AI dominance, aligned with the real human networks of its users through graph-based data and a global addressing scheme.
+
+<br />
+<img src="/ad4m/images/ad4m-spanning-layer.jpg" />
+
+## What is AD4M practically?
+
+AD4M, as an agent-centric spanning layer married with an app development framework, 
+redefines how decentralized applications connect users, data, and ecosystems. Unlike traditional back-ends tied to centralized servers, 
+AD4M runs as a distinct instance for every user—think of it as a personal, local runtime environment. Each instance, built on Holochain, 
+holds the user’s cryptographic keys (via their DID), stores their data in Perspectives (subjective RDF-based knowledge graphs), 
+and executes code that interfaces with Languages—protocol-like abstractions that attach to existing systems, from HTTP to IPFS to custom P2P
+protocols. This instance serves as the back-end that UIs and apps connect to, providing a unified, interoperable gateway to the user’s digital world.
+
+At its core, **AD4M inverts the typical app-centric model**. Instead of apps owning your data and social graph, your AD4M instance owns them,
+running on your device (or a trusted host) and exposing a GraphQL API, wrapped by our JavaScript client library, for apps to query and interact with.
+For example, a chat app might connect to `localhost:4000/graphql` to fetch messages stored in a Perspective, addressed via a Language like 
+`QmXyz123://message789`. This local runtime attaches to existing Languages—say, `http` for web content or `solid` for semantic triples—executing 
+their logic to read or write Expressions (data objects). Developers don’t rewrite the web; they extend it, with AD4M harmonizing these connections
+into a single, agent-owned layer.
+
+
+- **Agent Autonomy**: Each instance is sovereign, controlled by the user’s DID (e.g., `did:key:z6Mk...`). It signs every action—links in Perspectives, joins to Neighbourhoods—ensuring data integrity and ownership without intermediaries.
+
+- **Interoperability Through Expressions and Perspectives**:
+AD4M achieves seamless integration across ecosystems via two pillars: Expressions and Perspectives. Languages produce objective Expressions—data objects with global addresses like `<language_hash>://<address>` (e.g., `<QmSocial456://post123>`), readable by any AD4M-connected app. Meanwhile, Perspectives are subjective knowledge graphs, built from RDF triples (e.g., `<agent123>` `<posted>` `<QmSocial456://post123>`), representing an agent’s unique view. Together, they enable portability and connection: an Expression can be linked across Perspectives, and a Perspective can pull in data from multiple Languages, bridging web, semantic web, and P2P systems effortlessly.
+
+- **Rule-Based Distributed Consistency**: 
+Using Holochain for it's core backbone, each instance doesn’t just store data—it enforces consistency through Language-defined rules and Social DNA (Prolog-based logic). For example, a Neighbourhood might restrict posting to members via a rule like `member(Agent) :- link(Agent, "memberOf", Neighbourhood)`. This distributed validation ensures data aligns across the network without a central authority, giving developers a reliable, self-regulating foundation.
+
+
+
+Practically, this means every developer’s user runs their own AD4M node. Install it, configure it (e.g., via a RuntimeConfig JSON), and it spins up a process holding their private keys, syncing their Perspectives, and running Language code—like a lightweight, personal cloud. A UI might then query:
+```javascript
+// Initialize the client
+const ad4mClient = new Ad4mClient("ws://localhost:4000", false);
+
+// Get the current agent
+const agent = await ad4mClient.agent.me();
+console.log(agent.did); // did:key:z6Mk...
+
+// Create and work with a perspective
+const perspective = await ad4mClient.perspective.add("MyPerspective");
+const link = await perspective.add(new Link({
+  source: "test://source",
+  predicate: "test://predicate", 
+  target: "test://target"
+}));
+
+// Query links
+const links = await perspective.get({} as LinkQuery);
+console.log(links); // [{source: "test://source", predicate: "test://predicate", target: "test://target"}]
+```
+This spanning layer doesn’t replace the internet—it augments it, giving agents control over their data and connections while enabling apps to tap into a distributed, interoperable network. AD4M is the engine behind a user’s digital agency, the glue for ecosystem synergy, and the foundation for Collective Intelligence—all in one local instance.
+
+
+## AD4M Languages
+### Protocols with a Global Addressing Scheme
+At the heart of AD4M are Languages, which are more than just data formats—they’re protocol-like abstractions that define how agents express, 
+store, and share data across ecosystems. Conceptually akin to protocols like HTTP or IPFS, each Language encapsulates the capacity of (AD4M-) agents
+(read: nodes/users) to spawn *Expressions*-that is: data-objects with cryptographic provenance- messages, posts, you name it. 
+How the Language implementation actually stores and shares these Expressions is up to the Language implementor.
+
+The key point here is to introduce a global addressing scheme, extending the familiar URI model. 
+Every Language is identified by a unique code hash (a cryptographic hash of its implementation), which becomes the scheme in a URL-like address: 
+`<language_hash>://<language-specific-address>`. This mirrors the method resolution in Decentralized Identifiers (DIDs) but applies it to data 
+objects (Expressions) across the network.
+
+For example:
+A social context Language might have a hash like `QmXyz123...`, so an Expression could be addressed as `QmXyz123://agent123/post456`.
+
+HTTP, as a particular Language (read *protocol*), maps to `http://example.com/resource`, making AD4M backwards compatible with the web.
+
+Languages are implemented as JavaScript modules, that will be run in AD4M's integrated JavaScript runtime (an integrated build of [Deno](https://deno.com/)).
+This scheme ensures that any Expression—whether a tweet, a post, a semantic triple, or a custom data object—is globally referenceable across Languages (protocols). 
+Developers can thus integrate existing systems into the AD4M spanning layer by writing a Language that wraps and interfaces with given system (e.g. a database, blockchain, Holochain app...).
+
+### Foundational Bootstrap Languages
+Out of the gate, AD4M relies on bootstrap Languages—pre-installed essentials like the agent, perspective, & language languages. 
+These provide the core grammar for identity (`did:key:z6Mk...`), knowledge graphs / perspectives (`perspective://2f168edc-...`)
+and their collaboratively shared pendandts, Neighbourhoods, (`neighbourhood://2345d23...`), and then languages themselves (`lang://Qm3dgfw23...`)
+They standardize interactions across every AD4M instance, around the core ontology of AD4M itself.
+
+For instance:
+```javascript
+const ad4mClient = await getAd4mClient("ws://localhost:4000");
+const agentExpression = await ad4mClient.expression.get("did:key:z6Mk...");
+console.log(agentExpression.data); // { did: "did:key:z6Mk..." }
+```
+resolves a DID to the Agent Expression, which contains some information about the referenced AD4M agent (read: user).
+
+Bootstrap Languages make AD4M a functional spanning layer from the start, an evolvable bare-bones social network that enables
+its users to spawn their own ontologies and spaces into this meta-space.
+
+### Evolvability through the Language-Language
+The true genius of AD4M’s Language system lies in its evolvability, driven by the language-language—a meta-Language through which new Languages are defined, published, and shared across the network. 
+This bootstrap Language acts as a registry and distribution mechanism: developers create a custom Language (e.g., my-social-app), its code is hashed (e.g., QmCustom321), 
+and it’s published as an Expression at language://QmCustom321. Other agents can then fetch and install it:
+```javascript
+// Publish a new language
+const languageMeta = {
+  name: "my-social-app",
+  description: "A custom social app language"
+};
+const published = await ad4mClient.languages.publish("./build/bundle.js", languageMeta);
+console.log(published.address); // QmCustom321
+
+// Get all installed languages
+const languages = await ad4mClient.languages.all();
+console.log(languages); // Includes the newly published language
+```
+
+This Language installation process happens automatically when AD4M tries to resolve an Expression of a new Language.
+With the hash of the Language code being part of the Expression URL, AD4M will try to retrieve the Language throug the Language of Languages.
+Since every Expression contains its crytographic provenance, AD4M has a natural built-in way to apply code-signing and verification-only Languages of trusted agents
+will be installed automatically.
+
+This makes the AD4M spanning layer a living, adaptive system. The language-language ensures that as new protocols or needs emerge—say, a federated messaging standard or a novel AI integration—agents can adopt them without centralized gatekeepers or hard forks. 
+It’s the most critical aspect of Languages: not just connecting existing ecosystems, but enabling the entire framework to evolve with its users. 
+A developer might extend AD4M with:
+```typescript
+interface CustomLanguage {
+  hash: "QmCustom321";
+  name: "my-social-app";
+  expressionTypes: {
+    create: (content: { text: string }) => {
+        /* handle any transformation required here, save the data, and return its address */
+        return "QmCustom321://post789";
+    },
+    get: (address: string) => {
+        /* fetch the data here, handle any transformation required, and return it to the UI */
+        return { text: string };
+    };
+  };
+}
+```
+
+By rooting adaptability in the language-language, AD4M ensures its spanning layer isn’t static—it grows, driven by the collective innovation of its agents, making it a future-proof foundation for Collective Intelligence.
+
+
+
+## Perspectives and Neighbourhoods
+The local AD4M node stores, manages and gives access to an arbitrary number of Perspectives—subjective knowledge graphs of RDF triples.
+Each Perspective is similar to a Solid Pod, in that it's a (private) collection of semantic associations.
+The main difference to semantic web style graphs is that each triple (called a `Link` in AD4M) is an Expression and thus has a cryptographic provenance.
+These triples, like `<subject> <predicate> <object>`, store data such as `<agent123> <posted> <QmXyz123://post456>`. 
+
+Agents share these local graph databases in a collaberative way with other AD4M agents via Neighbourhoods, app-independent social contexts that act as shared, 
+collaboratively edited graphs. Built on the same linked data principles as the semantic web or Solid, Neighbourhoods enable portability: 
+a community’s social structure—its links and relationships—can move seamlessly across apps. For instance:
+```javascript
+const perspective = await ad4mClient.perspective.add("MyCommunity");
+
+// Add a link to the perspective
+await perspective.add(new Link({
+  source: "agent123",
+  predicate: "memberOf",
+  target: "neighbourhood://QmAbc789"
+}));
+
+// Query links
+const links = await perspective.get({} as LinkQuery);
+console.log(links);
+// [{source: "agent123", predicate: "memberOf", target: "neighbourhood://QmAbc789"}]
+```
+
+This focus on agent-to-agent relationships, not app boundaries, drives AD4M’s interoperability, making social networks the foundation of its architecture.
+
+<br />
+<img src="/ad4m/images/ad4m-neighbourhoods.jpg" />
+
+## Social DNA
+
+In a decentralized network awash with data, the leap from raw information to collective wisdom hinges on more than just connectivity—it requires a way to encode how agents 
+and their communities process, filter, and reason over that data. Social DNA is AD4M’s answer: a conceptual parallel to biological DNA, it defines the rules, 
+behaviors, and logic that transform static Perspectives and Neighbourhoods into dynamic, intelligent Social Organisms. For developers, Social DNA is the key to 
+crafting app-specific intelligence—whether it’s validating data, enforcing roles, or aggregating insights—all while keeping control distributed among agents. 
+It’s the engine driving AD4M’s vision of a Collective Intelligence network, turning linked data into actionable, shared understanding.
+
+### Query Engines: SurrealDB & Prolog
+
+AD4M provides two powerful query engines for working with graph data in Perspectives:
+
+#### SurrealDB: High-Performance Queries (Recommended)
+
+AD4M now includes **SurrealDB**, a modern database that provides **10-100x faster performance** than Prolog for most queries. SurrealDB uses SQL-like syntax (SurrealQL) and excels at:
+- Fast graph traversal using indexed `in.uri` and `out.uri` fields
+- Aggregations and analytics  
+- Complex filtering and sorting
+- Large dataset handling
+
+```javascript
+// Fast graph query - find who Alice follows
+const follows = await perspective.querySurrealDB(
+  "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'follows'"
+);
+
+// Find posts by Alice
+const posts = await perspective.querySurrealDB(
+  "SELECT target FROM link WHERE in.uri = 'user://alice' AND predicate = 'authored'"
+);
+```
+
+**Performance Tip**: Use `in.uri` (source) and `out.uri` (target) for graph traversal - they're indexed and fast. Avoid subqueries (`IN (SELECT ...)`) as they're very slow.
+
+**Important**: `Ad4mModel` (described below) now **uses SurrealDB by default** for all operations, providing dramatic performance improvements with no code changes required.
+
+For detailed examples and graph traversal patterns, see the [SurrealDB Queries Guide](/developer-guides/surreal-queries).
+
+#### Prolog: Logic Programming (Legacy)
+
+For backward compatibility and advanced logic programming, AD4M also includes Prolog, optimized for reasoning over relational data like the RDF triples in Perspectives. 
+Prolog's declarative nature lets developers write rules as predicates:
+
+```prolog
+% Check if an agent is a member
+member(Agent, Neighbourhood) :-
+    link(Agent, "memberOf", Neighbourhood).
+
+% Validate a post by a member
+memberPost(Post, Agent, Neighbourhood) :-
+    link(Agent, "posted", Post),
+    member(Agent, Neighbourhood).
+
+% Query all member posts
+?- memberPost(Post, Agent, "neighbourhood://QmGroup789").
+```
+
+This could be queried via the AD4M client:
+```javascript
+const posts = await perspective.infer(
+  "memberPost(Post, Agent, 'neighbourhood://QmGroup789')"
+);
+console.log(posts); // [{Post: "QmXyz123://post456", Agent: "did:key:z6Mk..."}, ...]
+```
+
+While these raw query engines are powerful, AD4M simplifies development with a higher-level abstraction.
+
+### Ad4mModel
+For app developers, writing queries directly is optional—AD4M's `Ad4mModel` class and its decorators handle the heavy lifting. 
+This TypeScript base class lets you define model classes with properties and relationships, automatically using **SurrealDB** under the hood for 
+fast query performance (10-100x faster than Prolog). Here's how you define a model:
+```typescript
+import { Ad4mModel, ModelOptions, Property, Collection, Flag, Optional, ReadOnly } from "@coasys/ad4m";
+
+@ModelOptions({
+    name: "Todo"
+})
+class Todo extends Ad4mModel {
+    @Property({
+        through: "todo://state",
+        initial: "todo://ready"
+    })
+    state: string = "";
+
+    @Optional({
+        through: "todo://has_title",
+        writable: true,
+        resolveLanguage: "literal"
+    })
+    title: string = "";
+
+    @ReadOnly({
+        getter: 'triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true'
+    })
+    isLiked: boolean = false;
+
+    @Collection({ through: "todo://comment" })
+    comments: string[] = [];
+
+    @Collection({ 
+        through: "flux://entry_type",
+        where: { condition: 'triple(Target, "flux://has_reaction", "flux://thumbsup")' }
+    })
+    likedMessages: string[] = [];
+
+    // Static query methods
+    static async all(perspective: PerspectiveProxy): Promise<Todo[]> {
+        return await Todo.findAll(perspective);
+    }
+
+    static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> {
+        return await Todo.findAll(perspective, { 
+            where: { state: "todo://done" }
+        });
+    }
+}
+```
+
+Behind this, `Ad4mModel`:
+- **Uses SurrealDB by default** for fast queries (10-100x faster)
+- Generates efficient SurrealQL queries automatically
+- Stores data as graph links in the perspective
+- Provides type-safe TypeScript interfaces
+
+For example, `Todo.findAll(perspective, { where: { state: "todo://done" } })` automatically generates and executes an optimized SurrealQL query.
+
+For backward compatibility, Prolog is still supported (pass `useSurrealDB: false` to query methods). See the [Model Classes Guide](/developer-guides/model-classes) and [SurrealDB Queries Guide](/developer-guides/surreal-queries) for details.
+
+You can use this model to work with Todo items in a type-safe way:
+```typescript
+// Create a new Todo
+const todo = new Todo(perspective);
+todo.title = "Complete documentation";
+todo.state = "todo://ready";
+await todo.save();
+
+// Query todos
+const allTodos = await Todo.all(perspective);
+const doneTodos = await Todo.allDone(perspective);
+
+// Update a todo
+todo.state = "todo://done";
+await todo.update();
+
+// Delete a todo
+await todo.delete();
+```
+
+Developers define their app's data model in familiar TypeScript, and AD4M handles the Social DNA—stored in a Perspective or Neighbourhood—making it both accessible and powerful. This abstraction lets you focus on app logic while SurrealDB provides fast queries and Prolog enables decentralized reasoning that scales across the network.
+
+
+## Why?
+
+The goal is to arrive at scalable and interoparable communication infrastructure
+that enables **group agency without imposing a bias on how a group manages itself**.
+
+_This is the real problem we're facing when trying to provide a
+technological solution to the web's fractured sense-making._
+
+AD4M is a sense-making network disguised as an app development framework.
+AD4M apps don't have to leak any of the AD4M concepts at all,
+and they would still be interoperable with each other to the degree
+of just being different views over the same agent-centric semantic web.
+
+## Why should I build on ADAM?
+
+ADAM solves a lot of common challenges when developing social applications:
+
+- **Cold Start**: When a new social platform has limited content and a small user base, it is challenging to attract users and engagement. By interacting with already existing agents and their social groups, you don't need to onboard users.
+- **Authentication**: Authentication is already taken care of, reducing the overload of having to implement authentication flows and user management.
+- **Privacy by default**: Each social group in ADAM is its own private network, making communication private by default.
+- **Database management**: ADAM is completely decentralized, hence there is no database to manage, and no infrastructure you need to scale.
+- **Interoperability**: You are not locked into using one kind of storage technology
+  and can switch out your tech stack incrementally. With ADAMs Language implementation, you are able to interact with any existing centralized or decentralized system.
+- **Smart Contracts without fees**: With ADAMs Social DNA, social spaces can easily add their own small programs (smart contracts) using prolog.
+
