@@ -397,7 +397,13 @@ pub async fn handle_perspective_diff_from_link_language_impl(
     language_address: String,
 ) {
     if let Some(perspective) = perspective_by_link_language(language_address.clone()).await {
-        perspective.diff_from_link_language(diff).await;
+        if let Err(e) = perspective.diff_from_link_language(diff).await {
+            log::error!(
+                "Failed to persist diff from link language ({}): {:?}",
+                language_address,
+                e
+            );
+        }
     }
 }
 

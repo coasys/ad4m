@@ -741,7 +741,7 @@ impl PerspectiveInstance {
         });
     }
 
-    pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) {
+    pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) -> Result<(), AnyError> {
         let handle = self.persisted.lock().await.clone();
 
         // Deduplicate by (author, timestamp, source, predicate, target)
@@ -796,13 +796,13 @@ impl PerspectiveInstance {
         };
 
         // Write to SurrealDB (primary storage for links)
-        self.persist_link_diff(&decorated_diff)
-            .await
-            .expect("SurrealDB link persistence failed - critical synchronization error");
+        self.persist_link_diff(&decorated_diff).await?;
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_diff.clone()).await;
         self.pubsub_publish_diff(decorated_diff).await;
+
+        Ok(())
     }
 
     pub async fn telepresence_signal_from_link_language(
@@ -934,9 +934,7 @@ impl PerspectiveInstance {
                     DecoratedPerspectiveDiff::from_removals(vec![decorated_link_result.clone()]);
 
                 // Remove from SurrealDB (primary storage)
-                self.persist_link_diff(&decorated_diff)
-                    .await
-                    .expect("SurrealDB link persistence failed - critical synchronization error");
+                self.persist_link_diff(&decorated_diff).await?;
 
                 // Update both Prolog engines: subscription (immediate) + query (lazy)
                 self.update_prolog_engines(decorated_diff.clone()).await;
@@ -1063,9 +1061,7 @@ impl PerspectiveInstance {
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
         // Write to SurrealDB (primary storage for links)
-        self.persist_link_diff(&decorated_perspective_diff)
-            .await
-            .expect("SurrealDB link persistence failed - critical synchronization error");
+        self.persist_link_diff(&decorated_perspective_diff).await?;
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_perspective_diff.clone())
@@ -1119,9 +1115,7 @@ impl PerspectiveInstance {
                 DecoratedPerspectiveDiff::from_additions(decorated_link_expressions.clone());
 
             // Write to SurrealDB (primary storage for links)
-            self.persist_link_diff(&decorated_perspective_diff)
-                .await
-                .expect("SurrealDB link persistence failed - critical synchronization error");
+            self.persist_link_diff(&decorated_perspective_diff).await?;
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
             self.pubsub_publish_diff(decorated_perspective_diff).await;
@@ -1168,9 +1162,7 @@ impl PerspectiveInstance {
         };
 
         // Write to SurrealDB (primary storage for links)
-        self.persist_link_diff(&decorated_diff)
-            .await
-            .expect("SurrealDB link persistence failed - critical synchronization error");
+        self.persist_link_diff(&decorated_diff).await?;
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
         self.pubsub_publish_diff(decorated_diff.clone()).await;
@@ -1252,9 +1244,7 @@ impl PerspectiveInstance {
             );
 
             // Write to SurrealDB (primary storage for links)
-            self.persist_link_diff(&decorated_diff)
-                .await
-                .expect("SurrealDB link persistence failed - critical synchronization error");
+            self.persist_link_diff(&decorated_diff).await?;
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
@@ -1368,9 +1358,7 @@ impl PerspectiveInstance {
             let decorated_diff = DecoratedPerspectiveDiff::from_removals(decorated_links.clone());
 
             // Remove from SurrealDB (primary storage)
-            self.persist_link_diff(&decorated_diff)
-                .await
-                .expect("SurrealDB link persistence failed - critical synchronization error");
+            self.persist_link_diff(&decorated_diff).await?;
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
@@ -4316,9 +4304,7 @@ impl PerspectiveInstance {
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(combined_diff.clone()).await;
 
-            self.persist_link_diff(&combined_diff)
-                .await
-                .expect("SurrealDB link persistence failed - critical synchronization error");
+            self.persist_link_diff(&combined_diff).await?;
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
         }
