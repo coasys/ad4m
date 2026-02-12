@@ -327,7 +327,7 @@ describe("Prolog + Literals", () => {
                 @InstanceQuery({where: { state: "todo://done" }})
                 static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
-                @InstanceQuery({condition: 'triple("ad4m://self", _, Instance)'})
+                @InstanceQuery({ prologCondition: 'triple("ad4m://self", _, Instance)'})
                 static async allSelf(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
                 //@ts-ignore
@@ -345,7 +345,7 @@ describe("Prolog + Literals", () => {
                 title: string = ""
 
                 @ReadOnly({
-                    getter: `triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true`
+                    prologGetter: `triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true`
                 })
                 isLiked: boolean = false
 
@@ -363,7 +363,7 @@ describe("Prolog + Literals", () => {
 
                 @Collection({
                     through: "flux://entry_type",
-                    where: { condition: `triple(Target, "flux://has_reaction", "flux://thumbsup")` }
+                    where: { prologCondition: `triple(Target, "flux://has_reaction", "flux://thumbsup")` }
                 })
                 likedMessages: string[] = []
             }
@@ -604,7 +604,7 @@ describe("Prolog + Literals", () => {
 
                     @Collection({
                         through: "recipe://entries",
-                        where: { condition: `triple(Target, "recipe://has_ingredient", "recipe://test")` }
+                        where: { prologCondition: `triple(Target, "recipe://has_ingredient", "recipe://test")` }
                     })
                     ingredients: string[] = []
 
@@ -785,8 +785,8 @@ describe("Prolog + Literals", () => {
                     expect(recipe2.ingredients.length).to.equal(1);
                 })
 
-                it("can constrain collection entries through 'where' clause with surrealCondition", async () => {
-                    // Define a Recipe model with surrealCondition filtering
+                it("can constrain collection entries through 'where' clause with condition", async () => {
+                    // Define a Recipe model with condition filtering
                     @ModelOptions({ name: "RecipeWithSurrealFilter" })
                     class RecipeWithSurrealFilter extends Ad4mModel {
                         @Optional({
@@ -801,7 +801,7 @@ describe("Prolog + Literals", () => {
                         @Collection({
                             through: "recipe://entries",
                             where: { 
-                                surrealCondition: `WHERE in.uri = Target AND predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test'` 
+                                condition: `WHERE in.uri = Target AND predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test'` 
                             }
                         })
                         ingredients: string[] = [];
@@ -817,7 +817,7 @@ describe("Prolog + Literals", () => {
                     let entry2 = Literal.from("entry without ingredient").toUrl();
 
                     recipe.entries = [entry1, entry2];
-                    recipe.name = "SurrealCondition test";
+                    recipe.name = "Condition test";
 
                     await recipe.save();
 
@@ -2886,7 +2886,7 @@ describe("Prolog + Literals", () => {
                 });
             })
 
-            describe("surrealGetter feature tests", () => {
+            describe("getter feature tests", () => {
                 @ModelOptions({ name: "BlogPost" })
                 class BlogPost extends Ad4mModel {
                     @Property({ 
@@ -2897,13 +2897,13 @@ describe("Prolog + Literals", () => {
 
                     @Optional({
                         through: "blog://parent",
-                        surrealGetter: "(->link[WHERE perspective = $perspective AND predicate = 'blog://reply_to'].out.uri)[0]"
+                        getter: "(->link[WHERE perspective = $perspective AND predicate = 'blog://reply_to'].out.uri)[0]"
                     })
                     parentPost: string | undefined;
 
                     @Collection({
                         through: "blog://tags",
-                        surrealGetter: "(->link[WHERE perspective = $perspective AND predicate = 'blog://tagged_with'].out.uri)"
+                        getter: "(->link[WHERE perspective = $perspective AND predicate = 'blog://tagged_with'].out.uri)"
                     })
                     tags: string[] = [];
                 }
@@ -2912,13 +2912,13 @@ describe("Prolog + Literals", () => {
                     if(perspective) {
                         await ad4m!.perspective.remove(perspective.uuid)
                     }
-                    perspective = await ad4m!.perspective.add("surrealGetter-test")
+                    perspective = await ad4m!.perspective.add("getter-test")
                     const { name, sdna } = (BlogPost as any).generateSDNA();
                     await perspective!.addSdna(name, sdna, 'subject_class')
                 });
 
-                it("should evaluate surrealGetter for property", async () => {
-                    const postRoot = Literal.from("Blog post for surrealGetter property test").toUrl();
+                it("should evaluate getter for property", async () => {
+                    const postRoot = Literal.from("Blog post for getter property test").toUrl();
                     const parentRoot = Literal.from("Parent blog post").toUrl();
 
                     const post = new BlogPost(perspective!, postRoot);
@@ -2929,22 +2929,22 @@ describe("Prolog + Literals", () => {
                     parent.title = "Original Post";
                     await parent.save();
 
-                    // Create the link that surrealGetter should find
+                    // Create the link that getter should find
                     await perspective!.add(new Link({
                         source: postRoot,
                         predicate: "blog://reply_to",
                         target: parentRoot
                     }));
 
-                    // Get the post and check if surrealGetter resolved the parent
+                    // Get the post and check if getter resolved the parent
                     const retrievedPost = new BlogPost(perspective!, postRoot);
                     await retrievedPost.get();
 
                     expect(retrievedPost.parentPost).to.equal(parentRoot);
                 });
 
-                it("should evaluate surrealGetter for collection", async () => {
-                    const postRoot = Literal.from("Blog post for surrealGetter collection test").toUrl();
+                it("should evaluate getter for collection", async () => {
+                    const postRoot = Literal.from("Blog post for getter collection test").toUrl();
                     const tag1 = Literal.from("tag:javascript").toUrl();
                     const tag2 = Literal.from("tag:typescript").toUrl();
 
@@ -2952,7 +2952,7 @@ describe("Prolog + Literals", () => {
                     post.title = "Test Post";
                     await post.save();
 
-                    // Create links that surrealGetter should find
+                    // Create links that getter should find
                     await perspective!.add(new Link({
                         source: postRoot,
                         predicate: "blog://tagged_with",
@@ -2964,7 +2964,7 @@ describe("Prolog + Literals", () => {
                         target: tag2
                     }));
 
-                    // Get the post and check if surrealGetter resolved the tags
+                    // Get the post and check if getter resolved the tags
                     const retrievedPost = new BlogPost(perspective!, postRoot);
                     await retrievedPost.get();
 
@@ -2973,14 +2973,14 @@ describe("Prolog + Literals", () => {
                     expect(retrievedPost.tags.length).to.equal(2);
                 });
 
-                it("should filter out 'None' and empty values from surrealGetter results", async () => {
+                it("should filter out 'None' and empty values from getter results", async () => {
                     const postRoot = Literal.from("Blog post for None filtering test").toUrl();
 
                     const post = new BlogPost(perspective!, postRoot);
                     post.title = "Post without parent";
                     await post.save();
 
-                    // Don't create any reply_to link, so surrealGetter should return None/empty
+                    // Don't create any reply_to link, so getter should return None/empty
 
                     const retrievedPost = new BlogPost(perspective!, postRoot);
                     await retrievedPost.get();

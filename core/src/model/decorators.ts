@@ -29,9 +29,9 @@ export interface InstanceQueryParams {
 where?: object;
 
 /**
- * A string representing the condition clause of the query.
+ * A string representing the Prolog condition clause of the query.
  */
-condition?: string;
+prologCondition?: string;
 }
 
 /**
@@ -65,14 +65,14 @@ condition?: string;
  *   static async findByName(perspective: PerspectiveProxy): Promise<Recipe[]> { return [] }
  * 
  *   // Get highly rated recipes using a custom condition
- *   @InstanceQuery({ condition: "triple(Instance, 'recipe://rating', Rating), Rating > 4" })
+ *   @InstanceQuery({ prologCondition: "triple(Instance, 'recipe://rating', Rating), Rating > 4" })
  *   static async topRated(perspective: PerspectiveProxy): Promise<Recipe[]> { return [] }
  * }
  * ```
  * 
  * @param {Object} [options] - Query options
  * @param {object} [options.where] - Object with property-value pairs to match
- * @param {string} [options.condition] - Custom Prolog condition for more complex queries
+ * @param {string} [options.prologCondition] - Custom Prolog condition for more complex queries
  */
 export function InstanceQuery(options?: InstanceQueryParams) {
     return function <T>(target: T, key: keyof T, descriptor: PropertyDescriptor) {
@@ -93,8 +93,8 @@ export function InstanceQuery(options?: InstanceQueryParams) {
                 }
             }
 
-            if(options && options.condition) {
-                query += ', ' + options.condition
+            if(options && options.prologCondition) {
+                query += ', ' + options.prologCondition
             }
 
             // Try Prolog first
@@ -171,21 +171,21 @@ export interface PropertyOptions {
     resolveLanguage?: string;
 
     /**
-     * Custom getter to get the value of the property in the prolog engine. If not provided, the default getter will be used.
+     * Custom Prolog getter to get the value of the property. If not provided, the default getter will be used.
      */
-    getter?: string;
+    prologGetter?: string;
 
     /**
-     * Custom setter to set the value of the property in the prolog engine. Only available if the property is writable.
+     * Custom Prolog setter to set the value of the property. Only available if the property is writable.
      */
-    setter?: string;
+    prologSetter?: string;
 
     /**
      * Custom SurrealQL getter to resolve the property value. Use this for custom graph traversals.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      * Example: "(<-link[WHERE predicate = 'flux://has_reply'].in.uri)[0]"
      */
-    surrealGetter?: string;
+    getter?: string;
 
     /**
      * Indicates whether the property is stored locally in the perspective and not in the network. Useful for properties that are not meant to be shared with the network.
@@ -276,8 +276,8 @@ export interface PropertyOptions {
  * @param {boolean} [opts.required] - Whether the property must have a value
  * @param {boolean} [opts.writable=true] - Whether the property can be modified
  * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
- * @param {string} [opts.getter] - Custom Prolog code for getting the property value
- * @param {string} [opts.setter] - Custom Prolog code for setting the property value
+ * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
+ * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function Optional(opts: PropertyOptions) {
@@ -290,8 +290,8 @@ export function Optional(opts: PropertyOptions) {
             throw new Error("SubjectProperty requires an 'initial' option if 'required' is true");
         }
 
-        if (!opts.through && !opts.getter) {
-            throw new Error("SubjectProperty requires either 'through' or 'getter' option")
+        if (!opts.through && !opts.prologGetter) {
+            throw new Error("SubjectProperty requires either 'through' or 'prologGetter' option")
         }
 
         target["__properties"] = target["__properties"] || {};
@@ -405,8 +405,8 @@ export function Flag(opts: FlagOptions) {
 
 interface WhereOptions {
     isInstance?: any
+    prologCondition?: string
     condition?: string
-    surrealCondition?: string
 }
 
 export interface CollectionOptions {
@@ -425,7 +425,7 @@ export interface CollectionOptions {
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      * Example: "(<-link[WHERE predicate = 'flux://has_reply'].in.uri)"
      */
-    surrealGetter?: string;
+    getter?: string;
 
     /**
      * Indicates whether the property is stored locally in the perspective and not in the network. Useful for properties that are not meant to be shared with the network.
@@ -472,14 +472,14 @@ export interface CollectionOptions {
  *   // Collection with custom Prolog filter condition
  *   @Collection({
  *     through: "recipe://step",
- *     where: { condition: `triple(Target, "step://order", Order), Order < 3` }
+ *     where: { prologCondition: `triple(Target, "step://order", Order), Order < 3` }
  *   })
  *   firstSteps: string[] = [];
  * 
  *   // Collection with custom SurrealDB filter condition
  *   @Collection({
  *     through: "recipe://entries",
- *     where: { surrealCondition: `WHERE in.uri = Target AND predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test')`
+ *     where: { condition: `WHERE in.uri = Target AND predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test')`
  *   })
  *   ingredients: string[] = [];
  * 
@@ -502,7 +502,7 @@ export interface CollectionOptions {
  * @param {string} opts.through - The predicate URI for collection links
  * @param {WhereOptions} [opts.where] - Filter conditions for collection values
  * @param {any} [opts.where.isInstance] - Model class to filter instances by
- * @param {string} [opts.where.condition] - Custom Prolog condition for filtering
+ * @param {string} [opts.where.prologCondition] - Custom Prolog condition for filtering
  * @param {boolean} [opts.local] - Whether collection links are stored locally only
  */
 export function Collection(opts: CollectionOptions) {
@@ -622,15 +622,15 @@ export function ModelOptions(opts: ModelOptionsOptions) {
             for(let property in properties) {
                 let propertyCode = `property(${uuid}, "${property}").\n`
 
-                let { through, initial, required, resolveLanguage, writable, flag, getter, setter, local } = properties[property]
+                let { through, initial, required, resolveLanguage, writable, flag, prologGetter, prologSetter, local } = properties[property]
 
                 if(resolveLanguage) {
                     propertyCode += `property_resolve(${uuid}, "${property}").\n`
                     propertyCode += `property_resolve_language(${uuid}, "${property}", "${resolveLanguage}").\n`
                 }
 
-                if(getter) {
-                    propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- ${getter}.\n`
+                if(prologGetter) {
+                    propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- ${prologGetter}.\n`
                 } else if(through) {
                     propertyCode += `property_getter(${uuid}, Base, "${property}", Value) :- triple(Base, "${through}", Value).\n`
 
@@ -643,8 +643,8 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                     }
                 }
 
-                if(setter) {
-                    propertyCode += `property_setter(${uuid}, "${property}", Actions) :- ${setter}.\n`
+                if(prologSetter) {
+                    propertyCode += `property_setter(${uuid}, "${property}", Actions) :- ${prologSetter}.\n`
                 } else if (writable && through) {
                     let setter = obj[propertyNameToSetterName(property)]
                     if(typeof setter === "function") {
@@ -687,8 +687,8 @@ export function ModelOptions(opts: ModelOptionsOptions) {
 
                 if(through) {
                     if(where) {
-                        if(!where.isInstance && !where.condition && !where.surrealCondition) {
-                            throw "'where' needs one of 'isInstance', 'condition', or 'surrealCondition'"
+                        if(!where.isInstance && !where.prologCondition && !where.condition) {
+                            throw "'where' needs one of 'isInstance', 'prologCondition', or 'condition'"
                         }
 
                         let conditions = []
@@ -703,17 +703,17 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                             conditions.push(`instance(OtherClass, Target), subject_class("${otherClass}", OtherClass)`)
                         }
 
-                        if(where.condition) {
-                            conditions.push(where.condition)
+                        if(where.prologCondition) {
+                            conditions.push(where.prologCondition)
                         }
 
-                        // If there are Prolog conditions (isInstance or condition), use setof with conditions
-                        // If only surrealCondition is present, use simple findall (SurrealDB will filter later)
+                        // If there are Prolog conditions (isInstance or prologCondition), use setof with conditions
+                        // If only condition is present, use simple findall (SurrealDB will filter later)
                         if(conditions.length > 0) {
                             const conditionString = conditions.join(", ")
                             collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- setof(Target, (triple(Base, "${through}", Target), ${conditionString}), List).\n`
                         } else {
-                            // Only surrealCondition present (no Prolog filtering)
+                            // Only SurrealDB condition present (no Prolog filtering)
                             collectionCode += `collection_getter(${uuid}, Base, "${collection}", List) :- findall(C, triple(Base, "${through}", C), List).\n`
                         }
                     } else {
@@ -824,8 +824,8 @@ export function ModelOptions(opts: ModelOptionsOptions) {
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (defaults to "literal://string:uninitialized")
  * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
- * @param {string} [opts.getter] - Custom Prolog code for getting the property value
- * @param {string} [opts.setter] - Custom Prolog code for setting the property value
+ * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
+ * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function Property(opts: PropertyOptions) {
@@ -889,7 +889,7 @@ export function Property(opts: PropertyOptions) {
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (if property should have one)
  * @param {string} [opts.resolveLanguage] - Language to use for value resolution (e.g. "literal")
- * @param {string} [opts.getter] - Custom Prolog code for getting the property value
+ * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function ReadOnly(opts: PropertyOptions) {

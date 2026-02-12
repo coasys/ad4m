@@ -1182,7 +1182,7 @@ export class PerspectiveProxy {
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
         properties: Map<string, { predicate: string, resolveLanguage?: string }>,
-        collections: Map<string, { predicate: string, instanceFilter?: string, surrealCondition?: string }>
+        collections: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
     } | null> {
         try {
             // Get SDNA code from perspective - it's stored as a link
@@ -1286,7 +1286,7 @@ export class PerspectiveProxy {
             //console.log("properties", properties);
 
             // Extract collection metadata
-            const collections = new Map<string, { predicate: string, instanceFilter?: string, surrealCondition?: string }>();
+            const collections = new Map<string, { predicate: string, instanceFilter?: string, condition?: string }>();
             const collectionResults = await this.infer(`subject_class("${className}", C), collection(C, Coll)`);
             //console.log("collectionResults", collectionResults);
             if (collectionResults) {
@@ -1294,7 +1294,7 @@ export class PerspectiveProxy {
                     const collName = result.Coll;
                     let predicate: string | null = null;
                     let instanceFilter: string | undefined = undefined;
-                    let surrealCondition: string | undefined = undefined;
+                    let condition: string | undefined = undefined;
 
                     // Try to extract predicate from collection_adder first
                     const adderResults = await this.infer(`subject_class("${className}", C), collection_adder(C, "${collName}", Adder)`);
@@ -1306,7 +1306,7 @@ export class PerspectiveProxy {
                         }
                     }
                     
-                    // Note: surrealCondition is not stored in SDNA, it's read from class metadata
+                    // Note: condition is not stored in SDNA, it's read from class metadata
                     // It will be populated by augmentMetadataWithCollectionOptions() when needed
 
                     // Parse collection_getter from SDNA to extract predicate and instanceFilter
@@ -1349,7 +1349,7 @@ export class PerspectiveProxy {
                     }
 
                     if (predicate) {
-                        collections.set(collName, { predicate, instanceFilter, surrealCondition });
+                        collections.set(collName, { predicate, instanceFilter, condition });
                     }
                 }
             }
@@ -1368,7 +1368,7 @@ export class PerspectiveProxy {
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
         properties: Map<string, { predicate: string, resolveLanguage?: string }>,
-        collections: Map<string, { predicate: string, instanceFilter?: string, surrealCondition?: string }>
+        collections: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
     }): string {
         if (metadata.requiredTriples.length === 0) {
             // No required triples - any node with links is an instance
@@ -1461,13 +1461,13 @@ export class PerspectiveProxy {
 
         let values = result.map(r => r.value).filter(v => v !== "" && v !== '');
         
-        // Apply surrealCondition filtering if present
-        if (collMeta.surrealCondition && values.length > 0) {
+        // Apply condition filtering if present
+        if (collMeta.condition && values.length > 0) {
             try {
                 const filteredValues: string[] = [];
                 
                 for (const value of values) {
-                    let condition = collMeta.surrealCondition
+                    let condition = collMeta.condition
                         .replace(/\$perspective/g, `'${this.uuid}'`)
                         .replace(/\$base/g, `'${baseExpression}'`)
                         .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
@@ -1486,7 +1486,7 @@ export class PerspectiveProxy {
                 
                 values = filteredValues;
             } catch (error) {
-                console.warn(`Failed to apply surrealCondition filter for ${collectionName}:`, error);
+                console.warn(`Failed to apply condition filter for ${collectionName}:`, error);
             }
         }
 
@@ -1519,7 +1519,7 @@ export class PerspectiveProxy {
             requiredPredicates: string[],
             requiredTriples: Array<{predicate: string, target?: string}>,
             properties: Map<string, { predicate: string, resolveLanguage?: string }>,
-            collections: Map<string, { predicate: string, instanceFilter?: string, surrealCondition?: string }>
+            collections: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
         }
     ): Promise<string[]> {
         if (expressions.length === 0) {

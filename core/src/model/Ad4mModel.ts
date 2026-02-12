@@ -90,11 +90,11 @@ export interface PropertyMetadata {
   /** Language for resolution (e.g., "literal") */
   resolveLanguage?: string;
   /** Custom Prolog getter code */
-  getter?: string;
+  prologGetter?: string;
   /** Custom Prolog setter code */
-  setter?: string;
+  prologSetter?: string;
   /** Custom SurrealQL getter code */
-  surrealGetter?: string;
+  getter?: string;
   /** Whether stored locally only */
   local?: boolean;
   /** Transform function */
@@ -112,9 +112,9 @@ export interface CollectionMetadata {
   /** The predicate URI (through value) */
   predicate: string;
   /** Filter conditions */
-  where?: { isInstance?: any; condition?: string; surrealCondition?: string };
+  where?: { isInstance?: any; prologCondition?: string; condition?: string };
   /** Custom SurrealQL getter code */
-  surrealGetter?: string;
+  getter?: string;
   /** Whether stored locally only */
   local?: boolean;
 }
@@ -515,9 +515,9 @@ export class Ad4mModel {
         writable: options.writable || false,
         ...(options.initial !== undefined && { initial: options.initial }),
         ...(options.resolveLanguage !== undefined && { resolveLanguage: options.resolveLanguage }),
+        ...(options.prologGetter !== undefined && { prologGetter: options.prologGetter }),
         ...(options.getter !== undefined && { getter: options.getter }),
-        ...(options.surrealGetter !== undefined && { surrealGetter: options.surrealGetter }),
-        ...(options.setter !== undefined && { setter: options.setter }),
+        ...(options.prologSetter !== undefined && { prologSetter: options.prologSetter }),
         ...(options.local !== undefined && { local: options.local }),
         ...(options.transform !== undefined && { transform: options.transform }),
         ...(options.flag !== undefined && { flag: options.flag })
@@ -535,7 +535,7 @@ export class Ad4mModel {
         predicate: options.through || "",
         ...(options.where !== undefined && { where: options.where }),
         ...(options.local !== undefined && { local: options.local }),
-        ...(options.surrealGetter !== undefined && { surrealGetter: options.surrealGetter })
+        ...(options.getter !== undefined && { getter: options.getter })
       };
     }
     
@@ -659,10 +659,10 @@ export class Ad4mModel {
       throw new Error(`Property "${key}" is read-only and cannot be written`);
     }
 
-    if (metadata.setter) {
-      // Custom setter - throw error for now (Phase 2)
+    if (metadata.prologSetter) {
+      // Custom Prolog setter - throw error for now (Phase 2)
       throw new Error(
-        `Custom setter for property "${key}" not yet supported without Prolog. ` +
+        `Custom Prolog setter for property "${key}" not yet supported without Prolog. ` +
         `Use standard @Property decorator or enable Prolog for custom setters.`
       );
     }
@@ -808,9 +808,9 @@ export class Ad4mModel {
         let latestAuthor = null;
         let originalAuthor = null;
 
-        // Process properties (skip those with surrealGetter)
+        // Process properties (skip those with custom getter)
         for (const [propName, propMeta] of Object.entries(metadata.properties)) {
-          if (propMeta.surrealGetter) continue; // Handle via surrealGetter evaluation
+          if (propMeta.getter) continue; // Handle via custom getter evaluation
           const matching = links.filter((l: any) => l.predicate === propMeta.predicate);
           if (matching.length > 0) {
             // "Latest wins" semantics: select the last element since links are ordered ASC.
@@ -863,22 +863,22 @@ export class Ad4mModel {
           }
         }
 
-        // Process collections (skip those with surrealGetter)
+        // Process collections (skip those with custom getter)
         for (const [collName, collMeta] of Object.entries(metadata.collections)) {
-          if (collMeta.surrealGetter) continue; // Handle via surrealGetter evaluation
+          if (collMeta.getter) continue; // Handle via custom getter evaluation
           const matching = links.filter((l: any) => l.predicate === collMeta.predicate);
           // Collections preserve chronological order: links are sorted ASC by timestamp,
           // so the collection reflects the order in which items were added (oldest to newest).
           let values = matching.map((l: any) => l.target);
           
-          // Apply where.surrealCondition filtering if present
-          if (collMeta.where?.surrealCondition && values.length > 0) {
+          // Apply where.condition filtering if present
+          if (collMeta.where?.condition && values.length > 0) {
             try {
               // Filter values by evaluating condition for each value
               const filteredValues: string[] = [];
               
               for (const value of values) {
-                let condition = collMeta.where.surrealCondition
+                let condition = collMeta.where.condition
                   .replace(/\$perspective/g, `'${this.#perspective.uuid}'`)
                   .replace(/\$base/g, `'${this.#baseExpression}'`)
                   .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
@@ -901,7 +901,7 @@ export class Ad4mModel {
               
               values = filteredValues;
             } catch (error) {
-              console.warn(`Failed to apply surrealCondition filter for ${collName}:`, error);
+              console.warn(`Failed to apply condition filter for ${collName}:`, error);
               // Keep unfiltered values on error
             }
           }
@@ -938,12 +938,12 @@ export class Ad4mModel {
       }
 
       // Evaluate SurrealQL getters
-      await ctor.evaluateSurrealGettersForInstance(this, this.#perspective, metadata);
+      await ctor.evaluateCustomGettersForInstance(this, this.#perspective, metadata);
       
-      // Apply where.isInstance filtering to surrealGetter collections
-      // (non-surrealGetter collections were already filtered above)
+      // Apply where.isInstance filtering to getter collections
+      // (non-getter collections were already filtered above)
       for (const [collName, collMeta] of Object.entries(metadata.collections)) {
-        if (collMeta.surrealGetter && collMeta.where?.isInstance && (this as any)[collName]?.length > 0) {
+        if (collMeta.getter && collMeta.where?.isInstance && (this as any)[collName]?.length > 0) {
           try {
             const className = typeof collMeta.where.isInstance === 'string'
               ? collMeta.where.isInstance
@@ -997,19 +997,19 @@ export class Ad4mModel {
    * Evaluates custom SurrealQL getters for properties and collections on a specific instance.
    * @private
    */
-  private static async evaluateSurrealGettersForInstance(
+  private static async evaluateCustomGettersForInstance(
     instance: any,
     perspective: PerspectiveProxy,
     metadata: any
   ) {
     const safeBaseExpression = this.formatSurrealValue(instance.baseExpression);
 
-    // Evaluate property surrealGetters
+    // Evaluate property getters
     for (const [propName, propMeta] of Object.entries(metadata.properties)) {
-      if ((propMeta as any).surrealGetter) {
+      if ((propMeta as any).getter) {
         try {
           // Replace 'Base' placeholder with actual base expression
-          const query = (propMeta as any).surrealGetter.replace(/Base/g, safeBaseExpression);
+          const query = (propMeta as any).getter.replace(/Base/g, safeBaseExpression);
           // Query from node table to have graph traversal context
           const result = await perspective.querySurrealDB(
             `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`
@@ -1018,17 +1018,17 @@ export class Ad4mModel {
             instance[propName] = result[0].value;
           }
         } catch (error) {
-          console.warn(`Failed to evaluate surrealGetter for ${propName}:`, error);
+          console.warn(`Failed to evaluate getter for ${propName}:`, error);
         }
       }
     }
 
-    // Evaluate collection surrealGetters
+    // Evaluate collection getters
     for (const [collName, collMeta] of Object.entries(metadata.collections)) {
-      if ((collMeta as any).surrealGetter) {
+      if ((collMeta as any).getter) {
         try {
           // Replace 'Base' placeholder with actual base expression
-          const query = (collMeta as any).surrealGetter.replace(/Base/g, safeBaseExpression);
+          const query = (collMeta as any).getter.replace(/Base/g, safeBaseExpression);
           // Query from node table to have graph traversal context
           const result = await perspective.querySurrealDB(
             `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`
@@ -1041,7 +1041,7 @@ export class Ad4mModel {
               : value;
           }
         } catch (error) {
-          console.warn(`Failed to evaluate surrealGetter for ${collName}:`, error);
+          console.warn(`Failed to evaluate getter for ${collName}:`, error);
         }
       }
     }
@@ -1657,10 +1657,10 @@ WHERE ${whereConditions.join(' AND ')}
             }
           }
           
-          // Find matching property (skip those with surrealGetter)
+          // Find matching property (skip those with getter)
           let foundProperty = false;
           for (const [propName, propMeta] of Object.entries(metadata.properties)) {
-            if (propMeta.surrealGetter) continue; // Handle via surrealGetter evaluation
+            if (propMeta.getter) continue; // Handle via getter evaluation
             if (propMeta.predicate === predicate) {
               // For properties, take the first value (or we could use timestamp to get latest)
               // Note: Empty objects {} are truthy, so we need to check for them explicitly
@@ -1727,10 +1727,10 @@ WHERE ${whereConditions.join(' AND ')}
             }
           }
           
-          // If not a property, check if it's a collection (skip those with surrealGetter)
+          // If not a property, check if it's a collection (skip those with getter)
           if (!foundProperty) {
             for (const [collName, collMeta] of Object.entries(metadata.collections)) {
-              if (collMeta.surrealGetter) continue; // Handle via surrealGetter evaluation
+              if (collMeta.getter) continue; // Handle via getter evaluation
               if (collMeta.predicate === predicate) {
                 // For collections, accumulate all values with their timestamps and indices for sorting
                 if (!instance[collName]) {
@@ -1834,10 +1834,10 @@ WHERE ${whereConditions.join(' AND ')}
       }
     }
     
-    // Evaluate SurrealQL getters for all instances (single pass)
+    // Evaluate custom getters for all instances (single pass)
     // This populates collection values needed for where.isInstance filtering
     for (const instance of instances) {
-      await this.evaluateSurrealGettersForInstance(instance, perspective, metadata);
+      await this.evaluateCustomGettersForInstance(instance, perspective, metadata);
     }
     
     // Filter collections by where.isInstance if specified
