@@ -3,8 +3,8 @@ use super::update_perspective;
 use super::utils::{
     prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string,
 };
-use crate::agent::create_signed_expression;
 use crate::agent::AgentContext;
+use crate::agent::{create_signed_expression, did_for_context};
 use crate::graphql::graphql_types::{
     DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery,
     LinkStatus, NeighbourhoodSignalFilter, OnlineAgent, PerspectiveExpression, PerspectiveHandle,
@@ -159,6 +159,7 @@ struct SubscribedQuery {
     query: String,
     last_result: String,
     last_keepalive: Instant,
+    user_email: Option<String>,
 }
 
 #[derive(Clone)]
@@ -166,6 +167,7 @@ struct SurrealSubscribedQuery {
     query: String,
     last_result: String,
     last_keepalive: Instant,
+    user_email: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1903,15 +1905,15 @@ impl PerspectiveInstance {
         &self,
         query: String,
         use_subscription_engine: bool,
+        context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
         let service = get_prolog_service().await;
 
         // Extract perspective metadata (same for Simple and SdnaOnly)
-        let (perspective_uuid, owner_did, neighbourhood_author) = {
+        let (perspective_uuid, neighbourhood_author) = {
             let persisted_guard = self.persisted.lock().await;
             (
                 persisted_guard.uuid.clone(),
-                persisted_guard.get_primary_owner(),
                 persisted_guard
                     .neighbourhood
                     .as_ref()
@@ -1919,8 +1921,11 @@ impl PerspectiveInstance {
             )
         };
 
+        // Override owner_did with current user's DID if context is provided (for multi-user prolog isolation)
+        let user_did = did_for_context(context)?;
+
         // Fetch links based on mode
-        let links = match PROLOG_MODE {
+        let mut links: Vec<DecoratedLinkExpression> = match PROLOG_MODE {
             PrologMode::Simple => {
                 // Get all links for Simple mode
                 self.get_links_local(&LinkQuery::default())
@@ -1940,6 +1945,18 @@ impl PerspectiveInstance {
             _ => Vec::new(), // Should never reach here given the callers
         };
 
+        // Filter to only show SDNA links created by this user
+        links.retain(|link| {
+            // Keep SDNA links only if authored by this user
+            link.data.source == "ad4m://self"
+                && (link.author == user_did || Some(&link.author) == neighbourhood_author.as_ref())
+                || link.data.predicate.as_ref().map(|p| p.as_str()) == Some("ad4m://sdna")
+                    && (link.author == user_did
+                        || Some(&link.author) == neighbourhood_author.as_ref())
+                || (link.data.source != "ad4m://self"
+                    && link.data.predicate.as_ref().map(|p| p.as_str()) != Some("ad4m://sdna"))
+        });
+
         // Execute the query using the appropriate engine
         let result = if use_subscription_engine {
             service
@@ -1948,7 +1965,7 @@ impl PerspectiveInstance {
                     query,
                     &links,
                     neighbourhood_author,
-                    owner_did,
+                    Some(user_did),
                 )
                 .await
         } else {
@@ -1958,7 +1975,7 @@ impl PerspectiveInstance {
                     query,
                     &links,
                     neighbourhood_author,
-                    owner_did,
+                    Some(user_did),
                 )
                 .await
         };
@@ -1976,7 +1993,7 @@ impl PerspectiveInstance {
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
             PrologMode::Simple | PrologMode::SdnaOnly => {
-                self.execute_simple_mode_query(query, false).await
+                self.execute_simple_mode_query(query, false, context).await
             }
             PrologMode::Pooled => {
                 // Pooled mode: Use the old pool-based approach
@@ -2015,7 +2032,8 @@ impl PerspectiveInstance {
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
             PrologMode::Simple | PrologMode::SdnaOnly => {
-                self.execute_simple_mode_query(query, true).await
+                self.execute_simple_mode_query(query, true, &AgentContext::main_agent())
+                    .await
             }
             PrologMode::Pooled => {
                 // Pooled mode: Use the old pool-based approach
@@ -2043,12 +2061,12 @@ impl PerspectiveInstance {
     pub async fn prolog_query_subscription_with_context(
         &self,
         query: String,
-        _context: &AgentContext,
+        context: &AgentContext,
     ) -> Result<QueryResolution, AnyError> {
         match PROLOG_MODE {
             PrologMode::Simple | PrologMode::SdnaOnly => {
-                // Note: In Simple/SdnaOnly modes, context is ignored (no context-specific pools)
-                self.execute_simple_mode_query(query, true).await
+                // Context is now properly used for SDNA filtering per-user
+                self.execute_simple_mode_query(query, true, context).await
             }
             PrologMode::Pooled => {
                 // Pooled mode: Use the old pool-based approach with context
@@ -2060,7 +2078,7 @@ impl PerspectiveInstance {
                 self.prolog_query_helper(
                     query,
                     true,
-                    |_uuid| self.get_pool_id_for_context(&perspective_uuid, _context),
+                    |_uuid| self.get_pool_id_for_context(&perspective_uuid, context),
                     |service, pool, q| async move { service.run_query_subscription(pool, q).await },
                 )
                 .await
@@ -2376,6 +2394,7 @@ impl PerspectiveInstance {
     pub async fn surreal_query_notification(
         &self,
         query: String,
+        user_email: Option<String>,
     ) -> Result<Vec<serde_json::Value>, AnyError> {
         // Get context data without holding locks
         let perspective_id = {
@@ -2383,8 +2402,14 @@ impl PerspectiveInstance {
             persisted_guard.uuid.clone()
         };
 
-        // Get global agent DID (not perspective-specific owner)
-        let agent_did = crate::agent::did();
+        // Get agent DID for the specific user (main agent if user_email is None)
+        let agent_context = if let Some(email) = user_email {
+            crate::agent::AgentContext::for_user_email(email)
+        } else {
+            crate::agent::AgentContext::main_agent()
+        };
+        let agent_did = crate::agent::did_for_context(&agent_context)
+            .map_err(|e| anyhow!("Failed to get agent DID: {}", e))?;
 
         // Inject context variables using string replacement instead of LET statements
         // This ensures the SELECT query result is at index 0
@@ -2674,19 +2699,42 @@ impl PerspectiveInstance {
         //    .collect::<Vec<String>>()
         //    .join("\n"));
         let mut result_map = BTreeMap::new();
-        let mut trigger_cache: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+        // Cache key must include both trigger and user_email since surreal_query_notification
+        // uses user_email to determine $agentDid substitution - otherwise users with identical
+        // triggers would incorrectly share cached results
+        let mut trigger_cache: HashMap<(String, Option<String>), Vec<serde_json::Value>> =
+            HashMap::new();
 
         for n in notifications {
             //log::info!("🔔 NOTIFICATIONS: Processing notification for perspective {}: {}", uuid, n.trigger);
-            if let Some(cached_matches) = trigger_cache.get(&n.trigger) {
+            let cache_key = (n.trigger.clone(), n.user_email.clone());
+            if let Some(cached_matches) = trigger_cache.get(&cache_key) {
                 //log::info!("🔔 NOTIFICATIONS: Using cached matches for notification for perspective {}: {}", uuid, n.trigger);
                 result_map.insert(n.clone(), cached_matches.clone());
             } else {
                 //let query_start = std::time::Instant::now();
                 //log::info!("🔔 NOTIFICATIONS: not cached - Querying notification for perspective {}", uuid);
-                let matches = self.surreal_query_notification(n.trigger.clone()).await?;
-                trigger_cache.insert(n.trigger.clone(), matches.clone());
-                result_map.insert(n.clone(), matches);
+                // Handle errors per-notification to prevent one user's DID failure from
+                // silencing all notifications. This can happen with orphaned notifications
+                // from deleted users or corrupted data.
+                match self
+                    .surreal_query_notification(n.trigger.clone(), n.user_email.clone())
+                    .await
+                {
+                    Ok(matches) => {
+                        trigger_cache.insert(cache_key, matches.clone());
+                        result_map.insert(n.clone(), matches);
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "Failed to query notification for user {:?} in perspective {}: {:?}. Skipping this notification.",
+                            n.user_email,
+                            uuid,
+                            e
+                        );
+                        // Skip this notification but continue processing others
+                    }
+                }
                 //log::info!("🔔 NOTIFICATIONS: Querying notification: {} - took {:?}", n.trigger, query_start.elapsed());
             }
         }
@@ -3626,13 +3674,17 @@ impl PerspectiveInstance {
         });
     }
 
-    pub async fn subscribe_and_query(&self, query: String) -> Result<(String, String), AnyError> {
-        // Check if we already have a subscription with the same query
+    pub async fn subscribe_and_query(
+        &self,
+        query: String,
+        user_email: Option<String>,
+    ) -> Result<(String, String), AnyError> {
+        // Check if we already have a subscription with the same query and user
         let existing_subscription = {
             let queries = self.subscribed_queries.lock().await;
             queries
                 .iter()
-                .find(|(_, q)| q.query == query)
+                .find(|(_, q)| q.query == query && q.user_email == user_email)
                 .map(|(id, _)| id.clone())
         };
 
@@ -3659,14 +3711,22 @@ impl PerspectiveInstance {
 
         let subscription_id = uuid::Uuid::new_v4().to_string();
 
-        // Execute prolog query without holding any locks
-        let initial_result = self.prolog_query_subscription(query.clone()).await?;
+        // Execute prolog query with user context
+        let agent_context = if let Some(email) = user_email.as_ref() {
+            crate::agent::AgentContext::for_user_email(email.clone())
+        } else {
+            crate::agent::AgentContext::main_agent()
+        };
+        let initial_result = self
+            .prolog_query_subscription_with_context(query.clone(), &agent_context)
+            .await?;
         let result_string = prolog_resolution_to_string(initial_result);
 
         let subscribed_query = SubscribedQuery {
             query,
             last_result: result_string.clone(),
             last_keepalive: Instant::now(),
+            user_email,
         };
 
         // Now insert the subscription
@@ -3727,13 +3787,14 @@ impl PerspectiveInstance {
     pub async fn subscribe_and_query_surreal(
         &self,
         query: String,
+        user_email: Option<String>,
     ) -> Result<(String, String), AnyError> {
-        // Check if we already have a subscription with the same query
+        // Check if we already have a subscription with the same query and user
         let existing_subscription = {
             let queries = self.surreal_subscribed_queries.lock().await;
             queries
                 .iter()
-                .find(|(_, q)| q.query == query)
+                .find(|(_, q)| q.query == query && q.user_email == user_email)
                 .map(|(id, _)| id.clone())
         };
 
@@ -3760,14 +3821,17 @@ impl PerspectiveInstance {
 
         let subscription_id = Uuid::new_v4().to_string();
 
-        // Execute surreal query without holding any locks
-        let initial_result_vec = self.surreal_query(query.clone()).await?;
+        // Execute surreal query with user context for $agentDid and $perspectiveId substitution
+        let initial_result_vec = self
+            .surreal_query_notification(query.clone(), user_email.clone())
+            .await?;
         let result_string = serde_json::to_string(&initial_result_vec)?;
 
         let subscribed_query = SurrealSubscribedQuery {
             query,
             last_result: result_string.clone(),
             last_keepalive: Instant::now(),
+            user_email,
         };
 
         // Now insert the subscription
@@ -3827,18 +3891,25 @@ impl PerspectiveInstance {
         let mut query_futures = Vec::new();
         let now = Instant::now();
 
-        // Collect only the minimal data needed: ID, query string, and keepalive time
+        // Collect only the minimal data needed: ID, query string, user_email, and keepalive time
         // DON'T clone the potentially huge last_result string
         let queries = {
             let queries_guard = self.surreal_subscribed_queries.lock().await;
             queries_guard
                 .iter()
-                .map(|(id, query)| (id.clone(), query.query.clone(), query.last_keepalive))
+                .map(|(id, query)| {
+                    (
+                        id.clone(),
+                        query.query.clone(),
+                        query.user_email.clone(),
+                        query.last_keepalive,
+                    )
+                })
                 .collect::<Vec<_>>()
         };
 
         // Create futures for each query check
-        for (id, query_string, last_keepalive) in queries {
+        for (id, query_string, user_email, last_keepalive) in queries {
             // Check for timeout
             if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
                 queries_to_remove.push(id);
@@ -3848,7 +3919,10 @@ impl PerspectiveInstance {
             // Spawn query check future
             let self_clone = self.clone();
             let query_future = async move {
-                match self_clone.surreal_query(query_string).await {
+                match self_clone
+                    .surreal_query_notification(query_string, user_email)
+                    .await
+                {
                     Ok(result_vec) => {
                         if let Ok(result_string) = serde_json::to_string(&result_vec) {
                             // Compare with stored last_result only now, avoiding the clone earlier
@@ -3905,18 +3979,25 @@ impl PerspectiveInstance {
         let mut query_futures = Vec::new();
         let now = Instant::now();
 
-        // Collect only the minimal data needed: ID, query string, and keepalive time
+        // Collect only the minimal data needed: ID, query string, user_email, and keepalive time
         // DON'T clone the potentially huge last_result string
         let queries = {
             let queries = self.subscribed_queries.lock().await;
             queries
                 .iter()
-                .map(|(id, query)| (id.clone(), query.query.clone(), query.last_keepalive))
+                .map(|(id, query)| {
+                    (
+                        id.clone(),
+                        query.query.clone(),
+                        query.user_email.clone(),
+                        query.last_keepalive,
+                    )
+                })
                 .collect::<Vec<_>>()
         };
 
         // Create futures for each query check
-        for (id, query_string, last_keepalive) in queries {
+        for (id, query_string, user_email, last_keepalive) in queries {
             // Check for timeout
             if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
                 queries_to_remove.push(id);
@@ -3927,7 +4008,15 @@ impl PerspectiveInstance {
             let self_clone = self.clone();
             let query_future = async move {
                 //let this_now = Instant::now();
-                if let Ok(result) = self_clone.prolog_query_subscription(query_string).await {
+                let agent_context = if let Some(email) = user_email {
+                    crate::agent::AgentContext::for_user_email(email)
+                } else {
+                    crate::agent::AgentContext::main_agent()
+                };
+                if let Ok(result) = self_clone
+                    .prolog_query_subscription_with_context(query_string, &agent_context)
+                    .await
+                {
                     let result_string = prolog_resolution_to_string(result);
                     // Compare with stored last_result only now, avoiding the clone earlier
                     let mut queries = self_clone.subscribed_queries.lock().await;

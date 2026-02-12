@@ -1,5 +1,6 @@
 lazy_static! {
-    pub static ref LATE_JOIN: String = String::from(r#"digraph {
+    pub static ref LATE_JOIN: String = String::from(
+        r#"digraph {
         1 [ label = "1" ]
         2 [ label = "2" ]
         3 [ label = "3" ]
@@ -658,8 +659,10 @@ lazy_static! {
         311 -> 310 [ label = "()" ]
         312 -> 311 [ label = "()" ]
         313 -> 312 [ label = "()" ]
-        }"#);
-    pub static ref LATE_JOIN2: String = String::from(r#"digraph {
+        }"#
+    );
+    pub static ref LATE_JOIN2: String = String::from(
+        r#"digraph {
         1 [ label = "1" ]
         2 [ label = "2" ]
         3 [ label = "3" ]
@@ -1370,8 +1373,10 @@ lazy_static! {
         
         304 -> 303 [ label = "()" ]
         303 -> 302 [ label = "()" ]
-    }"#);
-    pub static ref HIGH_COMPLEX_GRAPH: String = String::from(r#"digraph {
+    }"#
+    );
+    pub static ref HIGH_COMPLEX_GRAPH: String = String::from(
+        r#"digraph {
         1 [ label = "1" ]
         2 [ label = "2" ]
         3 [ label = "3" ]
@@ -1491,5 +1496,6 @@ lazy_static! {
         54 -> 53 [ label = "()" ]
         55 -> 54 [ label = "()" ]
         55 -> 22 [ label = "()" ]
-    }"#);
+    }"#
+    );
 }

@@ -3,15 +3,24 @@ use perspective_diff_sync_integrity::{PerspectiveExpression, RoutedSignalPayload
 
 use super::status::get_dids_agent_key;
 use crate::retriever::holochain::get_active_agents;
-use crate::{errors::{SocialContextResult, SocialContextError}, inputs::SignalData};
+use crate::{
+    errors::{SocialContextError, SocialContextResult},
+    inputs::SignalData,
+};
 
 pub fn send_signal(signal_data: SignalData) -> SocialContextResult<PerspectiveExpression> {
-    debug!("send_signal: Sending to DID: {}", signal_data.remote_agent_did);
+    debug!(
+        "send_signal: Sending to DID: {}",
+        signal_data.remote_agent_did
+    );
     let agent = get_dids_agent_key(signal_data.remote_agent_did.clone())?;
 
     match agent {
         Some(agent_pubkey) => {
-            debug!("send_signal: Found AgentPubKey {:?} for DID {}", agent_pubkey, signal_data.remote_agent_did);
+            debug!(
+                "send_signal: Found AgentPubKey {:?} for DID {}",
+                agent_pubkey, signal_data.remote_agent_did
+            );
             // Create flattened routed payload with recipient DID for multi-user routing
             let routed_payload = RoutedSignalPayload {
                 recipient_did: signal_data.remote_agent_did,
@@ -21,14 +30,22 @@ pub fn send_signal(signal_data: SignalData) -> SocialContextResult<PerspectiveEx
                 proof: signal_data.payload.proof.clone(),
             };
 
-            debug!("send_signal: Calling send_remote_signal to AgentPubKey {:?}", agent_pubkey);
+            debug!(
+                "send_signal: Calling send_remote_signal to AgentPubKey {:?}",
+                agent_pubkey
+            );
             send_remote_signal(routed_payload.get_sb()?, vec![agent_pubkey])?;
             debug!("send_signal: Successfully sent signal");
             Ok(signal_data.payload)
-        },
+        }
         None => {
-            debug!("send_signal: ERROR - No AgentPubKey found for DID {}", signal_data.remote_agent_did);
-            Err(SocialContextError::InternalError("Could not send signal - no AgentPubKey found for DID"))
+            debug!(
+                "send_signal: ERROR - No AgentPubKey found for DID {}",
+                signal_data.remote_agent_did
+            );
+            Err(SocialContextError::InternalError(
+                "Could not send signal - no AgentPubKey found for DID",
+            ))
         }
     }
 }
