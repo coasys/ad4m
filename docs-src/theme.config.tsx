@@ -8,7 +8,7 @@ export default {
   },
   logo: (
     <>
-      <img src="/ad4m/images/logo.svg" style={{ marginRight: "10px" }} />
+      <img src="/images/logo.svg" style={{ marginRight: "10px" }} />
       AD4M Docs {version}
     </>
   ),

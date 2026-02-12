@@ -2,7 +2,7 @@
   "name": "ad4m-monorepo",
   "workspaces": [
     "core",
-    "docs",
+    "docs-src",
     "executor",
     "ui",
     "connect",
