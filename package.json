@@ -2,7 +2,7 @@
   "name": "ad4m-monorepo",
   "workspaces": [
     "core",
-    "docs",
+    "docs-src",
     "executor",
     "ui",
     "connect",
@@ -33,6 +33,7 @@
     "test:windows": "turbo run test:windows --concurrency=1",
     "test-main": "turbo run test-main",
     "package-ad4m": "turbo run package-ad4m",
+    "package-ad4m:cuda": "turbo run package-ad4m:cuda",
     "build-languages": "turbo run build-languages --concurrency=1",
     "build-dapp": "turbo run build-dapp",
     "docs": "jsdoc -c jsdoc.json",

@@ -1,6 +1,6 @@
 version: 2.1
 references:
-  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
+  ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:d0c3e9683811505955185782a5cd683952f846f1abc520c35c1293ad7f046593
 
 commands:
   setup_integration_test_environment:
@@ -25,10 +25,6 @@ commands:
           keys:
             - p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
             - p-diff-sync-rust-cache-
-      - restore_cache:
-          keys:
-            - p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
-            - p-diff-sync-socket-signaling-rust-cache-
       - run:
           name: Install specific pnpm version
           command: npm install -g pnpm@9.15.0
@@ -57,10 +53,6 @@ commands:
           key: p-diff-sync-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock" }}
           paths:
             - ./bootstrap-languages/p-diff-sync/hc-dna/target
-      - save_cache:
-          key: p-diff-sync-socket-signaling-rust-cache-{{ checksum "bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/Cargo.lock" }}
-          paths:
-            - ./bootstrap-languages/p-diff-sync-socket-signaling/hc-dna/target
       - run:
           name: Install ffmpeg for transcription test
           command: sudo apt-get update && sudo apt-get install ffmpeg --fix-missing
@@ -78,7 +70,7 @@ jobs:
       - checkout
       - restore_cache:
           keys:
-            - rust-cache-{{ checksum "Cargo.lock" }}-1.88
+            - rust-cache-{{ checksum "Cargo.lock" }}-1.92
             - rust-cache-
       - run:
           name: cargo fmt --check
@@ -108,7 +100,7 @@ jobs:
           no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
       - save_cache:
-          key: rust-cache-{{ checksum "Cargo.lock" }}-1.88
+          key: rust-cache-{{ checksum "Cargo.lock" }}-1.92
           paths:
             - ./target
             - ~/.cargo/registry

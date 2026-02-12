@@ -1953,8 +1953,13 @@ impl Mutation {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
+        // Extract user context from auth token
+        let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
+        let user_email = agent_context.user_email;
+
         let perspective = get_perspective_with_access_control(&uuid, context).await?;
-        let (subscription_id, result_string) = perspective.subscribe_and_query(query).await?;
+        let (subscription_id, result_string) =
+            perspective.subscribe_and_query(query, user_email).await?;
 
         Ok(QuerySubscription {
             subscription_id,
@@ -1973,9 +1978,14 @@ impl Mutation {
             &perspective_query_capability(vec![uuid.clone()]),
         )?;
 
+        // Extract user context from auth token
+        let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
+        let user_email = agent_context.user_email;
+
         let perspective = get_perspective_with_uuid_field_error(&uuid)?;
-        let (subscription_id, result_string) =
-            perspective.subscribe_and_query_surreal(query).await?;
+        let (subscription_id, result_string) = perspective
+            .subscribe_and_query_surreal(query, user_email)
+            .await?;
 
         Ok(QuerySubscription {
             subscription_id,
@@ -2257,7 +2267,10 @@ impl Mutation {
         notification: NotificationInput,
     ) -> FieldResult<String> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
-        Ok(RuntimeService::request_install_notification(notification).await?)
+        // Extract user context from auth token
+        let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
+        let user_email = agent_context.user_email;
+        Ok(RuntimeService::request_install_notification(notification, user_email).await?)
     }
 
     async fn runtime_update_notification(
@@ -2268,7 +2281,36 @@ impl Mutation {
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
 
-        let notification = Notification::from_input_and_id(id.clone(), notification);
+        // Extract user context from auth token
+        let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
+        let user_email = agent_context.user_email;
+
+        // Fetch existing notification to verify ownership
+        let existing_notification =
+            Ad4mDb::with_global_instance(|db| db.get_notification(id.clone()))
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to fetch notification: {}", e),
+                        Value::null(),
+                    )
+                })?
+                .ok_or_else(|| FieldError::new("Notification not found", Value::null()))?;
+
+        // Verify ownership: user_email must match
+        if existing_notification.user_email != user_email {
+            return Err(FieldError::new(
+                "Permission denied: You do not own this notification",
+                Value::null(),
+            ));
+        }
+
+        // Build updated notification after ownership check
+        // if managed user, preserve the granted status
+        let mut notification =
+            Notification::from_input_and_id(id.clone(), notification, user_email.clone());
+        if user_email.is_some() {
+            notification.granted = existing_notification.granted;
+        }
 
         Ad4mDb::with_global_instance(|db| db.update_notification(id, &notification))?;
 
@@ -2281,6 +2323,31 @@ impl Mutation {
         id: String,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+
+        // Extract user context from auth token
+        let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
+        let user_email = agent_context.user_email;
+
+        // Fetch existing notification to verify ownership
+        let existing_notification =
+            Ad4mDb::with_global_instance(|db| db.get_notification(id.clone()))
+                .map_err(|e| {
+                    FieldError::new(
+                        format!("Failed to fetch notification: {}", e),
+                        Value::null(),
+                    )
+                })?
+                .ok_or_else(|| FieldError::new("Notification not found", Value::null()))?;
+
+        // Verify ownership: user_email must match
+        if existing_notification.user_email != user_email {
+            return Err(FieldError::new(
+                "Permission denied: You do not own this notification",
+                Value::null(),
+            ));
+        }
+
+        // Proceed with removal after ownership check
         Ad4mDb::with_global_instance(|db| db.remove_notification(id))?;
         Ok(true)
     }
@@ -2291,6 +2358,17 @@ impl Mutation {
         id: String,
     ) -> FieldResult<bool> {
         check_capability(&context.capabilities, &AGENT_UPDATE_CAPABILITY)?;
+
+        // Only the main agent can grant notifications
+        // Managed users have their notifications auto-granted on creation
+        let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
+        if !agent_context.is_main_agent {
+            return Err(FieldError::new(
+                "Permission denied: Only the main agent can grant notifications",
+                Value::null(),
+            ));
+        }
+
         let mut notification = Ad4mDb::with_global_instance(|db| db.get_notification(id.clone()))
             .map_err(|e| e.to_string())?
             .ok_or("Notification with given id not found")?;

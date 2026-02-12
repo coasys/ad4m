@@ -13,20 +13,40 @@ export default function agentLanguageTests(testContext: TestContext) {
             const aliceHerself = await alice.agent.me()
             const bobHimself = await bob.agent.me()
 
+            // Helper function to retry agent lookup with logging
+            async function retryAgentLookup(
+                client: typeof alice,
+                targetDid: string,
+                clientName: string,
+                targetName: string,
+                maxAttempts: number = 90
+            ) {
+                let result = await client.agent.byDID(targetDid)
+                let attempts = 0
+                while (!result && attempts < maxAttempts) {
+                    if (attempts % 10 === 0) {
+                        console.log(`${clientName} looking up ${targetName}... attempt ${attempts}/${maxAttempts}`)
+                    }
+                    await sleep(1000)
+                    result = await client.agent.byDID(targetDid)
+                    attempts++
+                }
+                if (!result) {
+                    console.error(`${clientName} failed to find ${targetName} after ${maxAttempts} attempts`)
+                    console.error(`Target DID: ${targetDid}`)
+                }
+                return result
+            }
+
             await sleep(5000)
 
-            let bobSeenFromAlice = await alice.agent.byDID(didBob)
-            let attempts = 0;
-            while (!bobSeenFromAlice && attempts < 30) {
-                await sleep(1000)
-                bobSeenFromAlice = await alice.agent.byDID(didBob)
-                attempts++
-            }
-            expect(bobSeenFromAlice).not.to.be.undefined
+            // Both lookups now have retry logic
+            const bobSeenFromAlice = await retryAgentLookup(alice, didBob, "Alice", "Bob")
+            expect(bobSeenFromAlice, "Alice should be able to see Bob's agent profile").to.not.be.null
             expect(bobSeenFromAlice).to.be.eql(bobHimself)
 
-            const aliceSeenFromBob = await bob.agent.byDID(didAlice)
-            expect(aliceSeenFromBob).not.to.be.undefined
+            const aliceSeenFromBob = await retryAgentLookup(bob, didAlice, "Bob", "Alice")
+            expect(aliceSeenFromBob, "Bob should be able to see Alice's agent profile").to.not.be.null
             expect(aliceSeenFromBob).to.be.eql(aliceHerself)
         })
     }

@@ -18,6 +18,7 @@ use holochain::prelude::{
 };
 use holochain::test_utils::itertools::Either;
 
+use holochain_types::app::DisabledAppReason;
 use holochain_types::dna::ValidatedDnaManifest;
 use holochain_types::websocket::AllowedOrigins;
 use kitsune_p2p_types::dependencies::url2::Url2;
@@ -46,7 +47,7 @@ lazy_static! {
         Arc::new(RwLock::new(None));
 }
 
-const COASYS_BOOTSTRAP_AGENT_INFO: &str = r#" ["g6VhZ2VudMQkeWyy+u7ziOZEejqRGCHVSjWuNDGCkHSFWpkp/DsXJFVDyWYdqXNpZ25hdHVyZcRAlYaUoegA0DB+U8F2cONLcoORjqz7WqW4dBSfvWyQ4AixLLB3h0jsvqGUo0UfowjUP1ntBhMjA8xo/oQateooDaphZ2VudF9pbmZvxPuGpXNwYWNlxCReuo1fprVD9jjsQWRglwEzVlWFiYB+4BEA7BQIwOpYgUgezPGlYWdlbnTEJHlssvru84jmRHo6kRgh1Uo1rjQxgpB0hVqZKfw7FyRVQ8lmHaR1cmxzkdlJd3NzOi8vc2lnbmFsLmhvbG8uaG9zdC90eDUtd3MvNEFNaGNWNHhpdFdPMHI2YUR1NjFwcW5jMW5LNjBmdkRfYTRyZUJmUFdTMKxzaWduZWRfYXRfbXPPAAABk/NOnPewZXhwaXJlc19hZnRlcl9tc84AEk+AqW1ldGFfaW5mb8QZgahhcnFfc2l6ZYKlcG93ZXIRpWNvdW50CA=="]"#;
+//const COASYS_BOOTSTRAP_AGENT_INFO: &str = r#" ["g6VhZ2VudMQkeWyy+u7ziOZEejqRGCHVSjWuNDGCkHSFWpkp/DsXJFVDyWYdqXNpZ25hdHVyZcRAlYaUoegA0DB+U8F2cONLcoORjqz7WqW4dBSfvWyQ4AixLLB3h0jsvqGUo0UfowjUP1ntBhMjA8xo/oQateooDaphZ2VudF9pbmZvxPuGpXNwYWNlxCReuo1fprVD9jjsQWRglwEzVlWFiYB+4BEA7BQIwOpYgUgezPGlYWdlbnTEJHlssvru84jmRHo6kRgh1Uo1rjQxgpB0hVqZKfw7FyRVQ8lmHaR1cmxzkdlJd3NzOi8vc2lnbmFsLmhvbG8uaG9zdC90eDUtd3MvNEFNaGNWNHhpdFdPMHI2YUR1NjFwcW5jMW5LNjBmdkRfYTRyZUJmUFdTMKxzaWduZWRfYXRfbXPPAAABk/NOnPewZXhwaXJlc19hZnRlcl9tc84AEk+AqW1ldGFfaW5mb8QZgahhcnFfc2l6ZYKlcG93ZXIRpWNvdW50CA=="]"#;
 #[derive(Clone)]
 pub struct HolochainService {
     pub conductor: ConductorHandle,
@@ -64,6 +65,7 @@ pub struct LocalConductorConfig {
     pub use_mdns: bool,
     pub proxy_url: String,
     pub bootstrap_url: String,
+    pub relay_url: Option<String>,
     pub app_port: u16,
 }
 
@@ -203,7 +205,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::AgentInfos(response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3),
+                                        std::time::Duration::from_secs(30),
                                         service.agent_infos()
                                     ).await.map_err(|_| anyhow!("Timeout error; AgentInfos")) {
                                         Ok(result) => {
@@ -216,7 +218,7 @@ impl HolochainService {
                                 }
                                 HolochainServiceRequest::AddAgentInfos(agent_infos, response_tx) => {
                                     match timeout(
-                                        std::time::Duration::from_secs(3),
+                                        std::time::Duration::from_secs(30),
                                         service.add_agent_infos(agent_infos)
                                     ).await.map_err(|_| anyhow!("Timeout error; AddAgentInfos")) {
                                         Ok(result) => {
@@ -378,11 +380,11 @@ impl HolochainService {
             _ => unreachable!(),
         };
 
-        let agent_infos: Vec<String> = serde_json::from_str(COASYS_BOOTSTRAP_AGENT_INFO)?;
-        info!("Adding agent infos: {:?}", agent_infos);
-        if let Err(e) = inteface.add_agent_infos(agent_infos).await {
-            error!("Error adding agent infos: {:?}", e);
-        }
+        //let agent_infos: Vec<String> = serde_json::from_str(COASYS_BOOTSTRAP_AGENT_INFO)?;
+        //info!("Adding agent infos: {:?}", agent_infos);
+        //if let Err(e) = inteface.add_agent_infos(agent_infos).await {
+        //    error!("Error adding agent infos: {:?}", e);
+        //}
 
         set_holochain_service(inteface).await;
 
@@ -435,27 +437,12 @@ impl HolochainService {
                 network_config.signal_url = Url2::parse("ws://relay.ad4m.dev:4433");
             }
 
-            //if local_config.use_local_proxy {
-            network_config.advanced = Some(serde_json::json!({
-                "tx5Transport": {
-                    "signalAllowPlainText": true,
-                }
-            }));
-            //}
-
-            network_config.webrtc_config = Some(serde_json::json!({
-                "iceServers": [
-                    {"urls": ["stun:stun.cloudflare.com:3478"]},
-                    {"urls": ["stun:stun.l.google.com:19302"]},
-                    {
-                        "urls": [
-                            "stun:relay.ad4m.dev:3478",
-                        ],
-                        "username": "openrelay",
-                        "credential": "openrelay",
-                    }
-                ]
-            }));
+            if let Some(relay_url) = local_config.relay_url {
+                network_config.relay_url = Url2::parse(relay_url.as_str());
+            } else {
+                network_config.relay_url =
+                    Url2::parse("https://use1-1.relay.n0.iroh-canary.iroh.link./");
+            }
 
             config.network = network_config;
 
@@ -518,21 +505,78 @@ impl HolochainService {
                     .install_app_bundle(install_app_payload)
                     .await
                     .map_err(|e| anyhow!("Could not install app: {:?}", e))?;
-
-                self.conductor
-                    .clone()
-                    .enable_app(app_id.clone())
-                    .await
-                    .map_err(|e| anyhow!("Could not activate app: {:?}", e))?;
-
-                let app_info = self.conductor.get_app_info(&app_id).await?;
-                Ok(app_info.unwrap())
             }
-            Some(app_info) => {
+            Some(_) => {
                 info!("App already installed with id: {:?}", app_id);
-                Ok(app_info)
             }
         }
+
+        // Always ensure the app is enabled, even if already installed.
+        // This is necessary because enable_app creates the K2 network space
+        // via the join operation. If we don't call enable_app for already-installed
+        // apps, their K2 spaces won't exist and p2p calls will fail with
+        // "The K2 Space does not exist" error.
+        self.conductor
+            .clone()
+            .enable_app(app_id.clone())
+            .await
+            .map_err(|e| anyhow!("Could not enable app: {:?}", e))?;
+
+        // Get app info to check if cells are actually running
+        let app_info = self.conductor.get_app_info(&app_id).await?;
+        let app_info =
+            app_info.ok_or_else(|| anyhow!("App not found after enabling: {}", app_id))?;
+
+        // Extract all cell IDs from the app
+        let mut app_cell_ids = Vec::new();
+        for (_role_name, cell_infos) in &app_info.cell_info {
+            for cell_info in cell_infos {
+                match cell_info {
+                    CellInfo::Provisioned(cell) => app_cell_ids.push(cell.cell_id.clone()),
+                    CellInfo::Cloned(cell) => {
+                        if cell.enabled {
+                            app_cell_ids.push(cell.cell_id.clone())
+                        }
+                    }
+                    CellInfo::Stem(_) => {} // Stem cells are not yet instantiated
+                }
+            }
+        }
+
+        // Check if all cells are running (have K2 spaces)
+        let running_cells = self.conductor.running_cell_ids();
+        let cells_not_running: Vec<_> = app_cell_ids
+            .iter()
+            .filter(|cell_id| !running_cells.contains(cell_id))
+            .collect();
+
+        if !cells_not_running.is_empty() {
+            // Some cells are not running - this means K2 spaces don't exist.
+            // Force a disable/enable cycle to create them.
+            info!(
+                "App {} has {} cells not running, forcing restart to create K2 spaces",
+                app_id,
+                cells_not_running.len()
+            );
+
+            // Disable the app (removes cells from running state)
+            self.conductor
+                .clone()
+                .disable_app(app_id.clone(), DisabledAppReason::User)
+                .await
+                .map_err(|e| anyhow!("Could not disable app for restart: {:?}", e))?;
+
+            // Re-enable to create cells and K2 spaces
+            self.conductor
+                .clone()
+                .enable_app(app_id.clone())
+                .await
+                .map_err(|e| anyhow!("Could not re-enable app after restart: {:?}", e))?;
+        }
+
+        let app_info = self.conductor.get_app_info(&app_id).await?;
+        let app_info = app_info.ok_or_else(|| anyhow!("App not found: {}", app_id))?;
+        Ok(app_info)
     }
 
     pub async fn call_zome_function(
@@ -663,17 +707,162 @@ impl HolochainService {
     }
 
     pub async fn agent_infos(&self) -> Result<Vec<String>, AnyError> {
-        Ok(self
-            .conductor
-            .get_agent_infos(None)
-            .await?
-            .into_iter()
-            .map(|arc| (*arc).encode())
-            .collect::<Result<Vec<_>, _>>()?)
+        // Get agent infos for running cells, with retry logic for K2 spaces that may be initializing.
+        // After the Holochain update, K2 spaces are only created by the `join` function.
+        // However, there might be a brief delay between cell creation and K2 space availability.
+        let running_cell_ids = self.conductor.running_cell_ids();
+        let running_dna_hashes: std::collections::HashSet<_> = running_cell_ids
+            .iter()
+            .map(|cell_id| cell_id.dna_hash().clone())
+            .collect();
+
+        if running_dna_hashes.is_empty() {
+            // No running cells, return empty list
+            return Ok(Vec::new());
+        }
+
+        // Try each DNA hash individually, with retries for K2SpaceNotFound errors
+        let mut all_agent_infos = Vec::new();
+        let mut permanently_failed = Vec::new();
+
+        // Quick retries per DNA - spaces should initialize quickly if they exist
+        // 5 retries × 200ms = 1 second max per DNA
+        // Service-level timeout handles the overall operation
+        const MAX_RETRIES: u32 = 5;
+        const RETRY_DELAY_MS: u64 = 200;
+
+        for dna_hash in running_dna_hashes {
+            let mut success = false;
+            let mut retries = 0;
+
+            while !success && retries < MAX_RETRIES {
+                match self
+                    .conductor
+                    .get_agent_infos(Some(vec![dna_hash.clone()]))
+                    .await
+                {
+                    Ok(infos) => {
+                        for info in infos {
+                            if let Ok(encoded) = (*info).encode() {
+                                all_agent_infos.push(encoded);
+                            }
+                        }
+                        success = true;
+                    }
+                    Err(e) => {
+                        let error_str = format!("{:?}", e);
+                        if error_str.contains("K2SpaceNotFound")
+                            || (error_str.contains("K2 Space")
+                                && error_str.contains("does not exist"))
+                        {
+                            // K2 space not ready yet, retry after a short delay
+                            retries += 1;
+                            if retries < MAX_RETRIES {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(
+                                    RETRY_DELAY_MS,
+                                ))
+                                .await;
+                            }
+                        } else if error_str.contains("Timeout") {
+                            // Timeout errors - skip immediately, retrying will just timeout again
+                            permanently_failed.push(dna_hash.clone());
+                            break;
+                        } else {
+                            // For other errors, don't retry
+                            error!("Failed to get agent infos for DNA {:?}: {:?}", dna_hash, e);
+                            permanently_failed.push(dna_hash.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if !success && retries >= MAX_RETRIES {
+                permanently_failed.push(dna_hash.clone());
+            }
+        }
+
+        if !permanently_failed.is_empty() {
+            info!(
+                "Got agent infos for {} DNAs, {} DNAs had unavailable K2 spaces or timed out",
+                all_agent_infos.len(),
+                permanently_failed.len()
+            );
+        }
+
+        Ok(all_agent_infos)
     }
 
     pub async fn add_agent_infos(&self, agent_infos: Vec<String>) -> Result<(), AnyError> {
-        Ok(self.conductor.add_agent_infos(agent_infos).await?)
+        // Try adding each agent info individually, with retry logic for K2 spaces that may be initializing.
+        // After the Holochain update, K2 spaces are only created by the `join` function.
+        // If an agent info is for a space we haven't joined (e.g., another agent's unique DNA),
+        // we'll skip it after retries fail.
+        let mut success_count = 0;
+        let mut skipped_count = 0;
+
+        // Quick retries per agent info - spaces should initialize quickly if they exist
+        // 5 retries × 200ms = 1 second max per agent info
+        // Service-level timeout handles the overall operation
+        const MAX_RETRIES: u32 = 5;
+        const RETRY_DELAY_MS: u64 = 200;
+
+        for agent_info in agent_infos {
+            let mut success = false;
+            let mut retries = 0;
+
+            while !success && retries < MAX_RETRIES {
+                match self
+                    .conductor
+                    .add_agent_infos(vec![agent_info.clone()])
+                    .await
+                {
+                    Ok(()) => {
+                        success_count += 1;
+                        success = true;
+                    }
+                    Err(e) => {
+                        let error_str = format!("{:?}", e);
+                        if error_str.contains("K2SpaceNotFound")
+                            || (error_str.contains("K2 Space")
+                                && error_str.contains("does not exist"))
+                        {
+                            // K2 space not ready yet, retry after a short delay
+                            retries += 1;
+                            if retries < MAX_RETRIES {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(
+                                    RETRY_DELAY_MS,
+                                ))
+                                .await;
+                            }
+                        } else if error_str.contains("Timeout") {
+                            // Timeout errors - skip immediately, retrying will just timeout again
+                            // This happens when trying to add agent info for a DNA with no peers
+                            skipped_count += 1;
+                            break;
+                        } else {
+                            // For other errors, don't retry
+                            error!("Failed to add agent info: {:?}", e);
+                            skipped_count += 1;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if !success && retries >= MAX_RETRIES {
+                skipped_count += 1;
+            }
+        }
+
+        if skipped_count > 0 {
+            info!(
+                "Added {} agent infos, skipped {} (spaces not available or timed out)",
+                success_count, skipped_count
+            );
+        }
+
+        Ok(())
     }
 
     pub async fn sign(&self, data: String) -> Result<Signature, AnyError> {
@@ -692,7 +881,7 @@ impl HolochainService {
     }
 
     pub async fn shutdown(&self) -> Result<(), AnyError> {
-        self.conductor.shutdown().await??;
+        self.conductor.clone().shutdown().await??;
         Ok(())
     }
 
