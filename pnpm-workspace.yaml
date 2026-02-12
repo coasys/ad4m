@@ -1,7 +1,7 @@
 packages:
   # all packages in direct subdirs of packages/
   - 'core'
-  - 'docs'
+  - 'docs-src'
   - 'executor'
   - 'ui'
   - 'connect'
