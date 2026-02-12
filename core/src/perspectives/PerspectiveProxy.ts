@@ -1514,12 +1514,13 @@ export class PerspectiveProxy {
         try {
             // Find the shape URI for this class by looking for the rdf://type -> ad4m://SubjectClass link
             // The source of that link is the class URI (e.g., "recipe://Recipe")
+            // Use string::ends_with since class URIs are "namespace://ClassName"
             const classQuery = `
                 SELECT source AS class_uri 
                 FROM link 
                 WHERE predicate = 'rdf://type' 
                   AND target = 'ad4m://SubjectClass' 
-                  AND source CONTAINS '${escapeSurrealString(className)}'
+                  AND string::ends_with(source, '://${escapeSurrealString(className)}')
                 LIMIT 1
             `;
             const classResult = await this.querySurrealDB(classQuery);
