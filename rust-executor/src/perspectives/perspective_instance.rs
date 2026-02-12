@@ -1835,7 +1835,7 @@ impl PerspectiveInstance {
         let service = get_prolog_service().await;
 
         // Extract perspective metadata (same for Simple and SdnaOnly)
-        let (perspective_uuid, mut owner_did, neighbourhood_author) = {
+        let (perspective_uuid, neighbourhood_author) = {
             let persisted_guard = self.persisted.lock().await;
             (
                 persisted_guard.uuid.clone(),
@@ -1847,13 +1847,8 @@ impl PerspectiveInstance {
         };
 
         // Override owner_did with current user's DID if context is provided (for multi-user prolog isolation)
-        if let Some(ctx) = context {
-            if let Some(user_email) = &ctx.user_email {
-                if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(user_email) {
-                    owner_did = Some(user_did);
-                }
-            }
-        }
+        let did_document = crate::agent::did_document_for_context(context)?;
+        let user_did = did_document.verification_method[0].id.clone();
 
         // Fetch links based on mode
         let mut links: Vec<DecoratedLinkExpression> = match PROLOG_MODE {
@@ -1876,27 +1871,14 @@ impl PerspectiveInstance {
             _ => Vec::new(), // Should never reach here given the callers
         };
 
-        // Filter SDNA links by author if context is provided (for prolog pool isolation)
-        if let Some(ctx) = context {
-            if let Some(user_email) = &ctx.user_email {
-                // Get user's DID
-                if let Ok(user_did) = crate::agent::AgentService::get_user_did_by_email(user_email) {
-                    // Filter to only show SDNA links created by this user
-                    links.retain(|link| {
-                        // Keep SDNA links only if authored by this user
-                        link.data.source == "ad4m://self" && ( link.author == user_did || Some(&link.author) == neighbourhood_author.as_ref())
-                            || link.data.predicate.as_ref().map(|p| p.as_str()) == Some("ad4m://sdna") && ( link.author == user_did || Some(&link.author) == neighbourhood_author.as_ref())
-                            || (link.data.source != "ad4m://self" && link.data.predicate.as_ref().map(|p| p.as_str()) != Some("ad4m://sdna"))
-                    });
-                    log::debug!(
-                        "🔍 Filtered SDNA links for user {} (DID: {}): {} links remaining",
-                        user_email,
-                        user_did,
-                        links.len()
-                    );
-                }
-            }
-        }
+
+        // Filter to only show SDNA links created by this user
+        links.retain(|link| {
+            // Keep SDNA links only if authored by this user
+            link.data.source == "ad4m://self" && ( link.author == user_did || Some(&link.author) == neighbourhood_author.as_ref())
+                || link.data.predicate.as_ref().map(|p| p.as_str()) == Some("ad4m://sdna") && ( link.author == user_did || Some(&link.author) == neighbourhood_author.as_ref())
+                || (link.data.source != "ad4m://self" && link.data.predicate.as_ref().map(|p| p.as_str()) != Some("ad4m://sdna"))
+        });
 
         // Execute the query using the appropriate engine
         let result = if use_subscription_engine {
@@ -1906,7 +1888,7 @@ impl PerspectiveInstance {
                     query,
                     &links,
                     neighbourhood_author,
-                    owner_did,
+                    Some(user_did),
                 )
                 .await
         } else {
@@ -1916,7 +1898,7 @@ impl PerspectiveInstance {
                     query,
                     &links,
                     neighbourhood_author,
-                    owner_did,
+                    Some(user_did),
                 )
                 .await
         };
