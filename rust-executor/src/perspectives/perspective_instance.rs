@@ -3,7 +3,7 @@ use super::update_perspective;
 use super::utils::{
     prolog_get_all_string_bindings, prolog_get_first_string_binding, prolog_resolution_to_string,
 };
-use crate::agent::create_signed_expression;
+use crate::agent::{create_signed_expression, did_for_context};
 use crate::agent::AgentContext;
 use crate::graphql::graphql_types::{
     DecoratedPerspectiveDiff, ExpressionRendered, JsResultType, LinkMutations, LinkQuery,
@@ -1847,8 +1847,7 @@ impl PerspectiveInstance {
         };
 
         // Override owner_did with current user's DID if context is provided (for multi-user prolog isolation)
-        let did_document = crate::agent::did_document_for_context(context)?;
-        let user_did = did_document.verification_method[0].id.clone();
+        let user_did = did_for_context(context)?;
 
         // Fetch links based on mode
         let mut links: Vec<DecoratedLinkExpression> = match PROLOG_MODE {
