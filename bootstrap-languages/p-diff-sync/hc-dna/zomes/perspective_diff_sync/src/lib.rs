@@ -47,8 +47,9 @@ fn init(_: ()) -> ExternResult<InitCallbackResult> {
 #[hdk_extern]
 pub fn commit(input: CommitInput) -> ExternResult<Hash> {
     debug!("commit");
-    let commit_result = link_adapter::commit::commit::<retriever::HolochainRetreiver>(input.diff, input.my_did)
-        .map_err(|error| utils::err(&format!("{}", error)));
+    let commit_result =
+        link_adapter::commit::commit::<retriever::HolochainRetreiver>(input.diff, input.my_did)
+            .map_err(|error| utils::err(&format!("{}", error)));
     debug!("commit_result: {:?}", commit_result);
     commit_result
 }
@@ -63,8 +64,9 @@ pub fn current_revision(_: ()) -> ExternResult<Option<Hash>> {
 #[hdk_extern]
 pub fn sync(my_did: String) -> ExternResult<Option<Hash>> {
     //info!("sync");
-    let broadcast_result = link_adapter::commit::broadcast_current::<retriever::HolochainRetreiver>(&my_did)
-        .map_err(|error| utils::err(&format!("{}", error)));
+    let broadcast_result =
+        link_adapter::commit::broadcast_current::<retriever::HolochainRetreiver>(&my_did)
+            .map_err(|error| utils::err(&format!("{}", error)));
     //info!("broadcast_result: {:?}", broadcast_result);
     broadcast_result
 }
@@ -72,8 +74,9 @@ pub fn sync(my_did: String) -> ExternResult<Option<Hash>> {
 #[hdk_extern]
 pub fn pull(args: PullArguments) -> ExternResult<PullResult> {
     debug!("pull");
-    let pull_result = link_adapter::pull::pull::<retriever::HolochainRetreiver>(true, args.hash, args.is_scribe)
-        .map_err(|error| utils::err(&format!("{}", error)));
+    let pull_result =
+        link_adapter::pull::pull::<retriever::HolochainRetreiver>(true, args.hash, args.is_scribe)
+            .map_err(|error| utils::err(&format!("{}", error)));
     //debug!("pull_result: {:?}", pull_result);
     pull_result
 }
@@ -101,11 +104,17 @@ pub fn update_current_revision(_hash: Hash) -> ExternResult<()> {
 
 #[hdk_extern]
 fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
-    debug!("recv_remote_signal called, signal size: {} bytes", signal.bytes().len());
+    debug!(
+        "recv_remote_signal called, signal size: {} bytes",
+        signal.bytes().len()
+    );
 
     // Check if it's a RoutedSignalPayload (multi-user routing)
     if let Ok(routed) = RoutedSignalPayload::try_from(signal.clone()) {
-        debug!("recv_remote_signal: Emitting RoutedSignalPayload for recipient: {}", routed.recipient_did);
+        debug!(
+            "recv_remote_signal: Emitting RoutedSignalPayload for recipient: {}",
+            routed.recipient_did
+        );
         emit_signal(routed)?;
         return Ok(());
     }
@@ -120,7 +129,10 @@ fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
 
     // Check if it's a regular PerspectiveExpression (broadcast telepresence)
     if let Ok(sig) = PerspectiveExpression::try_from(signal.clone()) {
-        debug!("recv_remote_signal: Emitting broadcast PerspectiveExpression from {}", sig.author);
+        debug!(
+            "recv_remote_signal: Emitting broadcast PerspectiveExpression from {}",
+            sig.author
+        );
         emit_signal(sig)?;
         return Ok(());
     }
