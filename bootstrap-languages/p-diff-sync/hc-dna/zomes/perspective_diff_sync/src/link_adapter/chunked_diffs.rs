@@ -3,14 +3,14 @@ use perspective_diff_sync_integrity::{
     EntryTypes, LinkExpression, PerspectiveDiff, PerspectiveDiffEntryReference,
 };
 
+use crate::errors::SocialContextResult;
+use crate::retriever::PerspectiveDiffRetreiver;
 use crate::{Hash, CHUNK_SIZE};
-use crate::errors::{SocialContextResult};
-use crate::retriever::{PerspectiveDiffRetreiver};
 
 #[derive(Clone)]
 pub struct ChunkedDiffs {
     max_changes_per_chunk: u16,
-    pub chunks: Vec<PerspectiveDiff>
+    pub chunks: Vec<PerspectiveDiff>,
 }
 
 impl ChunkedDiffs {
@@ -25,12 +25,17 @@ impl ChunkedDiffs {
         let mut reverse_links = links.into_iter().rev().collect::<Vec<_>>();
         while reverse_links.len() > 0 {
             let len = self.chunks.len();
-            let current_chunk = self.chunks.get_mut(len-1).expect("must have at least one");
-    
-            while current_chunk.total_diff_number() < self.max_changes_per_chunk.into() && reverse_links.len() > 0 {
+            let current_chunk = self
+                .chunks
+                .get_mut(len - 1)
+                .expect("must have at least one");
+
+            while current_chunk.total_diff_number() < self.max_changes_per_chunk.into()
+                && reverse_links.len() > 0
+            {
                 current_chunk.additions.push(reverse_links.pop().unwrap());
             }
-    
+
             if reverse_links.len() > 0 {
                 self.chunks.push(PerspectiveDiff::new())
             }
@@ -41,34 +46,45 @@ impl ChunkedDiffs {
         let mut reverse_links = links.into_iter().rev().collect::<Vec<_>>();
         while reverse_links.len() > 0 {
             let len = self.chunks.len();
-            let current_chunk = self.chunks.get_mut(len-1).expect("must have at least one");
+            let current_chunk = self
+                .chunks
+                .get_mut(len - 1)
+                .expect("must have at least one");
 
-            while current_chunk.total_diff_number() < self.max_changes_per_chunk.into() && reverse_links.len() > 0 {
+            while current_chunk.total_diff_number() < self.max_changes_per_chunk.into()
+                && reverse_links.len() > 0
+            {
                 current_chunk.removals.push(reverse_links.pop().unwrap());
             }
-    
+
             if reverse_links.len() > 0 {
                 self.chunks.push(PerspectiveDiff::new())
             }
         }
     }
 
-    pub fn into_entries<Retreiver: PerspectiveDiffRetreiver>(self) -> SocialContextResult<Vec<Hash>> {
+    pub fn into_entries<Retreiver: PerspectiveDiffRetreiver>(
+        self,
+    ) -> SocialContextResult<Vec<Hash>> {
         debug!("ChunkedDiffs.into_entries()");
         self.chunks
             .into_iter()
             .map(|chunk_diff| {
-                debug!("ChunkedDiffs writing chunk of size: {}", chunk_diff.total_diff_number());
+                debug!(
+                    "ChunkedDiffs writing chunk of size: {}",
+                    chunk_diff.total_diff_number()
+                );
                 let diff_entry = PerspectiveDiffEntryReference::new(
-                    chunk_diff,
-                    None, // No parents for chunk entries
+                    chunk_diff, None, // No parents for chunk entries
                 );
                 Retreiver::create_entry(EntryTypes::PerspectiveDiffEntryReference(diff_entry))
             })
-            .collect() 
+            .collect()
     }
 
-    pub fn from_entries<Retreiver: PerspectiveDiffRetreiver>(hashes: Vec<Hash>) -> SocialContextResult<Self> {
+    pub fn from_entries<Retreiver: PerspectiveDiffRetreiver>(
+        hashes: Vec<Hash>,
+    ) -> SocialContextResult<Self> {
         let mut diffs = Vec::new();
         for hash in hashes.into_iter() {
             let diff_entry = Retreiver::get::<PerspectiveDiffEntryReference>(hash)?;
@@ -117,12 +133,11 @@ pub fn load_diff_from_entry<Retriever: PerspectiveDiffRetreiver>(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::ChunkedDiffs;
+    use crate::retriever::{MockPerspectiveGraph, GLOBAL_MOCKED_GRAPH};
     use crate::utils::create_link_expression;
-    use crate::retriever::{GLOBAL_MOCKED_GRAPH, MockPerspectiveGraph};
 
     #[test]
     fn can_chunk() {
@@ -167,17 +182,16 @@ mod tests {
         let _r3 = create_link_expression("r", "3");
         let _r4 = create_link_expression("r", "4");
 
-
         chunks.add_additions(vec![_a1.clone()]);
         chunks.add_additions(vec![_a2.clone()]);
-        chunks.add_removals(vec![_r1.clone(),_r2.clone(),_r3.clone(),_r4.clone()]);
+        chunks.add_removals(vec![_r1.clone(), _r2.clone(), _r3.clone(), _r4.clone()]);
 
         assert_eq!(chunks.chunks.len(), 2);
 
         let diff = chunks.into_aggregated_diff();
 
-        assert_eq!(diff.additions, vec![_a1,_a2]);
-        assert_eq!(diff.removals, vec![_r1,_r2,_r3,_r4]);
+        assert_eq!(diff.additions, vec![_a1, _a2]);
+        assert_eq!(diff.removals, vec![_r1, _r2, _r3, _r4]);
     }
 
     #[test]
@@ -213,7 +227,8 @@ mod tests {
     fn can_write_and_read_entries() {
         fn update() {
             let mut graph = GLOBAL_MOCKED_GRAPH.lock().unwrap();
-            *graph = MockPerspectiveGraph::from_dot("digraph{}").expect("can create mock graph from empty dot");
+            *graph = MockPerspectiveGraph::from_dot("digraph{}")
+                .expect("can create mock graph from empty dot");
         }
         update();
 

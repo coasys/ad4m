@@ -158,14 +158,13 @@ impl Workspace {
                     let mut last_diff = None;
                     for i in 0..snapshot.diff_chunks.len() {
                         let diff_chunk_hash = &snapshot.diff_chunks[i];
-                        
+
                         // Retrieve the actual chunked diff entry
-                        let chunked_diff_entry = Self::get_p_diff_reference::<Retriever>(diff_chunk_hash.clone())?;
-                        
-                        self.entry_map.insert(
-                            diff_chunk_hash.clone(),
-                            chunked_diff_entry,
-                        );
+                        let chunked_diff_entry =
+                            Self::get_p_diff_reference::<Retriever>(diff_chunk_hash.clone())?;
+
+                        self.entry_map
+                            .insert(diff_chunk_hash.clone(), chunked_diff_entry);
                         last_diff = Some(vec![diff_chunk_hash.clone()]);
                     }
 
@@ -382,7 +381,7 @@ impl Workspace {
         if self.diffs.get(&NULL_NODE()).is_none() {
             let current_diff = PerspectiveDiffEntryReference::new(
                 PerspectiveDiff::new(), // Empty diff for NULL_NODE
-                None
+                None,
             );
             self.diffs.insert(NULL_NODE(), current_diff);
         };
@@ -664,11 +663,8 @@ impl Workspace {
         debug!("===Workspace.get_snapshot(): Function start");
         let fn_start = get_now()?.time();
 
-        let query = LinkQuery::try_new(
-            hash_entry(address)?,
-            LinkTypes::Snapshot
-        )?
-        .tag_prefix(LinkTag::new("snapshot"));
+        let query = LinkQuery::try_new(hash_entry(address)?, LinkTypes::Snapshot)?
+            .tag_prefix(LinkTag::new("snapshot"));
         let mut snapshot_links = get_links(query, GetStrategy::Local)?;
 
         if snapshot_links.len() > 0 {
