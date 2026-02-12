@@ -1505,6 +1505,10 @@ export class PerspectiveProxy {
      * - Property metadata (predicate, resolveLanguage)
      * - Collection metadata (predicate, instanceFilter)
      */
+    /**
+     * Gets subject class metadata from SHACL links (Prolog-free implementation).
+     * Uses the link API directly instead of SurrealDB queries.
+     */
     private async getSubjectClassMetadataFromSDNA(className: string): Promise<{
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
@@ -1512,26 +1516,21 @@ export class PerspectiveProxy {
         collections: Map<string, { predicate: string, instanceFilter?: string }>
     } | null> {
         try {
-            // Find the shape URI for this class by looking for the rdf://type -> ad4m://SubjectClass link
-            // The source of that link is the class URI (e.g., "recipe://Recipe")
-            // Use string::ends_with since class URIs are "namespace://ClassName"
-            const classQuery = `
-                SELECT source AS class_uri 
-                FROM link 
-                WHERE predicate = 'rdf://type' 
-                  AND target = 'ad4m://SubjectClass' 
-                  AND string::ends_with(source, '://${escapeSurrealString(className)}')
-                LIMIT 1
-            `;
-            const classResult = await this.querySurrealDB(classQuery);
+            // Find SHACL class links: source -> rdf://type -> ad4m://SubjectClass
+            const classLinks = await this.get(new LinkQuery({
+                predicate: "rdf://type",
+                target: "ad4m://SubjectClass"
+            }));
             
-            if (!classResult || classResult.length === 0) {
+            // Find the class URI that ends with our className
+            const classLink = classLinks.find(l => l.data.source.endsWith(`://${className}`));
+            if (!classLink) {
                 console.warn(`No SHACL class found for ${className}`);
                 return null;
             }
             
-            const classUri = classResult[0].class_uri;
-            // Extract namespace from class URI (e.g., "recipe://Recipe" -> "recipe://")
+            const classUri = classLink.data.source;
+            // Extract namespace from class URI (e.g., "todo://Todo" -> "todo://")
             const namespaceMatch = classUri.match(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)/);
             const namespace = namespaceMatch ? namespaceMatch[1] : 'ad4m://';
             const shapeUri = `${namespace}${className}Shape`;
@@ -1541,17 +1540,14 @@ export class PerspectiveProxy {
             const properties = new Map<string, { predicate: string, resolveLanguage?: string }>();
             const collections = new Map<string, { predicate: string, instanceFilter?: string }>();
             
-            // Get constructor actions to extract required predicates (for instance identification)
-            const constructorQuery = `
-                SELECT target 
-                FROM link 
-                WHERE source = '${escapeSurrealString(shapeUri)}' 
-                  AND predicate = 'ad4m://constructor'
-            `;
-            const constructorResult = await this.querySurrealDB(constructorQuery);
+            // Get constructor actions from SHACL shape
+            const constructorLinks = await this.get(new LinkQuery({
+                source: shapeUri,
+                predicate: "ad4m://constructor"
+            }));
             
-            if (constructorResult && constructorResult.length > 0) {
-                const constructorTarget = constructorResult[0].target;
+            if (constructorLinks.length > 0) {
+                const constructorTarget = constructorLinks[0].data.target;
                 // Parse constructor actions from literal://string:[{...}]
                 if (constructorTarget && constructorTarget.startsWith('literal://string:')) {
                     try {
@@ -1560,7 +1556,6 @@ export class PerspectiveProxy {
                         for (const action of actions) {
                             if (action.predicate) {
                                 requiredPredicates.push(action.predicate);
-                                // If target is a specific value (not "value"), it's a flag
                                 if (action.target && action.target !== 'value') {
                                     requiredTriples.push({ predicate: action.predicate, target: action.target });
                                 } else {
@@ -1575,50 +1570,42 @@ export class PerspectiveProxy {
             }
             
             // Get all property shapes
-            const propertiesQuery = `
-                SELECT target AS prop_uri 
-                FROM link 
-                WHERE source = '${escapeSurrealString(shapeUri)}' 
-                  AND predicate = 'sh://property'
-            `;
-            const propertiesResult = await this.querySurrealDB(propertiesQuery);
+            const propertyLinks = await this.get(new LinkQuery({
+                source: shapeUri,
+                predicate: "sh://property"
+            }));
             
-            if (propertiesResult) {
-                for (const propRow of propertiesResult) {
-                    const propUri = propRow.prop_uri;
-                    // Extract property name from URI (e.g., "recipe://Recipe.name" -> "name")
-                    const propNameMatch = propUri.match(/\.([^.]+)$/);
-                    if (!propNameMatch) continue;
-                    const propName = propNameMatch[1];
-                    
-                    // Get property details (path, resolveLanguage, collection flag)
-                    const propDetailsQuery = `
-                        SELECT predicate, target 
-                        FROM link 
-                        WHERE source = '${escapeSurrealString(propUri)}'
-                    `;
-                    const propDetails = await this.querySurrealDB(propDetailsQuery);
-                    
-                    let predicate: string | undefined;
-                    let resolveLanguage: string | undefined;
-                    let isCollection = false;
-                    
-                    for (const detail of propDetails || []) {
-                        if (detail.predicate === 'sh://path') {
-                            predicate = detail.target;
-                        } else if (detail.predicate === 'ad4m://resolveLanguage') {
-                            resolveLanguage = detail.target?.replace('literal://string:', '');
-                        } else if (detail.predicate === 'rdf://type' && detail.target === 'ad4m://Collection') {
-                            isCollection = true;
-                        }
+            for (const propLink of propertyLinks) {
+                const propUri = propLink.data.target;
+                // Extract property name from URI (e.g., "todo://Todo.title" -> "title")
+                const propNameMatch = propUri.match(/\.([^.]+)$/);
+                if (!propNameMatch) continue;
+                const propName = propNameMatch[1];
+                
+                // Get property details
+                const propDetailLinks = await this.get(new LinkQuery({
+                    source: propUri
+                }));
+                
+                let predicate: string | undefined;
+                let resolveLanguage: string | undefined;
+                let isCollection = false;
+                
+                for (const detail of propDetailLinks) {
+                    if (detail.data.predicate === 'sh://path') {
+                        predicate = detail.data.target;
+                    } else if (detail.data.predicate === 'ad4m://resolveLanguage') {
+                        resolveLanguage = detail.data.target?.replace('literal://string:', '');
+                    } else if (detail.data.predicate === 'rdf://type' && detail.data.target === 'ad4m://Collection') {
+                        isCollection = true;
                     }
-                    
-                    if (predicate) {
-                        if (isCollection) {
-                            collections.set(propName, { predicate });
-                        } else {
-                            properties.set(propName, { predicate, resolveLanguage });
-                        }
+                }
+                
+                if (predicate) {
+                    if (isCollection) {
+                        collections.set(propName, { predicate });
+                    } else {
+                        properties.set(propName, { predicate, resolveLanguage });
                     }
                 }
             }
@@ -1629,7 +1616,6 @@ export class PerspectiveProxy {
             return null;
         }
     }
-
     /**
      * Generates a SurrealDB query to find instances based on class metadata.
      */
