@@ -23,9 +23,17 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     diff: PerspectiveDiff,
     my_did: String,
 ) -> SocialContextResult<HoloHash<holo_hash::hash_type::Action>> {
-    debug!("===PerspectiveDiffSync.commit(): Function start");
+    info!("===PerspectiveDiffSync.commit(): START");
     let now_fn_start = get_now()?.time();
+    info!(
+        "===PerspectiveDiffSync.commit(): Diff size - additions: {}, removals: {}, total: {}",
+        diff.additions.len(), diff.removals.len(), diff.total_diff_number()
+    );
     let initial_current_revision: Option<LocalHashReference> = current_revision::<Retriever>()?;
+    info!(
+        "===PerspectiveDiffSync.commit(): Current revision: {:?}",
+        initial_current_revision.as_ref().map(|r| &r.hash)
+    );
 
     let mut entries_since_snapshot = 0;
     if initial_current_revision.is_some() {
@@ -34,7 +42,7 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
         )?;
         entries_since_snapshot = current.diffs_since_snapshot;
     };
-    debug!(
+    info!(
         "===PerspectiveDiffSync.commit(): Entries since snapshot: {:#?}",
         entries_since_snapshot
     );
@@ -54,7 +62,7 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     let (diff_entry_ref_entry, diff_entry_reference) = if diff.total_diff_number()
         > CHUNKING_THRESHOLD
     {
-        debug!(
+        info!(
             "===PerspectiveDiffSync.commit(): Diff size {} exceeds threshold {}, using chunked storage",
             diff.total_diff_number(),
             CHUNKING_THRESHOLD
@@ -67,7 +75,7 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
 
         // Store the chunk entries and get their hashes
         let chunk_hashes = chunked_diffs.into_entries::<Retriever>()?;
-        debug!(
+        info!(
             "===PerspectiveDiffSync.commit(): Created {} chunk entries",
             chunk_hashes.len()
         );
@@ -82,7 +90,7 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
             loop {
                 match Retriever::get::<PerspectiveDiffEntryReference>(chunk_hash.clone()) {
                     Ok(_) => {
-                        debug!("===PerspectiveDiffSync.commit(): Chunk {}/{} verified available", idx + 1, chunk_hashes.len());
+                        info!("===PerspectiveDiffSync.commit(): Chunk {}/{} verified available", idx + 1, chunk_hashes.len());
                         break;
                     }
                     Err(e) => {
@@ -92,7 +100,7 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
                                 "Failed to verify chunk availability after creation"
                             ));
                         }
-                        debug!(
+                        info!(
                             "===PerspectiveDiffSync.commit(): Chunk {}/{} not yet available, retry {}/{}",
                             idx + 1, chunk_hashes.len(), retry_count, MAX_RETRIES
                         );
@@ -110,7 +118,7 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
             }
         }
 
-        debug!("===PerspectiveDiffSync.commit(): All {} chunks verified, creating parent entry", chunk_hashes.len());
+        info!("===PerspectiveDiffSync.commit(): All {} chunks verified, creating parent entry", chunk_hashes.len());
 
         // Create the main entry reference with chunk hashes instead of inline diff
         let entry = PerspectiveDiffEntryReference {
@@ -124,6 +132,11 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
         (entry, hash)
     } else {
         // Small diff - use inline storage as before
+        info!(
+            "===PerspectiveDiffSync.commit(): Diff size {} below threshold {}, using INLINE storage",
+            diff.total_diff_number(),
+            CHUNKING_THRESHOLD
+        );
         let entry = PerspectiveDiffEntryReference {
             diff: diff.clone(),
             parents: initial_current_revision.clone().map(|val| vec![val.hash]),
@@ -132,15 +145,19 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
         };
         let hash =
             Retriever::create_entry(EntryTypes::PerspectiveDiffEntryReference(entry.clone()))?;
+        info!(
+            "===PerspectiveDiffSync.commit(): Created inline entry: {:?}",
+            hash
+        );
         (entry, hash)
     };
 
     let after = get_now()?.time();
-    // debug!(
+    // info!(
     //     "===PerspectiveDiffSync.commit(): Created diff entry ref: {:#?}",
     //     diff_entry_reference
     // );
-    debug!(
+    info!(
         "===PerspectiveDiffSync.commit() - Profiling: Took {} to create a PerspectiveDiffEntryReference",
         (after - now).num_milliseconds()
     );
@@ -159,14 +176,14 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
             LinkTag::new("snapshot"),
         )?;
         let after = get_now()?.time();
-        debug!("===PerspectiveDiffSync.commit() - Profiling: Took {} to create snapshot entry and link", (after - now).num_milliseconds());
+        info!("===PerspectiveDiffSync.commit() - Profiling: Took {} to create snapshot entry and link", (after - now).num_milliseconds());
     };
 
     let now = get_now()?;
     let now_profile = get_now()?.time();
     //update_latest_revision::<Retriever>(diff_entry_reference.clone(), now.clone())?;
     let after = get_now()?.time();
-    debug!(
+    info!(
         "===PerspectiveDiffSync.commit() - Profiling: Took {} to update the latest revision",
         (after - now_profile).num_milliseconds()
     );
@@ -189,22 +206,26 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
         };
     } else {
         // Concurrent update detected; decide how to handle it
-        debug!("Concurrent update detected in commit. Aborting commit without updating current revision.");
+        info!("Concurrent update detected in commit. Aborting commit without updating current revision.");
         return Err(SocialContextError::InternalError(
             "Concurrent update detected in commit",
         ));
     }
 
     let after_fn_end = get_now()?.time();
-    debug!(
+    info!(
         "===PerspectiveDiffSync.commit() - Profiling: Took {} to complete whole commit function",
         (after_fn_end - now_fn_start).num_milliseconds()
+    );
+    info!(
+        "===PerspectiveDiffSync.commit(): ✓ COMPLETE - New revision: {:?}, is_chunked: {}",
+        diff_entry_reference, diff_entry_ref_entry.is_chunked()
     );
     Ok(diff_entry_reference)
 }
 
 pub fn add_active_agent_link<Retriever: PerspectiveDiffRetreiver>() -> SocialContextResult<()> {
-    debug!("===PerspectiveDiffSync.add_active_agent_link(): Function start");
+    info!("===PerspectiveDiffSync.add_active_agent_link(): Function start");
     let now_fn_start = get_now()?.time();
     let agent_root_entry = get_active_agent_anchor();
     let _agent_root_entry_action =
@@ -224,7 +245,7 @@ pub fn add_active_agent_link<Retriever: PerspectiveDiffRetreiver>() -> SocialCon
         .any(|link| link.target.clone().into_agent_pub_key() == Some(agent.clone()));
 
     if !link_exists {
-        debug!("===PerspectiveDiffSync.add_active_agent_link(): Creating new active agent link");
+        info!("===PerspectiveDiffSync.add_active_agent_link(): Creating new active agent link");
         create_link(
             agent_root_hash,
             agent,
@@ -232,20 +253,20 @@ pub fn add_active_agent_link<Retriever: PerspectiveDiffRetreiver>() -> SocialCon
             LinkTag::new("active_agent"),
         )?;
     } else {
-        debug!("===PerspectiveDiffSync.add_active_agent_link(): Link already exists, skipping");
+        info!("===PerspectiveDiffSync.add_active_agent_link(): Link already exists, skipping");
     }
 
     let after_fn_end = get_now()?.time();
-    debug!("===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took {} to complete whole add_active_agent_link()", (after_fn_end - now_fn_start).num_milliseconds());
+    info!("===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took {} to complete whole add_active_agent_link()", (after_fn_end - now_fn_start).num_milliseconds());
     Ok(())
 }
 
 pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>(
     my_did: &str,
 ) -> SocialContextResult<Option<Hash>> {
-    //debug!("Running broadcast_current");
+    //info!("Running broadcast_current");
     let current = current_revision::<Retriever>()?;
-    //debug!("Current revision: {:#?}", current);
+    //info!("Current revision: {:#?}", current);
 
     if current.is_some() {
         let current_revision = current.clone().unwrap();
@@ -259,7 +280,7 @@ pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>(
         };
 
         let recent_agents = get_active_agents()?;
-        //debug!("Recent agents: {:#?}", recent_agents);
+        //info!("Recent agents: {:#?}", recent_agents);
         send_remote_signal(signal_data.get_sb()?, recent_agents.clone())?;
     };
     Ok(current.map(|rev| rev.hash))

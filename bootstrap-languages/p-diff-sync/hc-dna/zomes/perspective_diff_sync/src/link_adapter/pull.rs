@@ -15,7 +15,7 @@ fn merge<Retriever: PerspectiveDiffRetreiver>(
     latest: Hash,
     current: Hash,
 ) -> SocialContextResult<Hash> {
-    debug!("===PerspectiveDiffSync.merge(): Function start");
+    info!("===PerspectiveDiffSync.merge(): Function start");
     let fn_start = get_now()?.time();
 
     let latest_diff = Retriever::get::<PerspectiveDiffEntryReference>(latest.clone())?;
@@ -38,7 +38,7 @@ fn merge<Retriever: PerspectiveDiffRetreiver>(
     let merge_entry_reference_hash = Retriever::create_entry(
         EntryTypes::PerspectiveDiffEntryReference(merge_entry_reference.clone()),
     )?;
-    debug!(
+    info!(
         "===PerspectiveDiffSync.merge(): Commited merge entry: {:#?}",
         merge_entry_reference_hash
     );
@@ -47,7 +47,7 @@ fn merge<Retriever: PerspectiveDiffRetreiver>(
     update_current_revision::<Retriever>(merge_entry_reference_hash.clone(), now)?;
 
     let fn_end = get_now()?.time();
-    debug!(
+    info!(
         "===PerspectiveDiffSync.merge() - Profiling: Took: {} to complete merge() function",
         (fn_end - fn_start).num_milliseconds()
     );
@@ -59,14 +59,14 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
     theirs: Hash,
     is_scribe: bool,
 ) -> SocialContextResult<PullResult> {
-    debug!("===PerspectiveDiffSync.pull(): Function start");
+    info!("===PerspectiveDiffSync.pull(): START");
     let fn_start = get_now()?.time();
 
     let current = current_revision::<Retriever>()?;
     let current_hash = current.clone().map(|val| val.hash);
-    debug!(
-        "===PerspectiveDiffSync.pull(): Pull made with theirs: {:#?} and current: {:#?}",
-        theirs, current
+    info!(
+        "===PerspectiveDiffSync.pull(): theirs: {:?}, current: {:?}, is_scribe: {}",
+        theirs, current_hash, is_scribe
     );
 
     let theirs_hash = theirs.clone();
@@ -98,7 +98,7 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
     // First check if we are actually ahead of them -> we don't have to do anything
     // they will have to merge with / or fast-forward to our current
     if workspace.all_ancestors(&current.hash)?.contains(&theirs) {
-        debug!("===PerspectiveDiffSync.pull(): We are ahead of them. They will have to pull/fast-forward. Exiting without change...");
+        info!("===PerspectiveDiffSync.pull(): We are ahead of them. They will have to pull/fast-forward. Exiting without change...");
         return Ok(PullResult {
             diff: PerspectiveDiff::default(),
             current_revision: Some(current.hash),
@@ -111,7 +111,7 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
     // but if we are not a scribe, we can't merge
     // so in that case, we can't do anything
     if !fast_forward_possible && !is_scribe {
-        debug!("===PerspectiveDiffSync.pull(): Have to merge but I'm not a scribe. Exiting without change...");
+        info!("===PerspectiveDiffSync.pull(): Have to merge but I'm not a scribe. Exiting without change...");
         return Ok(PullResult {
             diff: PerspectiveDiff::default(),
             current_revision: Some(current.hash),
@@ -153,46 +153,73 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
     };
 
     let (diffs, current_revision) = if fast_forward_possible {
-        debug!("===PerspectiveDiffSync.pull(): There are paths between current and latest, lets fast forward the changes we have missed!");
+        info!("===PerspectiveDiffSync.pull(): FAST-FORWARD mode - {} unseen diff(s) to process", unseen_diffs.len());
         let mut out = PerspectiveDiff {
             additions: vec![],
             removals: vec![],
         };
-        for diff_entry in unseen_diffs {
+        for (idx, diff_entry) in unseen_diffs.iter().enumerate() {
+            info!(
+                "===PerspectiveDiffSync.pull(): Loading unseen diff {}/{}, hash: {:?}, is_chunked: {}",
+                idx + 1, unseen_diffs.len(), diff_entry.0, diff_entry.1.is_chunked()
+            );
             // Load diff handling both inline and chunked storage
             let mut loaded_diff = load_diff_from_entry::<Retriever>(&diff_entry.1)?;
+            info!(
+                "===PerspectiveDiffSync.pull(): Loaded diff {}/{} - additions: {}, removals: {}",
+                idx + 1, unseen_diffs.len(), loaded_diff.additions.len(), loaded_diff.removals.len()
+            );
             out.additions.append(&mut loaded_diff.additions);
             out.removals.append(&mut loaded_diff.removals);
         }
+        info!(
+            "===PerspectiveDiffSync.pull(): All unseen diffs loaded - total additions: {}, removals: {}",
+            out.additions.len(), out.removals.len()
+        );
+        info!("===PerspectiveDiffSync.pull(): Updating current_revision to: {:?}", theirs);
         update_current_revision::<Retriever>(theirs.clone(), get_now()?)?;
         let fn_end = get_now()?.time();
-        debug!(
-            "===PerspectiveDiffSync.pull() - Profiling: Took: {} to complete pull() function",
+        info!(
+            "===PerspectiveDiffSync.pull(): ✓ FAST-FORWARD COMPLETE - Took: {}ms",
             (fn_end - fn_start).num_milliseconds()
         );
         (out, theirs)
     } else if is_scribe {
-        debug!("===PerspectiveDiffSync.pull():There are no paths between current and latest, we must merge current and latest");
+        info!("===PerspectiveDiffSync.pull(): MERGE mode - {} unseen diff(s) to process", unseen_diffs.len());
         //Get the entries we missed from unseen diff
         let mut out = PerspectiveDiff {
             additions: vec![],
             removals: vec![],
         };
-        for diff_entry in unseen_diffs {
+        for (idx, diff_entry) in unseen_diffs.iter().enumerate() {
+            info!(
+                "===PerspectiveDiffSync.pull(): Loading unseen diff {}/{}, hash: {:?}, is_chunked: {}",
+                idx + 1, unseen_diffs.len(), diff_entry.0, diff_entry.1.is_chunked()
+            );
             // Load diff handling both inline and chunked storage
             let mut loaded_diff = load_diff_from_entry::<Retriever>(&diff_entry.1)?;
+            info!(
+                "===PerspectiveDiffSync.pull(): Loaded diff {}/{} - additions: {}, removals: {}",
+                idx + 1, unseen_diffs.len(), loaded_diff.additions.len(), loaded_diff.removals.len()
+            );
             out.additions.append(&mut loaded_diff.additions);
             out.removals.append(&mut loaded_diff.removals);
         }
+        info!(
+            "===PerspectiveDiffSync.pull(): All unseen diffs loaded - total additions: {}, removals: {}",
+            out.additions.len(), out.removals.len()
+        );
 
+        info!("===PerspectiveDiffSync.pull(): Creating merge commit");
         let merge_hash = merge::<Retriever>(theirs, current.hash)?;
         let fn_end = get_now()?.time();
-        debug!(
-            "===PerspectiveDiffSync.pull() - Profiling: Took: {} to complete pull() function",
-            (fn_end - fn_start).num_milliseconds()
+        info!(
+            "===PerspectiveDiffSync.pull(): ✓ MERGE COMPLETE - merge_hash: {:?}, Took: {}ms",
+            merge_hash, (fn_end - fn_start).num_milliseconds()
         );
         (out, merge_hash)
     } else {
+        info!("===PerspectiveDiffSync.pull(): NOT scribe - cannot merge, returning empty diff");
         (
             PerspectiveDiff {
                 additions: vec![],
@@ -217,31 +244,77 @@ pub fn pull<Retriever: PerspectiveDiffRetreiver>(
 pub fn handle_broadcast<Retriever: PerspectiveDiffRetreiver>(
     broadcast: HashBroadcast,
 ) -> SocialContextResult<()> {
-    // debug!("===PerspectiveDiffSync.fast_forward_signal(): Function start");
-    // let fn_start = get_now()?.time();
+    info!("===PerspectiveDiffSync.handle_broadcast(): START");
+    let fn_start = get_now()?.time();
     let diff_reference = broadcast.reference.clone();
     let revision = broadcast.reference_hash.clone();
+
+    info!(
+        "===PerspectiveDiffSync.handle_broadcast(): Received broadcast for revision: {:?}, is_chunked: {}",
+        revision, diff_reference.is_chunked()
+    );
 
     let current_revision = current_revision::<Retriever>()?;
 
     if current_revision.is_some() {
         let current_revision = current_revision.unwrap();
+        info!(
+            "===PerspectiveDiffSync.handle_broadcast(): Current revision: {:?}",
+            current_revision.hash
+        );
+
         if revision == current_revision.hash {
-            // debug!("===PerspectiveDiffSync.fast_forward_signal(): Revision is the same as current");
+            info!("===PerspectiveDiffSync.handle_broadcast(): Revision is the same as current - no action needed");
         };
-        if diff_reference.parents == Some(vec![current_revision.hash]) {
-            // debug!("===PerspectiveDiffSync.fast_forward_signal(): Revisions parent is the same as current, we can fast forward our current");
+
+        if diff_reference.parents == Some(vec![current_revision.hash.clone()]) {
+            info!(
+                "===PerspectiveDiffSync.handle_broadcast(): Fast-forward possible - broadcast parent matches current revision"
+            );
+
             // CRITICAL: Load diff BEFORE updating current_revision
             // If loading fails (e.g., chunks not available), we should NOT update current_revision
-            let loaded_diff = load_diff_from_entry::<Retriever>(&broadcast.reference)?;
-            // Only update current_revision if we successfully loaded the diff
-            update_current_revision::<Retriever>(revision, get_now()?)?;
-            emit_signal(loaded_diff)?;
+            info!("===PerspectiveDiffSync.handle_broadcast(): Loading diff from broadcast entry...");
+            match load_diff_from_entry::<Retriever>(&broadcast.reference) {
+                Ok(loaded_diff) => {
+                    info!(
+                        "===PerspectiveDiffSync.handle_broadcast(): ✓ Successfully loaded diff - additions: {}, removals: {}",
+                        loaded_diff.additions.len(), loaded_diff.removals.len()
+                    );
+
+                    // Only update current_revision if we successfully loaded the diff
+                    info!("===PerspectiveDiffSync.handle_broadcast(): Updating current_revision to: {:?}", revision);
+                    update_current_revision::<Retriever>(revision, get_now()?)?;
+
+                    info!("===PerspectiveDiffSync.handle_broadcast(): Emitting diff signal");
+                    emit_signal(loaded_diff)?;
+
+                    info!("===PerspectiveDiffSync.handle_broadcast(): ✓ Fast-forward COMPLETE");
+                },
+                Err(e) => {
+                    info!(
+                        "===PerspectiveDiffSync.handle_broadcast(): ✗ FAILED to load diff - current_revision NOT updated. Error: {:?}",
+                        e
+                    );
+                    return Err(e);
+                }
+            }
+        } else {
+            info!(
+                "===PerspectiveDiffSync.handle_broadcast(): Broadcast parent ({:?}) does NOT match current ({:?}) - not a fast-forward",
+                diff_reference.parents, current_revision.hash
+            );
         };
+    } else {
+        info!("===PerspectiveDiffSync.handle_broadcast(): No current revision - broadcast ignored");
     };
+
     emit_signal(broadcast)?;
-    // let fn_end = get_now()?.time();
-    // debug!("===PerspectiveDiffSync.fast_forward_signal() - Profiling: Took: {} to complete fast_forward_signal() function", (fn_end - fn_start).num_milliseconds());
+    let fn_end = get_now()?.time();
+    info!(
+        "===PerspectiveDiffSync.handle_broadcast(): COMPLETE - Took: {}ms",
+        (fn_end - fn_start).num_milliseconds()
+    );
     Ok(())
 }
 
