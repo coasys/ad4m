@@ -104,40 +104,56 @@ pub fn update_current_revision(_hash: Hash) -> ExternResult<()> {
 
 #[hdk_extern]
 fn recv_remote_signal(signal: SerializedBytes) -> ExternResult<()> {
-    debug!(
-        "recv_remote_signal called, signal size: {} bytes",
+    info!(
+        "===recv_remote_signal: START - signal size: {} bytes",
         signal.bytes().len()
     );
 
     // Check if it's a RoutedSignalPayload (multi-user routing)
     if let Ok(routed) = RoutedSignalPayload::try_from(signal.clone()) {
-        debug!(
-            "recv_remote_signal: Emitting RoutedSignalPayload for recipient: {}",
+        info!(
+            "===recv_remote_signal: Type=RoutedSignalPayload, recipient: {}",
             routed.recipient_did
         );
         emit_signal(routed)?;
+        info!("===recv_remote_signal: RoutedSignalPayload emitted successfully");
         return Ok(());
     }
 
     // Check if it's a HashBroadcast (link sync)
     if let Ok(broadcast) = HashBroadcast::try_from(signal.clone()) {
-        debug!("recv_remote_signal: Handling HashBroadcast");
-        link_adapter::pull::handle_broadcast::<retriever::HolochainRetreiver>(broadcast)
-            .map_err(|err| utils::err(&format!("{}", err)))?;
+        info!(
+            "===recv_remote_signal: Type=HashBroadcast, revision: {:?}",
+            broadcast.reference_hash
+        );
+        match link_adapter::pull::handle_broadcast::<retriever::HolochainRetreiver>(broadcast) {
+            Ok(()) => {
+                info!("===recv_remote_signal: HashBroadcast handled successfully");
+                Ok(())
+            },
+            Err(err) => {
+                info!(
+                    "===recv_remote_signal: ✗ HashBroadcast handling FAILED - Error: {:?}",
+                    err
+                );
+                Err(utils::err(&format!("{}", err)))
+            }
+        }?;
         return Ok(());
     }
 
     // Check if it's a regular PerspectiveExpression (broadcast telepresence)
     if let Ok(sig) = PerspectiveExpression::try_from(signal.clone()) {
-        debug!(
-            "recv_remote_signal: Emitting broadcast PerspectiveExpression from {}",
+        info!(
+            "===recv_remote_signal: Type=PerspectiveExpression, author: {}",
             sig.author
         );
         emit_signal(sig)?;
+        info!("===recv_remote_signal: PerspectiveExpression emitted successfully");
         return Ok(());
     }
 
-    debug!("recv_remote_signal: Signal not recognized");
+    info!("===recv_remote_signal: ✗ Signal not recognized");
     Err(utils::err("Signal not recognized"))
 }
 
