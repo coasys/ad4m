@@ -1442,6 +1442,13 @@ impl PerspectiveInstance {
         query: &LinkQuery,
     ) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
         let uuid = self.persisted.lock().await.uuid.clone();
+        log::debug!(
+            "get_links_local: uuid={}, query: source={:?}, predicate={:?}, target={:?}",
+            uuid,
+            query.source,
+            query.predicate,
+            query.target
+        );
         let mut result =
             if query.source.is_none() && query.predicate.is_none() && query.target.is_none() {
                 Ad4mDb::with_global_instance(|db| db.get_all_links(&uuid))?
@@ -1455,16 +1462,36 @@ impl PerspectiveInstance {
                 vec![]
             };
 
+        log::debug!(
+            "get_links_local: raw result count before filtering: {}",
+            result.len()
+        );
+
         if let Some(predicate) = &query.predicate {
             result.retain(|(link, _status)| link.data.predicate.as_ref() == Some(predicate));
+            log::debug!(
+                "get_links_local: after predicate filter ({}): {} links",
+                predicate,
+                result.len()
+            );
         }
 
         if let Some(target) = &query.target {
             result.retain(|(link, _status)| link.data.target == *target);
+            log::debug!(
+                "get_links_local: after target filter ({}): {} links",
+                target,
+                result.len()
+            );
         }
 
         if let Some(source) = &query.source {
             result.retain(|(link, _status)| link.data.source == *source);
+            log::debug!(
+                "get_links_local: after source filter ({}): {} links",
+                source,
+                result.len()
+            );
         }
 
         let until_date: Option<chrono::DateTime<chrono::Utc>> =
@@ -1575,6 +1602,13 @@ impl PerspectiveInstance {
 
         // Preserve original Prolog code for SHACL generation if needed
         let original_prolog_code = sdna_code.clone();
+        log::info!(
+            "add_sdna: name={}, sdna_type={:?}, original_prolog_code_len={}, shacl_json={}",
+            name,
+            sdna_type,
+            original_prolog_code.len(),
+            shacl_json.is_some()
+        );
 
         if (Literal::from_url(sdna_code.clone())).is_err() {
             sdna_code = Literal::from_string(sdna_code)
