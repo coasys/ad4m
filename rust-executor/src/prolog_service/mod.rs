@@ -48,7 +48,7 @@ pub enum PrologMode {
 // Set to Pooled for maximum query performance (multiple engines with caching)
 // Set to SdnaOnly for SDNA introspection without link data (minimal memory + SDNA queries work)
 // Set to Disabled to turn off Prolog completely
-pub static PROLOG_MODE: PrologMode = PrologMode::SdnaOnly;
+pub static PROLOG_MODE: PrologMode = PrologMode::Disabled;
 
 #[derive(Clone)]
 pub struct PrologService {
