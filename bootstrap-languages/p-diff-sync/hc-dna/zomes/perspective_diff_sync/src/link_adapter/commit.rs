@@ -72,12 +72,52 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
             chunk_hashes.len()
         );
 
+        // CRITICAL: Verify all chunks are retrievable before creating parent entry
+        // This ensures chunks are validated and available locally before we reference them
+        for (idx, chunk_hash) in chunk_hashes.iter().enumerate() {
+            let mut retry_count = 0;
+            const MAX_RETRIES: u32 = 10;
+            const RETRY_DELAY_MS: u64 = 100;
+
+            loop {
+                match Retriever::get::<PerspectiveDiffEntryReference>(chunk_hash.clone()) {
+                    Ok(_) => {
+                        debug!("===PerspectiveDiffSync.commit(): Chunk {}/{} verified available", idx + 1, chunk_hashes.len());
+                        break;
+                    }
+                    Err(e) => {
+                        retry_count += 1;
+                        if retry_count > MAX_RETRIES {
+                            return Err(SocialContextError::InternalError(
+                                "Failed to verify chunk availability after creation"
+                            ));
+                        }
+                        debug!(
+                            "===PerspectiveDiffSync.commit(): Chunk {}/{} not yet available, retry {}/{}",
+                            idx + 1, chunk_hashes.len(), retry_count, MAX_RETRIES
+                        );
+
+                        // Wait before retry using sys_time
+                        let start = sys_time()?;
+                        loop {
+                            let now = sys_time()?;
+                            if now.as_millis() - start.as_millis() >= RETRY_DELAY_MS as i64 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        debug!("===PerspectiveDiffSync.commit(): All {} chunks verified, creating parent entry", chunk_hashes.len());
+
         // Create the main entry reference with chunk hashes instead of inline diff
         let entry = PerspectiveDiffEntryReference {
             diff: PerspectiveDiff::new(), // Empty diff when using chunks
             parents: initial_current_revision.clone().map(|val| vec![val.hash]),
             diffs_since_snapshot: entries_since_snapshot,
-            diff_chunks: Some(chunk_hashes),
+            diff_chunks: Some(chunk_hashes.clone()),
         };
         let hash =
             Retriever::create_entry(EntryTypes::PerspectiveDiffEntryReference(entry.clone()))?;
