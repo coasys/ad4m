@@ -85,9 +85,46 @@ impl ChunkedDiffs {
     pub fn from_entries<Retreiver: PerspectiveDiffRetreiver>(
         hashes: Vec<Hash>,
     ) -> SocialContextResult<Self> {
+        const MAX_RETRIES: u32 = 5;
+        const RETRY_DELAY_MS: u64 = 500;
+
         let mut diffs = Vec::new();
-        for hash in hashes.into_iter() {
-            let diff_entry = Retreiver::get::<PerspectiveDiffEntryReference>(hash)?;
+        for (idx, hash) in hashes.iter().enumerate() {
+            // Retry logic for retrieving chunks from DHT
+            // Essential for production - chunks may not have propagated yet
+            let diff_entry = {
+                let mut retry_count = 0;
+                loop {
+                    match Retreiver::get::<PerspectiveDiffEntryReference>(hash.clone()) {
+                        Ok(entry) => break entry,
+                        Err(e) => {
+                            retry_count += 1;
+                            if retry_count > MAX_RETRIES {
+                                debug!(
+                                    "ChunkedDiffs::from_entries: Failed to retrieve chunk {}/{} after {} retries",
+                                    idx + 1, hashes.len(), MAX_RETRIES
+                                );
+                                return Err(e);
+                            }
+
+                            debug!(
+                                "ChunkedDiffs::from_entries: Chunk {}/{} not available (attempt {}/{}), waiting {}ms",
+                                idx + 1, hashes.len(), retry_count, MAX_RETRIES, RETRY_DELAY_MS
+                            );
+
+                            // Wait before retry
+                            let start = sys_time()?;
+                            loop {
+                                let now = sys_time()?;
+                                if now.as_millis() - start.as_millis() >= RETRY_DELAY_MS as i64 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
             // Use load_diff_from_entry to handle both inline and chunked entries properly
             // This prevents loading empty diffs if a chunk hash accidentally points to a chunked entry
             let diff = load_diff_from_entry::<Retreiver>(&diff_entry)?;
