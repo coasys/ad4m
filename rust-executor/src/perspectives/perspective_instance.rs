@@ -742,8 +742,6 @@ impl PerspectiveInstance {
     }
 
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) -> Result<(), AnyError> {
-        let handle = self.persisted.lock().await.clone();
-
         // Deduplicate by (author, timestamp, source, predicate, target)
         // Use structured keys to avoid delimiter collision issues
         let mut seen_add: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1036,7 +1034,6 @@ impl PerspectiveInstance {
         status: LinkStatus,
         batch_id: Option<String>,
     ) -> Result<DecoratedLinkExpression, AnyError> {
-        let handle = self.persisted.lock().await.clone();
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
             let diff = batches
@@ -1134,7 +1131,6 @@ impl PerspectiveInstance {
         status: LinkStatus,
         context: &AgentContext,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
-        let handle = self.persisted.lock().await.clone();
         let additions = mutations
             .additions
             .into_iter()
@@ -1197,7 +1193,7 @@ impl PerspectiveInstance {
             )
             .await?;
 
-        let (link, link_status) = match decorated_link_option {
+        let (_link, link_status) = match decorated_link_option {
             Some(decorated) => {
                 let status = decorated.status.clone().unwrap_or(LinkStatus::Local);
                 (LinkExpression::from(decorated), status)
@@ -1344,9 +1340,6 @@ impl PerspectiveInstance {
         } else {
             // Split into links and statuses
             let (links, statuses): (Vec<_>, Vec<_>) = existing_links.into_iter().unzip();
-
-            // Create diff from links that exist
-            let diff = PerspectiveDiff::from_removals(links.clone());
 
             // Create decorated versions
             let decorated_links: Vec<DecoratedLinkExpression> = links
@@ -4061,6 +4054,17 @@ impl PerspectiveInstance {
     }
 
     async fn subscribed_queries_loop(&self) {
+        // Prolog subscriptions only make sense in Simple and Pooled modes
+        // In SdnaOnly mode, link queries don't work, only SDNA queries
+        // In Disabled mode, prolog is disabled entirely
+        if PROLOG_MODE == PrologMode::SdnaOnly || PROLOG_MODE == PrologMode::Disabled {
+            log::debug!(
+                "Prolog subscription loop disabled in {:?} mode",
+                PROLOG_MODE
+            );
+            return;
+        }
+
         let mut log_counter = 0;
         const LOG_INTERVAL: u32 = 300; // Log every ~60 seconds (300 * 200ms)
 
@@ -4077,9 +4081,10 @@ impl PerspectiveInstance {
             log_counter += 1;
             if log_counter >= LOG_INTERVAL {
                 log_counter = 0;
+                // Get perspective_uuid FIRST before acquiring subscribed_queries lock to avoid deadlock
+                let perspective_uuid = self.persisted.lock().await.uuid.clone();
                 let queries = self.subscribed_queries.lock().await;
                 if !queries.is_empty() {
-                    let perspective_uuid = self.persisted.lock().await.uuid.clone();
                     log::info!(
                         "📊 Prolog subscriptions [{}]: {} active",
                         perspective_uuid,
@@ -4252,12 +4257,6 @@ impl PerspectiveInstance {
         //    processing_start.elapsed(),
         //    shared_diff.additions.len(), shared_diff.removals.len(),
         //    local_diff.additions.len(), local_diff.removals.len());
-
-        // Get UUID without holding lock during DB operations
-        let uuid = {
-            let handle = self.persisted.lock().await;
-            handle.uuid.clone()
-        };
 
         // Apply shared changes
         if !shared_diff.additions.is_empty() || !shared_diff.removals.is_empty() {
