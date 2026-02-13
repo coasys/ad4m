@@ -1,10 +1,11 @@
 //use chrono::Timelike;
 use hdk::prelude::*;
 use perspective_diff_sync_integrity::{
-    EntryTypes, HashBroadcast, LinkTypes, LocalHashReference, PerspectiveDiff, PerspectiveDiffEntryReference,
+    EntryTypes, HashBroadcast, LinkTypes, LocalHashReference, PerspectiveDiff,
+    PerspectiveDiffEntryReference,
 };
 
-use crate::errors::{SocialContextResult, SocialContextError};
+use crate::errors::{SocialContextError, SocialContextResult};
 use crate::link_adapter::chunked_diffs::ChunkedDiffs;
 use crate::link_adapter::revisions::{current_revision, update_current_revision};
 use crate::link_adapter::snapshots::generate_snapshot;
@@ -50,7 +51,9 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     let now = get_now()?.time();
 
     // Check if we need to use chunked storage for large diffs
-    let (diff_entry_ref_entry, diff_entry_reference) = if diff.total_diff_number() > CHUNKING_THRESHOLD {
+    let (diff_entry_ref_entry, diff_entry_reference) = if diff.total_diff_number()
+        > CHUNKING_THRESHOLD
+    {
         debug!(
             "===PerspectiveDiffSync.commit(): Diff size {} exceeds threshold {}, using chunked storage",
             diff.total_diff_number(),
@@ -76,7 +79,8 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
             diffs_since_snapshot: entries_since_snapshot,
             diff_chunks: Some(chunk_hashes),
         };
-        let hash = Retriever::create_entry(EntryTypes::PerspectiveDiffEntryReference(entry.clone()))?;
+        let hash =
+            Retriever::create_entry(EntryTypes::PerspectiveDiffEntryReference(entry.clone()))?;
         (entry, hash)
     } else {
         // Small diff - use inline storage as before
@@ -86,7 +90,8 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
             diffs_since_snapshot: entries_since_snapshot,
             diff_chunks: None,
         };
-        let hash = Retriever::create_entry(EntryTypes::PerspectiveDiffEntryReference(entry.clone()))?;
+        let hash =
+            Retriever::create_entry(EntryTypes::PerspectiveDiffEntryReference(entry.clone()))?;
         (entry, hash)
     };
 
@@ -127,8 +132,10 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     );
 
     let latest_current_revision: Option<LocalHashReference> = current_revision::<Retriever>()?;
-    
-    if initial_current_revision.map(|r| format!("{:?}", r)) == latest_current_revision.map(|r| format!("{:?}", r)) {
+
+    if initial_current_revision.map(|r| format!("{:?}", r))
+        == latest_current_revision.map(|r| format!("{:?}", r))
+    {
         update_current_revision::<Retriever>(diff_entry_reference.clone(), now)?;
 
         if *ENABLE_SIGNALS {
@@ -143,7 +150,9 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     } else {
         // Concurrent update detected; decide how to handle it
         debug!("Concurrent update detected in commit. Aborting commit without updating current revision.");
-        return Err(SocialContextError::InternalError("Concurrent update detected in commit"));
+        return Err(SocialContextError::InternalError(
+            "Concurrent update detected in commit",
+        ));
     }
 
     let after_fn_end = get_now()?.time();
@@ -163,20 +172,17 @@ pub fn add_active_agent_link<Retriever: PerspectiveDiffRetreiver>() -> SocialCon
 
     let agent = agent_info()?.agent_initial_pubkey;
     let agent_root_hash = hash_entry(agent_root_entry)?;
-    
+
     // Check if the link already exists to avoid duplicates
-    let query = LinkQuery::try_new(
-        agent_root_hash.clone(),
-        LinkTypes::Index
-    )?
-    .tag_prefix(LinkTag::new("active_agent"));
+    let query = LinkQuery::try_new(agent_root_hash.clone(), LinkTypes::Index)?
+        .tag_prefix(LinkTag::new("active_agent"));
     let existing_links = get_links(query, GetStrategy::Local)?;
-    
+
     // Check if this agent already has an active link
-    let link_exists = existing_links.iter().any(|link| {
-        link.target.clone().into_agent_pub_key() == Some(agent.clone())
-    });
-    
+    let link_exists = existing_links
+        .iter()
+        .any(|link| link.target.clone().into_agent_pub_key() == Some(agent.clone()));
+
     if !link_exists {
         debug!("===PerspectiveDiffSync.add_active_agent_link(): Creating new active agent link");
         create_link(
@@ -188,14 +194,15 @@ pub fn add_active_agent_link<Retriever: PerspectiveDiffRetreiver>() -> SocialCon
     } else {
         debug!("===PerspectiveDiffSync.add_active_agent_link(): Link already exists, skipping");
     }
-    
+
     let after_fn_end = get_now()?.time();
     debug!("===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took {} to complete whole add_active_agent_link()", (after_fn_end - now_fn_start).num_milliseconds());
     Ok(())
 }
 
-pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>(my_did: &str) -> SocialContextResult<Option<Hash>>
-{
+pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>(
+    my_did: &str,
+) -> SocialContextResult<Option<Hash>> {
     //debug!("Running broadcast_current");
     let current = current_revision::<Retriever>()?;
     //debug!("Current revision: {:#?}", current);

@@ -19,7 +19,8 @@ coverage
 docs-src/api.md
 docs-src/typedoc
 docs-src/_book
-docs/out
+docs-src/.next
+docs-src/pages/jsdoc
 host/dist
 host/build
 

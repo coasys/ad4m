@@ -4,7 +4,7 @@ use perspective_diff_sync_integrity::{
 };
 
 use crate::errors::{SocialContextError, SocialContextResult};
-use crate::link_adapter::chunked_diffs::{ChunkedDiffs, load_diff_from_entry};
+use crate::link_adapter::chunked_diffs::{load_diff_from_entry, ChunkedDiffs};
 use crate::retriever::HolochainRetreiver;
 use crate::utils::get_now;
 use crate::{Hash, CHUNK_SIZE};
@@ -41,11 +41,8 @@ pub fn generate_snapshot(
             ))?;
         if diff.diffs_since_snapshot == 0 && search_position.hash != latest {
             let now = get_now()?.time();
-            let query = LinkQuery::try_new(
-                hash_entry(&diff)?,
-                LinkTypes::Snapshot
-            )?
-            .tag_prefix(LinkTag::new("snapshot"));
+            let query = LinkQuery::try_new(hash_entry(&diff)?, LinkTypes::Snapshot)?
+                .tag_prefix(LinkTag::new("snapshot"));
             let mut snapshot_links = get_links(query, GetStrategy::Local)?;
             let after = get_now()?.time();
             debug!("===PerspectiveDiffSync.generate_snapshot() - Profiling: Took {} to get the snapshot links", (after - now).num_milliseconds());
