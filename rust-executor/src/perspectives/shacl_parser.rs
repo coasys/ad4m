@@ -1073,4 +1073,73 @@ mod tests {
             "Flowable literal should contain predicate"
         );
     }
+
+    #[test]
+    fn test_parse_prolog_sdna_to_shacl_links() {
+        let prolog = r#"subject_class("Todo", c).
+constructor(c, '[{action: "addLink", source: "this", predicate: "todo://state", target: "todo://ready"}]').
+instance(c, Base) :- triple(Base, "todo://state", _).
+
+destructor(c, '[{action: "removeLink", source: "this", predicate: "todo://state", target: "*"}]').
+
+property(c, "state").
+property_getter(c, Base, "state", Value) :- triple(Base, "todo://state", Value).
+property_setter(c, "state", '[{action: "setSingleTarget", source: "this", predicate: "todo://state", target: "value"}]').
+
+property(c, "title").
+property_resolve(c, "title").
+property_resolve_language(c, "title", "literal").
+property_getter(c, Base, "title", Value) :- triple(Base, "todo://has_title", Value).
+property_setter(c, "title", '[{action: "setSingleTarget", source: "this", predicate: "todo://has_title", target: "value"}]').
+"#;
+
+        let links = parse_prolog_sdna_to_shacl_links(prolog, "Todo").unwrap();
+
+        // Debug: print all links
+        for link in &links {
+            eprintln!(
+                "Link: {} -> {:?} -> {}",
+                link.source, link.predicate, link.target
+            );
+        }
+
+        // Should have generated links
+        assert!(
+            !links.is_empty(),
+            "Should have generated SHACL links from Prolog"
+        );
+
+        // Check for class definition link (this is what get_subject_classes_from_shacl queries)
+        assert!(
+            links
+                .iter()
+                .any(|l| l.predicate == Some("rdf://type".to_string())
+                    && l.target == "ad4m://SubjectClass"),
+            "Missing rdf://type -> ad4m://SubjectClass link"
+        );
+
+        // Check for shape link
+        assert!(
+            links
+                .iter()
+                .any(|l| l.predicate == Some("sh://targetClass".to_string())),
+            "Missing sh://targetClass link"
+        );
+
+        // Check for constructor action
+        assert!(
+            links
+                .iter()
+                .any(|l| l.predicate == Some("ad4m://constructor".to_string())),
+            "Missing constructor action link"
+        );
+
+        // Check for property links
+        assert!(
+            links
+                .iter()
+                .any(|l| l.predicate == Some("sh://property".to_string())),
+            "Missing property links"
+        );
+    }
 }
