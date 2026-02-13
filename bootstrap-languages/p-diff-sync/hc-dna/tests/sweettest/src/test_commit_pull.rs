@@ -439,3 +439,151 @@ async fn test_chunked_broadcast_does_not_update_revision_on_failure() {
         conductor.shutdown().await;
     }
 }
+
+/// Test that render() correctly returns chunked diffs
+///
+/// This test reproduces the production bug where:
+/// 1. Agent commits a large diff (>500 additions, gets chunked)
+/// 2. render() is called to get the current perspective state
+/// 3. BUG: render() returns EMPTY because chunked entries have empty diff.additions
+/// 4. FIX: workspace.handle_parents() must load chunks before inserting into entry_map
+///
+/// Scenario:
+/// 1. Alice commits 600 links (exceeds CHUNKING_THRESHOLD of 500)
+/// 2. Commit succeeds with chunked storage
+/// 3. Call render() to get current perspective
+/// 4. Verify all 600 links are returned (not 0!)
+#[tokio::test(flavor = "multi_thread")]
+async fn test_render_returns_chunked_diffs() {
+    use perspective_diff_sync_integrity::Perspective;
+
+    let (mut conductor, cell) = setup_1_conductor().await;
+
+    // Create DID link
+    create_did_link(&conductor, &cell, "did:test:alice").await;
+
+    println!("=== Committing 600 links (will be chunked) ===");
+
+    // Commit 600 links - this will be chunked since it exceeds CHUNKING_THRESHOLD of 500
+    let large_input = create_commit_input_multi("alice", 600);
+    let commit_hash: ActionHash = call_zome(
+        &conductor,
+        &cell,
+        "commit",
+        large_input,
+    ).await;
+
+    println!("Large commit succeeded: {:?}", commit_hash);
+
+    // Verify commit created a chunked entry
+    let entry: perspective_diff_sync_integrity::PerspectiveDiffEntryReference = call_zome(
+        &conductor,
+        &cell,
+        "get_diff_entry_reference",
+        commit_hash.clone(),
+    ).await;
+
+    println!("Entry is chunked: {}", entry.is_chunked());
+    println!("Entry has {} chunks", entry.diff_chunks.as_ref().map(|c| c.len()).unwrap_or(0));
+    assert!(entry.is_chunked(), "Entry should be chunked for this test");
+
+    // THE BUG TEST: Call render() and verify it returns all 600 links
+    println!("\n=== Testing render() with chunked entry ===");
+    let perspective: Perspective = call_zome(&conductor, &cell, "render", ()).await;
+
+    println!("render() returned {} links", perspective.links.len());
+
+    // CRITICAL ASSERTION: This should be 600, not 0!
+    // Without the fix in workspace.rs handle_parents(), this will be 0
+    // because render() accesses diff.additions which is empty for chunked entries
+    assert_eq!(
+        perspective.links.len(),
+        600,
+        "render() should return all 600 links from the chunked commit, not {} links! \
+        This indicates chunked diffs are not being loaded when building the workspace.",
+        perspective.links.len()
+    );
+
+    println!("✓ TEST PASSED: render() correctly returned all 600 links from chunked entry");
+
+    conductor.shutdown().await;
+}
+
+/// Test that pull() with current.is_none() correctly handles chunked diffs
+///
+/// This tests the initial pull scenario where an agent has no current revision
+/// and pulls a chunked diff from another agent.
+///
+/// Scenario:
+/// 1. Alice commits 600 links (chunked)
+/// 2. Bob (with no current revision) pulls Alice's revision
+/// 3. Verify Bob's pull returns correct diff count
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pull_initial_with_chunked_diffs() {
+    let (mut conductors, cells) = setup_conductors(2, true).await;
+    let alice_cell = &cells[0];
+    let bob_cell = &cells[1];
+
+    // Create DID links
+    create_did_link(&conductors[0], alice_cell, "did:test:alice").await;
+    create_did_link(&conductors[1], bob_cell, "did:test:bob").await;
+
+    println!("=== Alice committing 600 links (will be chunked) ===");
+
+    // Alice commits 600 links
+    let large_input = create_commit_input_multi("alice", 600);
+    let alice_commit: ActionHash = call_zome(
+        &conductors[0],
+        alice_cell,
+        "commit",
+        large_input,
+    ).await;
+
+    println!("Alice's commit: {:?}", alice_commit);
+
+    // Wait for DHT propagation
+    await_consistency(5000).await;
+
+    println!("\n=== Bob (no current revision) pulling Alice's chunked commit ===");
+
+    // Bob pulls Alice's revision (Bob has no current revision, so this uses collect_only_from_latest)
+    let bob_pull = retry_until_success(
+        &conductors[1],
+        bob_cell,
+        "pull",
+        serde_json::json!({ "hash": alice_commit, "is_scribe": false }),
+        5,
+        2000,
+        |_result: &perspective_diff_sync_integrity::PullResult| {
+            // For initial pull, the function returns early with empty diff
+            // but updates current_revision, so just check it doesn't error
+            true
+        },
+    ).await.expect("Bob's pull should succeed");
+
+    println!("Bob's pull succeeded");
+
+    // Verify Bob's current revision is now Alice's commit
+    let bob_current: Option<ActionHash> = call_zome(&conductors[1], bob_cell, "current_revision", ()).await;
+    assert_eq!(bob_current, Some(alice_commit.clone()), "Bob should have Alice's revision as current");
+
+    // Verify Bob can render the full perspective with all 600 links
+    println!("\n=== Bob rendering perspective ===");
+    let bob_perspective: perspective_diff_sync_integrity::Perspective =
+        call_zome(&conductors[1], bob_cell, "render", ()).await;
+
+    println!("Bob's render() returned {} links", bob_perspective.links.len());
+
+    assert_eq!(
+        bob_perspective.links.len(),
+        600,
+        "Bob should see all 600 links after pulling Alice's chunked commit"
+    );
+
+    println!("✓ TEST PASSED: Bob correctly pulled and rendered Alice's chunked commit");
+
+    // Cleanup
+    for conductor in conductors.iter_mut() {
+        conductor.shutdown().await;
+    }
+}
