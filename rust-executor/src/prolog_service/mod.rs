@@ -258,7 +258,12 @@ impl PrologService {
             let processed_facts =
                 PoolUtils::preprocess_program_lines(facts_to_load, &embedding_cache).await;
 
-            // LOCK SCOPE: Acquire write lock ONLY to get mutable engine references
+            // CRITICAL FIX: Hold write lock during entire update to prevent deadlock
+            // Previously, we released the lock and moved engines out temporarily with dummy placeholders.
+            // This caused deadlocks: other threads could acquire read lock, get dummy engines,
+            // try to query them, and block forever waiting for non-existent background threads.
+            // Now we keep the lock held during the update. Yes, this blocks other queries temporarily,
+            // but updates are rare (only when dirty) and blocking is better than deadlock.
             let mut engines = self.simple_engines.write().await;
 
             // Use Entry API to avoid race condition between check and insert
@@ -280,54 +285,34 @@ impl PrologService {
                 }
             }
 
-            // Get mutable reference and move engines out temporarily
+            // Get mutable reference to engines
             let simple_engine = engines.get_mut(&engine_key).unwrap();
 
-            // Move engines out of the struct temporarily
-            let query_engine_to_update =
-                std::mem::replace(&mut simple_engine.query_engine, PrologEngine::new());
-            let subscription_engine_to_update =
-                std::mem::replace(&mut simple_engine.subscription_engine, PrologEngine::new());
-
-            // Release write lock before expensive load operations
-            drop(engines);
-
-            // EXPENSIVE OPERATIONS OUTSIDE THE LOCK:
-            // Load facts into both engines - wrap in error handling to restore on failure
+            // Load facts directly into the engines while holding the lock
+            // This prevents other threads from querying dummy/uninitialized engines
             let load_result = async {
-                query_engine_to_update
+                simple_engine.query_engine
                     .load_module_string("facts", &processed_facts)
                     .await?;
-                subscription_engine_to_update
+                simple_engine.subscription_engine
                     .load_module_string("facts", &processed_facts)
                     .await?;
                 Ok::<_, Error>(())
             }
             .await;
 
-            // Handle load failure by restoring original engines
+            // Handle load failure
             if let Err(e) = load_result {
-                let mut engines = self.simple_engines.write().await;
-                let simple_engine = engines.get_mut(&engine_key).unwrap();
-
-                // Restore the original engines
-                simple_engine.query_engine = query_engine_to_update;
-                simple_engine.subscription_engine = subscription_engine_to_update;
-
-                // Mark dirty so update will be retried
+                // Mark dirty so update will be retried on next query
                 simple_engine.dirty = true;
+
+                // Release lock before returning error
+                drop(engines);
 
                 return Err(e);
             }
 
-            // LOCK SCOPE: Reacquire write lock to update final state
-            let mut engines = self.simple_engines.write().await;
-            let simple_engine = engines.get_mut(&engine_key).unwrap();
-
-            // Move engines back
-            simple_engine.query_engine = query_engine_to_update;
-            simple_engine.subscription_engine = subscription_engine_to_update;
-
+            // Update succeeded - mark as clean and update metadata
             simple_engine.dirty = false;
 
             // MEMORY OPTIMIZATION: In SdnaOnly mode, don't store full links
@@ -342,6 +327,9 @@ impl PrologService {
                 "Prolog engines {} updated successfully (query + subscription)",
                 perspective_id
             );
+
+            // Explicitly drop lock to make it clear when it's released
+            drop(engines);
         }
 
         Ok(())
