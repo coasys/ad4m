@@ -150,7 +150,7 @@ impl Workspace {
 
                 if snapshot.is_none() {
                     debug!("===Workspace.collect_only_from_latest(): ERROR: Expected to find snapshot link on current_diff where diffs_since_snapshot was 0");
-                    self.handle_parents(current_diff, current_hash, &mut unprocessed_branches);
+                    self.handle_parents::<Retriever>(current_diff, current_hash, &mut unprocessed_branches)?;
                 } else {
                     let mut snapshot = snapshot.unwrap();
 
@@ -185,7 +185,7 @@ impl Workspace {
                     unprocessed_branches.pop_front();
                 };
             } else {
-                self.handle_parents(current_diff, current_hash, &mut unprocessed_branches);
+                self.handle_parents::<Retriever>(current_diff, current_hash, &mut unprocessed_branches)?;
             }
         }
 
@@ -195,12 +195,12 @@ impl Workspace {
         Ok(())
     }
 
-    fn handle_parents(
+    fn handle_parents<Retriever: PerspectiveDiffRetreiver>(
         &mut self,
         current_diff: PerspectiveDiffEntryReference,
         current_hash: Hash,
         unprocessed_branches: &mut VecDeque<Hash>,
-    ) {
+    ) -> SocialContextResult<()> {
         if let Some(parents) = &current_diff.parents {
             for i in 0..parents.len() {
                 // Depth-first search:
@@ -220,7 +220,28 @@ impl Workspace {
             unprocessed_branches.pop_front();
         }
 
-        self.entry_map.insert(current_hash, current_diff);
+        // CRITICAL FIX: If the entry has chunked diffs, load them before inserting into entry_map
+        // Otherwise render() will see empty additions/removals for chunked entries
+        let resolved_diff = if current_diff.is_chunked() {
+            info!("===Workspace.handle_parents(): Entry {:?} is CHUNKED - loading {} chunk(s)",
+                current_hash, current_diff.diff_chunks.as_ref().unwrap().len());
+            let loaded_diff = load_diff_from_entry::<Retriever>(&current_diff)?;
+            info!("===Workspace.handle_parents(): Loaded chunked diff - additions: {}, removals: {}",
+                loaded_diff.additions.len(), loaded_diff.removals.len());
+
+            // Create a new entry with the loaded diff (inline, not chunked)
+            PerspectiveDiffEntryReference {
+                diff: loaded_diff,
+                parents: current_diff.parents.clone(),
+                diffs_since_snapshot: current_diff.diffs_since_snapshot,
+                diff_chunks: None, // No longer chunked after loading
+            }
+        } else {
+            current_diff
+        };
+
+        self.entry_map.insert(current_hash, resolved_diff);
+        Ok(())
     }
 
     pub fn sort_graph(&mut self) -> SocialContextResult<()> {
