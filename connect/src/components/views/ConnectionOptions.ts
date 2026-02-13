@@ -17,6 +17,7 @@ export class ConnectionOptions extends LitElement {
   @state() private localNodeDetected = false;
   @state() private newPort = 0;
   @state() private newRemoteUrl = "";
+  @state() private isMobile = false;
 
   static styles = [
     sharedStyles,
@@ -83,12 +84,23 @@ export class ConnectionOptions extends LitElement {
     this.detectLocalNode();
   }
 
+  private checkMobile = () => {
+    this.isMobile = window.innerWidth < 800;
+  };
+
   async connectedCallback() {
     super.connectedCallback();
     this.newPort = this.port;
     this.newRemoteUrl = this.remoteUrl || "";
+    this.checkMobile();
+    window.addEventListener('resize', this.checkMobile);
     await this.detectLocalNode();
     this.loading = false;
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    window.removeEventListener('resize', this.checkMobile);
   }
 
   willUpdate(changedProps: PropertyValues) {
@@ -107,56 +119,58 @@ export class ConnectionOptions extends LitElement {
         </div>
 
         <div class="options">
-          <div class="box">
-            <div class="box-header">
-              ${LocalIcon()}
-              <h3>Local Node</h3>
+          ${!this.isMobile ? html`
+            <div class="box">
+              <div class="box-header">
+                ${LocalIcon()}
+                <h3>Local Node</h3>
+              </div>
+
+              ${this.localNodeDetected
+                ? html`
+                    <div class="state success">
+                      ${CheckIcon()}
+                      <p>Local node detected on port ${this.port}</p>
+                    </div>
+
+                    <button class="primary" @click=${this.connectLocalNode}>
+                      Connect to Local Node
+                    </button>
+                  `
+                : html`
+                    <div class="state danger">
+                      ${CrossIcon()}
+                      <p>No local node detected on port ${this.port}</p>
+                    </div>
+
+                    <p style="margin-bottom: -12px">Download and install AD4M</p>
+                    <button class="secondary" @click=${() => window.open("https://github.com/coasys/ad4m/releases")}>
+                      ${DownloadIcon()} Download AD4M
+                    </button>
+                  `
+              }
+
+              <p style="margin-bottom: -12px">Or try another port</p>
+              <div class="port-input">
+                <input
+                  type="number"
+                  placeholder="Port number..."
+                  .value=${this.newPort != null ? this.newPort.toString() : ''}
+                  @input=${(e: Event) => {
+                    const input = e.target as HTMLInputElement;
+                    const next = Number.parseInt(input.value, 10);
+                    if (Number.isFinite(next)) this.newPort = next;
+                  }}
+                  @keydown=${(e: KeyboardEvent) => {
+                    if (e.key === 'Enter') this.refreshPort();
+                  }}
+                />
+                <button class="primary" @click=${this.refreshPort}>
+                  ${RefreshIcon()}
+                </button>
+              </div>
             </div>
-
-            ${this.localNodeDetected
-              ? html`
-                  <div class="state success">
-                    ${CheckIcon()}
-                    <p>Local node detected on port ${this.port}</p>
-                  </div>
-
-                  <button class="primary" @click=${this.connectLocalNode}>
-                    Connect to Local Node
-                  </button>
-                `
-              : html`
-                  <div class="state danger">
-                    ${CrossIcon()}
-                    <p>No local node detected on port ${this.port}</p>
-                  </div>
-
-                  <p style="margin-bottom: -12px">Download and install AD4M</p>
-                  <button class="secondary" @click=${() => window.open("https://github.com/coasys/ad4m/releases")}>
-                    ${DownloadIcon()} Download AD4M
-                  </button>
-                `
-            }
-
-            <p style="margin-bottom: -12px">Or try another port</p>
-            <div class="port-input">
-              <input
-                type="number"
-                placeholder="Port number..."
-                .value=${this.newPort != null ? this.newPort.toString() : ''}
-                @input=${(e: Event) => {
-                  const input = e.target as HTMLInputElement;
-                  const next = Number.parseInt(input.value, 10);
-                  if (Number.isFinite(next)) this.newPort = next;
-                }}
-                @keydown=${(e: KeyboardEvent) => {
-                  if (e.key === 'Enter') this.refreshPort();
-                }}
-              />
-              <button class="primary" @click=${this.refreshPort}>
-                ${RefreshIcon()}
-              </button>
-            </div>
-          </div>
+          ` : ''}
 
           ${this.showMultiUserOption ? html`
             <div class="box">
