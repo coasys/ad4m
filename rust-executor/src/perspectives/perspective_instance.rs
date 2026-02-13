@@ -539,8 +539,25 @@ impl PerspectiveInstance {
         };
 
         if let Some(mut link_language) = link_language_clone {
-            let mut local_links =
-                Ad4mDb::with_global_instance(|db| db.get_all_links(&uuid)).unwrap();
+            // Query SurrealDB instead of Rusqlite
+            let decorated_links = match self.surreal_service.get_all_links(&uuid).await {
+                Ok(links) => links,
+                Err(e) => {
+                    log::error!(
+                        "Failed to get links from SurrealDB in ensure_public_links_are_shared for perspective {}: {}",
+                        uuid, e
+                    );
+                    return false;
+                }
+            };
+
+            let mut local_links: Vec<(LinkExpression, LinkStatus)> = decorated_links
+                .into_iter()
+                .map(|decorated| {
+                    let status = decorated.status.clone().unwrap_or(LinkStatus::Local);
+                    (LinkExpression::from(decorated), status)
+                })
+                .collect();
 
             local_links.retain(|(_, status)| status == &LinkStatus::Shared);
 
@@ -724,7 +741,7 @@ impl PerspectiveInstance {
         });
     }
 
-    pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) {
+    pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) -> Result<(), AnyError> {
         let handle = self.persisted.lock().await.clone();
 
         // Deduplicate by (author, timestamp, source, predicate, target)
@@ -767,22 +784,6 @@ impl PerspectiveInstance {
             }
         }
 
-        if !unique_additions.is_empty() {
-            Ad4mDb::with_global_instance(|db| {
-                db.add_many_links(&handle.uuid, unique_additions.clone(), &LinkStatus::Shared)
-            })
-            .expect("Failed to add many links");
-        }
-
-        if !unique_removals.is_empty() {
-            Ad4mDb::with_global_instance(|db| {
-                for link in &unique_removals {
-                    db.remove_link(&handle.uuid, link)
-                        .expect("Failed to remove link");
-                }
-            });
-        }
-
         let decorated_diff = DecoratedPerspectiveDiff {
             additions: unique_additions
                 .iter()
@@ -794,11 +795,14 @@ impl PerspectiveInstance {
                 .collect(),
         };
 
+        // Write to SurrealDB (primary storage for links)
+        self.persist_link_diff(&decorated_diff).await?;
+
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_diff.clone()).await;
-
-        self.update_surreal_cache(&decorated_diff).await;
         self.pubsub_publish_diff(decorated_diff).await;
+
+        Ok(())
     }
 
     pub async fn telepresence_signal_from_link_language(
@@ -884,34 +888,64 @@ impl PerspectiveInstance {
                 .ok_or(anyhow!("Batch not found"))?;
 
             let handle = self.persisted.lock().await.clone();
-            let (link_from_db, status) =
-                Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &link_expression))?
-                    .ok_or(anyhow!("Link not found"))?;
+
+            // Query SurrealDB instead of Rusqlite
+            let decorated_link = self
+                .surreal_service
+                .get_link(
+                    &handle.uuid,
+                    &link_expression.data.source,
+                    link_expression.data.predicate.as_deref(),
+                    &link_expression.data.target,
+                    &link_expression.author,
+                    &link_expression.timestamp,
+                )
+                .await?
+                .ok_or(anyhow!("Link not found"))?;
+
+            let link_from_db = LinkExpression::from(decorated_link.clone());
+            let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
 
             diff.removals.push(link_from_db.clone());
             Ok(DecoratedLinkExpression::from((link_from_db, status)))
         } else {
             let handle = self.persisted.lock().await.clone();
-            if let Some((link_from_db, status)) =
-                Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &link_expression))?
+
+            // Query SurrealDB instead of Rusqlite
+            if let Some(decorated_link) = self
+                .surreal_service
+                .get_link(
+                    &handle.uuid,
+                    &link_expression.data.source,
+                    link_expression.data.predicate.as_deref(),
+                    &link_expression.data.target,
+                    &link_expression.author,
+                    &link_expression.timestamp,
+                )
+                .await?
             {
-                Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, &link_expression))?;
+                let link_from_db = LinkExpression::from(decorated_link.clone());
+                let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
+
                 let diff = PerspectiveDiff::from_removals(vec![link_expression.clone()]);
-                let decorated_link = DecoratedLinkExpression::from((link_from_db, status.clone()));
+                let decorated_link_result =
+                    DecoratedLinkExpression::from((link_from_db, status.clone()));
                 let decorated_diff =
-                    DecoratedPerspectiveDiff::from_removals(vec![decorated_link.clone()]);
+                    DecoratedPerspectiveDiff::from_removals(vec![decorated_link_result.clone()]);
+
+                // Remove from SurrealDB (primary storage)
+                self.persist_link_diff(&decorated_diff).await?;
 
                 // Update both Prolog engines: subscription (immediate) + query (lazy)
                 self.update_prolog_engines(decorated_diff.clone()).await;
 
-                self.update_surreal_cache(&decorated_diff).await;
                 self.pubsub_publish_diff(decorated_diff.clone()).await;
 
                 if status == LinkStatus::Shared {
                     self.spawn_commit_and_handle_error(&diff);
                 }
 
-                Ok(decorated_link)
+                Ok(decorated_link_result)
             } else {
                 Err(anyhow!("Link not found"))
             }
@@ -1018,19 +1052,20 @@ impl PerspectiveInstance {
                 status.clone(),
             )));
         }
-        Ad4mDb::with_global_instance(|db| db.add_link(&handle.uuid, &link_expression, &status))?;
 
+        // Store link in SurrealDB (no longer using Rusqlite for links)
         let diff = PerspectiveDiff::from_additions(vec![link_expression.clone()]);
         let decorated_link_expression =
             DecoratedLinkExpression::from((link_expression.clone(), status.clone()));
         let decorated_perspective_diff =
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
+        // Write to SurrealDB (primary storage for links)
+        self.persist_link_diff(&decorated_perspective_diff).await?;
+
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_perspective_diff.clone())
             .await;
-
-        self.update_surreal_cache(&decorated_perspective_diff).await;
 
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
@@ -1079,13 +1114,10 @@ impl PerspectiveInstance {
             let decorated_perspective_diff =
                 DecoratedPerspectiveDiff::from_additions(decorated_link_expressions.clone());
 
-            let handle = self.persisted.lock().await.clone();
-            Ad4mDb::with_global_instance(|db| {
-                db.add_many_links(&handle.uuid, link_expressions.clone(), &status)
-            })?;
+            // Write to SurrealDB (primary storage for links)
+            self.persist_link_diff(&decorated_perspective_diff).await?;
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
-            self.update_surreal_cache(&decorated_perspective_diff).await;
             self.pubsub_publish_diff(decorated_perspective_diff).await;
 
             if status == LinkStatus::Shared {
@@ -1116,14 +1148,6 @@ impl PerspectiveInstance {
             .map(LinkExpression::try_from)
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
 
-        Ad4mDb::with_global_instance(|db| {
-            db.add_many_links(&handle.uuid, additions.clone(), &status)
-        })?;
-
-        for link in &removals {
-            Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, link))?;
-        }
-
         let diff = PerspectiveDiff::from(additions.clone(), removals.clone());
         let decorated_diff = DecoratedPerspectiveDiff {
             additions: additions
@@ -1137,8 +1161,10 @@ impl PerspectiveInstance {
                 .collect::<Vec<DecoratedLinkExpression>>(),
         };
 
+        // Write to SurrealDB (primary storage for links)
+        self.persist_link_diff(&decorated_diff).await?;
+
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
-        self.update_surreal_cache(&decorated_diff).await;
         self.pubsub_publish_diff(decorated_diff.clone()).await;
 
         if status == LinkStatus::Shared {
@@ -1157,10 +1183,25 @@ impl PerspectiveInstance {
         context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
         let handle = self.persisted.lock().await.clone();
-        let link_option = Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &old_link))?;
 
-        let (link, link_status) = match link_option {
-            Some(link) => link,
+        // Query SurrealDB instead of Rusqlite
+        let decorated_link_option = self
+            .surreal_service
+            .get_link(
+                &handle.uuid,
+                &old_link.data.source,
+                old_link.data.predicate.as_deref(),
+                &old_link.data.target,
+                &old_link.author,
+                &old_link.timestamp,
+            )
+            .await?;
+
+        let (link, link_status) = match decorated_link_option {
+            Some(decorated) => {
+                let status = decorated.status.clone().unwrap_or(LinkStatus::Local);
+                (LinkExpression::from(decorated), status)
+            }
             None => {
                 return Err(AnyError::msg(format!(
                     "NH [{}] ({}) Link not found in perspective \"{}\": {:?}",
@@ -1191,10 +1232,6 @@ impl PerspectiveInstance {
 
             Ok(DecoratedLinkExpression::from((new_link_expr, link_status)))
         } else {
-            Ad4mDb::with_global_instance(|db| {
-                db.update_link(&handle.uuid, &link, &new_link_expression)
-            })?;
-
             let diff =
                 PerspectiveDiff::from(vec![new_link_expression.clone()], vec![old_link.clone()]);
             let decorated_new_link_expression =
@@ -1206,10 +1243,11 @@ impl PerspectiveInstance {
                 vec![decorated_old_link.clone()],
             );
 
+            // Write to SurrealDB (primary storage for links)
+            self.persist_link_diff(&decorated_diff).await?;
+
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
-
-            self.update_surreal_cache(&decorated_diff).await;
 
             // Publish link updated events - one per owner for proper multi-user isolation
             let pubsub = get_global_pubsub().await;
@@ -1264,9 +1302,21 @@ impl PerspectiveInstance {
         // Filter to only existing links and collect their statuses
         let mut existing_links = Vec::new();
         for link in link_expressions {
-            if let Some((link_from_db, status)) =
-                Ad4mDb::with_global_instance(|db| db.get_link(&handle.uuid, &link))?
+            // Query SurrealDB instead of Rusqlite
+            if let Some(decorated_link) = self
+                .surreal_service
+                .get_link(
+                    &handle.uuid,
+                    &link.data.source,
+                    link.data.predicate.as_deref(),
+                    &link.data.target,
+                    &link.author,
+                    &link.timestamp,
+                )
+                .await?
             {
+                let link_from_db = LinkExpression::from(decorated_link.clone());
+                let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
                 existing_links.push((link_from_db, status));
             }
         }
@@ -1307,15 +1357,11 @@ impl PerspectiveInstance {
 
             let decorated_diff = DecoratedPerspectiveDiff::from_removals(decorated_links.clone());
 
-            // Remove from DB
-            for link in diff.removals.iter() {
-                Ad4mDb::with_global_instance(|db| db.remove_link(&handle.uuid, link))?;
-            }
+            // Remove from SurrealDB (primary storage)
+            self.persist_link_diff(&decorated_diff).await?;
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
-
-            self.update_surreal_cache(&decorated_diff).await;
             self.pubsub_publish_diff(decorated_diff).await;
 
             // Only commit shared links by filtering decorated_links
@@ -1384,18 +1430,35 @@ impl PerspectiveInstance {
         query: &LinkQuery,
     ) -> Result<Vec<(LinkExpression, LinkStatus)>, AnyError> {
         let uuid = self.persisted.lock().await.uuid.clone();
-        let mut result =
+
+        // Query SurrealDB instead of Rusqlite
+        let decorated_links =
             if query.source.is_none() && query.predicate.is_none() && query.target.is_none() {
-                Ad4mDb::with_global_instance(|db| db.get_all_links(&uuid))?
+                self.surreal_service.get_all_links(&uuid).await?
             } else if let Some(source) = &query.source {
-                Ad4mDb::with_global_instance(|db| db.get_links_by_source(&uuid, source))?
+                self.surreal_service
+                    .get_links_by_source(&uuid, source)
+                    .await?
             } else if let Some(target) = &query.target {
-                Ad4mDb::with_global_instance(|db| db.get_links_by_target(&uuid, target))?
+                self.surreal_service
+                    .get_links_by_target(&uuid, target)
+                    .await?
             } else if let Some(predicate) = &query.predicate {
-                Ad4mDb::with_global_instance(|db| db.get_links_by_predicate(&uuid, predicate))?
+                self.surreal_service
+                    .get_links_by_predicate(&uuid, predicate)
+                    .await?
             } else {
                 vec![]
             };
+
+        // Convert DecoratedLinkExpression to (LinkExpression, LinkStatus)
+        let mut result: Vec<(LinkExpression, LinkStatus)> = decorated_links
+            .into_iter()
+            .map(|decorated| {
+                let status = decorated.status.clone().unwrap_or(LinkStatus::Local);
+                (LinkExpression::from(decorated), status)
+            })
+            .collect();
 
         if let Some(predicate) = &query.predicate {
             result.retain(|(link, _status)| link.data.predicate.as_ref() == Some(predicate));
@@ -2372,7 +2435,7 @@ impl PerspectiveInstance {
         Ok(results)
     }
 
-    async fn retry_surreal_op<F, Fut>(op: F, uuid: &str, op_name: &str)
+    async fn retry_surreal_op<F, Fut>(op: F, uuid: &str, op_name: &str) -> Result<(), anyhow::Error>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<(), anyhow::Error>>,
@@ -2381,7 +2444,7 @@ impl PerspectiveInstance {
         let max_attempts = 5;
         loop {
             match op().await {
-                Ok(_) => break,
+                Ok(_) => return Ok(()),
                 Err(e) => {
                     let msg = format!("{}", e);
                     if msg.contains("Failed to commit transaction due to a read or write conflict")
@@ -2397,14 +2460,17 @@ impl PerspectiveInstance {
                             uuid,
                             e
                         );
-                        break;
+                        return Err(e);
                     }
                 }
             }
         }
     }
 
-    async fn update_surreal_cache(&self, diff: &DecoratedPerspectiveDiff) {
+    pub(crate) async fn persist_link_diff(
+        &self,
+        diff: &DecoratedPerspectiveDiff,
+    ) -> Result<(), AnyError> {
         // Get UUID
         let uuid = {
             let persisted_guard = self.persisted.lock().await;
@@ -2426,7 +2492,7 @@ impl PerspectiveInstance {
                 &uuid,
                 "remove",
             )
-            .await;
+            .await?;
         }
         // Additions after
         for addition in &diff.additions {
@@ -2435,8 +2501,9 @@ impl PerspectiveInstance {
                 &uuid,
                 "add",
             )
-            .await;
+            .await?;
         }
+        Ok(())
     }
 
     fn spawn_prolog_facts_update(
@@ -4197,21 +4264,7 @@ impl PerspectiveInstance {
             //let db_start = std::time::Instant::now();
             //log::info!("🔄 BATCH COMMIT: Starting DB operations for shared changes");
 
-            // Add shared links to storage
-            for link in &shared_diff.additions {
-                Ad4mDb::with_global_instance(|db| {
-                    db.add_link(&uuid, &link.clone().into(), &LinkStatus::Shared)
-                })?;
-            }
-
-            // Remove shared links from storage
-            for link in &shared_diff.removals {
-                Ad4mDb::with_global_instance(|db| db.remove_link(&uuid, &link.clone().into()))?;
-            }
-
-            //log::info!("🔄 BATCH COMMIT: DB operations for shared changes took {:?}", db_start.elapsed());
-
-            // Commit to link language
+            // Commit to link language (SurrealDB will be updated later via persist_link_diff)
             if self.has_link_language().await {
                 //let link_lang_start = std::time::Instant::now();
                 //log::info!("🔄 BATCH COMMIT: Starting link language commit");
@@ -4234,27 +4287,7 @@ impl PerspectiveInstance {
             }
         }
 
-        // Apply local changes
-        if !local_diff.additions.is_empty() || !local_diff.removals.is_empty() {
-            //let local_db_start = std::time::Instant::now();
-            //log::info!("🔄 BATCH COMMIT: Starting DB operations for local changes");
-
-            // Add local links to storage
-            for link in &local_diff.additions {
-                Ad4mDb::with_global_instance(|db| {
-                    db.add_link(&uuid, &link.clone().into(), &LinkStatus::Local)
-                })?;
-            }
-
-            // Remove local links from storage
-            for link in &local_diff.removals {
-                Ad4mDb::with_global_instance(|db| db.remove_link(&uuid, &link.clone().into()))?;
-            }
-
-            //log::info!("🔄 BATCH COMMIT: DB operations for local changes took {:?}", local_db_start.elapsed());
-        }
-
-        // Create combined diff for prolog update and return value
+        // Create combined diff for prolog update, SurrealDB update, and return value
         let combined_diff = DecoratedPerspectiveDiff {
             additions: [shared_diff.additions.clone(), local_diff.additions.clone()].concat(),
             removals: [shared_diff.removals.clone(), local_diff.removals.clone()].concat(),
@@ -4271,7 +4304,7 @@ impl PerspectiveInstance {
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(combined_diff.clone()).await;
 
-            self.update_surreal_cache(&combined_diff).await;
+            self.persist_link_diff(&combined_diff).await?;
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
         }
@@ -4321,7 +4354,7 @@ mod tests {
         init_prolog_service().await;
 
         let uuid = Uuid::new_v4().to_string();
-        let surreal_service = SurrealDBService::new("ad4m", &uuid)
+        let surreal_service = SurrealDBService::new("ad4m", &uuid, None)
             .await
             .expect("Failed to create SurrealDB service");
 
@@ -4349,7 +4382,7 @@ mod tests {
 
     async fn create_perspective() -> PerspectiveInstance {
         let uuid = Uuid::new_v4().to_string();
-        let surreal_service = SurrealDBService::new("ad4m", &uuid)
+        let surreal_service = SurrealDBService::new("ad4m", &uuid, None)
             .await
             .expect("Failed to create SurrealDB service");
 

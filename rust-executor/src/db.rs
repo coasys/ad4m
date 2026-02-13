@@ -156,6 +156,15 @@ impl Ad4mDb {
         )?;
 
         conn.execute(
+            "CREATE TABLE IF NOT EXISTS perspective_link_migration (
+                id INTEGER PRIMARY KEY,
+                perspective_uuid TEXT NOT NULL UNIQUE,
+                migrated_at TEXT NOT NULL
+             )",
+            [],
+        )?;
+
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS outbox (
                 id INTEGER PRIMARY KEY,
                 message TEXT NOT NULL,
@@ -1468,6 +1477,54 @@ impl Ad4mDb {
         })?;
         let links: Result<Vec<_>, _> = link_iter.collect();
         Ok(links?)
+    }
+
+    /// Check if a perspective's links have been migrated from Rusqlite to SurrealDB
+    ///
+    /// # Arguments
+    /// * `perspective_uuid` - UUID of the perspective to check
+    ///
+    /// # Returns
+    /// * `Ok(true)` if the perspective has been migrated
+    /// * `Ok(false)` if the perspective has not been migrated yet
+    pub fn is_perspective_migrated(&self, perspective_uuid: &str) -> Ad4mDbResult<bool> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COUNT(*) FROM perspective_link_migration WHERE perspective_uuid = ?1",
+        )?;
+        let count: i64 = stmt.query_row(params![perspective_uuid], |row| row.get(0))?;
+        Ok(count > 0)
+    }
+
+    /// Mark a perspective as having been migrated from Rusqlite to SurrealDB
+    ///
+    /// This function is idempotent - calling it multiple times for the same perspective is safe.
+    ///
+    /// # Arguments
+    /// * `perspective_uuid` - UUID of the perspective to mark as migrated
+    pub fn mark_perspective_as_migrated(&self, perspective_uuid: &str) -> Ad4mDbResult<()> {
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO perspective_link_migration (perspective_uuid, migrated_at) VALUES (?1, ?2)",
+            params![perspective_uuid, timestamp],
+        )?;
+        Ok(())
+    }
+
+    /// Delete all links for a perspective from Rusqlite storage
+    ///
+    /// This should only be called after successfully migrating links to SurrealDB.
+    ///
+    /// # Arguments
+    /// * `perspective_uuid` - UUID of the perspective whose links should be deleted
+    ///
+    /// # Returns
+    /// The number of links that were deleted
+    pub fn delete_all_links_for_perspective(&self, perspective_uuid: &str) -> Ad4mDbResult<usize> {
+        let count = self.conn.execute(
+            "DELETE FROM link WHERE perspective = ?1",
+            params![perspective_uuid],
+        )?;
+        Ok(count)
     }
 
     pub fn add_pending_diff(
