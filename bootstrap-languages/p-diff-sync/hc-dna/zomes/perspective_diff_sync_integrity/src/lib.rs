@@ -292,17 +292,32 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
                 .to_app_option::<PerspectiveDiffEntryReference>();
 
             if let Ok(Some(pdiff_ref)) = maybe_entry {
+                let mut missing: Vec<AnyDhtHash> = Vec::new();
+
+                // Validate parent dependencies
                 if let Some(parents) = pdiff_ref.parents {
-                    let mut missing: Vec<AnyDhtHash> = Vec::new();
                     for parent_action_hash in parents {
                         // Ensure each declared parent exists and is valid in the source chain/DHT
                         if must_get_valid_record(parent_action_hash.clone()).is_err() {
                             missing.push(parent_action_hash.into());
                         }
                     }
-                    if !missing.is_empty() {
-                        return Ok(ValidateCallbackResult::UnresolvedDependencies(UnresolvedDependencies::Hashes(missing)));
+                }
+
+                // Validate chunk dependencies
+                // Chunks must be available before the parent entry can be validated.
+                // The commit flow ensures chunks are created and validated BEFORE the parent.
+                if let Some(diff_chunks) = pdiff_ref.diff_chunks {
+                    for chunk_action_hash in diff_chunks {
+                        // Ensure each chunk entry exists and is valid
+                        if must_get_valid_record(chunk_action_hash.clone()).is_err() {
+                            missing.push(chunk_action_hash.into());
+                        }
                     }
+                }
+
+                if !missing.is_empty() {
+                    return Ok(ValidateCallbackResult::UnresolvedDependencies(UnresolvedDependencies::Hashes(missing)));
                 }
             }
 
