@@ -1606,15 +1606,10 @@ impl PerspectiveInstance {
 
         // Preserve original Prolog code for SHACL generation if needed
         let original_prolog_code = sdna_code.clone();
+        let perspective_uuid = self.persisted.lock().await.uuid.clone();
         log::warn!(
-            "🔷 add_sdna: name={}, sdna_type={:?}, original_prolog_code_len={}, shacl_json={}",
-            name,
-            sdna_type,
-            original_prolog_code.len(),
-            shacl_json.is_some()
-        );
-        log::info!(
-            "add_sdna: name={}, sdna_type={:?}, original_prolog_code_len={}, shacl_json={}",
+            "🔷 add_sdna: uuid={}, name={}, sdna_type={:?}, original_prolog_code_len={}, shacl_json={}",
+            perspective_uuid,
             name,
             sdna_type,
             original_prolog_code.len(),
