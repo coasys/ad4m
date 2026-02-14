@@ -6,8 +6,7 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import yargs from 'yargs'
 import { hideBin } from 'yargs/helpers';
-import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
-import { execSync } from 'child_process';
+import { ChildProcessWithoutNullStreams, execFileSync, spawn } from 'child_process';
 import kill from 'tree-kill'
 import { resolve as resolvePath} from 'path'
 import { ad4mDataDirectory, cleanOutput, deleteAllAd4mData, findAndKillProcess, getAd4mHostBinary, getTestFiles, logger } from './utils.js';
@@ -129,7 +128,9 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
       if (!fs.pathExistsSync(suffixedPath)) {
         fs.mkdirSync(suffixedPath, { recursive: true });
       }
-      fs.copySync(langStoragePath, suffixedPath, { overwrite: true });
+      if (fs.pathExistsSync(langStoragePath)) {
+        fs.copySync(langStoragePath, suffixedPath, { overwrite: true });
+      }
       tempSeedFile.languageLanguageSettings.storagePath = suffixedPath;
     }
 
@@ -138,11 +139,14 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
       if (!fs.pathExistsSync(suffixedPath)) {
         fs.mkdirSync(suffixedPath, { recursive: true });
       }
+      if (fs.pathExistsSync(neighStoragePath)) {
+        fs.copySync(neighStoragePath, suffixedPath, { overwrite: true });
+      }
       tempSeedFile.neighbourhoodLanguageSettings.storagePath = suffixedPath;
     }
     fs.writeFileSync(agentSeedFile, JSON.stringify(tempSeedFile));
     
-    execSync(`${binaryPath} init --data-path ${relativePath} --network-bootstrap-seed ${agentSeedFile}`, { encoding: 'utf-8' });
+    execFileSync(binaryPath, ['init', '--data-path', relativePath, '--network-bootstrap-seed', agentSeedFile], { encoding: 'utf-8' });
 
     logger.info('ad4m-test initialized')
 
@@ -163,8 +167,8 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
       logFile.write(data)
     });
     child.stderr.on('data', async (data) => {
-      logFile.write(data)
       // Re-emit stderr on stdout so detection logic below catches Rust log output
+      // (stdout handler already writes to logFile, so no duplicate write needed here)
       child.stdout.emit('data', data)
     })
 

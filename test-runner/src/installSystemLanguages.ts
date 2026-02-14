@@ -1,7 +1,7 @@
 import { LanguageMetaInput } from "@coasys/ad4m"
 import path from "path";
 import fs from 'fs-extra';
-import { ChildProcessWithoutNullStreams, execSync, spawn } from "child_process";
+import { ChildProcessWithoutNullStreams, execFileSync, spawn } from "child_process";
 import { ad4mDataDirectory, deleteAllAd4mData, findAndKillProcess, getAd4mHostBinary, logger } from "./utils";
 import kill from 'tree-kill'
 import { buildAd4mClient } from "./client";
@@ -49,7 +49,7 @@ export async function installSystemLanguages(relativePath = '') {
 
     const seedFile = path.join(__dirname, '../bootstrapSeed.json')
 
-    execSync(`${binaryPath} init --data-path ${relativePath} --network-bootstrap-seed ${seedFile}`, { encoding: 'utf-8' });
+    execFileSync(binaryPath, ['init', '--data-path', relativePath, '--network-bootstrap-seed', seedFile], { encoding: 'utf-8' });
 
     logger.info('ad4m-test initialized')
 
@@ -78,8 +78,8 @@ export async function installSystemLanguages(relativePath = '') {
       logFile.write(data)
     });
     child.stderr.on('data', async (data) => {
-      logFile.write(data)
       // Re-emit stderr on stdout so detection logic below catches Rust log output
+      // (stdout handler already writes to logFile, so no duplicate write needed here)
       child.stdout.emit('data', data)
     })
 

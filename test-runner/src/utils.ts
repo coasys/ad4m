@@ -85,6 +85,13 @@ export async function getAd4mHostBinary(relativePath: string) {
     let data: any;
     try {
       const response = await fetch("https://api.github.com/repos/coasys/ad4m/releases/latest");
+      if (!response.ok) {
+        const status = response.status;
+        const message = status === 403 ? 'GitHub API rate limited' : `GitHub API returned ${status}`;
+        logger.error(message);
+        reject(new Error(message));
+        return;
+      }
       data = await response.json();
     } catch (err) {
       logger.error(`Failed to fetch release info from GitHub: ${err}`);
@@ -92,7 +99,7 @@ export async function getAd4mHostBinary(relativePath: string) {
       return;
     }
 
-    const version = (data && data['name']) ? data['name'].replace('v', '') : 'unknown';
+    const version = (data && data['name']) ? data['name'].replace(/^v/, '') : 'unknown';
     global.ad4mHostVersion = version;
 
     let dest = path.join(binaryPath, `ad4m`);
