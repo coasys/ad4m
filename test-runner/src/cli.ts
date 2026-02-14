@@ -121,19 +121,25 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
 
     const tempSeedFile = JSON.parse(fs.readFileSync(seedFile).toString())
 
-    if (tempSeedFile.languageLanguageSettings.storagePath && !fs.pathExistsSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)) {
-      fs.removeSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)
-      fs.mkdirSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)
-    }
-    if (tempSeedFile.neighbourhoodLanguageSettings.storagePath && !fs.pathExistsSync(`${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`)) {
-      fs.removeSync(`${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`)
-      fs.mkdirSync(`${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`)
+    const langStoragePath = tempSeedFile.languageLanguageSettings?.storagePath;
+    const neighStoragePath = tempSeedFile.neighbourhoodLanguageSettings?.storagePath;
+
+    if (langStoragePath) {
+      const suffixedPath = `${langStoragePath}-${relativePath}`;
+      if (!fs.pathExistsSync(suffixedPath)) {
+        fs.mkdirSync(suffixedPath, { recursive: true });
+      }
+      fs.copySync(langStoragePath, suffixedPath, { overwrite: true });
+      tempSeedFile.languageLanguageSettings.storagePath = suffixedPath;
     }
 
-    if (tempSeedFile.languageLanguageSettings.storagePath) fs.copySync(tempSeedFile.languageLanguageSettings.storagePath, `${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`, { overwrite: true })
-
-    tempSeedFile.languageLanguageSettings.storagePath = `${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`
-    tempSeedFile.neighbourhoodLanguageSettings.storagePath = `${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`
+    if (neighStoragePath) {
+      const suffixedPath = `${neighStoragePath}-${relativePath}`;
+      if (!fs.pathExistsSync(suffixedPath)) {
+        fs.mkdirSync(suffixedPath, { recursive: true });
+      }
+      tempSeedFile.neighbourhoodLanguageSettings.storagePath = suffixedPath;
+    }
     fs.writeFileSync(agentSeedFile, JSON.stringify(tempSeedFile));
     
     execSync(`${binaryPath} init --data-path ${relativePath} --network-bootstrap-seed ${agentSeedFile}`, { encoding: 'utf-8' });
@@ -142,11 +148,14 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
 
     let child: ChildProcessWithoutNullStreams;
 
-    if (defaultLangPath) {
-      child = spawn(`${binaryPath}`, ['run', '--admin-credential', global.ad4mToken, '--app-data-path', relativePath, '--gql-port', port.toString(), '--language-language-only', 'true'])
-    } else {
-      child = spawn(`${binaryPath}`, ['run', '--admin-credential', global.ad4mToken, '--app-data-path', relativePath, '--gql-port', port.toString(), '--language-language-only', 'true'])
-    }
+    const languageLanguageOnly = defaultLangPath ? 'false' : 'true';
+    child = spawn(`${binaryPath}`, [
+      'run',
+      '--admin-credential', global.ad4mToken,
+      '--app-data-path', relativePath,
+      '--gql-port', port.toString(),
+      '--language-language-only', languageLanguageOnly,
+    ])
 
     const logFile = fs.createWriteStream(path.join(process.cwd(), 'ad4m-test.log'))
 

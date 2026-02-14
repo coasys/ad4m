@@ -55,8 +55,6 @@ export async function installSystemLanguages(relativePath = '') {
 
     let child: ChildProcessWithoutNullStreams;
 
-    const defaultLangPath = path.join(__dirname, './languages');
-
     const languageLanguageBundlePath = path.join(__dirname, 'languages', "languages", "build", "bundle.js");
         
     seed['languageLanguageBundle'] = fs.readFileSync(languageLanguageBundlePath).toString();
@@ -65,11 +63,13 @@ export async function installSystemLanguages(relativePath = '') {
 
     fs.writeFileSync(path.join(__dirname, '../bootstrapSeed.json'), JSON.stringify(seed));
 
-    if (defaultLangPath) {
-      child = spawn(`${binaryPath}`, ['run', '--admin-credential', global.ad4mToken, '--app-data-path', relativePath, '--gql-port', '4000', '--language-language-only', 'true'])
-    } else {
-      child = spawn(`${binaryPath}`, ['run', '--admin-credential', global.ad4mToken, '--app-data-path', relativePath, '--gql-port', '4000', '--language-language-only', 'true'])
-    }
+    child = spawn(`${binaryPath}`, [
+      'run',
+      '--admin-credential', global.ad4mToken,
+      '--app-data-path', relativePath,
+      '--gql-port', '4000',
+      '--language-language-only', 'true',
+    ])
 
 
     const logFile = fs.createWriteStream(path.join(process.cwd(), 'ad4m-test.log'))
