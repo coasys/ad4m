@@ -3,6 +3,12 @@
   "description": "Testing library to test ad4m languages",
   "license": "MIT",
   "bin": "./build/cli.js",
+  "files": [
+    "build/",
+    "scripts/",
+    "bootstrapSeed.json",
+    "public/"
+  ],
   "scripts": {
     "build": "tsc",
     "build:util": "browserify build/client.js --standalone Bundle -p esmify > public/client.js",

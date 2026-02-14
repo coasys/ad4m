@@ -15,7 +15,6 @@ import process from 'process';
 import { installSystemLanguages } from './installSystemLanguages.js';
 import { buildAd4mClient } from './client.js';
 import express from 'express'
-import getPort from 'get-port';
 
 async function installLanguage(child: any, binaryPath: string, bundle: string, meta: string, languageType: string, resolve: any, port?: number, callback?: any) { 
   const ad4mClient = await buildAd4mClient(port!);
@@ -122,33 +121,31 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
 
     const tempSeedFile = JSON.parse(fs.readFileSync(seedFile).toString())
 
-    if (!fs.pathExistsSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)) {
+    if (tempSeedFile.languageLanguageSettings.storagePath && !fs.pathExistsSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)) {
       fs.removeSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)
       fs.mkdirSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)
     }
-    if (!fs.pathExistsSync(`${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`)) {
+    if (tempSeedFile.neighbourhoodLanguageSettings.storagePath && !fs.pathExistsSync(`${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`)) {
       fs.removeSync(`${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`)
       fs.mkdirSync(`${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`)
     }
 
-    fs.copySync(tempSeedFile.languageLanguageSettings.storagePath, `${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`, { overwrite: true })
+    if (tempSeedFile.languageLanguageSettings.storagePath) fs.copySync(tempSeedFile.languageLanguageSettings.storagePath, `${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`, { overwrite: true })
 
     tempSeedFile.languageLanguageSettings.storagePath = `${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`
     tempSeedFile.neighbourhoodLanguageSettings.storagePath = `${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`
     fs.writeFileSync(agentSeedFile, JSON.stringify(tempSeedFile));
     
-    execSync(`${binaryPath} init --dataPath ${relativePath} --networkBootstrapSeed ${agentSeedFile} --overrideConfig`, { encoding: 'utf-8' });
+    execSync(`${binaryPath} init --data-path ${relativePath} --network-bootstrap-seed ${agentSeedFile}`, { encoding: 'utf-8' });
 
     logger.info('ad4m-test initialized')
 
     let child: ChildProcessWithoutNullStreams;
 
-    const ipfsPort = await getPort({port: 14000});
-
     if (defaultLangPath) {
-      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', port.toString(), '--ipfsPort', ipfsPort.toString(),'--languageLanguageOnly', 'false'])
+      child = spawn(`${binaryPath}`, ['run', '--admin-credential', global.ad4mToken, '--app-data-path', relativePath, '--gql-port', port.toString(), '--language-language-only', 'true'])
     } else {
-      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', port.toString(), '--ipfsPort', ipfsPort.toString(), '--languageLanguageOnly', 'false'])
+      child = spawn(`${binaryPath}`, ['run', '--admin-credential', global.ad4mToken, '--app-data-path', relativePath, '--gql-port', port.toString(), '--language-language-only', 'true'])
     }
 
     const logFile = fs.createWriteStream(path.join(process.cwd(), 'ad4m-test.log'))
@@ -158,10 +155,12 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
     });
     child.stderr.on('data', async (data) => {
       logFile.write(data)
+      // Re-emit stderr on stdout so detection logic below catches Rust log output
+      child.stdout.emit('data', data)
     })
 
     child.stdout.on('data', async (data) => {
-      if (data.toString().includes('GraphQL server started, Unlock the agent to start holohchain')) {
+      if (data.toString().includes('GraphQL server started, Unlock the agent to start holohchain') || data.toString().includes('listening on http://127.0.0.1')) {
         const ad4mClient = await buildAd4mClient(port);
 
         const generateAgentResponse = await ad4mClient.agent.generate('123456789');

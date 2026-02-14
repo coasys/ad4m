@@ -61,17 +61,13 @@ function fileExist(binaryPath: string): Promise<string[]> {
 
 export async function getAd4mHostBinary(relativePath: string) {
   return new Promise(async (resolve, reject) => {
-    const response = await fetch("https://api.github.com/repos/perspect3vism/ad4m/releases/latest");
-    const data: any = await response.json();
-    const version = data['name'].replace('v', '');
-    global.ad4mHostVersion = version;
-
     const isWin = process.platform === "win32";
     const isMac = process.platform === 'darwin';
     const isLinux = process.platform === 'linux';
   
     const binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary');
 
+    // Check if binary already exists before hitting the API
     const files = await fileExist(binaryPath)
     
     for (const file of files) {
@@ -86,27 +82,36 @@ export async function getAd4mHostBinary(relativePath: string) {
 
     logger.info('ad4m-host binary not found, downloading now...')
 
+    let data: any;
+    try {
+      const response = await fetch("https://api.github.com/repos/coasys/ad4m/releases/latest");
+      data = await response.json();
+    } catch (err) {
+      logger.error(`Failed to fetch release info from GitHub: ${err}`);
+      reject(err);
+      return;
+    }
+
+    const version = (data && data['name']) ? data['name'].replace('v', '') : 'unknown';
+    global.ad4mHostVersion = version;
+
     let dest = path.join(binaryPath, `ad4m`);
     let download: any;
     await fs.ensureDir(binaryPath);
     
     if (isMac) {
-      const link = data.assets.find((e: any) =>
-        e.name.includes("-macos-")
-      ).browser_download_url;
-      download = wget.download(link, dest)
+      const asset = data.assets?.find((e: any) => e.name.includes("-macos-"));
+      if (!asset) { reject(new Error('No macOS binary found in release')); return; }
+      download = wget.download(asset.browser_download_url, dest)
     } else if(isWin) {
       dest = path.join(binaryPath, `ad4m.exe`);
-
-      const link = data.assets.find((e: any) =>
-        e.name.includes("-windows-")
-      ).browser_download_url;
-      download = wget.download(link, dest)
+      const asset = data.assets?.find((e: any) => e.name.includes("-windows-"));
+      if (!asset) { reject(new Error('No Windows binary found in release')); return; }
+      download = wget.download(asset.browser_download_url, dest)
     } else if (isLinux){
-      const link = data.assets.find((e: any) =>
-        e.name.includes("-linux-")
-      ).browser_download_url;
-      download = wget.download(link, dest)
+      const asset = data.assets?.find((e: any) => e.name.includes("-linux"));
+      if (!asset) { reject(new Error('No Linux binary found in release')); return; }
+      download = wget.download(asset.browser_download_url, dest)
     } else {
       console.error("Unknown OS type, cannot fetch ad4m binary");
       throw new Error("Unknown OS type, cannot fetch ad4m binary");

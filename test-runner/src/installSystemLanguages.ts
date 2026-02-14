@@ -49,7 +49,7 @@ export async function installSystemLanguages(relativePath = '') {
 
     const seedFile = path.join(__dirname, '../bootstrapSeed.json')
 
-    execSync(`${binaryPath} init --dataPath ${relativePath} --networkBootstrapSeed ${seedFile} --overrideConfig`, { encoding: 'utf-8' });
+    execSync(`${binaryPath} init --data-path ${relativePath} --network-bootstrap-seed ${seedFile}`, { encoding: 'utf-8' });
 
     logger.info('ad4m-test initialized')
 
@@ -66,9 +66,9 @@ export async function installSystemLanguages(relativePath = '') {
     fs.writeFileSync(path.join(__dirname, '../bootstrapSeed.json'), JSON.stringify(seed));
 
     if (defaultLangPath) {
-      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken ,'--dataPath', relativePath, '--port', '4000', '--languageLanguageOnly', 'true'])
+      child = spawn(`${binaryPath}`, ['run', '--admin-credential', global.ad4mToken, '--app-data-path', relativePath, '--gql-port', '4000', '--language-language-only', 'true'])
     } else {
-      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', '4000', '--languageLanguageOnly', 'true'])
+      child = spawn(`${binaryPath}`, ['run', '--admin-credential', global.ad4mToken, '--app-data-path', relativePath, '--gql-port', '4000', '--language-language-only', 'true'])
     }
 
 
@@ -79,10 +79,12 @@ export async function installSystemLanguages(relativePath = '') {
     });
     child.stderr.on('data', async (data) => {
       logFile.write(data)
+      // Re-emit stderr on stdout so detection logic below catches Rust log output
+      child.stdout.emit('data', data)
     })
 
     child.stdout.on('data', async (data) => {
-      if (data.toString().includes('GraphQL server started, Unlock the agent to start holohchain')) {
+      if (data.toString().includes('GraphQL server started, Unlock the agent to start holohchain') || data.toString().includes('listening on http://127.0.0.1')) {
         const client = await buildAd4mClient(4000);
         
         await client.agent.generate('123456789')
