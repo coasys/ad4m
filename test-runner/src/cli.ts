@@ -6,8 +6,7 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import yargs from 'yargs'
 import { hideBin } from 'yargs/helpers';
-import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
-import { execSync } from 'child_process';
+import { ChildProcessWithoutNullStreams, execFileSync, spawn } from 'child_process';
 import kill from 'tree-kill'
 import { resolve as resolvePath} from 'path'
 import { ad4mDataDirectory, cleanOutput, deleteAllAd4mData, findAndKillProcess, getAd4mHostBinary, getTestFiles, logger } from './utils.js';
@@ -15,7 +14,6 @@ import process from 'process';
 import { installSystemLanguages } from './installSystemLanguages.js';
 import { buildAd4mClient } from './client.js';
 import express from 'express'
-import getPort from 'get-port';
 
 async function installLanguage(child: any, binaryPath: string, bundle: string, meta: string, languageType: string, resolve: any, port?: number, callback?: any) { 
   const ad4mClient = await buildAd4mClient(port!);
@@ -122,34 +120,46 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
 
     const tempSeedFile = JSON.parse(fs.readFileSync(seedFile).toString())
 
-    if (!fs.pathExistsSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)) {
-      fs.removeSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)
-      fs.mkdirSync(`${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`)
-    }
-    if (!fs.pathExistsSync(`${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`)) {
-      fs.removeSync(`${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`)
-      fs.mkdirSync(`${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`)
+    const langStoragePath = tempSeedFile.languageLanguageSettings?.storagePath;
+    const neighStoragePath = tempSeedFile.neighbourhoodLanguageSettings?.storagePath;
+
+    if (langStoragePath) {
+      const suffixedPath = `${langStoragePath}-${relativePath}`;
+      if (!fs.pathExistsSync(suffixedPath)) {
+        fs.mkdirSync(suffixedPath, { recursive: true });
+      }
+      if (fs.pathExistsSync(langStoragePath)) {
+        fs.copySync(langStoragePath, suffixedPath, { overwrite: true });
+      }
+      tempSeedFile.languageLanguageSettings.storagePath = suffixedPath;
     }
 
-    fs.copySync(tempSeedFile.languageLanguageSettings.storagePath, `${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`, { overwrite: true })
-
-    tempSeedFile.languageLanguageSettings.storagePath = `${tempSeedFile.languageLanguageSettings.storagePath}-${relativePath}`
-    tempSeedFile.neighbourhoodLanguageSettings.storagePath = `${tempSeedFile.neighbourhoodLanguageSettings.storagePath}-${relativePath}`
+    if (neighStoragePath) {
+      const suffixedPath = `${neighStoragePath}-${relativePath}`;
+      if (!fs.pathExistsSync(suffixedPath)) {
+        fs.mkdirSync(suffixedPath, { recursive: true });
+      }
+      if (fs.pathExistsSync(neighStoragePath)) {
+        fs.copySync(neighStoragePath, suffixedPath, { overwrite: true });
+      }
+      tempSeedFile.neighbourhoodLanguageSettings.storagePath = suffixedPath;
+    }
     fs.writeFileSync(agentSeedFile, JSON.stringify(tempSeedFile));
     
-    execSync(`${binaryPath} init --dataPath ${relativePath} --networkBootstrapSeed ${agentSeedFile} --overrideConfig`, { encoding: 'utf-8' });
+    execFileSync(binaryPath, ['init', '--data-path', relativePath, '--network-bootstrap-seed', agentSeedFile], { encoding: 'utf-8' });
 
     logger.info('ad4m-test initialized')
 
     let child: ChildProcessWithoutNullStreams;
 
-    const ipfsPort = await getPort({port: 14000});
-
-    if (defaultLangPath) {
-      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', port.toString(), '--ipfsPort', ipfsPort.toString(),'--languageLanguageOnly', 'false'])
-    } else {
-      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', port.toString(), '--ipfsPort', ipfsPort.toString(), '--languageLanguageOnly', 'false'])
-    }
+    const languageLanguageOnly = defaultLangPath ? 'false' : 'true';
+    child = spawn(`${binaryPath}`, [
+      'run',
+      '--admin-credential', global.ad4mToken,
+      '--app-data-path', relativePath,
+      '--gql-port', port.toString(),
+      '--language-language-only', languageLanguageOnly,
+    ])
 
     const logFile = fs.createWriteStream(path.join(process.cwd(), 'ad4m-test.log'))
 
@@ -157,11 +167,13 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
       logFile.write(data)
     });
     child.stderr.on('data', async (data) => {
-      logFile.write(data)
+      // Re-emit stderr on stdout so detection logic below catches Rust log output
+      // (stdout handler already writes to logFile, so no duplicate write needed here)
+      child.stdout.emit('data', data)
     })
 
     child.stdout.on('data', async (data) => {
-      if (data.toString().includes('GraphQL server started, Unlock the agent to start holohchain')) {
+      if (data.toString().includes('GraphQL server started, Unlock the agent to start holohchain') || data.toString().includes('listening on http://127.0.0.1')) {
         const ad4mClient = await buildAd4mClient(port);
 
         const generateAgentResponse = await ad4mClient.agent.generate('123456789');

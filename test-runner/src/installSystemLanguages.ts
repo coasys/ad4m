@@ -1,7 +1,7 @@
 import { LanguageMetaInput } from "@coasys/ad4m"
 import path from "path";
 import fs from 'fs-extra';
-import { ChildProcessWithoutNullStreams, execSync, spawn } from "child_process";
+import { ChildProcessWithoutNullStreams, execFileSync, spawn } from "child_process";
 import { ad4mDataDirectory, deleteAllAd4mData, findAndKillProcess, getAd4mHostBinary, logger } from "./utils";
 import kill from 'tree-kill'
 import { buildAd4mClient } from "./client";
@@ -49,13 +49,11 @@ export async function installSystemLanguages(relativePath = '') {
 
     const seedFile = path.join(__dirname, '../bootstrapSeed.json')
 
-    execSync(`${binaryPath} init --dataPath ${relativePath} --networkBootstrapSeed ${seedFile} --overrideConfig`, { encoding: 'utf-8' });
+    execFileSync(binaryPath, ['init', '--data-path', relativePath, '--network-bootstrap-seed', seedFile], { encoding: 'utf-8' });
 
     logger.info('ad4m-test initialized')
 
     let child: ChildProcessWithoutNullStreams;
-
-    const defaultLangPath = path.join(__dirname, './languages');
 
     const languageLanguageBundlePath = path.join(__dirname, 'languages', "languages", "build", "bundle.js");
         
@@ -65,11 +63,13 @@ export async function installSystemLanguages(relativePath = '') {
 
     fs.writeFileSync(path.join(__dirname, '../bootstrapSeed.json'), JSON.stringify(seed));
 
-    if (defaultLangPath) {
-      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken ,'--dataPath', relativePath, '--port', '4000', '--languageLanguageOnly', 'true'])
-    } else {
-      child = spawn(`${binaryPath}`, ['serve', '--reqCredential', global.ad4mToken, '--dataPath', relativePath, '--port', '4000', '--languageLanguageOnly', 'true'])
-    }
+    child = spawn(`${binaryPath}`, [
+      'run',
+      '--admin-credential', global.ad4mToken,
+      '--app-data-path', relativePath,
+      '--gql-port', '4000',
+      '--language-language-only', 'true',
+    ])
 
 
     const logFile = fs.createWriteStream(path.join(process.cwd(), 'ad4m-test.log'))
@@ -78,11 +78,13 @@ export async function installSystemLanguages(relativePath = '') {
       logFile.write(data)
     });
     child.stderr.on('data', async (data) => {
-      logFile.write(data)
+      // Re-emit stderr on stdout so detection logic below catches Rust log output
+      // (stdout handler already writes to logFile, so no duplicate write needed here)
+      child.stdout.emit('data', data)
     })
 
     child.stdout.on('data', async (data) => {
-      if (data.toString().includes('GraphQL server started, Unlock the agent to start holohchain')) {
+      if (data.toString().includes('GraphQL server started, Unlock the agent to start holohchain') || data.toString().includes('listening on http://127.0.0.1')) {
         const client = await buildAd4mClient(4000);
         
         await client.agent.generate('123456789')
