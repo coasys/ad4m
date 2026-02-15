@@ -3375,18 +3375,25 @@ impl PerspectiveInstance {
             .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
             .collect();
 
-        // Get all subject classes from ad4m://has_subject_class links
+        // Get all subject classes from SHACL rdf://type -> ad4m://SubjectClass links
         let class_links = self
             .get_links_local(&LinkQuery {
-                predicate: Some("ad4m://has_subject_class".to_string()),
+                predicate: Some("rdf://type".to_string()),
+                target: Some("ad4m://SubjectClass".to_string()),
                 ..Default::default()
             })
             .await?;
 
+        log::warn!(
+            "🔷 find_subject_class_from_shacl_by_query: Found {} SHACL class links",
+            class_links.len()
+        );
+
         // For each class, check if it has all required properties
         for (link, _status) in class_links {
+            // Class name comes from link source (subject of rdf:type triple)
             let class_name =
-                match Literal::from_url(link.data.target.clone()).and_then(|lit| lit.get()) {
+                match Literal::from_url(link.data.source.clone()).and_then(|lit| lit.get()) {
                     Ok(val) => val.to_string(),
                     Err(_) => continue,
                 };
