@@ -36,47 +36,69 @@ export default async function create(context: LanguageContext): Promise<Language
       ]
     }],
     async (signal) => {
-      //@ts-ignore
-      const payload = signal.payload;
+      try {
+        //@ts-ignore
+        const payload = signal.payload;
 
-      // Link updates
-      if (payload.reference || (payload.additions && payload.removals)) {
-        const signalType = payload.reference ? 'HashBroadcast' : 'DiffSignal';
-        console.log(`[p-diff-sync] 📡 Signal received: type=${signalType}, has_additions=${!!payload.additions}, additions_count=${payload.additions?.length || 0}`);
-        await linksAdapter.handleHolochainSignal(signal);
-        return;
-      }
-
-      // Routed telepresence signal (has recipient_did field from RoutedSignalPayload)
-      if (payload.recipient_did) {
-        // Check if this signal is for THIS specific user (agent.did)
-        // Each language instance is created for a specific user
-
-        const recipientDid = payload.recipient_did;
-        const localUserDIDs = await agent.getAllLocalUserDIDs();
-        
-        if (! localUserDIDs.includes(recipientDid)) {
-          console.error(`[p-diff-sync] Received Signal not for user on this node. Recipient is ${payload.recipient_did}. All local user DIDs: ${localUserDIDs.join(', ')}`);
-          return; // Not for this user
+        // DIAGNOSTIC: Log raw signal shape to debug why signals are not being routed
+        const payloadKeys = payload ? Object.keys(payload) : 'null/undefined';
+        const payloadType = typeof payload;
+        const isArray = Array.isArray(payload);
+        console.log(`[p-diff-sync] 🔍 RAW SIGNAL ENTERED CALLBACK: type=${payloadType}, isArray=${isArray}, keys=${JSON.stringify(payloadKeys)}, has_reference=${!!payload?.reference}, has_additions=${!!payload?.additions}, has_removals=${!!payload?.removals}, has_recipient_did=${!!payload?.recipient_did}`);
+        if (isArray) {
+          console.log(`[p-diff-sync] 🔍 RAW SIGNAL ARRAY: length=${payload.length}, first_element_type=${typeof payload[0]}, first_element_keys=${payload[0] ? JSON.stringify(Object.keys(payload[0])).substring(0, 200) : 'N/A'}`);
+        }
+        // Log first few bytes/values of key fields for deeper inspection
+        if (payload && payloadType === 'object' && !isArray) {
+          const refType = typeof payload.reference;
+          const refVal = payload.reference ? JSON.stringify(payload.reference).substring(0, 200) : 'falsy';
+          const addType = typeof payload.additions;
+          const remType = typeof payload.removals;
+          console.log(`[p-diff-sync] 🔍 PAYLOAD DETAILS: reference(${refType})=${refVal}, additions(${addType})=${payload.additions ? 'length=' + (payload.additions.length || 'N/A') : 'falsy'}, removals(${remType})=${payload.removals ? 'length=' + (payload.removals.length || 'N/A') : 'falsy'}`);
         }
 
-        // Reconstruct PerspectiveExpression from flattened RoutedSignalPayload
-        const perspectiveExpression = {
-          author: payload.author,
-          data: payload.data,
-          timestamp: payload.timestamp,
-          proof: payload.proof
-        };
+        // Link updates
+        if (payload.reference || (payload.additions && payload.removals)) {
+          const signalType = payload.reference ? 'HashBroadcast' : 'DiffSignal';
+          console.log(`[p-diff-sync] 📡 Signal MATCHED link-update branch: type=${signalType}, has_additions=${!!payload.additions}, additions_count=${payload.additions?.length || 0}`);
+          await linksAdapter.handleHolochainSignal(signal);
+          console.log(`[p-diff-sync] 📡 Signal link-update branch COMPLETED`);
+          return;
+        }
 
+        // Routed telepresence signal (has recipient_did field from RoutedSignalPayload)
+        if (payload.recipient_did) {
+          console.log(`[p-diff-sync] 📡 Signal MATCHED routed-telepresence branch: recipient_did=${payload.recipient_did}`);
+          const recipientDid = payload.recipient_did;
+          const localUserDIDs = await agent.getAllLocalUserDIDs();
+
+          if (! localUserDIDs.includes(recipientDid)) {
+            console.error(`[p-diff-sync] Received Signal not for user on this node. Recipient is ${payload.recipient_did}. All local user DIDs: ${localUserDIDs.join(', ')}`);
+            return; // Not for this user
+          }
+
+          // Reconstruct PerspectiveExpression from flattened RoutedSignalPayload
+          const perspectiveExpression = {
+            author: payload.author,
+            data: payload.data,
+            timestamp: payload.timestamp,
+            proof: payload.proof
+          };
+
+          for (const callback of telepresenceAdapter.signalCallbacks) {
+            await callback(perspectiveExpression, recipientDid);
+          }
+          return;
+        }
+
+        // Regular broadcast telepresence signal (no specific recipient)
+        console.log(`[p-diff-sync] 📡 Signal FELL THROUGH to broadcast-telepresence (no branch matched). telepresence callbacks: ${telepresenceAdapter.signalCallbacks.length}`);
         for (const callback of telepresenceAdapter.signalCallbacks) {
-          await callback(perspectiveExpression, recipientDid);
+          await callback(payload);
         }
-        return;
-      }
-
-      // Regular broadcast telepresence signal (no specific recipient)
-      for (const callback of telepresenceAdapter.signalCallbacks) {
-        await callback(payload);
+      } catch (e) {
+        console.error(`[p-diff-sync] ❌ SIGNAL CALLBACK ERROR:`, e);
+        console.error(`[p-diff-sync] ❌ Error stack:`, e?.stack || 'no stack');
       }
     }
   );
