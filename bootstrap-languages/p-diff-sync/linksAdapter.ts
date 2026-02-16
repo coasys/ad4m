@@ -171,13 +171,15 @@ export class LinkAdapter implements LinkSyncAdapter {
       for (const hash of Array.from(revisions)) {
         if(!hash) continue
         if (this.myCurrentRevision && (encodeBase64(hash) == encodeBase64(this.myCurrentRevision))) continue;
-        
-        let pullResult = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "pull", { 
+
+        console.log(`[p-diff-sync] 🔄 gossip(): Pulling revision ${encodeBase64(hash)}, is_scribe=${is_scribe}`);
+        let pullResult = await this.hcDna.call(DNA_ROLE, ZOME_NAME, "pull", {
           hash,
-          is_scribe 
+          is_scribe
         });
 
         if (pullResult) {
+          console.log(`[p-diff-sync] 🔄 gossip(): Pull result - diff has ${pullResult.diff?.additions?.length || 0} additions, ${pullResult.diff?.removals?.length || 0} removals, current_revision=${pullResult.current_revision ? 'present' : 'null'}`);
           if (pullResult.current_revision && Buffer.isBuffer(pullResult.current_revision)) {
             let myRevision = pullResult.current_revision;
             this.myCurrentRevision = myRevision;
@@ -187,6 +189,8 @@ export class LinkAdapter implements LinkSyncAdapter {
             //@ts-ignore
             await checkSyncState(this.syncStateChangeCallback);
           }
+        } else {
+          console.warn(`[p-diff-sync] 🔄 gossip(): Pull returned null/undefined!`);
         }
       }
 
@@ -228,10 +232,13 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async commit(diff: PerspectiveDiff): Promise<string> {
-    //console.log("PerspectiveDiffSync.commit(); Getting lock");
+    console.log(`[p-diff-sync] 📤 commit(): Starting - ${diff.additions.length} additions, ${diff.removals.length} removals`);
+    for (let i = 0; i < Math.min(diff.additions.length, 5); i++) {
+      const link = diff.additions[i];
+      console.log(`[p-diff-sync] 📤 commit():   addition[${i}]: source='${link?.data?.source}', pred='${link?.data?.predicate}', target='${link?.data?.target?.substring(0, 60)}...'`);
+    }
     const release = await this.generalMutex.acquire();
     try {
-      //console.log("PerspectiveDiffSync.commit(); Got lock");
       let prep_diff = {
         additions: diff.additions.map((diff) => prepareLinkExpression(diff)),
         removals: diff.removals.map((diff) => prepareLinkExpression(diff))
@@ -290,29 +297,28 @@ export class LinkAdapter implements LinkSyncAdapter {
     const { reference_hash, reference, broadcast_author } = signal.payload;
     //Check if this signal came from another agent & contains a reference and reference_hash
     if (reference && reference_hash && broadcast_author) {
-      // console.log(`PerspectiveDiffSync.handleHolochainSignal: 
-      //       diff: ${JSON.stringify(diff)}
-      //       reference_hash: ${reference_hash.toString('base64')}
-      //       reference: {
-      //           diff: ${reference.diff?.toString('base64')}
-      //           parents: ${reference.parents ? reference.parents.map( (parent: Buffer) => parent ? parent.toString('base64') : 'null').join(', '):'none'}
-      //           diffs_since_snapshot: ${reference?.diffs_since_snapshot}
-      //       }
-      //       broadcast_author: ${broadcast_author}
-      //       `)
+      console.log(`[p-diff-sync] 📥 handleHolochainSignal: HashBroadcast from ${broadcast_author}, revision=${reference_hash ? encodeBase64(reference_hash) : 'null'}, is_chunked=${reference?.diff_chunks ? 'true' : 'false'}`);
       try {
-        //console.log("PerspectiveDiffSync.handleHolochainSignal: Getting lock");
-
-        //console.log("PerspectiveDiffSync.handleHolochainSignal: Got lock");
         this.peers.set(broadcast_author, { currentRevision: reference_hash, lastSeen: new Date() });
+        console.log(`[p-diff-sync] 📥 handleHolochainSignal: Updated peer ${broadcast_author}, total peers: ${this.peers.size}`);
       } catch (e) {
-        console.error("PerspectiveDiffSync.handleHolochainSignal: got error", e);
+        console.error("[p-diff-sync] 📥 handleHolochainSignal: error updating peer:", e);
       }
     } else {
-      //console.log("PerspectiveDiffSync.handleHolochainSignal: received a signals from ourselves in fast_forward_signal or in a pull: ", signal.payload);
-      //This signal only contains link data and no reference, and therefore came from us in a pull in fast_forward_signal
+      // This signal only contains link data and no reference, came from handle_broadcast fast-forward or pull
+      const additions = signal.payload?.additions || [];
+      const removals = signal.payload?.removals || [];
+      console.log(`[p-diff-sync] 📥 handleHolochainSignal: DIFF SIGNAL - ${additions.length} additions, ${removals.length} removals`);
+      for (let i = 0; i < Math.min(additions.length, 10); i++) {
+        const link = additions[i];
+        console.log(`[p-diff-sync] 📥   addition[${i}]: source='${link?.data?.source}', pred='${link?.data?.predicate}', target='${link?.data?.target?.substring(0, 60)}...'`);
+      }
       if (this.linkCallback) {
+        console.log(`[p-diff-sync] 📥 handleHolochainSignal: Calling linkCallback (perspectiveDiffReceived) with ${additions.length} additions`);
         await this.linkCallback(signal.payload);
+        console.log(`[p-diff-sync] 📥 handleHolochainSignal: linkCallback completed`);
+      } else {
+        console.error(`[p-diff-sync] 📥 handleHolochainSignal: NO linkCallback registered! Diff with ${additions.length} additions DROPPED!`);
       }
     }
   }
