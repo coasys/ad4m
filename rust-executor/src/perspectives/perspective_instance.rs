@@ -471,22 +471,35 @@ impl PerspectiveInstance {
             };
 
             if let Some(mut link_language) = link_language_clone {
-                log::info!("Committing {} pending diffs...", pending_ids.len());
+                log::info!("📤 PENDING DIFFS: Committing {} pending diffs ({} additions, {} removals) for perspective {}",
+                    pending_ids.len(), pending_diffs.additions.len(), pending_diffs.removals.len(), uuid);
+                for (i, link) in pending_diffs.additions.iter().enumerate() {
+                    log::info!("📤 PENDING DIFFS:   addition[{}]: source='{}', pred={:?}, target='{}'",
+                        i, link.data.source, link.data.predicate, link.data.target);
+                }
                 let commit_result = link_language.commit(pending_diffs).await;
                 match commit_result {
-                    Ok(Some(_)) => {
+                    Ok(Some(rev)) => {
                         Ad4mDb::with_global_instance(|db| {
                             db.clear_pending_diffs(&uuid, pending_ids)
                         })?;
                         // Reset immediate commits counter after successful commit
                         self.set_immediate_commits(IMMEDIATE_COMMITS_COUNT).await;
-                        log::info!("Successfully committed pending diffs");
+                        log::info!("📤 PENDING DIFFS: Successfully committed, revision={}, reset immediate_commits to {}",
+                            rev, IMMEDIATE_COMMITS_COUNT);
                         Ok(())
                     }
-                    Ok(None) => Err(anyhow!("No diff returned from commit")),
-                    Err(e) => Err(e),
+                    Ok(None) => {
+                        log::warn!("📤 PENDING DIFFS: Commit returned None revision");
+                        Err(anyhow!("No diff returned from commit"))
+                    }
+                    Err(e) => {
+                        log::error!("📤 PENDING DIFFS: Commit failed: {:?}", e);
+                        Err(e)
+                    }
                 }
             } else {
+                log::warn!("📤 PENDING DIFFS: No link language available, keeping {} diffs for later", pending_ids.len());
                 Ok(()) // Keep diffs if no link language
             }
         } else {
@@ -647,7 +660,15 @@ impl PerspectiveInstance {
     pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
         let handle = self.persisted.lock().await.clone();
         if handle.neighbourhood.is_none() {
+            log::debug!("📤 COMMIT: Skipping - no neighbourhood for perspective {}", handle.uuid);
             return Ok(());
+        }
+
+        log::info!("📤 COMMIT: Starting for perspective {} - {} additions, {} removals",
+            handle.uuid, diff.additions.len(), diff.removals.len());
+        for (i, link) in diff.additions.iter().enumerate() {
+            log::info!("📤 COMMIT:   addition[{}]: source='{}', pred={:?}, target='{}'",
+                i, link.data.source, link.data.predicate, link.data.target);
         }
 
         // Seeing if we already have pending diffs, to not overtake older commits but instead add this one to the queue
@@ -673,17 +694,22 @@ impl PerspectiveInstance {
                         self.immediate_commits_remaining.lock().await;
                     if *immediate_commits_remaining > 0 {
                         *immediate_commits_remaining -= 1;
+                        log::info!("📤 COMMIT: Committing immediately (remaining={})", *immediate_commits_remaining);
                         link_language.commit(diff.clone()).await
                     } else {
+                        log::warn!("📤 COMMIT: DEBOUNCING - immediate_commits_remaining=0, deferring to pending_diffs");
                         Err(anyhow!("Debouncing commit burst"))
                     }
                 } else {
+                    log::warn!("📤 COMMIT: Link Language not synced - deferring to pending_diffs");
                     Err(anyhow!("Link Language not synced"))
                 }
             } else {
+                log::warn!("📤 COMMIT: LinkLanguage not available - deferring to pending_diffs");
                 Err(anyhow!("LinkLanguage not available"))
             }
         } else {
+            log::info!("📤 COMMIT: {} pending diffs already in queue - adding to queue", pending_ids.len());
             Err(anyhow!("Other pending diffs already in queue"))
         };
 
@@ -730,13 +756,18 @@ impl PerspectiveInstance {
         let self_clone = self.clone();
         let diff_clone = diff.clone();
 
+        log::info!("📤 SPAWN COMMIT: Spawning commit task for {} additions, {} removals",
+            diff.additions.len(), diff.removals.len());
+
         tokio::spawn(async move {
             if let Err(e) = self_clone.commit(&diff_clone).await {
-                log::error!("PerspectiveInstance::commit() returned error: {:?}\nStoring in pending diffs for later", e);
+                log::error!("📤 SPAWN COMMIT: commit() failed: {:?} - storing in pending diffs", e);
                 let handle_clone = self_clone.persisted.lock().await.clone();
                 Ad4mDb::with_global_instance(|db|
                     db.add_pending_diff(&handle_clone.uuid, &diff_clone)
                 ).expect("Couldn't write pending diff. DB should be initialized and usable at this point");
+            } else {
+                log::info!("📤 SPAWN COMMIT: commit() succeeded for {} additions", diff_clone.additions.len());
             }
         });
     }
@@ -872,6 +903,8 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
+        log::info!("🔗 ADD LINK: source='{}', pred={:?}, target='{}', status={:?}, batch_id={:?}",
+            link.source, link.predicate, link.target, status, batch_id);
         let link_expr: LinkExpression = create_signed_expression(link, context)?.into();
         self.add_link_expression(link_expr, status, batch_id).await
     }
@@ -958,6 +991,9 @@ impl PerspectiveInstance {
             let persisted_guard = self.persisted.lock().await;
             persisted_guard.clone()
         };
+
+        log::info!("📡 PUBSUB: Publishing diff for perspective {} - {} additions, {} removals, owners={:?}",
+            handle.uuid, decorated_diff.additions.len(), decorated_diff.removals.len(), handle.owners);
 
         // Publish link added events - one per owner for proper multi-user isolation
         let pubsub = get_global_pubsub().await;
@@ -1046,6 +1082,9 @@ impl PerspectiveInstance {
             let mut link_expr = link_expression.clone();
             link_expr.status = Some(status.clone());
             diff.additions.push(link_expr.clone());
+
+            log::info!("🔗 ADD LINK EXPR (batch): added to batch={}, status={:?}, batch now has {} additions, {} removals",
+                batch_id, status, diff.additions.len(), diff.removals.len());
 
             return Ok(DecoratedLinkExpression::from((
                 link_expr.clone(),
@@ -1880,6 +1919,9 @@ impl PerspectiveInstance {
     /// Combined helper: spawns Prolog facts update AND marks query engine as dirty
     /// This is the common pattern throughout the codebase
     async fn update_prolog_engines(&self, diff: DecoratedPerspectiveDiff) {
+        log::info!("🧠 PROLOG ENGINES: Updating with {} additions, {} removals (mode={:?})",
+            diff.additions.len(), diff.removals.len(), PROLOG_MODE);
+
         // Update subscription engine (immediate via spawned task)
         self.spawn_prolog_facts_update(diff, None);
 
@@ -3097,9 +3139,8 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<(), AnyError> {
-        //let execute_start = std::time::Instant::now();
-        //log::info!("⚙️ EXECUTE COMMANDS: Starting execution of {} commands for expression '{}', batch_id: {:?}",
-        //    commands.len(), expression, batch_id);
+        log::info!("⚙️ EXECUTE COMMANDS: {} commands for expression='{}', batch_id={:?}",
+            commands.len(), expression, batch_id);
 
         let jsvalue_to_string = |value: &Value| -> String {
             match value {
@@ -3351,6 +3392,7 @@ impl PerspectiveInstance {
         value: &serde_json::Value,
         context: &AgentContext,
     ) -> Result<String, AnyError> {
+        log::info!("🔍 RESOLVE PROPERTY [{}::{}]: Checking if property needs language resolution...", class_name, property);
         let resolve_result = self.prolog_query_with_context(format!(
             r#"subject_class("{}", C), property_resolve(C, "{}"), property_resolve_language(C, "{}", Language)"#,
             class_name, property, property
@@ -3358,22 +3400,28 @@ impl PerspectiveInstance {
 
         if let Some(resolve_language) = prolog_get_first_string_binding(&resolve_result, "Language")
         {
+            log::info!("🔍 RESOLVE PROPERTY [{}::{}]: Resolving through language '{}'", class_name, property, resolve_language);
             // Create an expression for the value
             let mut lock = crate::js_core::JS_CORE_HANDLE.lock().await;
             let content = serde_json::to_string(value)
                 .map_err(|e| anyhow!("Failed to serialize JSON value: {}", e))?;
             if let Some(ref mut js) = *lock {
+                let resolve_start = std::time::Instant::now();
                 let result = js.execute(format!(
                     r#"JSON.stringify(
                         (await core.callResolver("Mutation", "expressionCreate", {{ languageAddress: "{}", content: {} }})).Ok
                     )"#,
                     resolve_language, content
                 )).await?;
+                log::info!("🔍 RESOLVE PROPERTY [{}::{}]: Resolved in {:?} -> '{}'",
+                    class_name, property, resolve_start.elapsed(), result.trim_matches('"'));
                 Ok(result.trim_matches('"').to_string())
             } else {
+                log::warn!("🔍 RESOLVE PROPERTY [{}::{}]: JS_CORE_HANDLE is None! Falling back to raw value", class_name, property);
                 Ok(value.to_string())
             }
         } else {
+            log::info!("🔍 RESOLVE PROPERTY [{}::{}]: No language resolution needed, using raw value", class_name, property);
             Ok(match value {
                 serde_json::Value::String(s) => s.clone(),
                 _ => value.to_string(),
@@ -3389,20 +3437,16 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<(), AnyError> {
-        //let create_start = std::time::Instant::now();
-        //log::info!("🎯 CREATE SUBJECT: Starting create_subject for expression '{}' - batch_id: {:?}",
-        //    expression_address, batch_id);
+        let create_start = std::time::Instant::now();
 
-        //let class_name_start = std::time::Instant::now();
         let class_name = self
             .subject_class_option_to_class_name(subject_class, context)
             .await?;
-        //log::info!("🎯 CREATE SUBJECT: Got class name '{}' in {:?}", class_name, class_name_start.elapsed());
+        log::info!("🎯 CREATE SUBJECT [{}]: expression='{}', batch_id={:?}, initial_values={:?}",
+            class_name, expression_address, batch_id, initial_values);
 
-        //let constructor_start = std::time::Instant::now();
         let mut commands = self.get_constructor_actions(&class_name, context).await?;
-        //log::info!("🎯 CREATE SUBJECT: Got {} constructor actions in {:?}",
-        //    commands.len(), constructor_start.elapsed());
+        log::info!("🎯 CREATE SUBJECT [{}]: Got {} constructor actions", class_name, commands.len());
 
         // Handle initial values if provided
         if let Some(obj) = initial_values {
@@ -3448,8 +3492,12 @@ impl PerspectiveInstance {
             }
         }
 
-        //let execute_start = std::time::Instant::now();
-        //log::info!("🎯 CREATE SUBJECT: Executing {} commands...", commands.len());
+        log::info!("🎯 CREATE SUBJECT [{}]: Executing {} commands (after merging with setters)...",
+            class_name, commands.len());
+        for (i, cmd) in commands.iter().enumerate() {
+            log::info!("🎯 CREATE SUBJECT [{}]:   cmd[{}]: action={:?}, source={:?}, pred={:?}, target={:?}, local={:?}",
+                class_name, i, cmd.action, cmd.source, cmd.predicate, cmd.target, cmd.local);
+        }
         // Execute the merged commands
         self.execute_commands(
             commands,
@@ -3460,8 +3508,7 @@ impl PerspectiveInstance {
         )
         .await?;
 
-        //log::info!("🎯 CREATE SUBJECT: Commands executed in {:?}", execute_start.elapsed());
-        //log::info!("🎯 CREATE SUBJECT: Total create_subject took {:?}", create_start.elapsed());
+        log::info!("🎯 CREATE SUBJECT [{}]: Completed in {:?}", class_name, create_start.elapsed());
 
         Ok(())
     }
@@ -4198,9 +4245,8 @@ impl PerspectiveInstance {
         batch_uuid: String,
         context: &AgentContext,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
-        //let commit_start = std::time::Instant::now();
-        //log::info!("🔄 BATCH COMMIT: Starting batch commit for batch_uuid: {}", batch_uuid);
-        //let batch_retrieval_start = std::time::Instant::now();
+        let commit_start = std::time::Instant::now();
+        log::info!("🔄 BATCH COMMIT: Starting for batch_uuid={}", batch_uuid);
 
         // Get the diff without holding lock during the entire operation
         let diff = {
@@ -4212,8 +4258,12 @@ impl PerspectiveInstance {
             }
         };
 
-        //log::info!("🔄 BATCH COMMIT: Retrieved batch diff in {:?} - {} additions, {} removals",
-        //    batch_retrieval_start.elapsed(), diff.additions.len(), diff.removals.len());
+        log::info!("🔄 BATCH COMMIT: Retrieved batch - {} additions, {} removals",
+            diff.additions.len(), diff.removals.len());
+        for (i, link) in diff.additions.iter().enumerate() {
+            log::info!("🔄 BATCH COMMIT:   addition[{}]: source='{}', pred={:?}, target='{}', status={:?}",
+                i, link.data.source, link.data.predicate, link.data.target, link.status);
+        }
 
         //let processing_start = std::time::Instant::now();
         let mut shared_diff = DecoratedPerspectiveDiff {
@@ -4248,10 +4298,9 @@ impl PerspectiveInstance {
             }
         }
 
-        //log::info!("🔄 BATCH COMMIT: Link processing took {:?} - shared: {} add/{} rem, local: {} add/{} rem",
-        //    processing_start.elapsed(),
-        //    shared_diff.additions.len(), shared_diff.removals.len(),
-        //    local_diff.additions.len(), local_diff.removals.len());
+        log::info!("🔄 BATCH COMMIT: After split - shared: {} add/{} rem, local: {} add/{} rem",
+            shared_diff.additions.len(), shared_diff.removals.len(),
+            local_diff.additions.len(), local_diff.removals.len());
 
         // Get UUID without holding lock during DB operations
         let uuid = {
@@ -4261,14 +4310,12 @@ impl PerspectiveInstance {
 
         // Apply shared changes
         if !shared_diff.additions.is_empty() || !shared_diff.removals.is_empty() {
-            //let db_start = std::time::Instant::now();
-            //log::info!("🔄 BATCH COMMIT: Starting DB operations for shared changes");
+            let has_ll = self.has_link_language().await;
+            log::info!("🔄 BATCH COMMIT: has_link_language={}, spawning commit for {} shared additions",
+                has_ll, shared_diff.additions.len());
 
             // Commit to link language (SurrealDB will be updated later via persist_link_diff)
-            if self.has_link_language().await {
-                //let link_lang_start = std::time::Instant::now();
-                //log::info!("🔄 BATCH COMMIT: Starting link language commit");
-
+            if has_ll {
                 let perspective_diff = PerspectiveDiff {
                     additions: shared_diff
                         .additions
@@ -4281,10 +4328,14 @@ impl PerspectiveInstance {
                         .map(|l| l.clone().into())
                         .collect(),
                 };
+                log::info!("🔄 BATCH COMMIT: Spawning link language commit with {} additions, {} removals",
+                    perspective_diff.additions.len(), perspective_diff.removals.len());
                 self.spawn_commit_and_handle_error(&perspective_diff);
-
-                //log::info!("🔄 BATCH COMMIT: Link language commit spawned in {:?}", link_lang_start.elapsed());
+            } else {
+                log::warn!("🔄 BATCH COMMIT: NO LINK LANGUAGE - shared links will NOT be committed to network!");
             }
+        } else {
+            log::warn!("🔄 BATCH COMMIT: No shared changes to commit! All links are local.");
         }
 
         // Create combined diff for prolog update, SurrealDB update, and return value
@@ -4295,9 +4346,8 @@ impl PerspectiveInstance {
 
         // Only spawn prolog facts update if there are changes to update
         if !combined_diff.additions.is_empty() || !combined_diff.removals.is_empty() {
-            //let prolog_start = std::time::Instant::now();
-            //log::info!("🔄 BATCH COMMIT: Starting prolog facts update - {} add, {} rem",
-            //    combined_diff.additions.len(), combined_diff.removals.len());
+            log::info!("🔄 BATCH COMMIT: Updating prolog engines and persisting {} additions, {} removals",
+                combined_diff.additions.len(), combined_diff.removals.len());
 
             // Update prolog facts once for all changes and wait for completion
             // Update Prolog: subscription engine (immediate) + query engine (lazy)
@@ -4306,10 +4356,11 @@ impl PerspectiveInstance {
 
             self.persist_link_diff(&combined_diff).await?;
 
-            //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
+            log::info!("🔄 BATCH COMMIT: Prolog + SurrealDB update complete");
         }
 
-        //log::info!("🔄 BATCH COMMIT: Total batch commit took {:?}", commit_start.elapsed());
+        log::info!("🔄 BATCH COMMIT: Total batch commit took {:?}, returning {} additions",
+            commit_start.elapsed(), combined_diff.additions.len());
 
         // Return combined diff
         Ok(combined_diff)
