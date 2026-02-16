@@ -294,6 +294,7 @@ export class LinkAdapter implements LinkSyncAdapter {
   }
 
   async handleHolochainSignal(signal: any): Promise<void> {
+    console.log(`[p-diff-sync] 📥 handleHolochainSignal ENTERED. signal keys=${Object.keys(signal)}, payload keys=${signal.payload ? Object.keys(signal.payload) : 'no payload'}, linkCallback registered=${!!this.linkCallback}`);
     const { reference_hash, reference, broadcast_author } = signal.payload;
     //Check if this signal came from another agent & contains a reference and reference_hash
     if (reference && reference_hash && broadcast_author) {
