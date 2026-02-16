@@ -22,7 +22,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
       @Optional({ through: "test://optional", writable: true })
       optional: string = "";
       
-      @ReadOnly({ through: "test://readonly", getter: "custom_getter" })
+      @ReadOnly({ through: "test://readonly", prologGetter: "custom_getter" })
       readonly: string = "";
       
       @Flag({ through: "test://type", value: "test://flag" })
@@ -47,7 +47,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
     // Verify "readonly" property
     expect(metadata.properties.readonly.predicate).toBe("test://readonly");
     expect(metadata.properties.readonly.writable).toBe(false);
-    expect(metadata.properties.readonly.getter).toBe("custom_getter");
+    expect(metadata.properties.readonly.prologGetter).toBe("custom_getter");
     
     // Verify "type" property (flag)
     expect(metadata.properties.type.predicate).toBe("test://type");
@@ -114,18 +114,18 @@ describe("Ad4mModel.getModelMetadata()", () => {
     class CustomModel extends Ad4mModel {
       @Optional({
         through: "test://computed",
-        getter: "triple(Base, 'test://value', V), Value is V * 2",
-        setter: "Value is V / 2, Actions = [{action: 'setSingleTarget', source: 'this', predicate: 'test://value', target: Value}]"
+        prologGetter: "triple(Base, 'test://value', V), Value is V * 2",
+        prologSetter: "Value is V / 2, Actions = [{action: 'setSingleTarget', source: 'this', predicate: 'test://value', target: Value}]"
       })
       computed: number = 0;
     }
 
     const metadata = CustomModel.getModelMetadata();
     
-    // Assert getter and setter contain the custom code
-    expect(metadata.properties.computed.getter).toContain("triple(Base, 'test://value', V), Value is V * 2");
-    expect(metadata.properties.computed.setter).toContain("Value is V / 2");
-    expect(metadata.properties.computed.setter).toContain("setSingleTarget");
+    // Assert prologGetter and prologSetter contain the custom code
+    expect(metadata.properties.computed.prologGetter).toContain("triple(Base, 'test://value', V), Value is V * 2");
+    expect(metadata.properties.computed.prologSetter).toContain("Value is V / 2");
+    expect(metadata.properties.computed.prologSetter).toContain("setSingleTarget");
   });
 
   it("should handle collection with isInstance where clause", () => {
@@ -163,7 +163,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
       @Optional({ through: "recipe://description" })
       description: string = "";
       
-      @ReadOnly({ through: "recipe://rating", getter: "avg_rating(Base, Value)" })
+      @ReadOnly({ through: "recipe://rating", prologGetter: "avg_rating(Base, Value)" })
       rating: number = 0;
       
       @Collection({ through: "recipe://ingredient" })
@@ -194,7 +194,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.name.resolveLanguage).toBe("literal");
     expect(metadata.properties.description.predicate).toBe("recipe://description");
     expect(metadata.properties.rating.predicate).toBe("recipe://rating");
-    expect(metadata.properties.rating.getter).toBe("avg_rating(Base, Value)");
+    expect(metadata.properties.rating.prologGetter).toBe("avg_rating(Base, Value)");
     expect(metadata.collections.ingredients.predicate).toBe("recipe://ingredient");
     expect(metadata.collections.steps.predicate).toBe("recipe://step");
     expect(metadata.collections.steps.local).toBe(true);

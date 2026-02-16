@@ -1499,21 +1499,13 @@ export class PerspectiveProxy {
      */
     /**
      * Gets subject class metadata from SHACL links (Prolog-free implementation).
-     * 
-     * Queries SHACL links stored by addSdna to extract:
-     * - Required predicates for instance identification
-     * - Property metadata (predicate, resolveLanguage)
-     * - Collection metadata (predicate, instanceFilter)
-     */
-    /**
-     * Gets subject class metadata from SHACL links (Prolog-free implementation).
      * Uses the link API directly instead of SurrealDB queries.
      */
     private async getSubjectClassMetadataFromSDNA(className: string): Promise<{
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
         properties: Map<string, { predicate: string, resolveLanguage?: string }>,
-        collections: Map<string, { predicate: string, instanceFilter?: string }>
+        collections: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
     } | null> {
         try {
             // Find SHACL class links: source -> rdf://type -> ad4m://SubjectClass
@@ -1623,7 +1615,7 @@ export class PerspectiveProxy {
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
         properties: Map<string, { predicate: string, resolveLanguage?: string }>,
-        collections: Map<string, { predicate: string }>
+        collections: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
     }): string {
         if (metadata.requiredTriples.length === 0) {
             // No required triples - any node with links is an instance
@@ -1692,6 +1684,7 @@ export class PerspectiveProxy {
     /**
      * Gets collection values using SurrealDB when Prolog fails.
      * This is used as a fallback in SdnaOnly mode where link data isn't in Prolog.
+     * Note: This is used by Subject.ts (legacy pattern). Ad4mModel.ts uses getModelMetadata() instead.
      */
     async getCollectionValuesViaSurreal(baseExpression: string, className: string, collectionName: string): Promise<any[]> {
         const metadata = await this.getSubjectClassMetadataFromSDNA(className);
@@ -1714,6 +1707,35 @@ export class PerspectiveProxy {
         }
 
         let values = result.map(r => r.value).filter(v => v !== "" && v !== '');
+        
+        // Apply condition filtering if present
+        if (collMeta.condition && values.length > 0) {
+            try {
+                const filteredValues: string[] = [];
+                
+                for (const value of values) {
+                    let condition = collMeta.condition
+                        .replace(/\$perspective/g, `'${this.uuid}'`)
+                        .replace(/\$base/g, `'${baseExpression}'`)
+                        .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
+                    
+                    // If condition starts with WHERE, wrap in array length check
+                    if (condition.trim().startsWith('WHERE')) {
+                        condition = `array::len(SELECT * FROM link ${condition}) > 0`;
+                    }
+                    
+                    const filterResult = await this.querySurrealDB(`RETURN ${condition}`);
+                    const isTrue = filterResult === true || (Array.isArray(filterResult) && filterResult.length > 0 && filterResult[0] === true);
+                    if (isTrue) {
+                        filteredValues.push(value);
+                    }
+                }
+                
+                values = filteredValues;
+            } catch (error) {
+                console.warn(`Failed to apply condition filter for ${collectionName}:`, error);
+            }
+        }
 
         // Apply instance filter if present - batch-check all values at once
         if (collMeta.instanceFilter) {
@@ -1738,13 +1760,13 @@ export class PerspectiveProxy {
      * Batch-checks multiple expressions against subject class metadata using a single or limited SurrealDB queries.
      * This avoids N+1 query problems by checking all values at once.
      */
-    private async batchCheckSubjectInstances(
+    async batchCheckSubjectInstances(
         expressions: string[],
         metadata: {
             requiredPredicates: string[],
             requiredTriples: Array<{predicate: string, target?: string}>,
             properties: Map<string, { predicate: string, resolveLanguage?: string }>,
-            collections: Map<string, { predicate: string, instanceFilter?: string }>
+            collections: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
         }
     ): Promise<string[]> {
         if (expressions.length === 0) {
@@ -1770,10 +1792,12 @@ export class PerspectiveProxy {
             if (triple.target) {
                 // Flag: must match both predicate AND exact target value
                 const escapedTarget = escapeSurrealString(triple.target);
-                checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] AND predicate = '${escapedPredicate}' AND out.uri = '${escapedTarget}' GROUP BY in.uri`;
+                // Note: Removed GROUP BY because it was causing SurrealDB to only return one result
+                checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] AND predicate = '${escapedPredicate}' AND out.uri = '${escapedTarget}'`;
             } else {
                 // Property: just check predicate exists
-                checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] AND predicate = '${escapedPredicate}' GROUP BY in.uri`;
+                // Note: Removed GROUP BY because it was causing SurrealDB to only return one result
+                checkQuery = `SELECT in.uri AS uri FROM link WHERE in.uri IN [${escapedExpressions}] AND predicate = '${escapedPredicate}'`;
             }
             
             const result = await this.querySurrealDB(checkQuery);
