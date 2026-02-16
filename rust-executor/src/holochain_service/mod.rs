@@ -130,11 +130,15 @@ impl HolochainService {
 
                         loop {
                             tokio::select! {
-                                Some((_, maybe_signal)) = streams.next() => {
-                                    if let Ok(signal) = maybe_signal {
-                                        let _ = stream_sender.send(signal);
-                                    } else {
-                                        log::error!("Got error from Holochain through app signal stream: {:?}", maybe_signal.expect_err("to be error since we're in else case"))
+                                Some((app_id, maybe_signal)) = streams.next() => {
+                                    match maybe_signal {
+                                        Ok(signal) => {
+                                            log::info!("📡 HC SIGNAL BRIDGE: Received signal from app='{}', forwarding to JS core", app_id);
+                                            let _ = stream_sender.send(signal);
+                                        }
+                                        Err(ref e) => {
+                                            log::error!("📡 HC SIGNAL BRIDGE: SIGNAL LOST from app='{}' - BroadcastStream error (likely LAGGED/buffer overflow): {:?}", app_id, e);
+                                        }
                                     }
                                 }
                                 Some(new_app_id) = new_app_ids_receiver.recv() => {

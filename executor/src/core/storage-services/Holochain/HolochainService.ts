@@ -67,8 +67,6 @@ export default class HolochainService {
     }
 
     async handleCallback(signal: EncodedAppSignal) {
-        //console.log(new Date().toISOString(), "GOT CALLBACK FROM HC, checking against language callbacks");
-        //console.dir(signal);
         //@ts-ignore
         let payload = decode(signal.signal);
         var TypedArray = Object.getPrototypeOf(Uint8Array);
@@ -81,21 +79,35 @@ export default class HolochainService {
             zome_name: signal.zome_name,
             payload: payload
         } as AppSignal;
+
+        console.log(`[HolochainService] 📡 handleCallback: zome='${signal.zome_name}', registered_callbacks=${this.#signalCallbacks.length}`);
+
         if (this.#signalCallbacks.length != 0) {
             const signalDna = Buffer.from(appSignalDecoded.cell_id[0]).toString('hex')
             const signalPubkey = Buffer.from(appSignalDecoded.cell_id[1]).toString('hex')
-            //console.debug("Looking for:", signalDna, signalPubkey)
             let callbacks = this.#signalCallbacks.filter(e => {
                 const dna = Buffer.from(e[0][0]).toString('hex')
                 const pubkey = Buffer.from(e[0][1]).toString('hex')
-                //console.debug("Checking:", dna, pubkey)
                 return ( dna === signalDna ) && (pubkey === signalPubkey)
             })
+            if (callbacks.length === 0) {
+                console.error(`[HolochainService] 📡 handleCallback: NO MATCHING CALLBACK! signal dna=${signalDna.substring(0, 16)}..., pubkey=${signalPubkey.substring(0, 16)}...`);
+                console.error(`[HolochainService] 📡   Registered callbacks for languages: ${this.#signalCallbacks.map(e => e[2]).join(', ')}`);
+                for (const cb of this.#signalCallbacks) {
+                    const regDna = Buffer.from(cb[0][0]).toString('hex');
+                    const regPubkey = Buffer.from(cb[0][1]).toString('hex');
+                    console.error(`[HolochainService] 📡   registered: lang=${cb[2]}, dna=${regDna.substring(0, 16)}..., pubkey=${regPubkey.substring(0, 16)}..., dna_match=${regDna === signalDna}, pubkey_match=${regPubkey === signalPubkey}`);
+                }
+            } else {
+                console.log(`[HolochainService] 📡 handleCallback: Found ${callbacks.length} matching callback(s), invoking...`);
+            }
             for (const cb of callbacks) {
                 if (cb && cb![1] != undefined) {
                     await cb![1](appSignalDecoded);
                 };
             }
+        } else {
+            console.error(`[HolochainService] 📡 handleCallback: NO CALLBACKS REGISTERED AT ALL! Signal from zome='${signal.zome_name}' DROPPED`);
         };
         return appSignalDecoded;
     }
