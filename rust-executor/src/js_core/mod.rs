@@ -394,6 +394,8 @@ impl JsCore {
                                             zome_name,
                                             signal: payload,
                                         } => {
+                                            log::info!("📡 HC SIGNAL TO JS: zome='{}'", zome_name);
+
                                             let js_core_cloned = js_core.clone();
                                             tokio::task::spawn_local(async move {
                                                 // Handle the received signal here
@@ -403,12 +405,10 @@ impl JsCore {
                                                 );
                                                 match js_core_cloned.execute_async_smart(script).await {
                                                     Ok(_res) => {
-                                                        // info!(
-                                                        //     "Holochain Handle Callback Completed Succesfully",
-                                                        // );
+                                                        log::info!("📡 HC SIGNAL TO JS: handleCallback completed successfully");
                                                     }
                                                     Err(err) => {
-                                                        error!("Error executing callback: {:?}", err);
+                                                        error!("📡 HC SIGNAL TO JS: Error executing callback: {:?}", err);
                                                     }
                                                 }
                                             });
