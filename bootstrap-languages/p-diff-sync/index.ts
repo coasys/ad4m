@@ -39,9 +39,10 @@ export default async function create(context: LanguageContext): Promise<Language
       //@ts-ignore
       const payload = signal.payload;
 
-
       // Link updates
       if (payload.reference || (payload.additions && payload.removals)) {
+        const signalType = payload.reference ? 'HashBroadcast' : 'DiffSignal';
+        console.log(`[p-diff-sync] 📡 Signal received: type=${signalType}, has_additions=${!!payload.additions}, additions_count=${payload.additions?.length || 0}`);
         await linksAdapter.handleHolochainSignal(signal);
         return;
       }

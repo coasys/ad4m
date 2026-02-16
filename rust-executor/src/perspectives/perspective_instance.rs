@@ -774,6 +774,13 @@ impl PerspectiveInstance {
 
     pub async fn diff_from_link_language(&self, diff: PerspectiveDiff) -> Result<(), AnyError> {
         let handle = self.persisted.lock().await.clone();
+        let perspective_uuid = handle.uuid.clone();
+        log::info!("📥 DIFF FROM LINK LANGUAGE [{}]: Received {} additions, {} removals",
+            perspective_uuid, diff.additions.len(), diff.removals.len());
+        for (i, link) in diff.additions.iter().enumerate() {
+            log::info!("📥 DIFF FROM LINK LANGUAGE [{}]:   addition[{}]: source='{}', pred={:?}, target='{}', author='{}'",
+                perspective_uuid, i, link.data.source, link.data.predicate, link.data.target, link.author);
+        }
 
         // Deduplicate by (author, timestamp, source, predicate, target)
         // Use structured keys to avoid delimiter collision issues
@@ -826,12 +833,18 @@ impl PerspectiveInstance {
                 .collect(),
         };
 
+        log::info!("📥 DIFF FROM LINK LANGUAGE [{}]: After dedup: {} unique additions, {} unique removals",
+            perspective_uuid, decorated_diff.additions.len(), decorated_diff.removals.len());
+
         // Write to SurrealDB (primary storage for links)
+        log::info!("📥 DIFF FROM LINK LANGUAGE [{}]: Persisting to SurrealDB...", perspective_uuid);
         self.persist_link_diff(&decorated_diff).await?;
+        log::info!("📥 DIFF FROM LINK LANGUAGE [{}]: SurrealDB persist complete", perspective_uuid);
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_diff.clone()).await;
         self.pubsub_publish_diff(decorated_diff).await;
+        log::info!("📥 DIFF FROM LINK LANGUAGE [{}]: All receiving-side processing complete", perspective_uuid);
 
         Ok(())
     }

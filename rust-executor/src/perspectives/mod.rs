@@ -367,6 +367,8 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
 }
 
 pub fn handle_perspective_diff_from_link_language(diff: PerspectiveDiff, language_address: String) {
+    log::info!("📥 DISPATCH DIFF: Received diff from link language '{}' - {} additions, {} removals",
+        language_address, diff.additions.len(), diff.removals.len());
     tokio::spawn(handle_perspective_diff_from_link_language_impl(
         diff,
         language_address,
@@ -397,13 +399,19 @@ pub async fn handle_perspective_diff_from_link_language_impl(
     language_address: String,
 ) {
     if let Some(perspective) = perspective_by_link_language(language_address.clone()).await {
+        let uuid = perspective.persisted.lock().await.uuid.clone();
+        log::info!("📥 DISPATCH DIFF: Found perspective {} for link language '{}', forwarding {} additions",
+            uuid, language_address, diff.additions.len());
         if let Err(e) = perspective.diff_from_link_language(diff).await {
             log::error!(
-                "Failed to persist diff from link language ({}): {:?}",
+                "📥 DISPATCH DIFF: FAILED to persist diff from link language ({}): {:?}",
                 language_address,
                 e
             );
         }
+    } else {
+        log::warn!("📥 DISPATCH DIFF: No perspective found for link language '{}'! Diff with {} additions DROPPED.",
+            language_address, diff.additions.len());
     }
 }
 
