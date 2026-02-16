@@ -1501,7 +1501,7 @@ export class PerspectiveProxy {
      * Gets subject class metadata from SHACL links (Prolog-free implementation).
      * Uses the link API directly instead of SurrealDB queries.
      */
-    private async getSubjectClassMetadataFromSDNA(className: string): Promise<{
+    async getSubjectClassMetadataFromSDNA(className: string): Promise<{
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
         properties: Map<string, { predicate: string, resolveLanguage?: string }>,
