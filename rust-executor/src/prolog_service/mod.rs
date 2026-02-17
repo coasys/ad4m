@@ -291,10 +291,12 @@ impl PrologService {
             // Load facts directly into the engines while holding the lock
             // This prevents other threads from querying dummy/uninitialized engines
             let load_result = async {
-                simple_engine.query_engine
+                simple_engine
+                    .query_engine
                     .load_module_string("facts", &processed_facts)
                     .await?;
-                simple_engine.subscription_engine
+                simple_engine
+                    .subscription_engine
                     .load_module_string("facts", &processed_facts)
                     .await?;
                 Ok::<_, Error>(())

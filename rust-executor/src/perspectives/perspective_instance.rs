@@ -1618,10 +1618,7 @@ impl PerspectiveInstance {
             let persisted = self.persisted.lock().await;
             let uuid = persisted.uuid.clone();
             let owner_did = persisted.get_primary_owner();
-            let neighbourhood_author = persisted
-                .neighbourhood
-                .as_ref()
-                .map(|n| n.author.clone());
+            let neighbourhood_author = persisted.neighbourhood.as_ref().map(|n| n.author.clone());
             (uuid, owner_did, neighbourhood_author)
         };
 
