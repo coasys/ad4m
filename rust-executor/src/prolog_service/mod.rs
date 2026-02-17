@@ -371,12 +371,7 @@ impl PrologService {
 
         // Check if Prolog is disabled
         if PROLOG_MODE == PrologMode::Disabled {
-            log::warn!(
-                "⚠️ Prolog query received but Prolog is DISABLED (perspective: {}, query: {})",
-                perspective_id,
-                query
-            );
-            return Err(anyhow!("Prolog is disabled"));
+            return Ok(QueryResolution::Matches(vec![]));
         }
 
         // Ensure engine is up to date
@@ -427,12 +422,7 @@ impl PrologService {
 
         // Check if Prolog is disabled
         if PROLOG_MODE == PrologMode::Disabled {
-            log::warn!(
-                "⚠️ Prolog subscription query received but Prolog is DISABLED (perspective: {}, query: {})",
-                perspective_id,
-                query
-            );
-            return Err(anyhow!("Prolog is disabled"));
+            return Ok(QueryResolution::Matches(vec![]));
         }
 
         // Ensure engine is up to date

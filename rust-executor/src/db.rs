@@ -1210,24 +1210,7 @@ impl Ad4mDb {
         links: Vec<LinkExpression>,
         status: &LinkStatus,
     ) -> Ad4mDbResult<()> {
-        log::warn!(
-            "🔵 Ad4mDb::add_many_links: perspective={}, link_count={}",
-            perspective_uuid,
-            links.len()
-        );
         for link in links.iter() {
-            // Debug log for SHACL-related links
-            if link.data.target == "ad4m://SubjectClass"
-                || link.data.predicate.as_deref() == Some("rdf://type")
-                || link.data.predicate.as_deref() == Some("sh://targetClass")
-            {
-                log::warn!(
-                    "🔵 Ad4mDb::add_many_links: SHACL link: {} -> {:?} -> {}",
-                    link.data.source,
-                    link.data.predicate,
-                    link.data.target
-                );
-            }
             self.conn.execute(
                 "INSERT OR IGNORE INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -1418,14 +1401,6 @@ impl Ad4mDb {
         perspective_uuid: &str,
         target: &str,
     ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
-        // Debug log for SHACL-related queries
-        if target == "ad4m://SubjectClass" {
-            log::warn!(
-                "🟡 Ad4mDb::get_links_by_target: perspective={}, target={}",
-                perspective_uuid,
-                target
-            );
-        }
         let mut stmt = self.conn.prepare(
             "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND target = ?2 ORDER BY timestamp, source, predicate, author",
         )?;
@@ -1456,22 +1431,6 @@ impl Ad4mDb {
         })?;
         let links: Result<Vec<_>, _> = link_iter.collect();
         let result = links?;
-        // Debug log for SHACL-related queries
-        if target == "ad4m://SubjectClass" {
-            log::warn!(
-                "🟡 Ad4mDb::get_links_by_target: Found {} links for target={}",
-                result.len(),
-                target
-            );
-            for (link, _status) in &result {
-                log::warn!(
-                    "🟡 Ad4mDb::get_links_by_target: Result link: {} -> {:?} -> {}",
-                    link.data.source,
-                    link.data.predicate,
-                    link.data.target
-                );
-            }
-        }
         Ok(result)
     }
 

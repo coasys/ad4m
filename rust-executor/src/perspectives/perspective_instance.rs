@@ -1609,14 +1609,31 @@ impl PerspectiveInstance {
         // Preserve original Prolog code for SHACL generation if needed
         let original_prolog_code = sdna_code.clone();
         let perspective_uuid = self.persisted.lock().await.uuid.clone();
-        log::warn!(
-            "🔷 add_sdna: uuid={}, name={}, sdna_type={:?}, original_prolog_code_len={}, shacl_json={}",
-            perspective_uuid,
-            name,
-            sdna_type,
-            original_prolog_code.len(),
-            shacl_json.is_some()
-        );
+
+        // Check if SHACL definition already exists for this class BEFORE doing anything
+        if matches!(sdna_type, SdnaType::SubjectClass) {
+            // Check for any existing SubjectClass with this name, regardless of namespace
+            // We query by target (ad4m://SubjectClass) and then filter by class name
+            let all_class_links = self.get_links_local(&LinkQuery {
+                predicate: Some("rdf://type".to_string()),
+                target: Some("ad4m://SubjectClass".to_string()),
+                ..Default::default()
+            }).await?;
+
+            // Check if any existing class matches this name
+            let exists = all_class_links.iter().any(|(link, _)| {
+                // Extract class name from source URI (e.g., "flux://Channel" -> "Channel")
+                link.data.source.split("://").last()
+                    .and_then(|s| s.split('/').last())
+                    .map(|class_name| class_name == name)
+                    .unwrap_or(false)
+            });
+
+            if exists {
+                log::info!("Class '{}' SHACL definition already exists, skipping duplicate", name);
+                return Ok(true);
+            }
+        }
 
         if (Literal::from_url(sdna_code.clone())).is_err() {
             sdna_code = Literal::from_string(sdna_code)
@@ -1667,32 +1684,11 @@ impl PerspectiveInstance {
                 .await?;
         } else if matches!(sdna_type, SdnaType::SubjectClass) && !original_prolog_code.is_empty() {
             // Generate SHACL links from Prolog SDNA for backward compatibility
-            log::warn!(
-                "🔷 add_sdna: Generating SHACL links from Prolog SDNA for class '{}'",
-                name
-            );
             match parse_prolog_sdna_to_shacl_links(&original_prolog_code, &name) {
                 Ok(shacl_links) => {
-                    log::warn!(
-                        "🔷 add_sdna: Generated {} SHACL links for class '{}'",
-                        shacl_links.len(),
-                        name
-                    );
-                    for link in &shacl_links {
-                        log::warn!(
-                            "🔷 add_sdna: SHACL link: {} -> {:?} -> {}",
-                            link.source,
-                            link.predicate,
-                            link.target
-                        );
-                    }
                     if !shacl_links.is_empty() {
                         self.add_links(shacl_links, LinkStatus::Shared, None, context)
                             .await?;
-                        log::warn!(
-                            "🔷 add_sdna: SHACL links stored successfully for class '{}'",
-                            name
-                        );
                     }
                 }
                 Err(e) => {
@@ -2091,11 +2087,8 @@ impl PerspectiveInstance {
                 .await
             }
             PrologMode::Disabled => {
-                log::warn!(
-                    "⚠️ Prolog query received but Prolog is DISABLED (query: {})",
-                    query
-                );
-                Err(anyhow!("Prolog is disabled"))
+                // Return empty matches instead of False/Error to allow SHACL-based SDNA to work
+                Ok(QueryResolution::Matches(vec![]))
             }
         }
     }
@@ -2124,10 +2117,11 @@ impl PerspectiveInstance {
             }
             PrologMode::Disabled => {
                 log::warn!(
-                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {})",
+                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
                     query
                 );
-                Err(anyhow!("Prolog is disabled"))
+                // Return empty result instead of error to allow SHACL-based SDNA to work
+                Ok(QueryResolution::False)
             }
         }
     }
@@ -2162,10 +2156,11 @@ impl PerspectiveInstance {
             }
             PrologMode::Disabled => {
                 log::warn!(
-                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {})",
+                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
                     query
                 );
-                Err(anyhow!("Prolog is disabled"))
+                // Return empty result instead of error to allow SHACL-based SDNA to work
+                Ok(QueryResolution::False)
             }
         }
     }
@@ -2256,7 +2251,9 @@ impl PerspectiveInstance {
                 )
                 .await
             }
-            PrologMode::Disabled => Err(anyhow!("Prolog is disabled")),
+            PrologMode::Disabled => {
+                Ok(QueryResolution::Matches(vec![]))
+            }
         }
     }
 
@@ -2373,7 +2370,9 @@ impl PerspectiveInstance {
                 )
                 .await
             }
-            PrologMode::Disabled => Err(anyhow!("Prolog is disabled")),
+            PrologMode::Disabled => {
+                Ok(QueryResolution::Matches(vec![]))
+            }
         }
     }
 
@@ -2599,14 +2598,9 @@ impl PerspectiveInstance {
         let self_clone = self.clone();
 
         tokio::spawn(async move {
-            // In Simple or SdnaOnly mode, just trigger subscription checks
+            // In Disabled, Simple, or SdnaOnly mode, just trigger subscription checks
             // (Pooled mode prolog updates don't apply - run_query_all only works in Pooled mode)
-            if PROLOG_MODE == PrologMode::Simple || PROLOG_MODE == PrologMode::SdnaOnly {
-                log::debug!(
-                    "Prolog facts update ({:?} mode): triggering subscription checks",
-                    PROLOG_MODE
-                );
-
+            if PROLOG_MODE == PrologMode::Disabled || PROLOG_MODE == PrologMode::Simple || PROLOG_MODE == PrologMode::SdnaOnly {
                 // Trigger notification, prolog subscription, and surreal subscription checks
                 *(self_clone.trigger_notification_check.lock().await) = true;
                 *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
@@ -3355,6 +3349,7 @@ impl PerspectiveInstance {
 
     /// Find a subject class from SHACL links by parsing a Prolog-like query
     /// Supports queries like: subject_class(Class, C), property(C, "name"), property(C, "rating").
+    /// NOTE: Ignores property_setter, collection_adder, etc. since SHACL handles those via actions
     async fn find_subject_class_from_shacl_by_query(
         &self,
         query: &str,
@@ -3362,14 +3357,16 @@ impl PerspectiveInstance {
         use regex::Regex;
 
         // Extract required properties from query like: property(C, "name"), property(C, "rating")
-        let property_regex = Regex::new(r#"property\([^,]+,\s*"([^"]+)"\)"#)?;
+        // NOTE: We use \b (word boundary) to match only "property(" not "property_setter(" etc.
+        let property_regex = Regex::new(r#"\bproperty\([^,]+,\s*"([^"]+)"\)"#)?;
         let required_properties: Vec<String> = property_regex
             .captures_iter(query)
             .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
             .collect();
 
         // Extract required collections from query like: collection(C, "items")
-        let collection_regex = Regex::new(r#"collection\([^,]+,\s*"([^"]+)"\)"#)?;
+        // NOTE: We use \b to match only "collection(" not "collection_adder(" etc.
+        let collection_regex = Regex::new(r#"\bcollection\([^,]+,\s*"([^"]+)"\)"#)?;
         let required_collections: Vec<String> = collection_regex
             .captures_iter(query)
             .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
@@ -3384,19 +3381,30 @@ impl PerspectiveInstance {
             })
             .await?;
 
-        log::warn!(
-            "🔷 find_subject_class_from_shacl_by_query: Found {} SHACL class links",
-            class_links.len()
-        );
-
         // For each class, check if it has all required properties
         for (link, _status) in class_links {
             // Class name comes from link source (subject of rdf:type triple)
-            let class_name =
-                match Literal::from_url(link.data.source.clone()).and_then(|lit| lit.get()) {
-                    Ok(val) => val.to_string(),
-                    Err(_) => continue,
-                };
+            // Extract class name from URL like "flux://Community" -> "Community"
+            let class_name = if let Ok(url) = url::Url::parse(&link.data.source) {
+                // Try to get the host (for flux://Community), or path (for other formats)
+                let name = url.host_str()
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        let path = url.path().trim_start_matches('/');
+                        if !path.is_empty() {
+                            Some(path.to_string())
+                        } else {
+                            None
+                        }
+                    });
+                
+                match name {
+                    Some(n) if !n.is_empty() => n,
+                    _ => continue,
+                }
+            } else {
+                continue;
+            };
 
             if class_name.is_empty() {
                 continue;
@@ -3415,7 +3423,11 @@ impl PerspectiveInstance {
                 .all(|c| class_collections.contains(c));
 
             if has_all_properties && has_all_collections {
+                log::info!("Class '{}' matches query requirements", class_name);
                 return Ok(Some(class_name));
+            } else {
+                log::debug!("Class '{}' does not match (props: {}, collections: {})", 
+                    class_name, has_all_properties, has_all_collections);
             }
         }
 
@@ -3442,36 +3454,36 @@ impl PerspectiveInstance {
             if link.data.source.ends_with(&shape_suffix) {
                 let prop_shape_uri = &link.data.target;
 
-                // Get the property name from sh://path link
-                let path_links = self
+                // Extract property name from property shape URI
+                // Format is: "flux://Community.type" -> "type"
+                let prop_name = if let Some(dot_pos) = prop_shape_uri.rfind('.') {
+                    &prop_shape_uri[dot_pos + 1..]
+                } else {
+                    // Fallback: extract from end of URI
+                    prop_shape_uri.split("://").last()
+                        .and_then(|s| s.split('/').last())
+                        .unwrap_or("")
+                };
+
+                if prop_name.is_empty() {
+                    continue;
+                }
+
+                // Check if this is a collection (has rdf://type = ad4m://CollectionShape)
+                let type_links = self
                     .get_links_local(&LinkQuery {
                         source: Some(prop_shape_uri.clone()),
-                        predicate: Some("sh://path".to_string()),
+                        predicate: Some("rdf://type".to_string()),
                         ..Default::default()
                     })
                     .await?;
 
-                for (path_link, _) in path_links {
-                    // Extract property name from path URI (e.g., "recipe://name" -> "name")
-                    let path = &path_link.data.target;
-                    if let Some(name) = path.split("://").last().and_then(|s| s.split('/').last()) {
-                        // Check if this is a collection (has rdf://type = ad4m://CollectionShape)
-                        let type_links = self
-                            .get_links_local(&LinkQuery {
-                                source: Some(prop_shape_uri.clone()),
-                                predicate: Some("rdf://type".to_string()),
-                                ..Default::default()
-                            })
-                            .await?;
+                let is_collection = type_links
+                    .iter()
+                    .any(|(l, _)| l.data.target == "ad4m://CollectionShape");
 
-                        let is_collection = type_links
-                            .iter()
-                            .any(|(l, _)| l.data.target == "ad4m://CollectionShape");
-
-                        if !is_collection {
-                            properties.push(name.to_string());
-                        }
-                    }
+                if !is_collection {
+                    properties.push(prop_name.to_string());
                 }
             }
         }
@@ -3513,22 +3525,19 @@ impl PerspectiveInstance {
                     .any(|(l, _)| l.data.target == "ad4m://CollectionShape");
 
                 if is_collection {
-                    // Get the collection name from sh://path link
-                    let path_links = self
-                        .get_links_local(&LinkQuery {
-                            source: Some(prop_shape_uri.clone()),
-                            predicate: Some("sh://path".to_string()),
-                            ..Default::default()
-                        })
-                        .await?;
+                    // Extract collection name from property shape URI
+                    // Format is: "flux://Community.channels" -> "channels"
+                    let coll_name = if let Some(dot_pos) = prop_shape_uri.rfind('.') {
+                        &prop_shape_uri[dot_pos + 1..]
+                    } else {
+                        // Fallback: extract from end of URI
+                        prop_shape_uri.split("://").last()
+                            .and_then(|s| s.split('/').last())
+                            .unwrap_or("")
+                    };
 
-                    for (path_link, _) in path_links {
-                        let path = &path_link.data.target;
-                        if let Some(name) =
-                            path.split("://").last().and_then(|s| s.split('/').last())
-                        {
-                            collections.push(name.to_string());
-                        }
+                    if !coll_name.is_empty() {
+                        collections.push(coll_name.to_string());
                     }
                 }
             }

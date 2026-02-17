@@ -2047,16 +2047,8 @@ export class PerspectiveProxy {
         // Get the class name from the JS class
         const className = jsClass.className || jsClass.prototype?.className || jsClass.name;
         
-        // Check if class already exists via SHACL lookup
-        try {
-            const existingClasses = await this.#client.subjectClassesFromSHACL(this.#handle.uuid);
-            if (existingClasses.includes(className)) {
-                return; // Class already exists
-            }
-        } catch (e) {
-            // SHACL lookup failed, continue to add the class
-        }
-
+        // Note: Duplicate checking is handled on the Rust side in add_sdna
+        
         // Generate SHACL SDNA (Prolog-free)
         if (!jsClass.generateSHACL) {
             throw new Error(`Class ${jsClass.name} must have generateSHACL(). Use @ModelOptions decorator.`);
