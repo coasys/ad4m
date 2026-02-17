@@ -1,6 +1,19 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
 deleted file mode 100644
 index 559b8418cf48dc9281b539bcc6b74969b80964f3..0000000000000000000000000000000000000000
+diff --git a/package.json b/package.json
+index 1234567890abcdef1234567890abcdef12345678..abcdef1234567890abcdef1234567890abcdef12 100644
+--- a/package.json
++++ b/package.json
+@@ -15,7 +15,7 @@
+     "pre-pr": "yarn clean && yarn format && yarn lint:fix && yarn build && yarn test",
+     "package": "node-pre-gyp package",
+     "version": "conventional-changelog -p angular -i CHANGELOG.md -s && git add CHANGELOG.md",
+-    "install": "node-pre-gyp install --fallback-to-build=false",
++    "install": "node-pre-gyp install --fallback-to-build",
+     "build:ts": "tsc --pretty",
+     "lint:fix": "yarn lint --fix",
+     "benchmark": "ts-node ./bench/index.ts",
 diff --git a/lib/bbsSignature.js b/lib/bbsSignature.js
 index 165b67d5bcf10ab920e61f9234ea883b4f7b6fda..5e8712b55b3e67f2db1b5a9af55324b2ee45e29d 100644
 --- a/lib/bbsSignature.js

@@ -1,6 +1,6 @@
 use coasys_juniper::{GraphQLEnum, GraphQLObject, GraphQLValue};
 use deno_core::{anyhow::anyhow, error::AnyError};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt::Display;
 use std::str::FromStr;
 use url::Url;
@@ -63,11 +63,24 @@ impl<T: GraphQLValue + Serialize> From<Expression<T>> for VerifiedExpression<T> 
     }
 }
 
+/// Deserializes a JSON null or missing value as an empty string.
+/// This is needed because link languages (e.g. p-diff-sync) may store null
+/// for empty source/target fields, but the Rust type expects String.
+fn null_as_empty_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Link {
     pub predicate: Option<String>,
+    #[serde(default, deserialize_with = "null_as_empty_string")]
     pub source: String,
+    #[serde(default, deserialize_with = "null_as_empty_string")]
     pub target: String,
 }
 

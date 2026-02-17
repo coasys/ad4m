@@ -85,14 +85,59 @@ impl ChunkedDiffs {
     pub fn from_entries<Retreiver: PerspectiveDiffRetreiver>(
         hashes: Vec<Hash>,
     ) -> SocialContextResult<Self> {
+        debug!(
+            "ChunkedDiffs::from_entries: START - Loading {} chunk(s) from DHT",
+            hashes.len()
+        );
+
         let mut diffs = Vec::new();
-        for hash in hashes.into_iter() {
-            let diff_entry = Retreiver::get::<PerspectiveDiffEntryReference>(hash)?;
+        for (idx, hash) in hashes.iter().enumerate() {
+            debug!(
+                "ChunkedDiffs::from_entries: Loading chunk {}/{} (hash: {:?})",
+                idx + 1, hashes.len(), hash
+            );
+
+            // NO RETRY LOOP - fail fast if chunks aren't available
+            // Validation dependencies ensure chunks arrive before parent entry validates
+            // If this fails, the caller will retry the entire operation later
+            let diff_entry = match Retreiver::get::<PerspectiveDiffEntryReference>(hash.clone()) {
+                Ok(entry) => {
+                    debug!(
+                        "ChunkedDiffs::from_entries: ✓ Chunk {}/{} retrieved successfully",
+                        idx + 1, hashes.len()
+                    );
+                    entry
+                },
+                Err(e) => {
+                    warn!(
+                        "ChunkedDiffs::from_entries: ✗ FAILED to retrieve chunk {}/{} (hash: {:?}) - Error: {:?}",
+                        idx + 1, hashes.len(), hash, e
+                    );
+                    warn!(
+                        "ChunkedDiffs::from_entries: Chunks not available - operation will be retried by caller"
+                    );
+                    return Err(e);
+                }
+            };
+
             // Use load_diff_from_entry to handle both inline and chunked entries properly
             // This prevents loading empty diffs if a chunk hash accidentally points to a chunked entry
+            debug!(
+                "ChunkedDiffs::from_entries: Processing chunk {}/{} - is_chunked: {}, has inline diff: {}",
+                idx + 1, hashes.len(), diff_entry.is_chunked(), diff_entry.diff.total_diff_number() > 0
+            );
             let diff = load_diff_from_entry::<Retreiver>(&diff_entry)?;
+            debug!(
+                "ChunkedDiffs::from_entries: Chunk {}/{} processed - additions: {}, removals: {}",
+                idx + 1, hashes.len(), diff.additions.len(), diff.removals.len()
+            );
             diffs.push(diff);
         }
+
+        debug!(
+            "ChunkedDiffs::from_entries: COMPLETE - Successfully loaded all {} chunk(s)",
+            hashes.len()
+        );
 
         Ok(ChunkedDiffs {
             max_changes_per_chunk: *CHUNK_SIZE,
@@ -122,13 +167,22 @@ pub fn load_diff_from_entry<Retriever: PerspectiveDiffRetreiver>(
         // Load chunks and aggregate them
         let chunk_hashes = entry.diff_chunks.as_ref().unwrap();
         debug!(
-            "load_diff_from_entry: Loading {} chunks",
+            "load_diff_from_entry: Entry is CHUNKED - loading {} chunk(s) from DHT",
             chunk_hashes.len()
         );
         let chunked_diffs = ChunkedDiffs::from_entries::<Retriever>(chunk_hashes.clone())?;
-        Ok(chunked_diffs.into_aggregated_diff())
+        let aggregated = chunked_diffs.into_aggregated_diff();
+        debug!(
+            "load_diff_from_entry: Successfully aggregated {} chunk(s) - total additions: {}, removals: {}",
+            chunk_hashes.len(), aggregated.additions.len(), aggregated.removals.len()
+        );
+        Ok(aggregated)
     } else {
         // Return inline diff
+        debug!(
+            "load_diff_from_entry: Entry is INLINE - additions: {}, removals: {}",
+            entry.diff.additions.len(), entry.diff.removals.len()
+        );
         Ok(entry.diff.clone())
     }
 }
