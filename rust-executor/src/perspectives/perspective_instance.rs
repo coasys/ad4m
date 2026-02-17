@@ -3647,7 +3647,11 @@ impl PerspectiveInstance {
                 // Extract value from literal://string:{value}
                 let prefix = "literal://string:";
                 if link.data.target.starts_with(prefix) {
-                    return Ok(Some(link.data.target[prefix.len()..].to_string()));
+                    let encoded_value = &link.data.target[prefix.len()..];
+                    // Decode URL-encoded characters (same as parse_actions_from_literal)
+                    let decoded = urlencoding::decode(encoded_value)
+                        .map_err(|e| anyhow!("Failed to decode resolve language value: {}", e))?;
+                    return Ok(Some(decoded.to_string()));
                 }
             }
         }

@@ -1122,13 +1122,29 @@ export class PerspectiveProxy {
             // Get all links for this property shape (named URI or blank node)
             const propShapeId = propLink.data.target;
             
-            // Query all links with this property shape as source
-            const allLinks = await this.get(new LinkQuery({}));
-            const propShapeLinks = allLinks.filter(l => 
-                l.data.source === propShapeId
-            );
+            // Query targeted predicates for this property shape to avoid loading all links
+            const expectedPredicates = [
+                "sh://path",
+                "sh://datatype",
+                "sh://nodeKind",
+                "sh://minCount",
+                "sh://maxCount",
+                "ad4m://local",
+                "ad4m://writable",
+                "ad4m://resolveLanguage",
+                "ad4m://setter",
+                "ad4m://adder",
+                "ad4m://remover",
+                "rdf://type"  // For CollectionShape detection
+            ];
             
-            shapeLinks.push(...propShapeLinks.map(l => l.data));
+            for (const predicate of expectedPredicates) {
+                const links = await this.get(new LinkQuery({
+                    source: propShapeId,
+                    predicate
+                }));
+                shapeLinks.push(...links.map(l => l.data));
+            }
         }
         
         // Reconstruct shape from links
@@ -1250,17 +1266,39 @@ export class PerspectiveProxy {
         // Get all links related to this flow
         // flowUri format: {namespace}{Name}Flow
         // State/transition URIs format: {namespace}{Name}.{stateName}
-        // Replace the trailing 'Flow' with '.' to find state/transition links
-        const flowPrefix = flowUri.endsWith('Flow') 
-            ? flowUri.slice(0, -4) + '.'  // Remove 'Flow', add '.'
+        // Compute alternate prefix by only replacing trailing "Flow" suffix
+        const alternatePrefix = flowUri.endsWith('Flow') 
+            ? flowUri.slice(0, -4) + '.'  // Remove trailing 'Flow', add '.'
             : flowUri + '.';
         
-        const allLinks = await this.get(new LinkQuery({}));
+        // Query flow-related predicates to avoid fetching all links
+        const flowPredicates = [
+            "rdf://type",
+            "ad4m://flowName",
+            "ad4m://flowable",
+            "ad4m://startAction",
+            "ad4m://hasState",
+            "ad4m://hasTransition",
+            "ad4m://stateName",
+            "ad4m://stateValue",
+            "ad4m://stateCheck",
+            "ad4m://actionName",
+            "ad4m://fromState",
+            "ad4m://toState",
+            "ad4m://transitionActions"
+        ];
+        
+        const allLinks: any[] = [];
+        for (const predicate of flowPredicates) {
+            const links = await this.get(new LinkQuery({ predicate }));
+            allLinks.push(...links);
+        }
+        
         const flowLinks = allLinks
             .map(l => l.data)
             .filter(l => 
                 l.source === flowUri || 
-                l.source.startsWith(flowPrefix)
+                l.source.startsWith(alternatePrefix)
             );
         
         // Reconstruct flow from links
@@ -1508,24 +1546,32 @@ export class PerspectiveProxy {
         collections: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
     } | null> {
         try {
-            // Find SHACL class links: source -> rdf://type -> ad4m://SubjectClass
-            const classLinks = await this.get(new LinkQuery({
-                predicate: "rdf://type",
-                target: "ad4m://SubjectClass"
+            // Resolve the exact SHACL shape URI from the name mapping to avoid overlapping class name issues
+            const nameMapping = Literal.fromUrl(`literal://string:shacl://${className}`);
+            const shapeUriLinks = await this.get(new LinkQuery({
+                source: nameMapping.toUrl(),
+                predicate: "ad4m://shacl_shape_uri"
             }));
             
-            // Find the class URI that ends with our className
-            const classLink = classLinks.find(l => l.data.source.endsWith(`://${className}`));
-            if (!classLink) {
-                console.warn(`No SHACL class found for ${className}`);
+            if (shapeUriLinks.length === 0) {
+                console.warn(`No SHACL metadata found for ${className}`);
                 return null;
             }
             
-            const classUri = classLink.data.source;
-            // Extract namespace from class URI (e.g., "todo://Todo" -> "todo://")
-            const namespaceMatch = classUri.match(/^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)/);
-            const namespace = namespaceMatch ? namespaceMatch[1] : 'ad4m://';
-            const shapeUri = `${namespace}${className}Shape`;
+            const shapeUri = shapeUriLinks[0].data.target;
+            
+            // Get the target class URI from the shape
+            const targetClassLinks = await this.get(new LinkQuery({
+                source: shapeUri,
+                predicate: "sh://targetClass"
+            }));
+            
+            if (targetClassLinks.length === 0) {
+                console.warn(`No target class found for SHACL shape ${shapeUri}`);
+                return null;
+            }
+            
+            const classUri = targetClassLinks[0].data.target;
             
             const requiredPredicates: string[] = [];
             const requiredTriples: Array<{predicate: string, target?: string}> = [];

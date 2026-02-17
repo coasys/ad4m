@@ -855,7 +855,24 @@ pub fn get_sdna_facts(
     // Generate Prolog facts for each SHACL class
     for (class_name, shape_uri) in &class_shapes {
         // Generate a Prolog-safe identifier for the shape
-        let shape_id = format!("shacl_{}", class_name.to_lowercase());
+        // Sanitize: lowercase, replace non-alphanumeric/underscore chars with '_',
+        // collapse consecutive underscores, and trim leading/trailing underscores
+        let sanitized_name = class_name
+            .to_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+            .split('_')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<&str>>()
+            .join("_");
+        let shape_id = format!("shacl_{}", sanitized_name);
 
         // subject_class/2 fact
         lines.push(format!("subject_class(\"{}\", {}).", class_name, shape_id));

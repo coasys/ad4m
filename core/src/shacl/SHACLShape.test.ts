@@ -187,6 +187,10 @@ describe('SHACLShape', () => {
         minCount: 0,
         maxCount: 5,
         pattern: '^[a-z]+$',
+        minInclusive: 10,
+        maxInclusive: 100,
+        hasValue: 'expectedValue',
+        resolveLanguage: 'test://language',
         local: true,
         writable: true,
         setter: [{ action: 'addLink', source: 'this', predicate: 'test://field', target: 'value' }],
@@ -204,6 +208,10 @@ describe('SHACLShape', () => {
       expect(prop.minCount).toBe(0);
       expect(prop.maxCount).toBe(5);
       expect(prop.pattern).toBe('^[a-z]+$');
+      expect(prop.minInclusive).toBe(10);
+      expect(prop.maxInclusive).toBe(100);
+      expect(prop.hasValue).toBe('expectedValue');
+      expect(prop.resolveLanguage).toBe('test://language');
       expect(prop.local).toBe(true);
       expect(prop.writable).toBe(true);
       expect(prop.setter).toBeDefined();

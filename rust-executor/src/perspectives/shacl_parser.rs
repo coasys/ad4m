@@ -276,7 +276,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
     let mut links = Vec::new();
 
     // Extract namespace from target_class (e.g., "recipe://Recipe" -> "recipe://")
-    let namespace = extract_namespace(&shape.target_class);
+    let namespace = extract_namespace(&shape.target_class)?;
     let shape_uri = format!("{}{}Shape", namespace, class_name);
 
     // Class definition links
@@ -378,7 +378,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("sh://minCount".to_string()),
-                target: format!("literal://number:{}", min_count),
+                target: format!("literal://{}^^xsd:integer", min_count),
             });
         }
 
@@ -386,7 +386,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("sh://maxCount".to_string()),
-                target: format!("literal://number:{}", max_count),
+                target: format!("literal://{}^^xsd:integer", max_count),
             });
         }
 
@@ -394,7 +394,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://writable".to_string()),
-                target: format!("literal://boolean:{}", writable),
+                target: format!("literal://{}", writable),
             });
         }
 
@@ -418,7 +418,7 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://local".to_string()),
-                target: format!("literal://boolean:{}", local),
+                target: format!("literal://{}", local),
             });
         }
 
@@ -771,7 +771,7 @@ fn convert_prolog_json_to_json(prolog_json: &str) -> String {
 
 /// Extract namespace from URI (e.g., "recipe://Recipe" -> "recipe://")
 /// Matches TypeScript SHACLShape.ts extractNamespace() behavior
-pub fn extract_namespace(uri: &str) -> String {
+pub fn extract_namespace(uri: &str) -> Result<String, AnyError> {
     // Handle protocol-style URIs (://ending) - for AD4M-style URIs like "recipe://Recipe"
     // We want just the scheme + "://" part
     if let Some(scheme_pos) = uri.find("://") {
@@ -779,34 +779,62 @@ pub fn extract_namespace(uri: &str) -> String {
 
         // If nothing after scheme or only simple local name (no / or #), return just scheme://
         if !after_scheme.contains('/') && !after_scheme.contains('#') {
-            return uri[..scheme_pos + 3].to_string();
+            return Ok(uri[..scheme_pos + 3].to_string());
         }
     }
 
     // Handle hash fragments (e.g., "http://example.com/ns#Recipe" -> "http://example.com/ns#")
     if let Some(hash_pos) = uri.rfind('#') {
-        return uri[..hash_pos + 1].to_string();
+        return Ok(uri[..hash_pos + 1].to_string());
     }
 
     // Handle slash-based paths (e.g., "http://example.com/ns/Recipe" -> "http://example.com/ns/")
     if let Some(scheme_pos) = uri.find("://") {
         let after_scheme = &uri[scheme_pos + 3..];
         if let Some(last_slash) = after_scheme.rfind('/') {
-            return uri[..scheme_pos + 3 + last_slash + 1].to_string();
+            return Ok(uri[..scheme_pos + 3 + last_slash + 1].to_string());
         }
     }
 
-    // Fallback: return as-is with trailing separator
-    String::new()
+    // Error: malformed URI without proper namespace structure
+    Err(anyhow::anyhow!(
+        "Cannot extract namespace from malformed URI: '{}'",
+        uri
+    ))
 }
 
 /// Extract local name from URI (e.g., "recipe://name" -> "name")
 fn extract_local_name(uri: &str) -> String {
-    uri.split('/')
-        .last()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("unknown")
-        .to_string()
+    // Find the last occurrence of namespace delimiters: '#', ':', or '/'
+    // This handles URIs like "http://example.com/ns#name" or "prefix:name"
+    let last_hash = uri.rfind('#');
+    let last_colon = uri.rfind(':');
+    let last_slash = uri.rfind('/');
+
+    // Find the rightmost delimiter position
+    let delimiter_pos = [last_hash, last_colon, last_slash]
+        .iter()
+        .filter_map(|&pos| pos)
+        .max();
+
+    match delimiter_pos {
+        Some(pos) => {
+            let local_name = &uri[pos + 1..];
+            if local_name.is_empty() {
+                "unknown".to_string()
+            } else {
+                local_name.to_string()
+            }
+        }
+        None => {
+            // No delimiter found, return the whole URI if non-empty
+            if uri.is_empty() {
+                "unknown".to_string()
+            } else {
+                uri.to_string()
+            }
+        }
+    }
 }
 
 #[cfg(test)]

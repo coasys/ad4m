@@ -1,4 +1,5 @@
 # SHACL SDNA Architecture
+
 **Replacing Prolog-based Subject DNA with W3C SHACL + AD4M Extensions**
 
 ## Overview
@@ -25,19 +26,19 @@ AD4M uses Subject DNA (SDNA) to define data schemas and their operational behavi
 
 For a class named `Recipe` with namespace `recipe://`:
 
-| Link Type | Source | Predicate | Target |
-|-----------|--------|-----------|--------|
-| Shape Type | `recipe://RecipeShape` | `rdf://type` | `sh://NodeShape` |
-| Target Class | `recipe://RecipeShape` | `sh://targetClass` | `recipe://Recipe` |
-| Has Property | `recipe://RecipeShape` | `sh://property` | `recipe://Recipe.name` |
-| Property Type | `recipe://Recipe.name` | `rdf://type` | `sh://PropertyShape` |
-| Property Path | `recipe://Recipe.name` | `sh://path` | `recipe://name` |
-| Datatype | `recipe://Recipe.name` | `sh://datatype` | `xsd://string` |
-| Constructor | `recipe://RecipeShape` | `ad4m://constructor` | `literal://string:[...]` |
-| Destructor | `recipe://RecipeShape` | `ad4m://destructor` | `literal://string:[...]` |
-| Setter | `recipe://Recipe.name` | `ad4m://setter` | `literal://string:[...]` |
-| Adder | `recipe://Recipe.items` | `ad4m://adder` | `literal://string:[...]` |
-| Remover | `recipe://Recipe.items` | `ad4m://remover` | `literal://string:[...]` |
+| Link Type     | Source                  | Predicate            | Target                   |
+| ------------- | ----------------------- | -------------------- | ------------------------ |
+| Shape Type    | `recipe://RecipeShape`  | `rdf://type`         | `sh://NodeShape`         |
+| Target Class  | `recipe://RecipeShape`  | `sh://targetClass`   | `recipe://Recipe`        |
+| Has Property  | `recipe://RecipeShape`  | `sh://property`      | `recipe://Recipe.name`   |
+| Property Type | `recipe://Recipe.name`  | `rdf://type`         | `sh://PropertyShape`     |
+| Property Path | `recipe://Recipe.name`  | `sh://path`          | `recipe://name`          |
+| Datatype      | `recipe://Recipe.name`  | `sh://datatype`      | `xsd://string`           |
+| Constructor   | `recipe://RecipeShape`  | `ad4m://constructor` | `literal://string:[...]` |
+| Destructor    | `recipe://RecipeShape`  | `ad4m://destructor`  | `literal://string:[...]` |
+| Setter        | `recipe://Recipe.name`  | `ad4m://setter`      | `literal://string:[...]` |
+| Adder         | `recipe://Recipe.items` | `ad4m://adder`       | `literal://string:[...]` |
+| Remover       | `recipe://Recipe.items` | `ad4m://remover`     | `literal://string:[...]` |
 
 ---
 
@@ -48,7 +49,7 @@ For a class named `Recipe` with namespace `recipe://`:
 ```typescript
 @ModelOptions({
   name: "Recipe",
-  namespace: "recipe://"
+  namespace: "recipe://",
 })
 class Recipe {
   @SubjectProperty({ through: "recipe://name", writable: true })
@@ -94,34 +95,34 @@ recipe://RecipeShape sh:property recipe://Recipe.ingredients .
 
 ```turtle
 # Constructor - creates instance with default values
-recipe://RecipeShape ad4m://constructor "literal://string:[
-  {\"action\": \"addLink\", \"source\": \"this\", \"predicate\": \"recipe://name\", \"target\": \"\"},
-  {\"action\": \"addLink\", \"source\": \"this\", \"predicate\": \"recipe://rating\", \"target\": \"0\"}
-]" .
+recipe://RecipeShape ad4m://constructor """literal://string:[
+  {"action": "addLink", "source": "this", "predicate": "recipe://name", "target": ""},
+  {"action": "addLink", "source": "this", "predicate": "recipe://rating", "target": "0"}
+]""" .
 
 # Destructor - removes instance links
-recipe://RecipeShape ad4m://destructor "literal://string:[
-  {\"action\": \"removeLink\", \"source\": \"this\", \"predicate\": \"recipe://name\"},
-  {\"action\": \"removeLink\", \"source\": \"this\", \"predicate\": \"recipe://rating\"}
-]" .
+recipe://RecipeShape ad4m://destructor """literal://string:[
+  {"action": "removeLink", "source": "this", "predicate": "recipe://name"},
+  {"action": "removeLink", "source": "this", "predicate": "recipe://rating"}
+]""" .
 
 # Property setters
-recipe://Recipe.name ad4m://setter "literal://string:[
-  {\"action\": \"setSingleTarget\", \"source\": \"this\", \"predicate\": \"recipe://name\", \"target\": \"value\"}
-]" .
+recipe://Recipe.name ad4m://setter """literal://string:[
+  {"action": "setSingleTarget", "source": "this", "predicate": "recipe://name", "target": "value"}
+]""" .
 
-recipe://Recipe.rating ad4m://setter "literal://string:[
-  {\"action\": \"setSingleTarget\", \"source\": \"this\", \"predicate\": \"recipe://rating\", \"target\": \"value\"}
-]" .
+recipe://Recipe.rating ad4m://setter """literal://string:[
+  {"action": "setSingleTarget", "source": "this", "predicate": "recipe://rating", "target": "value"}
+]""" .
 
 # Collection operations
-recipe://Recipe.ingredients ad4m://adder "literal://string:[
-  {\"action\": \"addLink\", \"source\": \"this\", \"predicate\": \"recipe://has_ingredient\", \"target\": \"value\"}
-]" .
+recipe://Recipe.ingredients ad4m://adder """literal://string:[
+  {"action": "addLink", "source": "this", "predicate": "recipe://has_ingredient", "target": "value"}
+]""" .
 
-recipe://Recipe.ingredients ad4m://remover "literal://string:[
-  {\"action\": \"removeLink\", \"source\": \"this\", \"predicate\": \"recipe://has_ingredient\", \"target\": \"value\"}
-]" .
+recipe://Recipe.ingredients ad4m://remover """literal://string:[
+  {"action": "removeLink", "source": "this", "predicate": "recipe://has_ingredient", "target": "value"}
+]""" .
 ```
 
 ---
@@ -130,18 +131,18 @@ recipe://Recipe.ingredients ad4m://remover "literal://string:[
 
 ### Shape-Level Actions
 
-| Predicate | Purpose | Bound To |
-|-----------|---------|----------|
+| Predicate            | Purpose                       | Bound To                      |
+| -------------------- | ----------------------------- | ----------------------------- |
 | `ad4m://constructor` | Create instance with defaults | `{namespace}{ClassName}Shape` |
-| `ad4m://destructor` | Remove instance and links | `{namespace}{ClassName}Shape` |
+| `ad4m://destructor`  | Remove instance and links     | `{namespace}{ClassName}Shape` |
 
 ### Property-Level Actions
 
-| Predicate | Purpose | Bound To |
-|-----------|---------|----------|
-| `ad4m://setter` | Set single-valued property | `{namespace}{ClassName}.{propertyName}` |
-| `ad4m://adder` | Add to collection | `{namespace}{ClassName}.{collectionName}` |
-| `ad4m://remover` | Remove from collection | `{namespace}{ClassName}.{collectionName}` |
+| Predicate        | Purpose                    | Bound To                                  |
+| ---------------- | -------------------------- | ----------------------------------------- |
+| `ad4m://setter`  | Set single-valued property | `{namespace}{ClassName}.{propertyName}`   |
+| `ad4m://adder`   | Add to collection          | `{namespace}{ClassName}.{collectionName}` |
+| `ad4m://remover` | Remove from collection     | `{namespace}{ClassName}.{collectionName}` |
 
 ### Action JSON Format
 
@@ -152,7 +153,7 @@ recipe://Recipe.ingredients ad4m://remover "literal://string:[
     "source": "this|uuid|literal",
     "predicate": "namespace://predicate",
     "target": "value|*|specific_value",
-    "local": true  // optional
+    "local": true // optional
   }
 ]
 ```
@@ -243,10 +244,10 @@ for link in links {
 
 ## Files
 
-| File | Purpose |
-|------|---------|
-| `core/src/model/decorators.ts` | `generateSHACL()` - Creates SHACL from decorators |
-| `core/src/shacl/SHACLShape.ts` | SHACL shape class with `toLinks()` |
-| `core/src/perspectives/PerspectiveProxy.ts` | `ensureSdnaLinks()` - Stores SHACL as links |
-| `rust-executor/src/perspectives/shacl_parser.rs` | Parses SHACL JSON, generates links |
-| `rust-executor/src/perspectives/perspective_instance.rs` | Action retrieval with SHACL-first |
+| File                                                     | Purpose                                           |
+| -------------------------------------------------------- | ------------------------------------------------- |
+| `core/src/model/decorators.ts`                           | `generateSHACL()` - Creates SHACL from decorators |
+| `core/src/shacl/SHACLShape.ts`                           | SHACL shape class with `toLinks()`                |
+| `core/src/perspectives/PerspectiveProxy.ts`              | `ensureSdnaLinks()` - Stores SHACL as links       |
+| `rust-executor/src/perspectives/shacl_parser.rs`         | Parses SHACL JSON, generates links                |
+| `rust-executor/src/perspectives/perspective_instance.rs` | Action retrieval with SHACL-first                 |

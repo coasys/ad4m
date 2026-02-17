@@ -385,6 +385,9 @@ export class SHACLFlow {
       l.source === flowUri && l.predicate === "ad4m://hasState"
     );
     
+    // Build a map from state URI to state name for later lookup
+    const stateUriToName = new Map<string, string>();
+    
     for (const stateLink of stateLinks) {
       const stateUri = stateLink.target;
       
@@ -393,6 +396,9 @@ export class SHACLFlow {
         l.source === stateUri && l.predicate === "ad4m://stateName"
       );
       const stateName = nameLink ? Literal.fromUrl(nameLink.target).get() as string : "";
+      
+      // Store mapping for transition lookup
+      stateUriToName.set(stateUri, stateName);
       
       // Get state value
       const valueLink = links.find(l =>
@@ -436,14 +442,14 @@ export class SHACLFlow {
         l.source === transitionUri && l.predicate === "ad4m://fromState"
       );
       const fromStateUri = fromStateLink?.target || "";
-      const fromState = fromStateUri.split('.').pop() || "";
+      const fromState = stateUriToName.get(fromStateUri) || "";
       
       // Get to state
       const toStateLink = links.find(l =>
         l.source === transitionUri && l.predicate === "ad4m://toState"
       );
       const toStateUri = toStateLink?.target || "";
-      const toState = toStateUri.split('.').pop() || "";
+      const toState = stateUriToName.get(toStateUri) || "";
       
       // Get actions
       const actionsLink = links.find(l =>

@@ -875,6 +875,10 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                 // === Extract Setter Actions (same logic as generateSDNA) ===
                 if (propMeta.setter) {
                     // Custom setter defined - not yet supported in SHACL
+                    console.warn(
+                        `[SHACL Generation] Custom Prolog setter for property '${propName}' in class '${subjectName}' is not yet supported. ` +
+                        `The property will be created without setter actions. Consider using standard writable properties or provide explicit SHACL JSON.`
+                    );
                     // TODO: Parse custom Prolog setter to extract actions
                 } else if (propMeta.writable && propMeta.through) {
                     let setter = obj[propertyNameToSetterName(propName)];

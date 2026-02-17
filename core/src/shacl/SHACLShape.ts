@@ -39,6 +39,21 @@ function extractNamespace(uri: string): string {
 }
 
 /**
+ * Escape special characters for Turtle string literals
+ * Handles backslashes, quotes, newlines, and other control characters
+ */
+function escapeTurtleString(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')     // Backslash must be first
+    .replace(/"/g, '\\"')        // Double quotes
+    .replace(/\n/g, '\\n')       // Newlines
+    .replace(/\r/g, '\\r')       // Carriage returns
+    .replace(/\t/g, '\\t')       // Tabs
+    .replace(/\b/g, '\\b')       // Backspace
+    .replace(/\f/g, '\\f');      // Form feed
+}
+
+/**
  * Extract local name from a URI
  * Examples:
  *   - "recipe://name" -> "name"
@@ -238,7 +253,7 @@ export class SHACLShape {
       }
       
       if (prop.pattern) {
-        turtle += `    sh:pattern "${prop.pattern}" ;\n`;
+        turtle += `    sh:pattern "${escapeTurtleString(prop.pattern)}" ;\n`;
       }
       
       if (prop.minInclusive !== undefined) {
@@ -250,7 +265,7 @@ export class SHACLShape {
       }
       
       if (prop.hasValue) {
-        turtle += `    sh:hasValue "${prop.hasValue}" ;\n`;
+        turtle += `    sh:hasValue "${escapeTurtleString(prop.hasValue)}" ;\n`;
       }
       
       // AD4M-specific metadata
