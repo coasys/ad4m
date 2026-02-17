@@ -87,7 +87,7 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
                     }
                     Err(e) => {
                         retry_count += 1;
-                        if retry_count > MAX_RETRIES {
+                        if retry_count >= MAX_RETRIES {
                             return Err(SocialContextError::InternalError(
                                 "Failed to verify chunk availability after creation"
                             ));
