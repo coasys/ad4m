@@ -212,23 +212,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ad4m-mcp-server"
-version = "0.1.0"
-dependencies = [
- "ad4m-client",
- "anyhow",
- "clap 4.5.54",
- "rmcp",
- "schemars 1.2.1",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber 0.3.22",
-]
-
-[[package]]
 name = "addr"
 version = "0.15.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
