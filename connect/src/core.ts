@@ -47,10 +47,10 @@ export default class Ad4mConnect extends EventTarget {
       console.log('[Ad4m Connect] Embedded mode - waiting for AD4M config via postMessage');
       
       return new Promise((resolve, reject) => {
-        // Set up timeout
+        // Set up 30 second timeout
         const timeout = setTimeout(() => {
           reject(new Error('Timeout waiting for AD4M config from parent window'));
-        }, 30000); // 30 second timeout
+        }, 30000);
         
         // Store resolvers to call when AD4M_CONFIG arrives
         this.embeddedResolve = (client: Ad4mClient) => {
@@ -65,14 +65,16 @@ export default class Ad4mConnect extends EventTarget {
         };
         
         // If we already have a client (message arrived before connect() was called)
-        if (this.ad4mClient && this.authState === 'authenticated') {
-          clearTimeout(timeout);
-          console.log('[Ad4m Connect] Client already initialized in embedded mode');
-          resolve(this.ad4mClient);
-        } else if (this.ad4mClient && this.authState !== 'authenticated') {
-          // Auth already failed before connect() was called
-          clearTimeout(timeout);
-          reject(new Error(`Embedded auth state: ${this.authState}`));
+        if (this.ad4mClient) {
+          if (this.authState === 'authenticated') {
+            clearTimeout(timeout);
+            console.log('[Ad4m Connect] Client already initialized in embedded mode');
+            resolve(this.ad4mClient);
+          } else {
+            // Auth already failed before connect() was called
+            clearTimeout(timeout);
+            reject(new Error(`Embedded auth state: ${this.authState}`));
+          }
         }
       });
     }
@@ -186,14 +188,22 @@ export default class Ad4mConnect extends EventTarget {
     } catch (error) {
       console.error('[Ad4m Connect] Authentication check failed:', error);
       const lockedMessage = "Cannot extractByTags from a ciphered wallet. You must unlock first.";
+      
       if (error.message === lockedMessage) {
         // TODO: isLocked throws an error, should just return a boolean. Temp fix
         this.notifyAuthChange("locked");
         return true;
-      } else {
-        this.notifyAuthChange("unauthenticated");
-        return false;
       }
+      
+      // Clear token if it's invalid (signed by different agent)
+      if (error.message === "InvalidSignature") {
+        console.log('[Ad4m Connect] Clearing invalid token due to InvalidSignature');
+        this.token = '';
+        removeLocal('ad4m-token');
+      }
+      
+      this.notifyAuthChange("unauthenticated");
+      return false;
     }
   }
 
@@ -455,7 +465,6 @@ export default class Ad4mConnect extends EventTarget {
   }
 
   private notifyAuthChange(value: AuthStates) {
-    if (this.authState === value) return;
     this.authState = value;
     this.dispatchEvent(new CustomEvent("authstatechange", { detail: value }));
 

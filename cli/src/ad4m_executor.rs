@@ -114,6 +114,8 @@ enum Domain {
         hc_proxy_url: Option<String>,
         #[arg(long, action)]
         hc_bootstrap_url: Option<String>,
+        #[arg(long, action)]
+        hc_relay_url: Option<String>,
         #[arg(short, long, action)]
         connect_holochain: Option<bool>,
         #[arg(long, action)]
@@ -172,6 +174,7 @@ async fn main() -> Result<()> {
         hc_use_proxy,
         hc_proxy_url,
         hc_bootstrap_url,
+        hc_relay_url,
         connect_holochain,
         admin_credential,
         localhost,
@@ -209,6 +212,7 @@ async fn main() -> Result<()> {
                 hc_use_proxy,
                 hc_proxy_url,
                 hc_bootstrap_url,
+                hc_relay_url,
                 connect_holochain,
                 admin_credential,
                 localhost,

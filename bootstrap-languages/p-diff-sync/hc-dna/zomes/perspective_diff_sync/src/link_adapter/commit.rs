@@ -1,16 +1,23 @@
 //use chrono::Timelike;
 use hdk::prelude::*;
 use perspective_diff_sync_integrity::{
-    EntryTypes, HashBroadcast, LinkTypes, LocalHashReference, PerspectiveDiff, PerspectiveDiffEntryReference,
+    EntryTypes, HashBroadcast, LinkTypes, LocalHashReference, PerspectiveDiff,
+    PerspectiveDiffEntryReference,
 };
 
-use crate::errors::{SocialContextResult, SocialContextError};
+use crate::errors::{SocialContextError, SocialContextResult};
+use crate::link_adapter::chunked_diffs::ChunkedDiffs;
 use crate::link_adapter::revisions::{current_revision, update_current_revision};
 use crate::link_adapter::snapshots::generate_snapshot;
 use crate::retriever::holochain::{get_active_agent_anchor, get_active_agents};
 use crate::retriever::PerspectiveDiffRetreiver;
 use crate::utils::get_now;
-use crate::{Hash, ENABLE_SIGNALS, SNAPSHOT_INTERVAL};
+use crate::{Hash, CHUNK_SIZE, ENABLE_SIGNALS, SNAPSHOT_INTERVAL};
+
+/// Threshold for when to use chunked storage.
+/// If total_diff_number exceeds this, we split into chunks to avoid exceeding
+/// Holochain's 4MB entry size limit.
+const CHUNKING_THRESHOLD: usize = 500;
 
 pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     diff: PerspectiveDiff,
@@ -42,14 +49,92 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     };
 
     let now = get_now()?.time();
-    let diff_entry_ref_entry = PerspectiveDiffEntryReference {
-        diff: diff.clone(),
-        parents: initial_current_revision.clone().map(|val| vec![val.hash]),
-        diffs_since_snapshot: entries_since_snapshot,
+
+    // Check if we need to use chunked storage for large diffs
+    let (diff_entry_ref_entry, diff_entry_reference) = if diff.total_diff_number()
+        > CHUNKING_THRESHOLD
+    {
+        debug!(
+            "===PerspectiveDiffSync.commit(): Diff size {} exceeds threshold {}, using chunked storage",
+            diff.total_diff_number(),
+            CHUNKING_THRESHOLD
+        );
+
+        // Create chunked diff entries
+        let mut chunked_diffs = ChunkedDiffs::new(*CHUNK_SIZE);
+        chunked_diffs.add_additions(diff.additions.clone());
+        chunked_diffs.add_removals(diff.removals.clone());
+
+        // Store the chunk entries and get their hashes
+        let chunk_hashes = chunked_diffs.into_entries::<Retriever>()?;
+        debug!(
+            "===PerspectiveDiffSync.commit(): Created {} chunk entries",
+            chunk_hashes.len()
+        );
+
+        // CRITICAL: Verify all chunks are retrievable before creating parent entry
+        // This ensures chunks are validated and available locally before we reference them
+        for (idx, chunk_hash) in chunk_hashes.iter().enumerate() {
+            let mut retry_count = 0;
+            const MAX_RETRIES: u32 = 10;
+            const RETRY_DELAY_MS: u64 = 100;
+
+            loop {
+                match Retriever::get::<PerspectiveDiffEntryReference>(chunk_hash.clone()) {
+                    Ok(_) => {
+                        debug!("===PerspectiveDiffSync.commit(): Chunk {}/{} verified available", idx + 1, chunk_hashes.len());
+                        break;
+                    }
+                    Err(e) => {
+                        retry_count += 1;
+                        if retry_count >= MAX_RETRIES {
+                            return Err(SocialContextError::InternalError(
+                                "Failed to verify chunk availability after creation"
+                            ));
+                        }
+                        debug!(
+                            "===PerspectiveDiffSync.commit(): Chunk {}/{} not yet available, retry {}/{}",
+                            idx + 1, chunk_hashes.len(), retry_count, MAX_RETRIES
+                        );
+
+                        // Wait before retry using sys_time
+                        let start = sys_time()?;
+                        loop {
+                            let now = sys_time()?;
+                            if now.as_millis() - start.as_millis() >= RETRY_DELAY_MS as i64 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        debug!("===PerspectiveDiffSync.commit(): All {} chunks verified, creating parent entry", chunk_hashes.len());
+
+        // Create the main entry reference with chunk hashes instead of inline diff
+        let entry = PerspectiveDiffEntryReference {
+            diff: PerspectiveDiff::new(), // Empty diff when using chunks
+            parents: initial_current_revision.clone().map(|val| vec![val.hash]),
+            diffs_since_snapshot: entries_since_snapshot,
+            diff_chunks: Some(chunk_hashes.clone()),
+        };
+        let hash =
+            Retriever::create_entry(EntryTypes::PerspectiveDiffEntryReference(entry.clone()))?;
+        (entry, hash)
+    } else {
+        // Small diff - use inline storage as before
+        let entry = PerspectiveDiffEntryReference {
+            diff: diff.clone(),
+            parents: initial_current_revision.clone().map(|val| vec![val.hash]),
+            diffs_since_snapshot: entries_since_snapshot,
+            diff_chunks: None,
+        };
+        let hash =
+            Retriever::create_entry(EntryTypes::PerspectiveDiffEntryReference(entry.clone()))?;
+        (entry, hash)
     };
-    let diff_entry_reference = Retriever::create_entry(EntryTypes::PerspectiveDiffEntryReference(
-        diff_entry_ref_entry.clone(),
-    ))?;
+
     let after = get_now()?.time();
     // debug!(
     //     "===PerspectiveDiffSync.commit(): Created diff entry ref: {:#?}",
@@ -87,8 +172,10 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     );
 
     let latest_current_revision: Option<LocalHashReference> = current_revision::<Retriever>()?;
-    
-    if initial_current_revision.map(|r| format!("{:?}", r)) == latest_current_revision.map(|r| format!("{:?}", r)) {
+
+    if initial_current_revision.map(|r| format!("{:?}", r))
+        == latest_current_revision.map(|r| format!("{:?}", r))
+    {
         update_current_revision::<Retriever>(diff_entry_reference.clone(), now)?;
 
         if *ENABLE_SIGNALS {
@@ -103,7 +190,9 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
     } else {
         // Concurrent update detected; decide how to handle it
         debug!("Concurrent update detected in commit. Aborting commit without updating current revision.");
-        return Err(SocialContextError::InternalError("Concurrent update detected in commit"));
+        return Err(SocialContextError::InternalError(
+            "Concurrent update detected in commit",
+        ));
     }
 
     let after_fn_end = get_now()?.time();
@@ -123,20 +212,17 @@ pub fn add_active_agent_link<Retriever: PerspectiveDiffRetreiver>() -> SocialCon
 
     let agent = agent_info()?.agent_initial_pubkey;
     let agent_root_hash = hash_entry(agent_root_entry)?;
-    
+
     // Check if the link already exists to avoid duplicates
-    let query = LinkQuery::try_new(
-        agent_root_hash.clone(),
-        LinkTypes::Index
-    )?
-    .tag_prefix(LinkTag::new("active_agent"));
+    let query = LinkQuery::try_new(agent_root_hash.clone(), LinkTypes::Index)?
+        .tag_prefix(LinkTag::new("active_agent"));
     let existing_links = get_links(query, GetStrategy::Local)?;
-    
+
     // Check if this agent already has an active link
-    let link_exists = existing_links.iter().any(|link| {
-        link.target.clone().into_agent_pub_key() == Some(agent.clone())
-    });
-    
+    let link_exists = existing_links
+        .iter()
+        .any(|link| link.target.clone().into_agent_pub_key() == Some(agent.clone()));
+
     if !link_exists {
         debug!("===PerspectiveDiffSync.add_active_agent_link(): Creating new active agent link");
         create_link(
@@ -148,14 +234,15 @@ pub fn add_active_agent_link<Retriever: PerspectiveDiffRetreiver>() -> SocialCon
     } else {
         debug!("===PerspectiveDiffSync.add_active_agent_link(): Link already exists, skipping");
     }
-    
+
     let after_fn_end = get_now()?.time();
     debug!("===PerspectiveDiffSync.add_active_agent_link() - Profiling: Took {} to complete whole add_active_agent_link()", (after_fn_end - now_fn_start).num_milliseconds());
     Ok(())
 }
 
-pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>(my_did: &str) -> SocialContextResult<Option<Hash>>
-{
+pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>(
+    my_did: &str,
+) -> SocialContextResult<Option<Hash>> {
     //debug!("Running broadcast_current");
     let current = current_revision::<Retriever>()?;
     //debug!("Current revision: {:#?}", current);

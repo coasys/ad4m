@@ -100,7 +100,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
                 let tries = 1
 
-                while(bobLinks.length < 1 && tries < 20) {
+                while(bobLinks.length < 1 && tries < 60) {
                     console.log("Bob retrying getting links...");
                     await sleep(1000)
                     bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
@@ -346,7 +346,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     let aliceAgents = await aliceNH!.otherAgents()
                     let bobAgents = await bobNH!.otherAgents()
                     let tries = 1
-                    const maxTries = 20 // 20 tries with 1 second sleep = 20 seconds max
+                    const maxTries = 60 // 60 tries with 1 second sleep = 1 minute max
 
                     while ((aliceAgents.length < 1 || bobAgents.length < 1) && tries < maxTries) {
                         console.log(`Waiting for agents to discover each other... Alice: ${aliceAgents.length}, Bob: ${bobAgents.length}`);

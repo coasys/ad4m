@@ -1,4 +1,4 @@
-# P-Diff-Sync Language Tests - Uses Docker container for consistent environment
+# P Diff Sync Tests - Using CircleCI Docker Image
 
 name: P Diff Sync
 
@@ -10,180 +10,49 @@ on:
       - bootstrap-languages
 
 jobs:
-  unit:
-    name: Rust Unit Test
-    runs-on: ubuntu-latest
+  rust-tests:
+    name: Rust Tests (Unit + Integration)
+    runs-on: ubuntu-22.04
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
+      image: coasys/ad4m-ci-linux:latest@sha256:d0c3e9683811505955185782a5cd683952f846f1abc520c35c1293ad7f046593
 
     steps:
-    - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-    # Rust toolchain configured via rust-toolchain.toml
-    - name: Verify Rust toolchain
-      run: rustc --version && cargo --version
+      - name: Cache Rust dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            bootstrap-languages/p-diff-sync/hc-dna/target/
+          key: ${{ runner.os }}-p-diff-sync-rust-${{ hashFiles('bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-p-diff-sync-rust-
 
-    - name: Run unit tests
-      run: cd bootstrap-languages/p-diff-sync/hc-dna && cargo test -- --test-threads=1
+      - name: Build DNA
+        working-directory: bootstrap-languages/p-diff-sync/hc-dna
+        run: bash build.sh
 
-  pull:
-    name: Pull Test
-    runs-on: ubuntu-latest
-    container:
-      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
-    env:
-      npm_config_build_from_source: true
+      - name: Run unit tests
+        working-directory: bootstrap-languages/p-diff-sync/hc-dna
+        run: cargo test --lib -- --test-threads=1
 
-    steps:
-    - uses: actions/checkout@v3
+      - name: Run sweettest integration tests
+        working-directory: bootstrap-languages/p-diff-sync/hc-dna/tests/sweettest
+        run: cargo test --test integration
 
-    - name: Verify Rust toolchain
-      run: rustc --version && cargo --version && hc --version
-
-    - name: Install dependencies
-      run: pnpm install --no-frozen-lockfile
-
-    - name: Build languages
-      run: pnpm run build-languages
-
-    - name: Run tests
-      run: |
-        cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests
-        pnpm install --no-frozen-lockfile
-        deno install
-        pnpm run test-pull
-
-  render:
-    name: Render Test
-    runs-on: ubuntu-latest
-    container:
-      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
-    env:
-      npm_config_build_from_source: true
-
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: Verify Rust toolchain
-      run: rustc --version && cargo --version && hc --version
-
-    - name: Install dependencies
-      run: pnpm install --no-frozen-lockfile
-
-    - name: Build languages
-      run: pnpm run build-languages
-
-    - name: Run tests
-      run: |
-        cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests
-        pnpm install --no-frozen-lockfile
-        deno install
-        pnpm run test-render
-
-  revisions:
-    name: Revisions Test
-    runs-on: ubuntu-latest
-    container:
-      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
-    env:
-      npm_config_build_from_source: true
-
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: Verify Rust toolchain
-      run: rustc --version && cargo --version && hc --version
-
-    - name: Install dependencies
-      run: pnpm install --no-frozen-lockfile
-
-    - name: Build languages
-      run: pnpm run build-languages
-
-    - name: Run tests
-      run: |
-        cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests
-        pnpm install --no-frozen-lockfile
-        deno install
-        pnpm run test-revisions
-
-  signals:
-    name: Signals Test
-    runs-on: ubuntu-latest
-    container:
-      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
-    env:
-      npm_config_build_from_source: true
-
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: Verify Rust toolchain
-      run: rustc --version && cargo --version && hc --version
-
-    - name: Install dependencies
-      run: pnpm install --no-frozen-lockfile
-
-    - name: Build languages
-      run: pnpm run build-languages
-
-    - name: Run tests
-      run: |
-        cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests
-        pnpm install --no-frozen-lockfile
-        deno install
-        pnpm run test-signals
-
-  stress:
-    name: Stress Test
-    runs-on: ubuntu-latest
-    container:
-      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
-    env:
-      npm_config_build_from_source: true
-
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: Verify Rust toolchain
-      run: rustc --version && cargo --version && hc --version
-
-    - name: Install dependencies
-      run: pnpm install --no-frozen-lockfile
-
-    - name: Build languages
-      run: pnpm run build-languages
-
-    - name: Run tests
-      run: |
-        cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests
-        pnpm install --no-frozen-lockfile
-        deno install
-        pnpm run test-stress
-
-  telepresence:
-    name: Telepresence Test
-    runs-on: ubuntu-latest
-    container:
-      image: coasys/ad4m-ci-linux:latest@sha256:3d6e8b6357224d689345eebd5f9da49ee5fd494b3fd976273d0cf5528f6903ab
-    env:
-      npm_config_build_from_source: true
-
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: Verify Rust toolchain
-      run: rustc --version && cargo --version && hc --version
-
-    - name: Install dependencies
-      run: pnpm install --no-frozen-lockfile
-
-    - name: Build languages
-      run: pnpm run build-languages
-
-    - name: Run tests
-      run: |
-        cd bootstrap-languages/p-diff-sync/hc-dna/zomes/tests
-        pnpm install --no-frozen-lockfile
-        deno install
-        pnpm run test-telepresence
+      - name: Save Rust cache
+        if: success()
+        uses: actions/cache/save@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            bootstrap-languages/p-diff-sync/hc-dna/target/
+          key: ${{ runner.os }}-p-diff-sync-rust-${{ hashFiles('bootstrap-languages/p-diff-sync/hc-dna/Cargo.lock') }}

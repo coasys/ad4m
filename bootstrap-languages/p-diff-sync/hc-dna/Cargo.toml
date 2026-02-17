@@ -1,7 +1,8 @@
 [workspace]
 members = [
   "zomes/perspective_diff_sync",
-  "zomes/perspective_diff_sync_integrity"
+  "zomes/perspective_diff_sync_integrity",
+  "tests/sweettest"
 ]
 resolver="2"
 

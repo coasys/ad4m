@@ -66,6 +66,11 @@
       "outputs": ["dist/**"]
     },
 
+    "ad4m-launcher#package-ad4m:cuda": {
+      "dependsOn": ["build-core-executor"],
+      "outputs": ["dist/**"]
+    },
+
     "lint": {
       "outputs": []
     },

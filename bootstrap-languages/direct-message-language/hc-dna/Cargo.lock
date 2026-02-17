@@ -391,8 +391,8 @@ checksum = "5419bdc4f6a9207fbeba6d11b604d481addf78ecd10c11ad51e76c2f6482748d"
 
 [[package]]
 name = "hdi"
-version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.8.0-dev.4"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "getrandom",
  "hdk_derive",
@@ -410,8 +410,8 @@ dependencies = [
 
 [[package]]
 name = "hdk"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.6"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "getrandom",
  "hdi",
@@ -427,8 +427,8 @@ dependencies = [
 
 [[package]]
 name = "hdk_derive"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.4"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "darling",
  "heck",
@@ -454,8 +454,8 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "holo_hash"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.3"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "base64",
  "blake2b_simd",
@@ -473,8 +473,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_integrity_types"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.4"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "holo_hash",
  "holochain_secure_primitive",
@@ -489,8 +489,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_nonce"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.0"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "getrandom",
  "holochain_secure_primitive",
@@ -499,8 +499,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_secure_primitive"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.0"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "paste",
  "serde",
@@ -534,8 +534,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_timestamp"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.0"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "chrono",
  "serde",
@@ -543,8 +543,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_util"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.0"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "cfg-if",
  "colored",
@@ -580,8 +580,8 @@ dependencies = [
 
 [[package]]
 name = "holochain_zome_types"
-version = "0.6.0"
-source = "git+https://github.com/coasys/holochain.git?branch=0.6.0-coasys#49dfa94e5acff197ab85e3a4d02934300cb91f91"
+version = "0.7.0-dev.5"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-dev.10-coasys#2e8d24e8c02a79f0c01fc1266b08b3862020ec33"
 dependencies = [
  "derive_more 2.0.1",
  "holo_hash",
