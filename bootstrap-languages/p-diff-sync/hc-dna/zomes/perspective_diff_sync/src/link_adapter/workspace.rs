@@ -223,10 +223,10 @@ impl Workspace {
         // CRITICAL FIX: If the entry has chunked diffs, load them before inserting into entry_map
         // Otherwise render() will see empty additions/removals for chunked entries
         let resolved_diff = if current_diff.is_chunked() {
-            info!("===Workspace.handle_parents(): Entry {:?} is CHUNKED - loading {} chunk(s)",
+            debug!("===Workspace.handle_parents(): Entry {:?} is CHUNKED - loading {} chunk(s)",
                 current_hash, current_diff.diff_chunks.as_ref().unwrap().len());
             let loaded_diff = load_diff_from_entry::<Retriever>(&current_diff)?;
-            info!("===Workspace.handle_parents(): Loaded chunked diff - additions: {}, removals: {}",
+            debug!("===Workspace.handle_parents(): Loaded chunked diff - additions: {}, removals: {}",
                 loaded_diff.additions.len(), loaded_diff.removals.len());
 
             // Create a new entry with the loaded diff (inline, not chunked)
