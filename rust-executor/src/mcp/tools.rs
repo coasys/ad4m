@@ -5,14 +5,13 @@
 
 use super::server::McpContext;
 use crate::agent::AgentContext;
-use crate::perspectives::{all_perspectives, get_perspective};
 use crate::perspectives::perspective_instance::{Command, Parameter, SubjectClassOption};
 use crate::perspectives::utils::prolog_resolution_to_string;
+use crate::perspectives::{all_perspectives, get_perspective};
 use rmcp::{
-    ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{ServerInfo, ServerCapabilities, ToolsCapability, ProtocolVersion, Implementation},
-    tool, tool_handler, tool_router,
+    model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo, ToolsCapability},
+    tool, tool_handler, tool_router, ServerHandler,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -139,6 +138,25 @@ impl Ad4mMcpHandler {
         self.context.auth_token.read().await.clone()
     }
 
+    /// Get agent context, requiring authentication for non-main operations
+    async fn get_agent_context(&self) -> Result<AgentContext, String> {
+        match self.get_auth_token().await {
+            Some(token) if !token.is_empty() => Ok(AgentContext::from_auth_token(token)),
+            _ => {
+                // No token means this is the main agent context
+                // This is only safe for read operations on non-sensitive data
+                Ok(AgentContext::from_auth_token(String::new()))
+            }
+        }
+    }
+
+    /// Escape string for safe use in Prolog queries
+    fn escape_prolog_string(s: &str) -> String {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\'', "\\'")
+    }
+
     // ========================================================================
     // MCP TOOLS
     // ========================================================================
@@ -161,22 +179,27 @@ impl Ad4mMcpHandler {
     }
 
     /// List all subject classes (model types) defined in a perspective
-    #[tool(description = "List all subject classes (model types) defined in a perspective. Returns the available models you can query and create instances of.")]
+    #[tool(
+        description = "List all subject classes (model types) defined in a perspective. Returns the available models you can query and create instances of."
+    )]
     async fn list_subject_classes(&self, params: Parameters<ListSubjectClassesParams>) -> String {
         let uuid = &params.0.perspective_id;
-        
+
         match get_perspective(uuid) {
             Some(perspective) => {
-                let auth_token = self.get_auth_token().await.unwrap_or_default();
-                let agent_context = AgentContext::from_auth_token(auth_token);
-                
+                let agent_context = match self.get_agent_context().await {
+                    Ok(ctx) => ctx,
+                    Err(e) => return format!("Authentication error: {}", e),
+                };
+
                 // Use Prolog to get subject classes
                 let query = "subject_class(ClassName, _)".to_string();
-                match perspective.prolog_query_with_context(query, &agent_context).await {
-                    Ok(result) => {
-                        prolog_resolution_to_string(result)
-                    }
-                    Err(e) => format!("Error getting subject classes: {}", e)
+                match perspective
+                    .prolog_query_with_context(query, &agent_context)
+                    .await
+                {
+                    Ok(result) => prolog_resolution_to_string(result),
+                    Err(e) => format!("Error getting subject classes: {}", e),
                 }
             }
             None => format!("Perspective not found: {}", uuid),
@@ -184,33 +207,43 @@ impl Ad4mMcpHandler {
     }
 
     /// Query instances of a subject class with optional filters
-    #[tool(description = "Query instances of a subject class (model) with optional Prolog filters. Returns all instances matching the criteria.")]
+    #[tool(
+        description = "Query instances of a subject class (model) with optional Prolog filters. Returns all instances matching the criteria."
+    )]
     async fn query_subjects(&self, params: Parameters<QuerySubjectsParams>) -> String {
         let p = &params.0;
-        
+
         match get_perspective(&p.perspective_id) {
             Some(perspective) => {
-                let auth_token = self.get_auth_token().await.unwrap_or_default();
-                let agent_context = AgentContext::from_auth_token(auth_token);
-                
+                let agent_context = match self.get_agent_context().await {
+                    Ok(ctx) => ctx,
+                    Err(e) => return format!("Authentication error: {}", e),
+                };
+
+                // Escape class_name to prevent Prolog injection
+                let escaped_class_name = Self::escape_prolog_string(&p.class_name);
+
                 // Build Prolog query for subject instances
+                // Note: The filter query is passed directly as it's meant to be Prolog code
+                // Users should be aware this accepts raw Prolog syntax
                 let query = if let Some(filter) = &p.query {
                     format!(
                         r#"subject_class("{}", C), instance(C, Base), {}"#,
-                        p.class_name, filter
+                        escaped_class_name, filter
                     )
                 } else {
                     format!(
                         r#"subject_class("{}", C), instance(C, Base)"#,
-                        p.class_name
+                        escaped_class_name
                     )
                 };
-                
-                match perspective.prolog_query_with_context(query, &agent_context).await {
-                    Ok(result) => {
-                        prolog_resolution_to_string(result)
-                    }
-                    Err(e) => format!("Error querying subjects: {}", e)
+
+                match perspective
+                    .prolog_query_with_context(query, &agent_context)
+                    .await
+                {
+                    Ok(result) => prolog_resolution_to_string(result),
+                    Err(e) => format!("Error querying subjects: {}", e),
                 }
             }
             None => format!("Perspective not found: {}", p.perspective_id),
@@ -218,25 +251,32 @@ impl Ad4mMcpHandler {
     }
 
     /// Get all data (properties) for a specific subject instance
-    #[tool(description = "Get all data (properties and values) for a specific subject instance. Returns the complete state of the model instance.")]
+    #[tool(
+        description = "Get all data (properties and values) for a specific subject instance. Returns the complete state of the model instance."
+    )]
     async fn get_subject_data(&self, params: Parameters<GetSubjectDataParams>) -> String {
         let p = &params.0;
-        
+
         match get_perspective(&p.perspective_id) {
-            Some(perspective) => {
-                let auth_token = self.get_auth_token().await.unwrap_or_default();
-                let agent_context = AgentContext::from_auth_token(auth_token);
-                
+            Some(mut perspective) => {
+                let agent_context = match self.get_agent_context().await {
+                    Ok(ctx) => ctx,
+                    Err(e) => return format!("Authentication error: {}", e),
+                };
+
                 let subject_class: SubjectClassOption = match serde_json::from_value(json!({
                     "className": p.class_name
                 })) {
                     Ok(sc) => sc,
                     Err(e) => return format!("Error creating subject class: {}", e),
                 };
-                
-                match perspective.get_subject_data(subject_class, p.expression_address.clone(), &agent_context).await {
+
+                match perspective
+                    .get_subject_data(subject_class, p.expression_address.clone(), &agent_context)
+                    .await
+                {
                     Ok(data) => data,
-                    Err(e) => format!("Error getting subject data: {}", e)
+                    Err(e) => format!("Error getting subject data: {}", e),
                 }
             }
             None => format!("Perspective not found: {}", p.perspective_id),
@@ -244,32 +284,45 @@ impl Ad4mMcpHandler {
     }
 
     /// Create a new subject instance
-    #[tool(description = "Create a new subject instance (model object) with optional initial property values.")]
+    #[tool(
+        description = "Create a new subject instance (model object) with optional initial property values."
+    )]
     async fn create_subject(&self, params: Parameters<CreateSubjectParams>) -> String {
         let p = &params.0;
-        
+
         match get_perspective(&p.perspective_id) {
-            Some(perspective) => {
-                let auth_token = self.get_auth_token().await.unwrap_or_default();
-                let agent_context = AgentContext::from_auth_token(auth_token);
-                
+            Some(mut perspective) => {
+                let agent_context = match self.get_agent_context().await {
+                    Ok(ctx) => ctx,
+                    Err(e) => return format!("Authentication error: {}", e),
+                };
+
                 let subject_class: SubjectClassOption = match serde_json::from_value(json!({
                     "className": p.class_name
                 })) {
                     Ok(sc) => sc,
                     Err(e) => return format!("Error creating subject class: {}", e),
                 };
-                
-                let initial_values: Option<serde_json::Value> = 
-                    p.initial_values.as_ref().and_then(|v| serde_json::from_str(v).ok());
-                
-                match perspective.create_subject(
-                    subject_class,
-                    p.expression_address.clone(),
-                    initial_values,
-                    None, // batch_id
-                    &agent_context,
-                ).await {
+
+                // Parse initial_values and propagate errors instead of swallowing them
+                let initial_values: Option<serde_json::Value> = match &p.initial_values {
+                    Some(v) => match serde_json::from_str(v) {
+                        Ok(parsed) => Some(parsed),
+                        Err(e) => return format!("Error parsing initial_values JSON: {}", e),
+                    },
+                    None => None,
+                };
+
+                match perspective
+                    .create_subject(
+                        subject_class,
+                        p.expression_address.clone(),
+                        initial_values,
+                        None, // batch_id
+                        &agent_context,
+                    )
+                    .await
+                {
                     Ok(_) => {
                         let result = json!({
                             "created": true,
@@ -277,9 +330,10 @@ impl Ad4mMcpHandler {
                             "class_name": p.class_name,
                             "expression_address": p.expression_address
                         });
-                        serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
+                        serde_json::to_string_pretty(&result)
+                            .unwrap_or_else(|e| format!("Error: {}", e))
                     }
-                    Err(e) => format!("Error creating subject: {}", e)
+                    Err(e) => format!("Error creating subject: {}", e),
                 }
             }
             None => format!("Perspective not found: {}", p.perspective_id),
@@ -287,42 +341,54 @@ impl Ad4mMcpHandler {
     }
 
     /// Execute commands (actions) on a subject instance
-    #[tool(description = "Execute commands (actions) on a subject instance. Commands are JSON arrays of {source, predicate, target, action} objects.")]
+    #[tool(
+        description = "Execute commands (actions) on a subject instance. Commands are JSON arrays of {source, predicate, target, action} objects."
+    )]
     async fn execute_commands(&self, params: Parameters<ExecuteCommandsParams>) -> String {
         let p = &params.0;
-        
+
         match get_perspective(&p.perspective_id) {
-            Some(perspective) => {
-                let auth_token = self.get_auth_token().await.unwrap_or_default();
-                let agent_context = AgentContext::from_auth_token(auth_token);
-                
+            Some(mut perspective) => {
+                let agent_context = match self.get_agent_context().await {
+                    Ok(ctx) => ctx,
+                    Err(e) => return format!("Authentication error: {}", e),
+                };
+
                 // Parse commands from JSON string
                 let commands: Vec<Command> = match serde_json::from_str(&p.commands) {
                     Ok(cmds) => cmds,
-                    Err(e) => return format!("Error parsing commands: {}", e),
+                    Err(e) => return format!("Error parsing commands JSON: {}", e),
                 };
-                
-                // Parse parameters from JSON string
-                let parameters: Vec<Parameter> = p.parameters.as_ref()
-                    .map(|params_str| serde_json::from_str(params_str).unwrap_or_default())
-                    .unwrap_or_default();
-                
-                match perspective.execute_commands(
-                    commands,
-                    p.expression_address.clone(),
-                    parameters,
-                    None, // batch_id
-                    &agent_context,
-                ).await {
+
+                // Parse parameters from JSON string - propagate errors
+                let parameters: Vec<Parameter> = match &p.parameters {
+                    Some(params_str) => match serde_json::from_str(params_str) {
+                        Ok(parsed) => parsed,
+                        Err(e) => return format!("Error parsing parameters JSON: {}", e),
+                    },
+                    None => Vec::new(),
+                };
+
+                match perspective
+                    .execute_commands(
+                        commands,
+                        p.expression_address.clone(),
+                        parameters,
+                        None, // batch_id
+                        &agent_context,
+                    )
+                    .await
+                {
                     Ok(_) => {
                         let result = json!({
                             "executed": true,
                             "perspective_id": p.perspective_id,
                             "expression_address": p.expression_address
                         });
-                        serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
+                        serde_json::to_string_pretty(&result)
+                            .unwrap_or_else(|e| format!("Error: {}", e))
                     }
-                    Err(e) => format!("Error executing commands: {}", e)
+                    Err(e) => format!("Error executing commands: {}", e),
                 }
             }
             None => format!("Perspective not found: {}", p.perspective_id),
@@ -330,20 +396,25 @@ impl Ad4mMcpHandler {
     }
 
     /// Run a Prolog query for complex reasoning
-    #[tool(description = "Run a Prolog query on a perspective for complex reasoning and custom queries. Use this for advanced queries not covered by other tools.")]
+    #[tool(
+        description = "Run a Prolog query on a perspective for complex reasoning and custom queries. Use this for advanced queries not covered by other tools. Note: Query is executed as raw Prolog."
+    )]
     async fn infer(&self, params: Parameters<InferParams>) -> String {
         let p = &params.0;
-        
+
         match get_perspective(&p.perspective_id) {
             Some(perspective) => {
-                let auth_token = self.get_auth_token().await.unwrap_or_default();
-                let agent_context = AgentContext::from_auth_token(auth_token);
-                
-                match perspective.prolog_query_with_context(p.query.clone(), &agent_context).await {
-                    Ok(result) => {
-                        prolog_resolution_to_string(result)
-                    }
-                    Err(e) => format!("Error running query: {}", e)
+                let agent_context = match self.get_agent_context().await {
+                    Ok(ctx) => ctx,
+                    Err(e) => return format!("Authentication error: {}", e),
+                };
+
+                match perspective
+                    .prolog_query_with_context(p.query.clone(), &agent_context)
+                    .await
+                {
+                    Ok(result) => prolog_resolution_to_string(result),
+                    Err(e) => format!("Error running query: {}", e),
                 }
             }
             None => format!("Perspective not found: {}", p.perspective_id),

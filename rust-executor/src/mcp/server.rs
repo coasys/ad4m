@@ -4,7 +4,7 @@ use super::tools::Ad4mMcpHandler;
 use crate::js_core::JsCoreHandle;
 use anyhow::Result;
 use log::{info, warn};
-use rmcp::{ServiceExt, transport::stdio};
+use rmcp::{transport::stdio, ServiceExt};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -17,7 +17,7 @@ pub struct McpContext {
 }
 
 /// Start the MCP server on stdio
-/// 
+///
 /// This is designed to be run alongside the GraphQL server, sharing the same
 /// JsCoreHandle for executing AD4M operations.
 pub async fn start_mcp_server(
@@ -36,10 +36,10 @@ pub async fn start_mcp_server(
     let handler = Ad4mMcpHandler::new(context);
     let transport = stdio();
     let running = handler.serve(transport).await?;
-    
+
     info!("MCP server running");
     running.waiting().await?;
-    
+
     Ok(())
 }
 
@@ -51,9 +51,9 @@ pub async fn start_mcp_http_server(
     port: u16,
 ) -> Result<()> {
     info!("Starting AD4M MCP HTTP server on port {}", port);
-    
+
     // TODO: Implement HTTP transport with auth header extraction
     warn!("MCP HTTP transport not yet implemented");
-    
+
     Ok(())
 }

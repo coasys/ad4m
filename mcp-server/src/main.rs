@@ -1,5 +1,5 @@
 //! AD4M MCP Server
-//! 
+//!
 //! Exposes AD4M functionality via the Model Context Protocol (MCP).
 //! Supports stdio transport for Claude Desktop integration.
 
@@ -16,8 +16,8 @@ struct Args {
     #[arg(short, long, default_value = "http://localhost:4000/graphql")]
     executor_url: String,
 
-    /// Capability token for AD4M authentication
-    #[arg(short, long)]
+    /// Capability token for AD4M authentication (prefer AD4M_TOKEN env var)
+    #[arg(short, long, env = "AD4M_TOKEN")]
     token: Option<String>,
 
     /// Admin credential for capability token generation (optional)
@@ -41,11 +41,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Executor URL: {}", args.executor_url);
 
     // Create and run the MCP server
-    let server = server::Ad4mMcpServer::new(
-        args.executor_url,
-        args.token,
-        args.admin_credential,
-    ).await?;
+    let server =
+        server::Ad4mMcpServer::new(args.executor_url, args.token, args.admin_credential).await?;
 
     server.serve_stdio().await?;
 

@@ -363,13 +363,15 @@ impl Ad4mMcpServer {
         {
             Ok(jwt) => {
                 // Store the token for subsequent calls
-                let mut token = self.token.write().await;
-                *token = Some(jwt.clone());
+                {
+                    let mut token = self.token.write().await;
+                    *token = Some(jwt);
+                }
 
                 let result = json!({
                     "success": true,
                     "message": "Login successful. Token has been stored for subsequent calls.",
-                    "token_preview": format!("{}...", &jwt[..std::cmp::min(20, jwt.len())])
+                    "token_set": true
                 });
                 serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
             }
@@ -424,23 +426,27 @@ impl Ad4mMcpServer {
         description = "Check current authentication status. Returns agent info if authenticated, or authentication requirements if not."
     )]
     async fn auth_status(&self, _params: Parameters<AuthStatusParams>) -> String {
-        let token = self.token.read().await;
+        // Read token and drop lock before HTTP call
+        let token_value = {
+            let token = self.token.read().await;
+            token.clone()
+        };
 
-        if token.is_none() {
+        if token_value.is_none() {
             let result = json!({
                 "authenticated": false,
                 "message": "No authentication token configured.",
                 "options": [
                     "Use 'login' tool with email/password for multi-user mode",
                     "Use 'set_token' tool to provide a capability token",
-                    "Start the server with --token flag"
+                    "Start the server with --token flag or AD4M_TOKEN env var"
                 ]
             });
             return serde_json::to_string_pretty(&result)
                 .unwrap_or_else(|e| format!("Error: {}", e));
         }
 
-        let client = Ad4mClient::new(self.executor_url.clone(), token.clone().unwrap());
+        let client = Ad4mClient::new(self.executor_url.clone(), token_value.unwrap());
 
         match client.agent.me().await {
             Ok(agent) => {

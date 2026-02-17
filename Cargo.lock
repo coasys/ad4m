@@ -217,15 +217,15 @@ version = "0.1.0"
 dependencies = [
  "ad4m-client",
  "anyhow",
- "clap 4.5.38",
+ "clap 4.5.54",
  "rmcp",
  "schemars 1.2.1",
  "serde",
  "serde_json",
- "thiserror 1.0.63",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
- "tracing-subscriber 0.3.18",
+ "tracing-subscriber 0.3.22",
 ]
 
 [[package]]
@@ -17290,7 +17290,7 @@ dependencies = [
  "schemars 1.2.1",
  "serde",
  "serde_json",
- "thiserror 2.0.12",
+ "thiserror 2.0.17",
  "tokio",
  "tokio-util",
  "tracing",
@@ -17306,7 +17306,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde_json",
- "syn 2.0.87",
+ "syn 2.0.114",
 ]
 
 [[package]]
@@ -18387,7 +18387,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde_derive_internals",
- "syn 2.0.87",
+ "syn 2.0.114",
 ]
 
 [[package]]
@@ -18999,7 +18999,7 @@ dependencies = [
  "indexmap 1.9.3",
  "indexmap 2.11.1",
  "schemars 0.9.0",
- "schemars 1.2.0",
+ "schemars 1.2.1",
  "serde",
  "serde_derive",
  "serde_json",
