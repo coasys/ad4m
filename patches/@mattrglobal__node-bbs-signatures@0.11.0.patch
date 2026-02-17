@@ -23,7 +23,7 @@ index 165b67d5bcf10ab920e61f9234ea883b4f7b6fda..5e8712b55b3e67f2db1b5a9af55324b2
   */
  // eslint-disable-next-line @typescript-eslint/no-var-requires
 -var path = require("path");
-+var path = require("node:path");
++import path from "node:path"
  // eslint-disable-next-line @typescript-eslint/no-var-requires
  var bbs = require(path.resolve(path.join(__dirname, "../native/index.node")));
  /**
@@ -36,7 +36,7 @@ index d216914596a056173ad393a1aaebf65076ac8a4f..c8bf836873e6a6a6592b4266544f4170
   */
  // eslint-disable-next-line @typescript-eslint/no-var-requires
 -var path = require("path");
-+var path = require("node:path");
++import path from "node:path"
  // eslint-disable-next-line @typescript-eslint/no-var-requires
  var bbs = require(path.resolve(path.join(__dirname, "../native/index.node")));
  /**
@@ -49,7 +49,7 @@ index 9293a30e10871aa1292e8f38f49bb43ac5b3a6e7..48ac33d7d70ab7926325ed1203163dd9
   */
  // eslint-disable-next-line @typescript-eslint/no-var-requires
 -var path = require("path");
-+var path = require("node:path");
++import path from "node:path"
  // eslint-disable-next-line @typescript-eslint/no-var-requires
  var bbs = require(path.resolve(path.join(__dirname, "../native/index.node")));
-/**
+ /**

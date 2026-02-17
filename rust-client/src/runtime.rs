@@ -434,31 +434,6 @@ pub async fn message_outbox(
         .collect())
 }
 
-#[derive(GraphQLQuery)]
-#[graphql(
-    schema_path = "schema.gql",
-    query_path = "src/runtime.gql",
-    response_derives = "Debug"
-)]
-pub struct LoginUser;
-
-pub async fn login_user(executor_url: String, email: String, password: String) -> Result<String> {
-    // Note: Login doesn't require an existing token
-    let query = LoginUser::build_query(login_user::Variables { email, password });
-    let response_body: graphql_client::Response<login_user::ResponseData> = reqwest::Client::new()
-        .post(&executor_url)
-        .json(&query)
-        .send()
-        .await?
-        .json()
-        .await?;
-
-    let response_data = response_body
-        .data
-        .ok_or_else(|| anyhow::anyhow!("Login failed: {:?}", response_body.errors))?;
-    Ok(response_data.runtime_login_user)
-}
-
 pub struct RuntimeClient {
     info: Arc<ClientInfo>,
 }
@@ -649,10 +624,5 @@ impl RuntimeClient {
             filter,
         )
         .await
-    }
-
-    /// Login with email and password (multi-user mode)
-    pub async fn login_user(&self, email: String, password: String) -> Result<String> {
-        login_user(self.info.executor_url.clone(), email, password).await
     }
 }

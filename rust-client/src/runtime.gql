@@ -171,7 +171,3 @@ query MessageOutbox($filter: String) {
     }
   }
 }
-
-mutation LoginUser($email: String!, $password: String!) {
-  runtimeLoginUser(email: $email, password: $password)
-}
