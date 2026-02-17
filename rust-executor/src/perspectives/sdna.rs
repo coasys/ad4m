@@ -771,9 +771,19 @@ pub fn get_sdna_facts(
                 .last()
                 .unwrap_or(class_uri);
 
-            if !class_name.is_empty() && !seen_subject_classes.contains_key(class_name) {
-                shape_to_class.insert(shape_uri.clone(), class_name.to_string());
-                class_shapes.insert(class_name.to_string(), shape_uri.clone());
+            if !class_name.is_empty() {
+                // Only generate SHACL→Prolog facts for classes WITHOUT original Prolog code
+                // Classes with original Prolog use their own predicates and class identifiers
+                let has_original_prolog = seen_subject_classes
+                    .get(class_name)
+                    .and_then(|props| props.get("code"))
+                    .map(|code| !code.trim().is_empty())
+                    .unwrap_or(false);
+                
+                if !has_original_prolog {
+                    shape_to_class.insert(shape_uri.clone(), class_name.to_string());
+                    class_shapes.insert(class_name.to_string(), shape_uri.clone());
+                }
             }
         }
     }
@@ -885,13 +895,20 @@ pub fn get_sdna_facts(
                         // collection/2 fact
                         lines.push(format!("collection({}, \"{}\").", shape_id, prop_name));
 
-                        // collection_adder/3 if it has a setter (which doubles as adder for collections)
-                        if prop_has_setter.contains(prop_shape) {
-                            lines.push(format!(
-                                "collection_adder({}, \"{}\", _).",
-                                shape_id, prop_name
-                            ));
-                        }
+                        // Collection operations - always generate adder, remover, and setter
+                        // These are required for template object matching queries
+                        lines.push(format!(
+                            "collection_adder({}, \"{}\", _).",
+                            shape_id, prop_name
+                        ));
+                        lines.push(format!(
+                            "collection_remover({}, \"{}\", _).",
+                            shape_id, prop_name
+                        ));
+                        lines.push(format!(
+                            "collection_setter({}, \"{}\", _).",
+                            shape_id, prop_name
+                        ));
                     } else {
                         // property/2 fact
                         lines.push(format!("property({}, \"{}\").", shape_id, prop_name));
@@ -911,6 +928,42 @@ pub fn get_sdna_facts(
         // constructor/2 if shape has constructor
         if shape_has_constructor.contains(shape_uri) {
             lines.push(format!("constructor({}, _).", shape_id));
+        }
+        
+        // Generate instance/2 rule for SHACL-based classes
+        // This allows isSubjectInstance queries to work
+        // The rule checks if at least one required property/constructor property exists
+        let mut instance_conditions = Vec::new();
+        
+        // Collect predicates from properties that have initial values (constructor properties)
+        // or required properties
+        if let Some(prop_shapes) = shape_properties.get(shape_uri) {
+            for prop_shape in prop_shapes {
+                // Check if this property has sh://minCount >= 1 (required)
+                // For now, we'll create a simple rule that checks if any property exists
+                if let Some(prop_name) = prop_shape_to_name.get(prop_shape) {
+                    // Get the path (predicate) for this property
+                    for link_expression in all_links {
+                        let link = &link_expression.data;
+                        if link.predicate == Some("sh://path".to_string()) && &link.source == prop_shape {
+                            let predicate = &link.target;
+                            instance_conditions.push(format!("triple(Base, \"{}\", _)", predicate));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If we have conditions, create an instance rule with OR logic
+        if !instance_conditions.is_empty() {
+            // Use OR (;) to check if ANY of the properties exist
+            let condition_str = instance_conditions.join("; ");
+            lines.push(format!("instance({}, Base) :- {}.", shape_id, condition_str));
+        } else {
+            // No properties found - generate a permissive rule that matches any base
+            // This allows classes with only collections to work
+            lines.push(format!("instance({}, _).", shape_id));
         }
     }
 
