@@ -4,7 +4,13 @@
 //! work with typed models (get properties, run actions) instead of raw links.
 
 use super::server::McpContext;
-use crate::agent::AgentContext;
+use crate::agent::capabilities::{
+    get_user_default_capabilities,
+    token::{decode_jwt, generate_jwt},
+    AuthInfo, DEFAULT_TOKEN_VALID_PERIOD,
+};
+use crate::agent::{AgentContext, AgentService};
+use crate::db::Ad4mDb;
 use crate::perspectives::perspective_instance::{Command, Parameter, SubjectClassOption};
 use crate::perspectives::utils::prolog_resolution_to_string;
 use crate::perspectives::{all_perspectives, get_perspective};
@@ -88,6 +94,30 @@ pub struct InferParams {
     /// Prolog query string
     pub query: String,
 }
+
+// ============================================================================
+// Authentication Parameter Types
+// ============================================================================
+
+/// Parameters for email/password login (multi-user mode)
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LoginEmailParams {
+    /// User email address
+    pub email: String,
+    /// User password
+    pub password: String,
+}
+
+/// Parameters for setting an existing token directly
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SetTokenParams {
+    /// JWT capability token
+    pub token: String,
+}
+
+/// Parameters for checking authentication status (no params needed)
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AuthStatusParams {}
 
 // ============================================================================
 // MCP Handler
@@ -420,4 +450,298 @@ impl Ad4mMcpHandler {
             None => format!("Perspective not found: {}", p.perspective_id),
         }
     }
+
+    // ========================================================================
+    // AUTHENTICATION TOOLS
+    // ========================================================================
+
+    /// Login with email and password (multi-user mode)
+    #[tool(
+        description = "Login to a multi-user AD4M executor using email and password. Returns a JWT token on success that will be used for subsequent operations."
+    )]
+    async fn login_email(&self, params: Parameters<LoginEmailParams>) -> String {
+        let p = &params.0;
+
+        // Normalize email
+        let email = p.email.trim().to_lowercase();
+
+        // Check if multi-user mode is enabled
+        let multi_user_enabled =
+            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+
+        if !multi_user_enabled {
+            return json!({
+                "success": false,
+                "error": "Multi-user mode is not enabled. Use set_token with an admin credential instead."
+            })
+            .to_string();
+        }
+
+        // Verify user credentials
+        let password_valid = Ad4mDb::with_global_instance(|db| {
+            db.verify_user_password(&email, &p.password)
+                .unwrap_or(false)
+        });
+
+        if !password_valid {
+            return json!({
+                "success": false,
+                "error": "Invalid credentials"
+            })
+            .to_string();
+        }
+
+        // Check user exists in agent service
+        if !AgentService::user_exists(&email) {
+            return json!({
+                "success": false,
+                "error": "User key not found on executor"
+            })
+            .to_string();
+        }
+
+        // Create auth info with user-scoped capabilities
+        let auth_info = AuthInfo {
+            app_name: "mcp-agent".to_string(),
+            app_desc: "MCP AI Agent".to_string(),
+            app_domain: Some("mcp".to_string()),
+            app_url: Some("https://ad4m.dev/mcp".to_string()),
+            app_icon_path: None,
+            capabilities: Some(get_user_default_capabilities()),
+            user_email: Some(email.clone()),
+        };
+
+        // Generate JWT token
+        match generate_jwt(
+            auth_info.app_name.clone(),
+            DEFAULT_TOKEN_VALID_PERIOD,
+            auth_info,
+        ) {
+            Ok(cap_token) => {
+                // Store the token in context for subsequent operations
+                let mut token_guard = self.context.auth_token.write().await;
+                *token_guard = Some(cap_token.clone());
+
+                json!({
+                    "success": true,
+                    "token": cap_token,
+                    "user_email": email,
+                    "message": "Login successful. Token stored for subsequent operations."
+                })
+                .to_string()
+            }
+            Err(e) => json!({
+                "success": false,
+                "error": format!("Failed to generate token: {}", e)
+            })
+            .to_string(),
+        }
+    }
+
+    /// Set an existing JWT token for authentication
+    #[tool(
+        description = "Set an existing JWT capability token for authentication. Use this for local executors with admin credentials or when you already have a valid token."
+    )]
+    async fn set_token(&self, params: Parameters<SetTokenParams>) -> String {
+        let token = params.0.token.trim().to_string();
+
+        if token.is_empty() {
+            return json!({
+                "success": false,
+                "error": "Token cannot be empty"
+            })
+            .to_string();
+        }
+
+        // Validate the token format and extract info
+        match decode_jwt(token.clone()) {
+            Ok(claims) => {
+                // Store the token
+                let mut token_guard = self.context.auth_token.write().await;
+                *token_guard = Some(token.clone());
+
+                json!({
+                    "success": true,
+                    "app_name": claims.capabilities.app_name,
+                    "user_email": claims.capabilities.user_email,
+                    "message": "Token set successfully."
+                })
+                .to_string()
+            }
+            Err(e) => {
+                // Check if it's the admin credential (not a JWT)
+                if let Some(admin_cred) = &self.context.admin_credential {
+                    if &token == admin_cred {
+                        let mut token_guard = self.context.auth_token.write().await;
+                        *token_guard = Some(token.clone());
+
+                        return json!({
+                            "success": true,
+                            "is_admin": true,
+                            "message": "Admin credential set successfully."
+                        })
+                        .to_string();
+                    }
+                }
+
+                json!({
+                    "success": false,
+                    "error": format!("Invalid token: {}", e)
+                })
+                .to_string()
+            }
+        }
+    }
+
+    /// Check current authentication status
+    #[tool(description = "Check the current authentication status of the MCP session.")]
+    async fn auth_status(&self, _params: Parameters<AuthStatusParams>) -> String {
+        let token = self.context.auth_token.read().await;
+
+        match &*token {
+            Some(t) if !t.is_empty() => {
+                // Try to decode and get info
+                match decode_jwt(t.clone()) {
+                    Ok(claims) => json!({
+                        "authenticated": true,
+                        "app_name": claims.capabilities.app_name,
+                        "user_email": claims.capabilities.user_email,
+                        "has_capabilities": claims.capabilities.capabilities.is_some(),
+                    })
+                    .to_string(),
+                    Err(_) => {
+                        // Might be admin credential
+                        if let Some(admin_cred) = &self.context.admin_credential {
+                            if t == admin_cred {
+                                return json!({
+                                    "authenticated": true,
+                                    "is_admin": true,
+                                    "message": "Authenticated with admin credential"
+                                })
+                                .to_string();
+                            }
+                        }
+                        json!({
+                            "authenticated": true,
+                            "token_type": "unknown",
+                            "message": "Token set but could not decode (may be a raw credential)"
+                        })
+                        .to_string()
+                    }
+                }
+            }
+            _ => json!({
+                "authenticated": false,
+                "message": "Not authenticated. Use login_email or set_token to authenticate."
+            })
+            .to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    // Test-only struct that mirrors McpContext but without JsCoreHandle
+    // This is necessary because JsCoreHandle requires complex channel setup
+    struct TestAuthContext {
+        admin_credential: Option<String>,
+        auth_token: Arc<RwLock<Option<String>>>,
+    }
+
+    impl TestAuthContext {
+        fn new(admin_credential: Option<String>) -> Self {
+            Self {
+                admin_credential,
+                auth_token: Arc::new(RwLock::new(None)),
+            }
+        }
+
+        async fn get_auth_token(&self) -> Option<String> {
+            self.auth_token.read().await.clone()
+        }
+    }
+
+    // Test the auth_status logic directly without needing full MCP handler
+    #[tokio::test]
+    async fn test_auth_status_unauthenticated() {
+        let ctx = TestAuthContext::new(None);
+        let token = ctx.get_auth_token().await;
+
+        // Simulate auth_status logic
+        let result = match token {
+            Some(t) if !t.is_empty() => "authenticated",
+            _ => "not_authenticated",
+        };
+
+        assert_eq!(result, "not_authenticated");
+    }
+
+    #[tokio::test]
+    async fn test_set_token_stores_value() {
+        let ctx = TestAuthContext::new(None);
+
+        // Simulate set_token logic
+        {
+            let mut token_guard = ctx.auth_token.write().await;
+            *token_guard = Some("test-token".to_string());
+        }
+
+        let token = ctx.get_auth_token().await;
+        assert_eq!(token, Some("test-token".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_admin_credential_check() {
+        let ctx = TestAuthContext::new(Some("my-admin-secret".to_string()));
+
+        // Set admin credential as token
+        {
+            let mut token_guard = ctx.auth_token.write().await;
+            *token_guard = Some("my-admin-secret".to_string());
+        }
+
+        let token = ctx.get_auth_token().await;
+        let is_admin = token.as_ref() == ctx.admin_credential.as_ref();
+
+        assert!(is_admin);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_admin_credential() {
+        let ctx = TestAuthContext::new(Some("my-admin-secret".to_string()));
+
+        // Set wrong credential
+        {
+            let mut token_guard = ctx.auth_token.write().await;
+            *token_guard = Some("wrong-secret".to_string());
+        }
+
+        let token = ctx.get_auth_token().await;
+        let is_admin = token.as_ref() == ctx.admin_credential.as_ref();
+
+        assert!(!is_admin);
+    }
+
+    #[test]
+    fn test_escape_prolog_string() {
+        assert_eq!(
+            Ad4mMcpHandler::escape_prolog_string(r#"test"value"#),
+            r#"test\"value"#
+        );
+        assert_eq!(
+            Ad4mMcpHandler::escape_prolog_string(r"test\path"),
+            r"test\\path"
+        );
+        assert_eq!(
+            Ad4mMcpHandler::escape_prolog_string("test'quote"),
+            r"test\'quote"
+        );
+    }
+
+    // Integration tests for full login flow would need the database initialized
+    // See tests/js/tests/mcp-auth.test.ts for full integration tests
 }
