@@ -870,6 +870,7 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
+        link.validate()?;
         let link_expr: LinkExpression = create_signed_expression(link, context)?.into();
         self.add_link_expression(link_expr, status, batch_id).await
     }
@@ -1034,6 +1035,7 @@ impl PerspectiveInstance {
         status: LinkStatus,
         batch_id: Option<String>,
     ) -> Result<DecoratedLinkExpression, AnyError> {
+        link_expression.data.validate()?;
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
             let diff = batches
@@ -1079,6 +1081,9 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        for link in &links {
+            link.validate()?;
+        }
         let link_expressions: Result<Vec<_>, _> = links
             .into_iter()
             .map(|l| create_signed_expression(l, context).map(LinkExpression::from))
@@ -1131,10 +1136,12 @@ impl PerspectiveInstance {
         status: LinkStatus,
         context: &AgentContext,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
-        let additions = mutations
-            .additions
+        let addition_links: Vec<Link> = mutations.additions.into_iter().map(Link::from).collect();
+        for link in &addition_links {
+            link.validate()?;
+        }
+        let additions = addition_links
             .into_iter()
-            .map(Link::from)
             .map(|l| create_signed_expression(l, context))
             .map(|r| r.map(LinkExpression::from))
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
