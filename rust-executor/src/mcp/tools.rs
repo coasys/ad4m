@@ -208,7 +208,7 @@ impl Ad4mMcpHandler {
 
     /// Query instances of a subject class with optional filters
     #[tool(
-        description = "Query instances of a subject class (model) with optional Prolog filters. Returns all instances matching the criteria."
+        description = "Query instances of a subject class (model) with optional Prolog filters. Returns all instances matching the criteria. WARNING: The 'query' parameter accepts raw Prolog syntax and is intended for trusted AI agents only."
     )]
     async fn query_subjects(&self, params: Parameters<QuerySubjectsParams>) -> String {
         let p = &params.0;

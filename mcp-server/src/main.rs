@@ -16,8 +16,10 @@ struct Args {
     #[arg(short, long, default_value = "http://localhost:4000/graphql")]
     executor_url: String,
 
-    /// Capability token for AD4M authentication (prefer AD4M_TOKEN env var)
-    #[arg(short, long, env = "AD4M_TOKEN")]
+    /// Capability token for AD4M authentication.
+    /// SECURITY: Prefer setting AD4M_TOKEN environment variable over CLI flag
+    /// to avoid exposing the token in process listings.
+    #[arg(long, env = "AD4M_TOKEN", hide_short_help = true)]
     token: Option<String>,
 
     /// Admin credential for capability token generation (optional)
