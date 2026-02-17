@@ -1614,23 +1614,31 @@ impl PerspectiveInstance {
         if matches!(sdna_type, SdnaType::SubjectClass) {
             // Check for any existing SubjectClass with this name, regardless of namespace
             // We query by target (ad4m://SubjectClass) and then filter by class name
-            let all_class_links = self.get_links_local(&LinkQuery {
-                predicate: Some("rdf://type".to_string()),
-                target: Some("ad4m://SubjectClass".to_string()),
-                ..Default::default()
-            }).await?;
+            let all_class_links = self
+                .get_links_local(&LinkQuery {
+                    predicate: Some("rdf://type".to_string()),
+                    target: Some("ad4m://SubjectClass".to_string()),
+                    ..Default::default()
+                })
+                .await?;
 
             // Check if any existing class matches this name
             let exists = all_class_links.iter().any(|(link, _)| {
                 // Extract class name from source URI (e.g., "flux://Channel" -> "Channel")
-                link.data.source.split("://").last()
+                link.data
+                    .source
+                    .split("://")
+                    .last()
                     .and_then(|s| s.split('/').last())
                     .map(|class_name| class_name == name)
                     .unwrap_or(false)
             });
 
             if exists {
-                log::info!("Class '{}' SHACL definition already exists, skipping duplicate", name);
+                log::info!(
+                    "Class '{}' SHACL definition already exists, skipping duplicate",
+                    name
+                );
                 return Ok(true);
             }
         }
@@ -2251,9 +2259,7 @@ impl PerspectiveInstance {
                 )
                 .await
             }
-            PrologMode::Disabled => {
-                Ok(QueryResolution::Matches(vec![]))
-            }
+            PrologMode::Disabled => Ok(QueryResolution::Matches(vec![])),
         }
     }
 
@@ -2370,9 +2376,7 @@ impl PerspectiveInstance {
                 )
                 .await
             }
-            PrologMode::Disabled => {
-                Ok(QueryResolution::Matches(vec![]))
-            }
+            PrologMode::Disabled => Ok(QueryResolution::Matches(vec![])),
         }
     }
 
@@ -2600,7 +2604,10 @@ impl PerspectiveInstance {
         tokio::spawn(async move {
             // In Disabled, Simple, or SdnaOnly mode, just trigger subscription checks
             // (Pooled mode prolog updates don't apply - run_query_all only works in Pooled mode)
-            if PROLOG_MODE == PrologMode::Disabled || PROLOG_MODE == PrologMode::Simple || PROLOG_MODE == PrologMode::SdnaOnly {
+            if PROLOG_MODE == PrologMode::Disabled
+                || PROLOG_MODE == PrologMode::Simple
+                || PROLOG_MODE == PrologMode::SdnaOnly
+            {
                 // Trigger notification, prolog subscription, and surreal subscription checks
                 *(self_clone.trigger_notification_check.lock().await) = true;
                 *(self_clone.trigger_prolog_subscription_check.lock().await) = true;
@@ -3387,17 +3394,15 @@ impl PerspectiveInstance {
             // Extract class name from URL like "flux://Community" -> "Community"
             let class_name = if let Ok(url) = url::Url::parse(&link.data.source) {
                 // Try to get the host (for flux://Community), or path (for other formats)
-                let name = url.host_str()
-                    .map(|s| s.to_string())
-                    .or_else(|| {
-                        let path = url.path().trim_start_matches('/');
-                        if !path.is_empty() {
-                            Some(path.to_string())
-                        } else {
-                            None
-                        }
-                    });
-                
+                let name = url.host_str().map(|s| s.to_string()).or_else(|| {
+                    let path = url.path().trim_start_matches('/');
+                    if !path.is_empty() {
+                        Some(path.to_string())
+                    } else {
+                        None
+                    }
+                });
+
                 match name {
                     Some(n) if !n.is_empty() => n,
                     _ => continue,
@@ -3426,8 +3431,12 @@ impl PerspectiveInstance {
                 log::info!("Class '{}' matches query requirements", class_name);
                 return Ok(Some(class_name));
             } else {
-                log::debug!("Class '{}' does not match (props: {}, collections: {})", 
-                    class_name, has_all_properties, has_all_collections);
+                log::debug!(
+                    "Class '{}' does not match (props: {}, collections: {})",
+                    class_name,
+                    has_all_properties,
+                    has_all_collections
+                );
             }
         }
 
@@ -3460,7 +3469,9 @@ impl PerspectiveInstance {
                     &prop_shape_uri[dot_pos + 1..]
                 } else {
                     // Fallback: extract from end of URI
-                    prop_shape_uri.split("://").last()
+                    prop_shape_uri
+                        .split("://")
+                        .last()
                         .and_then(|s| s.split('/').last())
                         .unwrap_or("")
                 };
@@ -3531,7 +3542,9 @@ impl PerspectiveInstance {
                         &prop_shape_uri[dot_pos + 1..]
                     } else {
                         // Fallback: extract from end of URI
-                        prop_shape_uri.split("://").last()
+                        prop_shape_uri
+                            .split("://")
+                            .last()
                             .and_then(|s| s.split('/').last())
                             .unwrap_or("")
                     };
