@@ -3,7 +3,7 @@
 use super::tools::Ad4mMcpHandler;
 use crate::js_core::JsCoreHandle;
 use anyhow::Result;
-use log::{info, warn};
+use log::info;
 use rmcp::{transport::stdio, ServiceExt};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -43,17 +43,13 @@ pub async fn start_mcp_server(
     Ok(())
 }
 
-/// Start MCP server on HTTP transport (for remote access)
-#[allow(dead_code)]
-pub async fn start_mcp_http_server(
-    _js_core_handle: JsCoreHandle,
-    _admin_credential: Option<String>,
-    port: u16,
-) -> Result<()> {
-    info!("Starting AD4M MCP HTTP server on port {}", port);
-
-    // TODO: Implement HTTP transport with auth header extraction
-    warn!("MCP HTTP transport not yet implemented");
-
-    Ok(())
-}
+// TODO: HTTP transport implementation
+// The rmcp crate supports StreamableHttpService for HTTP transport,
+// but it requires hyper 1.x which conflicts with the project's hyper 0.14 (via reqwest).
+// Options to add HTTP support:
+// 1. Update reqwest to use hyper 1.x when available
+// 2. Use a warp-based wrapper that translates HTTP -> MCP protocol
+// 3. Run MCP HTTP on a separate process that communicates via IPC
+//
+// For now, Claude Desktop and other MCP clients can use the stdio transport
+// by running the executor as a subprocess.
