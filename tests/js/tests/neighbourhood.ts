@@ -27,7 +27,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 let link = new LinkExpression()
                 link.author = "did:test";
                 link.timestamp = new Date().toISOString();
-                link.data = new Link({source: "src", target: "target", predicate: "pred"});
+                link.data = new Link({source: "ad4m://src", target: "test://target", predicate: "ad4m://pred"});
                 link.proof = new ExpressionProof("sig", "key");
                 const publishPerspective = await ad4mClient.neighbourhood.publishFromPerspective(create.uuid, socialContext.address,
                     new Perspective(
@@ -93,17 +93,17 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 await sleep(1000)
 
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
                 await sleep(1000)
 
-                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 let tries = 1
 
                 while(bobLinks.length < 1 && tries < 60) {
                     console.log("Bob retrying getting links...");
                     await sleep(1000)
-                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                     tries++
                 }
 
@@ -127,17 +127,17 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 await sleep(1000)
 
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'}, 'local')
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'}, 'local')
 
                 await sleep(1000)
 
-                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 let tries = 1
 
                 while(bobLinks.length < 1 && tries < 5) {
                     console.log("Bob retrying getting NOT received links...");
                     await sleep(1000)
-                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                     tries++
                 }
 
@@ -162,7 +162,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 //const linkPromises = []
                 for(let i = 0; i < 1500; i++) {
                     console.log("Alice adding link ", i)
-                    const link = await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: `test://test/${i}`})
+                    const link = await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: `test://test/${i}`})
                     console.log("Link expression:", link)
                 }
                 //await Promise.all(linkPromises)
@@ -170,14 +170,14 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 console.log("wait 15s for initial sync")
                 await sleep(15000)
 
-                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 let tries = 1
                 const maxTries = 180 // 3 minutes with 1 second sleep (increased for fallback sync)
 
                 while(bobLinks.length < 1500 && tries < maxTries) {
                     console.log(`Bob retrying getting links... Got ${bobLinks.length}/1500`);
                     await sleep(1000)
-                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                     tries++
                 }
 
@@ -275,7 +275,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
             //     aliceP1.addSyncStateChangeListener(aliceSyncChangeHandler);
 
-            //     await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
+            //     await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
             //     let bobSyncChangeCalls = 0;
             //     let bobSyncChangeData = null;
@@ -295,12 +295,12 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
             //     //These next assertions are flaky since they depend on holochain not syncing right away, which most of the time is the case
 
-            //     let bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+            //     let bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
             //     let tries = 1
 
             //     while(bobLinks.length < 1 && tries < 300) {
             //         await sleep(1000)
-            //         bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+            //         bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
             //         tries++
             //     }
 
@@ -368,7 +368,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     let link = new LinkExpression()
                     link.author = "did:test";
                     link.timestamp = new Date().toISOString();
-                    link.data = new Link({source: "src", target: "target", predicate: "pred"});
+                    link.data = new Link({source: "ad4m://src", target: "test://target", predicate: "ad4m://pred"});
                     link.proof = new ExpressionProof("sig", "key");
                     link.proof.invalid = true;
                     link.proof.valid = false;

@@ -476,7 +476,7 @@ describe("Multi-User Simple integration tests", () => {
             const p1 = await client1.perspective.add("User 1 Test Perspective");
             // @ts-ignore - Suppress Apollo type mismatch
             const link1 = await client1.perspective.addLink(p1.uuid, {
-                source: "root",
+                source: "ad4m://root",
                 target: "test://target1",
                 predicate: "test://predicate"
             });
@@ -494,7 +494,7 @@ describe("Multi-User Simple integration tests", () => {
             const p2 = await client2.perspective.add("User 2 Test Perspective");
             // @ts-ignore - Suppress Apollo type mismatch
             const link2 = await client2.perspective.addLink(p2.uuid, {
-                source: "root",
+                source: "ad4m://root",
                 target: "test://target2",
                 predicate: "test://predicate"
             });
