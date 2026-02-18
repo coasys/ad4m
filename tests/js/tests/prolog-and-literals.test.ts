@@ -907,14 +907,11 @@ describe("Prolog + Literals", () => {
                     const recipe = new Recipe(perspective!, root)
 
                     const longName = "This is a very long recipe name that goes on and on with many many characters to test that we can handle long property values without any issues whatsoever and keep going even longer to make absolutely sure we hit at least 300 characters in this test string that just keeps getting longer and longer until we are completely satisfied that it works properly with such lengthy content. But wait, there's more! We need to make this string even longer to properly test the system's ability to handle extremely long property values. Let's add some more meaningful content about recipes - ingredients like flour, sugar, eggs, milk, butter, vanilla extract, baking powder, salt, and detailed instructions for mixing them together in just the right way to create the perfect baked goods. We could go on about preheating the oven to the right temperature, greasing the pans properly, checking for doneness with a toothpick, and letting things cool completely before frosting. The possibilities are endless when it comes to recipe details and instructions that could make this string longer and longer. We want to be absolutely certain that our system can handle property values of any reasonable length without truncating or corrupting the data in any way. This is especially important for recipes where precise instructions and ingredient amounts can make the difference between success and failure in the kitchen. Testing with realistically long content helps ensure our system works reliably in real-world usage scenarios where users might enter detailed information that extends well beyond a few simple sentences."
-                    recipe.plain = longName
+                    // Use resolve (resolveLanguage: "literal") to store the long string value.
+                    // The plain property is for storing URI addresses; resolve encodes arbitrary strings.
                     recipe.resolve = longName
 
                     await recipe.save()
-
-                    let linksName = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://plain"}))
-                    expect(linksName.length).to.equal(1)
-                    expect(linksName[0].data.target).to.equal(longName)
 
                     let linksResolve = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://resolve"}))
                     expect(linksResolve.length).to.equal(1)
@@ -923,9 +920,6 @@ describe("Prolog + Literals", () => {
 
                     const recipe2 = new Recipe(perspective!, root)
                     await recipe2.get()
-
-                    expect(recipe2.plain.length).to.equal(longName.length)
-                    expect(recipe2.plain).to.equal(longName)
 
                     expect(recipe2.resolve.length).to.equal(longName.length)
                     expect(recipe2.resolve).to.equal(longName)
@@ -1006,13 +1000,13 @@ describe("Prolog + Literals", () => {
                 it("findAll() returns collections on instances", async () => {
                     let root1 = Literal.from("findAll test 1").toUrl()
                     let root2 = Literal.from("findAll test 2").toUrl()
-                    
+
                     const recipe1 = new Recipe(perspective!, root1)
-                    recipe1.comments = ["Recipe 1: Comment 1", "Recipe 1: Comment 2"];
+                    recipe1.comments = ["recipe://comment/r1/1", "recipe://comment/r1/2"];
                     await recipe1.save();
 
                     const recipe2 = new Recipe(perspective!, root2)
-                    recipe2.comments = ["Recipe 2: Comment 1", "Recipe 2: Comment 2"];
+                    recipe2.comments = ["recipe://comment/r2/1", "recipe://comment/r2/2"];
                     await recipe2.save();
 
                     // Test findAll
@@ -1020,12 +1014,12 @@ describe("Prolog + Literals", () => {
 
                     expect(recipes.length).to.equal(2);
                     expect(recipes[0].comments.length).to.equal(2);
-                    expect(recipes[0].comments).to.include("Recipe 1: Comment 1");
-                    expect(recipes[0].comments).to.include("Recipe 1: Comment 2");
+                    expect(recipes[0].comments).to.include("recipe://comment/r1/1");
+                    expect(recipes[0].comments).to.include("recipe://comment/r1/2");
 
                     expect(recipes[1].comments.length).to.equal(2);
-                    expect(recipes[1].comments).to.include("Recipe 2: Comment 1");
-                    expect(recipes[1].comments).to.include("Recipe 2: Comment 2");
+                    expect(recipes[1].comments).to.include("recipe://comment/r2/1");
+                    expect(recipes[1].comments).to.include("recipe://comment/r2/2");
                 })
 
                 it("findAll() returns author & timestamp on instances", async () => {
@@ -1110,8 +1104,8 @@ describe("Prolog + Literals", () => {
                 it("findAll() works with collections query", async () => {
                     let root = Literal.from("findAll test 1").toUrl()
                     const recipe = new Recipe(perspective!, root);
-                    recipe.comments = ["Recipe 1: Comment 1", "Recipe 1: Comment 2"];
-                    recipe.entries = ["Recipe 1: Entry 1", "Recipe 1: Entry 2"];
+                    recipe.comments = ["recipe://comment/1", "recipe://comment/2"];
+                    recipe.entries = ["recipe://entry/1", "recipe://entry/2"];
                     await recipe.save();
 
                     // Test recipes with all collections
@@ -1501,15 +1495,15 @@ describe("Prolog + Literals", () => {
                     const recipe1 = new Recipe(perspective!);
                     recipe1.name = "Recipe 1";
                     recipe1.booleanTest = true;
-                    recipe1.comments = ["Recipe 1: Comment 1", "Recipe 1: Comment 2"];
-                    recipe1.entries = ["Recipe 1: Entry 1", "Recipe 1: Entry 2"];
+                    recipe1.comments = ["recipe://comment/r1/1", "recipe://comment/r1/2"];
+                    recipe1.entries = ["recipe://entry/r1/1", "recipe://entry/r1/2"];
                     await recipe1.save();
 
                     const recipe2 = new Recipe(perspective!);
                     recipe2.name = "Recipe 2";
                     recipe2.booleanTest = false;
-                    recipe2.comments = ["Recipe 2: Comment 1", "Recipe 2: Comment 2"];
-                    recipe2.entries = ["Recipe 2: Entry 1", "Recipe 2: Entry 2"];
+                    recipe2.comments = ["recipe://comment/r2/1", "recipe://comment/r2/2"];
+                    recipe2.entries = ["recipe://entry/r2/1", "recipe://entry/r2/2"];
                     await recipe2.save();
 
                     // Check all recipes are there
@@ -2286,7 +2280,7 @@ describe("Prolog + Literals", () => {
                     // Create and save multiple models in batch
                     const recipe = new BatchRecipe(perspective!);
                     recipe.name = "Pasta";
-                    recipe.ingredients = ["pasta", "sauce", "cheese"];
+                    recipe.ingredients = ["recipe://ingredient/pasta", "recipe://ingredient/sauce", "recipe://ingredient/cheese"];
                     await recipe.save(batchId);
                     
 
@@ -2311,7 +2305,7 @@ describe("Prolog + Literals", () => {
                     const recipesAfterCommit = await BatchRecipe.findAll(perspective!);
                     expect(recipesAfterCommit.length).to.equal(1);
                     expect(recipesAfterCommit[0].name).to.equal("Pasta");
-                    expect(recipesAfterCommit[0].ingredients).to.have.members(["pasta", "sauce", "cheese"]);
+                    expect(recipesAfterCommit[0].ingredients).to.have.members(["recipe://ingredient/pasta", "recipe://ingredient/sauce", "recipe://ingredient/cheese"]);
 
                     const notesAfterCommit = await BatchNote.findAll(perspective!);
                     expect(notesAfterCommit.length).to.equal(1);
@@ -2320,7 +2314,7 @@ describe("Prolog + Literals", () => {
 
                     // Test updating models in batch
                     const updateBatchId = await perspective!.createBatch();
-                    recipe.ingredients.push("garlic");
+                    recipe.ingredients.push("recipe://ingredient/garlic");
                     await recipe.update(updateBatchId);
 
                     note.content = "Updated: Use fresh ingredients and add garlic";
@@ -2328,7 +2322,7 @@ describe("Prolog + Literals", () => {
 
                     // Verify models haven't changed before commit
                     const recipesBeforeUpdate = await BatchRecipe.findAll(perspective!);
-                    expect(recipesBeforeUpdate[0].ingredients).to.have.members(["pasta", "sauce", "cheese"]);
+                    expect(recipesBeforeUpdate[0].ingredients).to.have.members(["recipe://ingredient/pasta", "recipe://ingredient/sauce", "recipe://ingredient/cheese"]);
 
                     const notesBeforeUpdate = await BatchNote.findAll(perspective!);
                     expect(notesBeforeUpdate[0].content).to.equal("Make sure to use fresh ingredients");
@@ -2340,10 +2334,10 @@ describe("Prolog + Literals", () => {
                     // Verify models are updated
                     const recipesAfterUpdate = await BatchRecipe.findAll(perspective!);
                     expect(recipesAfterUpdate[0].ingredients.length).to.equal(4);
-                    expect(recipesAfterUpdate[0].ingredients.includes("pasta")).to.be.true;
-                    expect(recipesAfterUpdate[0].ingredients.includes("sauce")).to.be.true;
-                    expect(recipesAfterUpdate[0].ingredients.includes("cheese")).to.be.true;
-                    expect(recipesAfterUpdate[0].ingredients.includes("garlic")).to.be.true;
+                    expect(recipesAfterUpdate[0].ingredients.includes("recipe://ingredient/pasta")).to.be.true;
+                    expect(recipesAfterUpdate[0].ingredients.includes("recipe://ingredient/sauce")).to.be.true;
+                    expect(recipesAfterUpdate[0].ingredients.includes("recipe://ingredient/cheese")).to.be.true;
+                    expect(recipesAfterUpdate[0].ingredients.includes("recipe://ingredient/garlic")).to.be.true;
 
                     const notesAfterUpdate = await BatchNote.findAll(perspective!);
                     expect(notesAfterUpdate[0].content).to.equal("Updated: Use fresh ingredients and add garlic");
@@ -3793,9 +3787,9 @@ describe("Prolog + Literals", () => {
                 
                 // Test array/collection handling
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                post1.tags = ["ad4m", "tutorial", "blockchain"]
+                post1.tags = ["tag://ad4m", "tag://tutorial", "tag://blockchain"]
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                post1.categories = ["technology", "development"]
+                post1.categories = ["category://technology", "category://development"]
                 
                 // Test complex object handling (should be stored as JSON)
                 // @ts-ignore - properties are added dynamically from JSON Schema
@@ -3812,9 +3806,9 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 post2.title = "Advanced AD4M Patterns"
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                post2.tags = ["ad4m", "advanced", "patterns"]
+                post2.tags = ["tag://ad4m", "tag://advanced", "tag://patterns"]
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                post2.categories = ["technology"]
+                post2.categories = ["category://technology"]
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 post2.metadata = {
                     created: "2025-09-22T11:00:00Z",
@@ -3835,7 +3829,7 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 expect(tutorialPost!.tags).to.be.an('array')
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                expect(tutorialPost!.tags).to.include.members(["ad4m", "tutorial", "blockchain"])
+                expect(tutorialPost!.tags).to.include.members(["tag://ad4m", "tag://tutorial", "tag://blockchain"])
                 
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 expect(tutorialPost!.metadata).to.be.an('object')
@@ -3904,7 +3898,7 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 person.email = "alice@example.com"
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                person.skills = ["javascript", "typescript", "ad4m"]
+                person.skills = ["skill://javascript", "skill://typescript", "skill://ad4m"]
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 person.profile = {
                     bio: "Software developer passionate about decentralized systems",
@@ -3922,7 +3916,7 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 expect(alice.profile.bio).to.equal("Software developer passionate about decentralized systems")
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                expect(alice.skills).to.include.members(["javascript", "typescript", "ad4m"])
+                expect(alice.skills).to.include.members(["skill://javascript", "skill://typescript", "skill://ad4m"])
             })
         })
     })

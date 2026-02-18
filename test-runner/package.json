@@ -3,6 +3,12 @@
   "description": "Testing library to test ad4m languages",
   "license": "MIT",
   "bin": "./build/cli.js",
+  "files": [
+    "build/",
+    "scripts/",
+    "bootstrapSeed.json",
+    "public/"
+  ],
   "scripts": {
     "build": "tsc",
     "build:util": "browserify build/client.js --standalone Bundle -p esmify > public/client.js",
@@ -30,7 +36,6 @@
     "express": "4.18.2",
     "find-process": "^1.4.7",
     "fs-extra": "^10.0.1",
-    "get-port": "5.1.1",
     "glob": "^7.2.0",
     "graphql": "15.7.2",
     "graphql-ws": "5.12.0",
