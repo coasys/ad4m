@@ -874,18 +874,18 @@ mod tests {
     #[test]
     fn test_extract_namespace() {
         // AD4M-style URIs (scheme://LocalName) -> just scheme://
-        assert_eq!(extract_namespace("recipe://Recipe"), "recipe://");
-        assert_eq!(extract_namespace("simple://Test"), "simple://");
+        assert_eq!(extract_namespace("recipe://Recipe").unwrap(), "recipe://");
+        assert_eq!(extract_namespace("simple://Test").unwrap(), "simple://");
 
         // W3C-style URIs with hash fragments -> include the hash
         assert_eq!(
-            extract_namespace("http://example.com/ns#Recipe"),
+            extract_namespace("http://example.com/ns#Recipe").unwrap(),
             "http://example.com/ns#"
         );
 
         // W3C-style URIs with slash paths -> include trailing slash
         assert_eq!(
-            extract_namespace("http://example.com/ns/Recipe"),
+            extract_namespace("http://example.com/ns/Recipe").unwrap(),
             "http://example.com/ns/"
         );
     }
