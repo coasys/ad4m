@@ -5,6 +5,7 @@ import { ChildProcessWithoutNullStreams, execFileSync, spawn } from "child_proce
 import { ad4mDataDirectory, deleteAllAd4mData, findAndKillProcess, getAd4mHostBinary, logger } from "./utils";
 import kill from 'tree-kill'
 import { buildAd4mClient } from "./client";
+import { transformBundle } from "./bundleTransform";
 
 let seed = {
   trustedAgents: [],
@@ -56,8 +57,12 @@ export async function installSystemLanguages(relativePath = '') {
     let child: ChildProcessWithoutNullStreams;
 
     const languageLanguageBundlePath = path.join(__dirname, 'languages', "languages", "build", "bundle.js");
-        
-    seed['languageLanguageBundle'] = fs.readFileSync(languageLanguageBundlePath).toString();
+
+    // Transform Language Language bundle: CJS→ESM + IPFS patch for Deno compatibility
+    const rawLangLangBundle = fs.readFileSync(languageLanguageBundlePath).toString();
+    const transformedLangLangBundle = transformBundle(rawLangLangBundle, 'Language Language', true);
+    fs.writeFileSync(languageLanguageBundlePath, transformedLangLangBundle);
+    seed['languageLanguageBundle'] = transformedLangLangBundle;
     seed['languageLanguageSettings'] = { storagePath: path.join(__dirname, 'publishedLanguages') }
     seed['neighbourhoodLanguageSettings'] = { storagePath: path.join(__dirname, 'publishedNeighbourhood') }
 
@@ -95,6 +100,11 @@ export async function installSystemLanguages(relativePath = '') {
           const client = await buildAd4mClient(4000);
 
           const bundlePath = path.join(__dirname, 'languages', lang, 'build', 'bundle.js')
+
+          // Transform bundle: CJS→ESM for Deno compatibility
+          const rawBundle = fs.readFileSync(bundlePath).toString();
+          const transformedBundle = transformBundle(rawBundle, lang);
+          fs.writeFileSync(bundlePath, transformedBundle);
 
           const language = await client.languages.publish(bundlePath, languageMeta);
 
