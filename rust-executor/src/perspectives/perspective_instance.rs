@@ -3371,7 +3371,7 @@ impl PerspectiveInstance {
                 Ok(value.to_string())
             }
         } else {
-            Ok(match value {
+            let uri = match value {
                 serde_json::Value::String(s) => {
                     // If the value is already a valid URI (has a scheme), use it directly.
                     // Otherwise wrap it in a literal:// URI so link targets are always valid URIs.
@@ -3384,20 +3384,21 @@ impl PerspectiveInstance {
                     } else {
                         Literal::from_string(s.clone())
                             .to_url()
-                            .expect("Literal::from_string could not be turned into URL")
+                            .map_err(|e| anyhow!("Failed to encode string as literal URI: {}", e))?
                     }
                 }
                 serde_json::Value::Number(n) => {
                     if let Some(f) = n.as_f64() {
                         Literal::from_number(f)
                             .to_url()
-                            .expect("Literal::from_number could not be turned into URL")
+                            .map_err(|e| anyhow!("Failed to encode number as literal URI: {}", e))?
                     } else {
                         value.to_string()
                     }
                 }
                 _ => value.to_string(),
-            })
+            };
+            Ok(uri)
         }
     }
 
