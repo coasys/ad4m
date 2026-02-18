@@ -202,6 +202,27 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         });
     };
 
+    // Check if MCP mode is enabled (for AI agent subprocess mode)
+    if config.enable_mcp == Some(true) {
+        info!("Starting MCP server on stdio (AI agent mode)...");
+        let admin_credential = config.admin_credential.clone();
+
+        return std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .thread_name(String::from("mcp_server"))
+                .enable_all()
+                .build()
+                .unwrap();
+            if let Err(e) = runtime.block_on(mcp::start_mcp_server(
+                js_core_handle,
+                admin_credential,
+                None, // No pre-set auth token
+            )) {
+                error!("MCP server error: {:?}", e);
+            }
+        });
+    }
+
     info!("Starting GraphQL...");
 
     std::thread::spawn(move || {
