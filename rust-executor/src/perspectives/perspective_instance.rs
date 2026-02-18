@@ -3378,7 +3378,7 @@ impl PerspectiveInstance {
                     static URI_SCHEME_RE: std::sync::OnceLock<regex::Regex> =
                         std::sync::OnceLock::new();
                     let re = URI_SCHEME_RE
-                        .get_or_init(|| regex::Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-.]*:").unwrap());
+                        .get_or_init(|| regex::Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-._]*:").unwrap());
                     if re.is_match(s) {
                         s.clone()
                     } else {

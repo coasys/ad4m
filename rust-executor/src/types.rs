@@ -111,12 +111,13 @@ impl Link {
     /// Validates that source and target are non-empty URIs (RFC 3986 scheme present),
     /// and that predicate, if present, is also a valid URI.
     ///
-    /// A valid URI must begin with a scheme: `[a-zA-Z][a-zA-Z0-9+\-.]*:`
-    /// Examples: `did:key:alice`, `expression://Qm...`, `neighbourhood://Qm...`
+    /// A valid URI must begin with a scheme: `[a-zA-Z][a-zA-Z0-9+\-._]*:`
+    /// (underscore is included as a pragmatic extension for schemes like `smart_literal://`)
+    /// Examples: `did:key:alice`, `expression://Qm...`, `smart_literal://content`
     pub fn validate(&self) -> Result<(), AnyError> {
         use std::sync::OnceLock;
         static URI_SCHEME_RE: OnceLock<Regex> = OnceLock::new();
-        let re = URI_SCHEME_RE.get_or_init(|| Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-.]*:").unwrap());
+        let re = URI_SCHEME_RE.get_or_init(|| Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-._]*:").unwrap());
 
         let check = |field: &str, value: &str| -> Result<(), AnyError> {
             if value.is_empty() {
