@@ -3393,7 +3393,9 @@ impl PerspectiveInstance {
                             .to_url()
                             .map_err(|e| anyhow!("Failed to encode number as literal URI: {}", e))?
                     } else {
-                        value.to_string()
+                        Literal::from_string(value.to_string())
+                            .to_url()
+                            .map_err(|e| anyhow!("Failed to encode number as literal URI: {}", e))?
                     }
                 }
                 _ => value.to_string(),
