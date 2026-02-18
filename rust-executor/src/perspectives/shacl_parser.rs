@@ -281,13 +281,13 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
 
     // Create name mapping for class lookup (needed by isSubjectInstance)
     let name_mapping = format!("literal://string:shacl://{}", class_name);
-    
+
     links.push(Link {
         source: "ad4m://self".to_string(),
         predicate: Some("ad4m://has_shacl".to_string()),
         target: name_mapping.clone(),
     });
-    
+
     links.push(Link {
         source: name_mapping,
         predicate: Some("ad4m://shacl_shape_uri".to_string()),
@@ -498,13 +498,13 @@ pub fn parse_prolog_sdna_to_shacl_links(
 
     // Create name mapping for class lookup (needed by isSubjectInstance)
     let name_mapping = format!("literal://string:shacl://{}", class_name);
-    
+
     links.push(Link {
         source: "ad4m://self".to_string(),
         predicate: Some("ad4m://has_shacl".to_string()),
         target: name_mapping.clone(),
     });
-    
+
     links.push(Link {
         source: name_mapping,
         predicate: Some("ad4m://shacl_shape_uri".to_string()),

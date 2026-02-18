@@ -779,7 +779,7 @@ pub fn get_sdna_facts(
                     .and_then(|props| props.get("code"))
                     .map(|code| !code.trim().is_empty())
                     .unwrap_or(false);
-                
+
                 if !has_original_prolog {
                     shape_to_class.insert(shape_uri.clone(), class_name.to_string());
                     class_shapes.insert(class_name.to_string(), shape_uri.clone());
@@ -929,12 +929,12 @@ pub fn get_sdna_facts(
         if shape_has_constructor.contains(shape_uri) {
             lines.push(format!("constructor({}, _).", shape_id));
         }
-        
+
         // Generate instance/2 rule for SHACL-based classes
         // This allows isSubjectInstance queries to work
         // The rule checks if at least one required property/constructor property exists
         let mut instance_conditions = Vec::new();
-        
+
         // Collect predicates from properties that have initial values (constructor properties)
         // or required properties
         if let Some(prop_shapes) = shape_properties.get(shape_uri) {
@@ -945,7 +945,9 @@ pub fn get_sdna_facts(
                     // Get the path (predicate) for this property
                     for link_expression in all_links {
                         let link = &link_expression.data;
-                        if link.predicate == Some("sh://path".to_string()) && &link.source == prop_shape {
+                        if link.predicate == Some("sh://path".to_string())
+                            && &link.source == prop_shape
+                        {
                             let predicate = &link.target;
                             instance_conditions.push(format!("triple(Base, \"{}\", _)", predicate));
                             break;
@@ -954,12 +956,15 @@ pub fn get_sdna_facts(
                 }
             }
         }
-        
+
         // If we have conditions, create an instance rule with OR logic
         if !instance_conditions.is_empty() {
             // Use OR (;) to check if ANY of the properties exist
             let condition_str = instance_conditions.join("; ");
-            lines.push(format!("instance({}, Base) :- {}.", shape_id, condition_str));
+            lines.push(format!(
+                "instance({}, Base) :- {}.",
+                shape_id, condition_str
+            ));
         } else {
             // No properties found - generate a permissive rule that matches any base
             // This allows classes with only collections to work
