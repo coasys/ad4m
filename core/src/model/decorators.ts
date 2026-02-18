@@ -115,8 +115,8 @@ export function InstanceQuery(options?: InstanceQueryParams) {
             }
 
             // Fallback to SurrealDB (SdnaOnly mode)
-            // Get all instances first
-            let allInstances = await perspective.getAllSubjectInstances(subjectClassName)
+            // Get all instances first - pass the class constructor, not just the name
+            let allInstances = await perspective.getAllSubjectInstances(target)
 
             // Filter by where clause if provided
             if(options && options.where) {
@@ -743,9 +743,9 @@ export function ModelOptions(opts: ModelOptionsOptions) {
                         target: "value",
                         ...(local && { local: true })
                     }]
-                    collectionCode += `collection_adder(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionAdderAction)}').\n`
-                    collectionCode += `collection_remover(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionRemoverAction)}').\n`
-                    collectionCode += `collection_setter(${uuid}, "${singularToPlural(collection)}", '${stringifyObjectLiteral(collectionSetterAction)}').\n`
+                    collectionCode += `collection_adder(${uuid}, "${collection}", '${stringifyObjectLiteral(collectionAdderAction)}').\n`
+                    collectionCode += `collection_remover(${uuid}, "${collection}", '${stringifyObjectLiteral(collectionRemoverAction)}').\n`
+                    collectionCode += `collection_setter(${uuid}, "${collection}", '${stringifyObjectLiteral(collectionSetterAction)}').\n`
                 }
 
                 collectionsCode.push(collectionCode)

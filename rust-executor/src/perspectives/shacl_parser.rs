@@ -279,6 +279,21 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
     let namespace = extract_namespace(&shape.target_class)?;
     let shape_uri = format!("{}{}Shape", namespace, class_name);
 
+    // Create name mapping for class lookup (needed by isSubjectInstance)
+    let name_mapping = format!("literal://string:shacl://{}", class_name);
+    
+    links.push(Link {
+        source: "ad4m://self".to_string(),
+        predicate: Some("ad4m://has_shacl".to_string()),
+        target: name_mapping.clone(),
+    });
+    
+    links.push(Link {
+        source: name_mapping,
+        predicate: Some("ad4m://shacl_shape_uri".to_string()),
+        target: shape_uri.clone(),
+    });
+
     // Class definition links
     // Note: The ad4m://has_subject_class link is created by add_sdna(), not here,
     // to avoid duplication since add_sdna() always creates that link
@@ -480,6 +495,21 @@ pub fn parse_prolog_sdna_to_shacl_links(
 
     let target_class = format!("{}{}", namespace, class_name);
     let shape_uri = format!("{}{}Shape", namespace, class_name);
+
+    // Create name mapping for class lookup (needed by isSubjectInstance)
+    let name_mapping = format!("literal://string:shacl://{}", class_name);
+    
+    links.push(Link {
+        source: "ad4m://self".to_string(),
+        predicate: Some("ad4m://has_shacl".to_string()),
+        target: name_mapping.clone(),
+    });
+    
+    links.push(Link {
+        source: name_mapping,
+        predicate: Some("ad4m://shacl_shape_uri".to_string()),
+        target: shape_uri.clone(),
+    });
 
     // Basic class definition links
     links.push(Link {

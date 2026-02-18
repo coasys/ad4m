@@ -14,9 +14,6 @@ property_resolve_language(c, "title", "literal").
 property_getter(c, Base, "title", Value) :- triple(Base, "todo://has_title", Value).
 property_setter(c, "title", '[{action: "setSingleTarget", source: "this", predicate: "todo://has_title", target: "value"}]').
 
-property(c, "isLiked").
-property_getter(c, Base, "isLiked", Value) :- triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true.
-
 collection(c, "comments").
 collection_getter(c, Base, "comments", List) :- findall(C, triple(Base, "todo://comment", C), List).
 collection_adder(c, "comments", '[{action: "addLink", source: "this", predicate: "todo://comment", target: "value"}]').
@@ -34,9 +31,3 @@ collection_getter(c, Base, "messages", List) :- setof(Target, (triple(Base, "flu
 collection_adder(c, "messages", '[{action: "addLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
 collection_remover(c, "messages", '[{action: "removeLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
 collection_setter(c, "messages", '[{action: "collectionSetter", source: "this", predicate: "flux://entry_type", target: "value"}]').
-
-collection(c, "likedMessages").
-collection_getter(c, Base, "likedMessages", List) :- setof(Target, (triple(Base, "flux://entry_type", Target), triple(Target, "flux://has_reaction", "flux://thumbsup")), List).
-collection_adder(c, "likedMessages", '[{action: "addLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
-collection_remover(c, "likedMessages", '[{action: "removeLink", source: "this", predicate: "flux://entry_type", target: "value"}]').
-collection_setter(c, "likedMessages", '[{action: "collectionSetter", source: "this", predicate: "flux://entry_type", target: "value"}]').

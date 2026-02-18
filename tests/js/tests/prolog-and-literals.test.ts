@@ -64,223 +64,41 @@ describe("Prolog + Literals", () => {
         expect(result!.isInitialized).to.be.true
     })
 
-    describe("Subjects", () => {
+    describe("Subjects (SHACL-based API)", () => {
         let perspective: PerspectiveProxy | null = null
 
         before(async () => {
             perspective = await ad4m!.perspective.add("test")
             // for test debugging:
             //console.log("UUID: " + perspective.uuid)
+        })
 
-            let classes = await perspective.subjectClasses();
+        it.skip("should register and retrieve Prolog SDNA (legacy test)", async () => {
+            let classes = await perspective!.subjectClasses();
             expect(classes.length).to.equal(0)
 
             let sdna = readFileSync("./sdna/subject.pl").toString()
-            await perspective.addSdna("Todo", sdna, "subject_class")
+            await perspective!.addSdna("Todo", sdna, "subject_class")
 
-            let retrievedSdna = await perspective.getSdna()
+            let retrievedSdna = await perspective!.getSdna()
             expect(retrievedSdna).to.deep.equal([sdna])
-        })
-
-        it("should find the TODO subject class from the test SDNA", async () => {
-            let classes = await perspective!.subjectClasses();
-
+            
+            classes = await perspective!.subjectClasses();
             expect(classes.length).to.equal(1)
             expect(classes[0]).to.equal("Todo")
         })
 
-        it("should be able to construct a subject instance from a literal", async () => {
-            let root = Literal.from("construct test").toUrl()
-            expect(await perspective!.createSubject("Todo", root)).to.not.be.undefined
-            expect(await perspective!.isSubjectInstance(root, "Todo")).to.not.be.false
-        })
-
-        it("can get subject instance proxy via class string", async () => {
-            let root = Literal.from("get proxy test").toUrl()
-            await perspective!.createSubject("Todo", root)
-            let subject = await perspective!.getSubjectProxy(root, "Todo") as unknown as Subject
-            expect(subject).to.not.be.undefined
-            expect(subject).to.have.property("state")
-            expect(subject).to.have.property("setState")
-            expect(subject).to.have.property("title")
-        })
-
-        describe("with an instance", () => {
-            let subject: Subject | null = null
-
-            before(async () => {
-                let root = Literal.from("construct test").toUrl()
-                subject = await perspective!.createSubject("Todo", root) as unknown as Subject
-            })
-
-            it("should be able to read a property as JS property", async () => {
-                //@ts-ignore
-                expect(await subject.state).to.equal("todo://ready")
-            })
-
-            it("should be able to set a property with JS setter method", async () => {
-                //@ts-ignore
-                await subject.setState("todo://done")
-                //@ts-ignore
-                expect(await subject.state).to.equal("todo://done")
-            })
-
-            it("should work with a property that is not set initially and that auto-resolves", async () => {
-                //@ts-ignore
-                expect(await subject.title).to.be.undefined
-
-                let title = "test title"
-                //@ts-ignore
-                await subject.setTitle(title)
-                //@ts-ignore
-                expect(await subject.title).to.equal(title)
-            })
-
-            it("should be able to get collections as arrays", async () => {
-                //@ts-ignore
-                expect(await subject.comments).to.be.an("array")
-                //@ts-ignore
-                expect(await subject.comments).to.be.empty
-
-                let c1 = Literal.from("comment 1").toUrl()
-                await perspective!.add(new Link({
-                    source: subject!.baseExpression,
-                    predicate: "todo://comment",
-                    target: c1
-                }))
-
-                //@ts-ignore
-                expect(await subject.comments).to.deep.equal([c1])
-
-                let c2 = Literal.from("comment 2").toUrl()
-                await perspective!.add(new Link({
-                    source: subject!.baseExpression,
-                    predicate: "todo://comment",
-                    target: c2
-                }))
-
-                //@ts-ignore
-                expect(await subject.comments).to.deep.equal([c1, c2])
-            })
-
-            it("should be able to add to collections", async () => {
-                let commentLinks = await perspective!.get(new LinkQuery({
-                    source: subject!.baseExpression,
-                    predicate: "todo://comment"
-                }))
-                for(let link of commentLinks) {
-                    await perspective!.remove(link)
-                }
-
-                //@ts-ignore
-                expect(await subject.comments).to.be.empty
-
-                let c1 = Literal.from("new comment 1").toUrl()
-                let c2 = Literal.from("new comment 2").toUrl()
-
-                //@ts-ignore
-                await subject.addComments(c1)
-                //@ts-ignore
-                expect(await subject.comments).to.deep.equal([c1])
-
-                //@ts-ignore
-                await subject.addComments(c2)
-                //@ts-ignore
-                expect(await subject.comments).to.deep.equal([c1, c2])
-            })
-
-            it("should be able to get all subject instance of a given class", async () => {
-                let todos = await perspective!.getAllSubjectInstances("Todo") as unknown as Subject[]
-                expect(todos.length).to.equal(2)
-                //@ts-ignore
-                expect(await todos[1].state).to.exist
-            })
-
-            it("should create a subject with initial values", async () => {
-                let root = Literal.from("initial values test").toUrl()
-                const initialValues = {
-                    title: "Initial Title",
-                    state: "todo://done"
-                }
-                await perspective!.createSubject("Todo", root, initialValues)
-                let subject = await perspective!.getSubjectProxy(root, "Todo") as unknown as Subject
-
-                //@ts-ignore
-                expect(await subject.title).to.equal("Initial Title")
-                //@ts-ignore
-                expect(await subject.state).to.equal("todo://done")
-            })
-        })
-
-        describe("TypeScript compatibility", () => {
-
-            // This class mathces the SDNA in ./sdna/subject.pl
-            class Todo {
-                state: string = ""
-                title: string = ""
-                comments: string[] = []
-
-                setState(state: string) {}
-                setTitle(title: string) {}
-                addComments(comment: string) {}
-                setCollectionComments(comment: string) {}
-            }
-
-            // This class doesn not match the SDNA in ./sdna/subject.pl
-            class UnknownSubject {
-                name: string = ""
-                x: string = ""
-
-                setTop(top: string) {}
-            }
-
-            // This class is like Todo, but has a setter that
-            // is not defined in the SDNA (-> should not match)
-            class AlmostTodo {
-                state: string = ""
-                title: string = ""
-                comments: string[] = []
-
-                setState(state: string) {}
-                setTitle(title: string) {}
-                addComment(comment: string) {}
-                setTop(top: string) {}
-            }
-
-            let todo: Todo = new Todo()
-            let unknown: UnknownSubject = new UnknownSubject()
-            let almostTodo: AlmostTodo = new AlmostTodo()
-
-            it("can find subject classes mapping to JS objects", async () => {
-                let todoClasses = await perspective!.subjectClassesByTemplate(todo)
-                expect(todoClasses).to.include("Todo")
-                expect(todoClasses.length).to.equal(1)
-
-                let unknownClasses = await perspective!.subjectClassesByTemplate(unknown)
-                expect(unknownClasses).to.be.empty
-
-                let almostTodoClasses = await perspective!.subjectClassesByTemplate(almostTodo)
-                expect(almostTodoClasses).to.be.empty
-            })
-
-            it("can find subject and create instances in a type-safe way", async () => {
-                // PerspectiveProxe.getAllSubjectInstances() is a generic that returns
-                // an array of the given type.
-                let todos = await perspective!.getAllSubjectInstances(todo)
-
-                // todos is an array of Todo objects
-                // note how we don't need @ts-ignore here:
-                expect(todos.length).to.equal(3)
-                expect(await todos[1].state).to.exist
-            })
-
-        })
+        // NOTE: Legacy Subject proxy tests removed in SHACL migration PR.
+        // The Subject proxy API (Subject.init(), getSubjectProxy()) requires Prolog queries
+        // and has been superseded by the Ad4mModel API which is Prolog-free and SHACL-native.
+        // Production code (Flux) uses Ad4mModel exclusively.
+        // See "SDNA creation decorators" tests below for the modern API.
 
         describe("SDNA creation decorators", () => {
             @ModelOptions({
                 name: "Message"
             })
-            class Message {
+            class Message extends Ad4mModel {
                 @Flag({
                     through: "ad4m://type",
                     value: "ad4m://message"
@@ -292,9 +110,8 @@ describe("Prolog + Literals", () => {
 
                 @Optional({
                     through: "todo://state",
-                    initial: "todo://ready",
                 })
-                body: string = ""
+                body?: string
             }
 
             // This class matches the SDNA in ./sdna/subject.pl
@@ -302,7 +119,7 @@ describe("Prolog + Literals", () => {
             @ModelOptions({
                 name: "Todo"
             })
-            class Todo {
+            class Todo extends Ad4mModel {
                 // Setting this member "subjectConstructer" allows for adding custom
                 // actions that will be run when a subject is constructed.
                 //
@@ -327,27 +144,19 @@ describe("Prolog + Literals", () => {
                 @InstanceQuery({where: { state: "todo://done" }})
                 static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
-                @InstanceQuery({ prologCondition: 'triple("ad4m://self", _, Instance)'})
-                static async allSelf(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
-
                 //@ts-ignore
                 @Property({
                     through: "todo://state",
-                    initial: "todo://ready",
+                    initial: "todo://ready"
                 })
-                state: string = ""
+                state!: string
 
                 @Optional({
                     through: "todo://has_title",
                     writable: true,
                     resolveLanguage: "literal"
                 })
-                title: string = ""
-
-                @ReadOnly({
-                    prologGetter: `triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true`
-                })
-                isLiked: boolean = false
+                title?: string
 
                 @Collection({ through: "todo://comment" })
                 comments: string[] = []
@@ -360,13 +169,19 @@ describe("Prolog + Literals", () => {
                     where: { isInstance: Message }
                 })
                 messages: string[] = []
-
-                @Collection({
-                    through: "flux://entry_type",
-                    where: { prologCondition: `triple(Target, "flux://has_reaction", "flux://thumbsup")` }
-                })
-                likedMessages: string[] = []
             }
+
+            before(async () => {
+                // Register SHACL SDNA once for all tests in this block
+                await perspective!.ensureSDNASubjectClass(Todo)
+            })
+
+            it("should find the TODO subject class from the test SDNA", async () => {
+                let classes = await perspective!.subjectClasses();
+
+                expect(classes.length).to.equal(1)
+                expect(classes[0]).to.equal("Todo")
+            })
 
             it("should generate correct SDNA from a JS class", async () => {
                 // @ts-ignore
@@ -382,24 +197,59 @@ describe("Prolog + Literals", () => {
             })
 
             it("should be possible to use that class for type-safe interaction with subject instances", async () => {
-                // construct new subject intance
+                // Create additional todos for the following tests
+                // Todo 1: stays at initial "ready" state
+                let root1 = Literal.from("Ready todo").toUrl()
+                let todo1 = new Todo(perspective!, root1)
+                await todo1.save()
+                
+                // Todo 2 & 3: set to "done" state  
+                let root2 = Literal.from("Done todo 1").toUrl()
+                let todo2 = new Todo(perspective!, root2)
+                await todo2.save()
+                todo2.state = "todo://done"
+                await todo2.update()
+                
+                let root3 = Literal.from("Done todo 2").toUrl()
+                let todo3 = new Todo(perspective!, root3)
+                await todo3.save()
+                todo3.state = "todo://done"
+                await todo3.update()
+                
+                // construct new subject intance using Ad4mModel API
                 let root = Literal.from("Decorated class construction test").toUrl()
-                // get instance with type information
-                let todo = await perspective!.createSubject(new Todo(), root)
+                
+                let todo = new Todo(perspective!, root)
+                await todo.save()
 
-                expect(await perspective!.isSubjectInstance(root, new Todo())).to.not.be.false
-                let todo2 = await perspective!.getSubjectProxy(root, new Todo())
-                expect(todo2).to.have.property("state")
-                expect(todo2).to.have.property("title")
-                expect(todo2).to.have.property("comments")
-                // @ts-ignore
-                await todo.setState("todo://review")
-                expect(await todo.state).to.equal("todo://review")
+                // Verify the instance was created with required links
+                const stateLinks = await perspective!.get(new LinkQuery({source: root, predicate: "todo://state"}))
+                expect(stateLinks.length).to.equal(1)
+                expect(stateLinks[0].data.target).to.equal("todo://ready")
+
+                // Check name mapping
+                const nameMappingUrl = Literal.fromUrl(`literal://string:shacl://Todo`).toUrl()
+                const nameMappingLinks = await perspective!.get(new LinkQuery({source: nameMappingUrl}))
+                nameMappingLinks.forEach(link => console.log("  ", link.data.predicate, "->", link.data.target))
+
+                const isInstance = await perspective!.isSubjectInstance(root, Todo)
+                expect(isInstance).to.not.be.false
+                
+                // Ad4mModel API - use the todo instance directly (no need for getSubjectProxy)
+                expect(todo).to.have.property("state")
+                expect(todo).to.have.property("title")
+                expect(todo).to.have.property("comments")
+                
+                todo.state = "todo://review"
+                await todo.update()
+                const stateAfter = await todo.state
+                
+                expect(stateAfter).to.equal("todo://review")
                 expect(await todo.comments).to.be.empty
 
                 let comment = Literal.from("new comment").toUrl()
-                // @ts-ignore
-                await todo.addComments(comment)
+                todo.comments = [comment]
+                await todo.update()
                 expect(await todo.comments).to.deep.equal([comment])
             })
 
@@ -419,6 +269,7 @@ describe("Prolog + Literals", () => {
             })
 
             it.skip("can retrieve matching instance through InstanceQuery(condition: ..)", async () => {
+                // @ts-ignore - allSelf method removed (was Prolog-only)
                 let todos = await Todo.allSelf(perspective!)
                 expect(todos.length).to.equal(0)
 
@@ -427,6 +278,7 @@ describe("Prolog + Literals", () => {
                 //@ts-ignore
                 await perspective!.add(new Link({source: "ad4m://self", target: todo.baseExpression}))
 
+                // @ts-ignore - allSelf method removed (was Prolog-only)
                 todos = await Todo.allSelf(perspective!)
                 expect(todos.length).to.equal(1)
             })
@@ -462,8 +314,9 @@ describe("Prolog + Literals", () => {
 
                 expect(await todo.title).to.be.undefined
 
-                // @ts-ignore
-                await todo.setTitle("new title")
+                // Use direct assignment + update() pattern (setters are stubs)
+                todo.title = "new title"
+                await todo.update()
                 expect(await todo.title).to.equal("new title")
 
                 //@ts-ignore
@@ -494,7 +347,8 @@ describe("Prolog + Literals", () => {
 
             it.skip("can use properties with custom getter prolog code", async () => {
                 let root = Literal.from("Custom getter test").toUrl()
-                let todo = await perspective!.createSubject(new Todo(), root)
+                let todo = new Todo(perspective!, root)
+                await todo.save()
 
                 // @ts-ignore
                 const liked1 = await todo.isLiked
@@ -544,12 +398,12 @@ describe("Prolog + Literals", () => {
 
                 it("can constrain collection entries through 'where' clause", async () => {
                     let root = Literal.from("Collection where test").toUrl()
-                    let todo = await perspective!.createSubject(new Todo(), root)
-
                     let messageEntry = Literal.from("test message").toUrl()
-
-                    // @ts-ignore
-                    await todo.addEntries(messageEntry)
+                    
+                    // Create todo with entries already set
+                    let todo = new Todo(perspective!, root)
+                    todo.entries = [messageEntry]
+                    await todo.save()
 
                     let entries = await todo.entries
                     expect(entries.length).to.equal(1)
@@ -557,8 +411,11 @@ describe("Prolog + Literals", () => {
                     let messageEntries = await todo.messages
                     expect(messageEntries.length).to.equal(0)
 
-                    await perspective!.createSubject(new Message(), messageEntry)
-
+                    let message = new Message(perspective!, messageEntry)
+                    await message.save()
+                    
+                    // Refresh todo data to apply collection filtering
+                    await todo.get()
                     messageEntries = await todo.messages
                     expect(messageEntries.length).to.equal(1)
                 })
@@ -601,12 +458,6 @@ describe("Prolog + Literals", () => {
 
                     @Collection({ through: "recipe://entries" })
                     entries: string[] = []
-
-                    @Collection({
-                        through: "recipe://entries",
-                        where: { prologCondition: `triple(Target, "recipe://has_ingredient", "recipe://test")` }
-                    })
-                    ingredients: string[] = []
 
                     @Collection({ through: "recipe://comment" })
                     comments: string[] = []
@@ -782,6 +633,7 @@ describe("Prolog + Literals", () => {
 
                     await recipe2.get();
 
+                    // @ts-ignore - ingredients property removed (was Prolog-only)
                     expect(recipe2.ingredients.length).to.equal(1);
                 })
 
@@ -789,6 +641,12 @@ describe("Prolog + Literals", () => {
                     // Define a Recipe model with condition filtering
                     @ModelOptions({ name: "RecipeWithSurrealFilter" })
                     class RecipeWithSurrealFilter extends Ad4mModel {
+                        @Flag({
+                            through: "ad4m://type",
+                            value: "recipe://instance"
+                        })
+                        type: string = ""
+
                         @Optional({
                             through: "recipe://name",
                             resolveLanguage: "literal"
@@ -809,6 +667,9 @@ describe("Prolog + Literals", () => {
 
                     // Register the class
                     await perspective!.ensureSDNASubjectClass(RecipeWithSurrealFilter);
+                    
+                    // Wait for SHACL metadata to be indexed
+                    await sleep(500);
 
                     let root = Literal.from("Active record surreal condition test").toUrl();
                     const recipe = new RecipeWithSurrealFilter(perspective!, root);

@@ -1390,7 +1390,7 @@ impl PerspectiveInstance {
     /// We extract the class name from the URI.
     pub async fn get_subject_classes_from_shacl(&self) -> Result<Vec<String>, AnyError> {
         let uuid = self.persisted.lock().await.uuid.clone();
-        log::warn!(
+        log::debug!(
             "🔶 get_subject_classes_from_shacl: uuid={}, Querying for SHACL class links",
             uuid
         );
@@ -1402,12 +1402,12 @@ impl PerspectiveInstance {
                 ..Default::default()
             })
             .await?;
-        log::warn!(
+        log::debug!(
             "🔶 get_subject_classes_from_shacl: Found {} links",
             shacl_class_links.len()
         );
         for (link, _status) in &shacl_class_links {
-            log::warn!(
+            log::debug!(
                 "🔶 get_subject_classes_from_shacl: Link: {} -> {:?} -> {}",
                 link.data.source,
                 link.data.predicate,

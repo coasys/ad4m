@@ -2355,9 +2355,12 @@ WHERE ${whereConditions.join(' AND ')}
       }
     }
 
+    // Get the class name instead of passing the instance to avoid Prolog query generation
+    const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
+
     // Create the subject with the initial values
     await this.perspective.createSubject(
-      this,
+      className,
       this.#baseExpression,
       initialValues,
       batchId

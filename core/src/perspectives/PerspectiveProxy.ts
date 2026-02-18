@@ -1578,36 +1578,9 @@ export class PerspectiveProxy {
             const properties = new Map<string, { predicate: string, resolveLanguage?: string }>();
             const collections = new Map<string, { predicate: string, instanceFilter?: string }>();
             
-            // Get constructor actions from SHACL shape
-            const constructorLinks = await this.get(new LinkQuery({
-                source: shapeUri,
-                predicate: "ad4m://constructor"
-            }));
-            
-            if (constructorLinks.length > 0) {
-                const constructorTarget = constructorLinks[0].data.target;
-                // Parse constructor actions from literal://string:[{...}]
-                if (constructorTarget && constructorTarget.startsWith('literal://string:')) {
-                    try {
-                        const actionsJson = constructorTarget.substring('literal://string:'.length);
-                        const actions = JSON.parse(actionsJson);
-                        for (const action of actions) {
-                            if (action.predicate) {
-                                requiredPredicates.push(action.predicate);
-                                if (action.target && action.target !== 'value') {
-                                    requiredTriples.push({ predicate: action.predicate, target: action.target });
-                                } else {
-                                    requiredTriples.push({ predicate: action.predicate });
-                                }
-                            }
-                        }
-                    } catch (e) {
-                        console.warn(`Failed to parse constructor actions for ${className}:`, e);
-                    }
-                }
-            }
-            
-            // Get all property shapes
+            // Get all property shapes FIRST to know which predicates are from properties vs flags
+            const propertyPredicates = new Set<string>();
+            const writablePredicates = new Set<string>(); // Track which predicates are writable
             const propertyLinks = await this.get(new LinkQuery({
                 source: shapeUri,
                 predicate: "sh://property"
@@ -1628,6 +1601,7 @@ export class PerspectiveProxy {
                 let predicate: string | undefined;
                 let resolveLanguage: string | undefined;
                 let isCollection = false;
+                let isWritable = false;
                 
                 for (const detail of propDetailLinks) {
                     if (detail.data.predicate === 'sh://path') {
@@ -1636,14 +1610,55 @@ export class PerspectiveProxy {
                         resolveLanguage = detail.data.target?.replace('literal://string:', '');
                     } else if (detail.data.predicate === 'rdf://type' && detail.data.target === 'ad4m://Collection') {
                         isCollection = true;
+                    } else if (detail.data.predicate === 'ad4m://writable' && detail.data.target === 'literal://true') {
+                        isWritable = true;
                     }
                 }
                 
                 if (predicate) {
+                    propertyPredicates.add(predicate); // Track predicates that come from properties
+                    if (isWritable) {
+                        writablePredicates.add(predicate); // Track which are writable
+                    }
                     if (isCollection) {
                         collections.set(propName, { predicate });
                     } else {
                         properties.set(propName, { predicate, resolveLanguage });
+                    }
+                }
+            }
+            
+            // Get constructor actions from SHACL shape
+            const constructorLinks = await this.get(new LinkQuery({
+                source: shapeUri,
+                predicate: "ad4m://constructor"
+            }));
+            
+            if (constructorLinks.length > 0) {
+                const constructorTarget = constructorLinks[0].data.target;
+                // Parse constructor actions from literal://string:[{...}]
+                if (constructorTarget && constructorTarget.startsWith('literal://string:')) {
+                    try {
+                        const actionsJson = constructorTarget.substring('literal://string:'.length);
+                        const actions = JSON.parse(actionsJson);
+                        for (const action of actions) {
+                            if (action.predicate) {
+                                requiredPredicates.push(action.predicate);
+                                // Flags: fixed target value + in propertyPredicates + NOT writable -> require exact match
+                                // Properties with initial: has target + in propertyPredicates + IS writable -> any value OK
+                                // Other: not in propertyPredicates -> require exact match if has target
+                                const isWritableProperty = writablePredicates.has(action.predicate);
+                                if (action.target && action.target !== 'value' && !isWritableProperty) {
+                                    // Either a flag (not writable) or not a property at all - require exact target
+                                    requiredTriples.push({ predicate: action.predicate, target: action.target });
+                                } else {
+                                    // Writable property with initial value - just require predicate exists
+                                    requiredTriples.push({ predicate: action.predicate });
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        console.warn(`Failed to parse constructor actions for ${className}:`, e);
                     }
                 }
             }
@@ -1889,8 +1904,13 @@ export class PerspectiveProxy {
      */
     async getAllSubjectInstances<T>(subjectClass: T): Promise<T[]> {
         let classes = []
+        let isClassConstructor = typeof subjectClass === "function"
         if(typeof subjectClass === "string") {
             classes = [subjectClass]
+        } else if (isClassConstructor) {
+            // It's an Ad4mModel class constructor
+            //@ts-ignore
+            classes = [subjectClass.name]
         } else {
             classes = await this.subjectClassesByTemplate(subjectClass as object)
         }
@@ -1909,9 +1929,19 @@ export class PerspectiveProxy {
                 for (const result of results || []) {
                     //console.log(`getAllSubjectInstances: Creating subject for base ${result.base}`);
                     try {
-                        let subject = new Subject(this, result.base, className);
-                        await subject.init();
-                        instances.push(subject as unknown as T);
+                        let instance;
+                        if (isClassConstructor) {
+                            // Create an instance of the actual Ad4mModel class
+                            //@ts-ignore
+                            instance = new subjectClass(this, result.base);
+                            // Load the instance data from links
+                            await instance.get();
+                        } else {
+                            // Legacy: Create a Subject proxy
+                            instance = new Subject(this, result.base, className);
+                            await instance.init();
+                        }
+                        instances.push(instance as unknown as T);
                         //console.log(`getAllSubjectInstances: Successfully created subject for ${result.base}`);
                     } catch (e) {
                         //console.warn(`Failed to create subject for ${result.base}:`, e);
