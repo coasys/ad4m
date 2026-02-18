@@ -2994,20 +2994,21 @@ impl PerspectiveInstance {
                 }
             }
 
-            // Check if the main agent is the recipient
+            // Check if the main agent is the recipient.
+            // Treat owners=None or owners=[] as implicit main-agent ownership (legacy perspectives).
             let main_agent_did = AgentService::with_global_instance(|s| s.did.clone());
             if let Some(main_agent_did) = main_agent_did {
                 if main_agent_did == remote_agent_did {
-                    if let Some(owners) = &current_perspective_handle.owners {
-                        if owners.contains(&remote_agent_did) {
-                            log::debug!(
-                                "Routing signal locally to main agent in neighbourhood {:?}",
-                                current_perspective_handle.shared_url
-                            );
-                            let handle = self.persisted.lock().await.clone();
-                            publish_local(handle, payload, remote_agent_did).await;
-                            return Ok(());
-                        }
+                    let is_owner = current_perspective_handle.owners.as_ref()
+                        .map_or(true, |o| o.is_empty() || o.contains(&remote_agent_did));
+                    if is_owner {
+                        log::debug!(
+                            "Routing signal locally to main agent in neighbourhood {:?}",
+                            current_perspective_handle.shared_url
+                        );
+                        let handle = self.persisted.lock().await.clone();
+                        publish_local(handle, payload, remote_agent_did).await;
+                        return Ok(());
                     }
                 }
             }
