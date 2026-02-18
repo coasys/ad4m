@@ -3085,7 +3085,9 @@ impl PerspectiveInstance {
             if let Some(main_agent_did) = main_agent_did {
                 let is_owner = current_perspective_handle.owners.as_ref()
                     .map_or(true, |o| o.is_empty() || o.contains(&main_agent_did));
-                if is_owner {
+                // Don't echo the broadcast back to the sender (loopback is handled separately).
+                let is_sender = payload.author == main_agent_did;
+                if is_owner && !is_sender {
                     let handle = self.persisted.lock().await.clone();
                     let mut signal = payload.clone();
                     signal.verify_signatures();
