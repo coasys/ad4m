@@ -3050,8 +3050,8 @@ impl PerspectiveInstance {
 
         // Route signals to all local agents (managed users + main agent) who are owners
         if current_perspective_handle.shared_url.is_some() {
+            // Send to each local managed email user who is an explicit owner
             if let Some(owners) = &current_perspective_handle.owners {
-                // Send to each local managed email user who is an owner
                 if let Ok(user_emails) = AgentService::list_user_emails() {
                     for user_email in user_emails {
                         if let Ok(user_did) = AgentService::get_user_did_by_email(&user_email) {
@@ -3076,34 +3076,37 @@ impl PerspectiveInstance {
                         }
                     }
                 }
+            }
 
-                // Also send to the main agent if it is an owner.
-                // The main agent is not in list_user_emails(), so it must be handled separately.
-                let main_agent_did = AgentService::with_global_instance(|s| s.did.clone());
-                if let Some(main_agent_did) = main_agent_did {
-                    if owners.contains(&main_agent_did) {
-                        let handle = self.persisted.lock().await.clone();
-                        let mut signal = payload.clone();
-                        signal.verify_signatures();
+            // Send to the main agent if it is an owner.
+            // The main agent is not in list_user_emails(), so it must be handled separately.
+            // Treat owners=None or owners=[] as implicit main-agent ownership (legacy perspectives).
+            let main_agent_did = AgentService::with_global_instance(|s| s.did.clone());
+            if let Some(main_agent_did) = main_agent_did {
+                let is_owner = current_perspective_handle.owners.as_ref()
+                    .map_or(true, |o| o.is_empty() || o.contains(&main_agent_did));
+                if is_owner {
+                    let handle = self.persisted.lock().await.clone();
+                    let mut signal = payload.clone();
+                    signal.verify_signatures();
 
-                        log::debug!(
-                            "Broadcasting signal locally to main agent in neighbourhood {:?}",
-                            current_perspective_handle.shared_url
-                        );
+                    log::debug!(
+                        "Broadcasting signal locally to main agent in neighbourhood {:?}",
+                        current_perspective_handle.shared_url
+                    );
 
-                        get_global_pubsub()
-                            .await
-                            .publish(
-                                &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                                &serde_json::to_string(&NeighbourhoodSignalFilter {
-                                    perspective: handle,
-                                    signal,
-                                    recipient: Some(main_agent_did),
-                                })
-                                .unwrap(),
-                            )
-                            .await;
-                    }
+                    get_global_pubsub()
+                        .await
+                        .publish(
+                            &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                            &serde_json::to_string(&NeighbourhoodSignalFilter {
+                                perspective: handle,
+                                signal,
+                                recipient: Some(main_agent_did),
+                            })
+                            .unwrap(),
+                        )
+                        .await;
                 }
             }
         }
