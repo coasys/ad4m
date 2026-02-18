@@ -2999,7 +2999,9 @@ impl PerspectiveInstance {
             let main_agent_did = AgentService::with_global_instance(|s| s.did.clone());
             if let Some(main_agent_did) = main_agent_did {
                 if main_agent_did == remote_agent_did {
-                    let is_owner = current_perspective_handle.owners.as_ref()
+                    let is_owner = current_perspective_handle
+                        .owners
+                        .as_ref()
                         .map_or(true, |o| o.is_empty() || o.contains(&remote_agent_did));
                     if is_owner {
                         log::debug!(
@@ -3083,7 +3085,9 @@ impl PerspectiveInstance {
             // Treat owners=None or owners=[] as implicit main-agent ownership (legacy perspectives).
             let main_agent_did = AgentService::with_global_instance(|s| s.did.clone());
             if let Some(main_agent_did) = main_agent_did {
-                let is_owner = current_perspective_handle.owners.as_ref()
+                let is_owner = current_perspective_handle
+                    .owners
+                    .as_ref()
                     .map_or(true, |o| o.is_empty() || o.contains(&main_agent_did));
                 // Don't echo the broadcast back to the sender (loopback is handled separately).
                 let is_sender = payload.author == main_agent_did;
