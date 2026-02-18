@@ -195,19 +195,19 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 // Alice creates some links
                 console.log("Alice creating links...")
-                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'alice', target: 'test://alice/1'})
-                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'alice', target: 'test://alice/2'})
-                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'alice', target: 'test://alice/3'})
+                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://alice', target: 'test://alice/1'})
+                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://alice', target: 'test://alice/2'})
+                await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://alice', target: 'test://alice/3'})
 
                 // Wait for sync with retry loop
-                bobLinks = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'alice'}))
+                bobLinks = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'ad4m://alice'}))
                 let bobTries = 1
                 const maxTriesBob = 20 // 20 tries with 2 second sleep = 40 seconds max
 
                 while(bobLinks.length < 3 && bobTries < maxTriesBob) {
                     console.log(`Bob retrying getting Alice's links... Got ${bobLinks.length}/3`);
                     await sleep(2000)
-                    bobLinks = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'alice'}))
+                    bobLinks = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'ad4m://alice'}))
                     bobTries++
                 }
 
@@ -219,19 +219,19 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                 // Bob creates some links
                 console.log("Bob creating links...")
-                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'bob', target: 'test://bob/1'})
-                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'bob', target: 'test://bob/2'}) 
-                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'bob', target: 'test://bob/3'})
+                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://bob', target: 'test://bob/1'})
+                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://bob', target: 'test://bob/2'})
+                await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://bob', target: 'test://bob/3'})
 
                 // Wait for sync with retry loop
-                let aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'bob'}))
+                let aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'ad4m://bob'}))
                 tries = 1
                 const maxTriesAlice = 20 // 2 minutes with 1 second sleep
 
                 while(aliceLinks.length < 3 && tries < maxTriesAlice) {
                     console.log(`Alice retrying getting links... Got ${aliceLinks.length}/3`);
                     await sleep(2000)
-                    aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'bob'}))
+                    aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'ad4m://bob'}))
                     tries++
                 }
 
