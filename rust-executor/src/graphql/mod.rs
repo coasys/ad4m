@@ -10,7 +10,7 @@ use reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN;
 use subscription_resolvers::*;
 use warp::reply::with_header;
 
-use crate::agent::capabilities::capabilities_from_token;
+use crate::agent::capabilities::{capabilities_from_token, is_admin_credential_token};
 use crate::js_core::JsCoreHandle;
 use crate::Ad4mConfig;
 
@@ -78,11 +78,13 @@ pub async fn start_server(
             //println!("Request body: {}", std::str::from_utf8(body_data::bytes()).expect("error converting bytes to &str"));
             let capabilities =
                 capabilities_from_token(auth_header.clone(), admin_credential.clone());
+            let is_admin_credential = is_admin_credential_token(&auth_header, &admin_credential);
             RequestContext {
                 capabilities,
                 js_handle: js_core_handle_cloned1.clone(),
                 auto_permit_cap_requests: config.auto_permit_cap_requests.unwrap_or(false),
                 auth_token: auth_header,
+                is_admin_credential,
             }
         });
     let qm_graphql_filter = coasys_juniper_warp::make_graphql_filter(qm_schema, qm_state.boxed());
@@ -123,16 +125,18 @@ pub async fn start_server(
                         crate::agent::capabilities::track_last_seen_from_token(auth_header.clone())
                             .await;
 
-                        let capabilities = capabilities_from_token(
-                            auth_header.clone(),
-                            admin_credential_arc.as_ref().clone(),
-                        );
+                        let admin_credential = admin_credential_arc.as_ref().clone();
+                        let capabilities =
+                            capabilities_from_token(auth_header.clone(), admin_credential.clone());
+                        let is_admin_credential =
+                            is_admin_credential_token(&auth_header, &admin_credential);
 
                         let context = RequestContext {
                             capabilities,
                             js_handle: js_core_handle.clone(),
                             auto_permit_cap_requests,
                             auth_token: auth_header,
+                            is_admin_credential,
                         };
                         Ok(ConnectionConfig::new(context))
                             as Result<ConnectionConfig<_>, Infallible>
@@ -262,16 +266,20 @@ pub async fn start_server(
                             )
                             .await;
 
+                            let admin_credential = admin_credential_arc.as_ref().clone();
                             let capabilities = capabilities_from_token(
                                 auth_header.clone(),
-                                admin_credential_arc.as_ref().clone(),
+                                admin_credential.clone(),
                             );
+                            let is_admin_credential =
+                                is_admin_credential_token(&auth_header, &admin_credential);
 
                             let context = RequestContext {
                                 capabilities,
                                 js_handle: js_core_handle.clone(),
                                 auto_permit_cap_requests: auto_permit_cap_requests2,
                                 auth_token: auth_header,
+                                is_admin_credential,
                             };
                             Ok(ConnectionConfig::new(context))
                                 as Result<ConnectionConfig<_>, Infallible>
