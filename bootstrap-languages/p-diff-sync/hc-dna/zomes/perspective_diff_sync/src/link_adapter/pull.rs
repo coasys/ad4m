@@ -231,9 +231,11 @@ pub fn handle_broadcast<Retriever: PerspectiveDiffRetreiver>(
         };
         if diff_reference.parents == Some(vec![current_revision.hash]) {
             // debug!("===PerspectiveDiffSync.fast_forward_signal(): Revisions parent is the same as current, we can fast forward our current");
-            update_current_revision::<Retriever>(revision, get_now()?)?;
-            // Load diff handling both inline and chunked storage
+            // CRITICAL: Load diff BEFORE updating current_revision
+            // If loading fails (e.g., chunks not available), we should NOT update current_revision
             let loaded_diff = load_diff_from_entry::<Retriever>(&broadcast.reference)?;
+            // Only update current_revision if we successfully loaded the diff
+            update_current_revision::<Retriever>(revision, get_now()?)?;
             emit_signal(loaded_diff)?;
         };
     };

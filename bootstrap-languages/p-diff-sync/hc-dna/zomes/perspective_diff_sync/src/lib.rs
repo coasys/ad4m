@@ -7,7 +7,7 @@ use lazy_static::lazy_static;
 
 use perspective_diff_sync_integrity::{
     CommitInput, HashBroadcast, OnlineAgent, OnlineAgentAndAction, Perspective, PerspectiveDiff,
-    PerspectiveExpression, PullResult, RoutedSignalPayload,
+    PerspectiveDiffEntryReference, PerspectiveExpression, PullResult, RoutedSignalPayload,
 };
 
 mod errors;
@@ -205,6 +205,14 @@ pub fn get_others(_: ()) -> ExternResult<Vec<String>> {
         telepresence::status::get_others().map_err(|error| utils::err(&format!("{}", error)))?;
     info!("get_others res: {:?}", res);
     Ok(res)
+}
+
+/// Helper function for testing - get a PerspectiveDiffEntryReference by hash
+#[hdk_extern]
+pub fn get_diff_entry_reference(hash: Hash) -> ExternResult<PerspectiveDiffEntryReference> {
+    use retriever::PerspectiveDiffRetreiver;
+    retriever::HolochainRetreiver::get::<PerspectiveDiffEntryReference>(hash)
+        .map_err(|error| utils::err(&format!("{}", error)))
 }
 
 //not loading from DNA properies since dna zome properties is always null for some reason

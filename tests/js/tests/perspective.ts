@@ -136,13 +136,13 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(perspective.name).to.equal('test-duplicate-link-removal');
 
                 // create link
-                const link = { source: 'root', predicate: 'p', target: 'abc' };
+                const link = { source: 'ad4m://root', predicate: 'ad4m://p', target: 'test://abc' };
                 const addLink = await perspective.add(link);
-                expect(addLink.data.target).to.equal("abc");
+                expect(addLink.data.target).to.equal("test://abc");
 
                 // get link expression
                 const linkExpression = (await perspective.get(new LinkQuery(link)))[0];
-                expect(linkExpression.data.target).to.equal("abc");
+                expect(linkExpression.data.target).to.equal("test://abc");
 
                 // attempt to remove link twice (currently errors and prevents further execution of code)
                 await perspective.removeLinks([linkExpression, linkExpression])
@@ -291,12 +291,12 @@ export default function perspectiveTests(testContext: TestContext) {
                 const linkUpdated = sinon.fake()
                 await ad4mClient.perspective.addPerspectiveLinkUpdatedListener(p1.uuid, [linkUpdated])
 
-                const linkExpression = await ad4mClient.perspective.addLink(p1.uuid , {source: 'root', target: 'lang://123'})
+                const linkExpression = await ad4mClient.perspective.addLink(p1.uuid , {source: 'ad4m://root', target: 'lang://123'})
                 await sleep(1000)
                 expect(linkAdded.called).to.be.true;
                 expect(linkAdded.getCall(0).args[0]).to.eql(linkExpression)
 
-                const updatedLinkExpression = await ad4mClient.perspective.updateLink(p1.uuid , linkExpression, {source: 'root', target: 'lang://456'})
+                const updatedLinkExpression = await ad4mClient.perspective.updateLink(p1.uuid , linkExpression, {source: 'ad4m://root', target: 'lang://456'})
                 await sleep(1000)
                 expect(linkUpdated.called).to.be.true;
                 expect(linkUpdated.getCall(0).args[0].newLink).to.eql(updatedLinkExpression)
@@ -818,7 +818,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 const link1 = new Link({
                     source: 'test://source',
                     predicate: 'test://predicate',
-                    target: 'target1'
+                    target: 'test://target1'
                 })
 
                 await proxy.setSingleTarget(link1)
@@ -826,12 +826,12 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(result1.source).to.equal(link1.source)
                 expect(result1.predicate).to.equal(link1.predicate)
                 expect(result1.target).to.equal(link1.target)
-                expect(await proxy.getSingleTarget(new LinkQuery(link1))).to.equal('target1')
+                expect(await proxy.getSingleTarget(new LinkQuery(link1))).to.equal('test://target1')
 
                 const link2 = new Link({
                     source: 'test://source',
                     predicate: 'test://predicate',
-                    target: 'target2'
+                    target: 'test://target2'
                 })
 
                 await proxy.setSingleTarget(link2)
@@ -840,7 +840,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(result2.source).to.equal(link2.source)
                 expect(result2.predicate).to.equal(link2.predicate)
                 expect(result2.target).to.equal(link2.target)
-                expect(await proxy.getSingleTarget(new LinkQuery(link1))).to.equal('target2')
+                expect(await proxy.getSingleTarget(new LinkQuery(link1))).to.equal('test://target2')
             })
 
             // SdnaOnly doesn't load links into prolog engine

@@ -18,6 +18,10 @@ pub struct RequestContext {
     pub js_handle: JsCoreHandle,
     pub auto_permit_cap_requests: bool,
     pub auth_token: String,
+    /// True when the request was authenticated with the launcher's admin_credential token.
+    /// Only the launcher (or legacy single-user empty-token) qualifies.
+    /// Regular app tokens (JWT) never have this set, regardless of which capabilities they hold.
+    pub is_admin_credential: bool,
 }
 
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone)]

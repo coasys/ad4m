@@ -39,7 +39,7 @@ const styles = css`
     left: 0;
     height: 100vh;
     width: 100vw;
-    z-index: 100;
+    z-index: 99999;
   }
 
   .backdrop {
@@ -90,12 +90,13 @@ const styles = css`
     background: transparent;
     padding: 0;
     cursor: pointer;
-    position: absolute;
-    bottom: 20px;
-    right: 20px;
+    position: fixed;
+    bottom: 10px;
+    right: 10px;
     color: var(--ac-primary-color);
-    width: 40px;
-    height: 40px;
+    width: 34px;
+    height: 34px;
+    z-index: 99999;
   }
 `;
 
