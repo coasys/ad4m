@@ -168,21 +168,27 @@ impl Ad4mMcpHandler {
         self.context.auth_token.read().await.clone()
     }
 
-    /// Get agent context, requiring authentication for non-main operations
+    /// Get agent context, requiring authentication
     async fn get_agent_context(&self) -> Result<AgentContext, String> {
         match self.get_auth_token().await {
             Some(token) if !token.is_empty() => Ok(AgentContext::from_auth_token(token)),
-            _ => {
-                // No token means this is the main agent context
-                // This is only safe for read operations on non-sensitive data
-                Ok(AgentContext::from_auth_token(String::new()))
-            }
+            _ => Err("Authentication required. Use login_email or set_token first.".to_string()),
+        }
+    }
+
+    /// Get agent context for read operations - allows unauthenticated access for local/main agent
+    async fn get_agent_context_for_read(&self) -> AgentContext {
+        match self.get_auth_token().await {
+            Some(token) if !token.is_empty() => AgentContext::from_auth_token(token),
+            _ => AgentContext::from_auth_token(String::new()),
         }
     }
 
     /// Escape string for safe use in Prolog queries
     fn escape_prolog_string(s: &str) -> String {
         s.replace('\\', "\\\\")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
             .replace('"', "\\\"")
             .replace('\'', "\\'")
     }
@@ -217,10 +223,7 @@ impl Ad4mMcpHandler {
 
         match get_perspective(uuid) {
             Some(perspective) => {
-                let agent_context = match self.get_agent_context().await {
-                    Ok(ctx) => ctx,
-                    Err(e) => return format!("Authentication error: {}", e),
-                };
+                let agent_context = self.get_agent_context_for_read().await;
 
                 // Use Prolog to get subject classes
                 let query = "subject_class(ClassName, _)".to_string();
@@ -245,10 +248,7 @@ impl Ad4mMcpHandler {
 
         match get_perspective(&p.perspective_id) {
             Some(perspective) => {
-                let agent_context = match self.get_agent_context().await {
-                    Ok(ctx) => ctx,
-                    Err(e) => return format!("Authentication error: {}", e),
-                };
+                let agent_context = self.get_agent_context_for_read().await;
 
                 // Escape class_name to prevent Prolog injection
                 let escaped_class_name = Self::escape_prolog_string(&p.class_name);
@@ -289,10 +289,7 @@ impl Ad4mMcpHandler {
 
         match get_perspective(&p.perspective_id) {
             Some(mut perspective) => {
-                let agent_context = match self.get_agent_context().await {
-                    Ok(ctx) => ctx,
-                    Err(e) => return format!("Authentication error: {}", e),
-                };
+                let agent_context = self.get_agent_context_for_read().await;
 
                 let subject_class: SubjectClassOption = match serde_json::from_value(json!({
                     "className": p.class_name
@@ -622,9 +619,9 @@ impl Ad4mMcpHandler {
                             }
                         }
                         json!({
-                            "authenticated": true,
+                            "authenticated": false,
                             "token_type": "unknown",
-                            "message": "Token set but could not decode (may be a raw credential)"
+                            "message": "Token set but invalid - could not decode and not recognized as admin credential"
                         })
                         .to_string()
                     }
@@ -739,6 +736,15 @@ mod tests {
         assert_eq!(
             Ad4mMcpHandler::escape_prolog_string("test'quote"),
             r"test\'quote"
+        );
+        // Test newline and carriage return escaping
+        assert_eq!(
+            Ad4mMcpHandler::escape_prolog_string("line1\nline2"),
+            r"line1\nline2"
+        );
+        assert_eq!(
+            Ad4mMcpHandler::escape_prolog_string("text\r\nmore"),
+            r"text\r\nmore"
         );
     }
 
