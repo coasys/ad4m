@@ -422,10 +422,17 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         }
 
         if let Some(node_kind) = &prop.node_kind {
+            // Ensure node_kind is a valid URI - prefix bare names with sh://
+            // e.g. "IRI" -> "sh://IRI", "Literal" -> "sh://Literal"
+            let node_kind_uri = if node_kind.contains("://") {
+                node_kind.clone()
+            } else {
+                format!("sh://{}", node_kind)
+            };
             links.push(Link {
                 source: prop_shape_uri.clone(),
                 predicate: Some("sh://nodeKind".to_string()),
-                target: node_kind.clone(),
+                target: node_kind_uri,
             });
         }
 
