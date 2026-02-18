@@ -157,10 +157,10 @@ if (isPreRelease) {
 }
 fs.writeFileSync('ui/src-tauri/Cargo.toml', uiTauriCargo.newContent)
 
-const book = JSON.parse(fs.readFileSync('docs/package.json', 'utf8'))
+const book = JSON.parse(fs.readFileSync('docs-src/package.json', 'utf8'))
 console.log("Docs version: " + book.version + " -> " + VERSION)
 book.version = VERSION
-fs.writeFileSync('docs/package.json', JSON.stringify(book, null, 2) + '\n')
+fs.writeFileSync('docs-src/package.json', JSON.stringify(book, null, 2) + '\n')
 
 const testRunner = JSON.parse(fs.readFileSync('test-runner/package.json', 'utf8'))
 console.log("Test runner version: " + testRunner.version + " -> " + VERSION)

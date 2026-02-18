@@ -1,6 +1,6 @@
 use coasys_juniper::{GraphQLEnum, GraphQLObject, GraphQLValue};
 use deno_core::{anyhow::anyhow, error::AnyError};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt::Display;
 use std::str::FromStr;
 use url::Url;
@@ -63,11 +63,24 @@ impl<T: GraphQLValue + Serialize> From<Expression<T>> for VerifiedExpression<T> 
     }
 }
 
+/// Deserializes a JSON null or missing value as an empty string.
+/// This is needed because link languages (e.g. p-diff-sync) may store null
+/// for empty source/target fields, but the Rust type expects String.
+fn null_as_empty_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
 #[derive(GraphQLObject, Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Link {
     pub predicate: Option<String>,
+    #[serde(default, deserialize_with = "null_as_empty_string")]
     pub source: String,
+    #[serde(default, deserialize_with = "null_as_empty_string")]
     pub target: String,
 }
 
@@ -93,6 +106,42 @@ impl Link {
             source: self.source.clone(),
             target: self.target.clone(),
         }
+    }
+
+    /// Validates that source and target are non-empty URIs (RFC 3986 scheme present),
+    /// and that predicate, if present, is also a valid URI.
+    ///
+    /// A valid URI must begin with a scheme: `[a-zA-Z][a-zA-Z0-9+\-._]*:`
+    /// (underscore is included as a pragmatic extension for schemes like `smart_literal://`)
+    /// Examples: `did:key:alice`, `expression://Qm...`, `smart_literal://content`
+    pub fn validate(&self) -> Result<(), AnyError> {
+        use std::sync::OnceLock;
+        static URI_SCHEME_RE: OnceLock<Regex> = OnceLock::new();
+        let re = URI_SCHEME_RE.get_or_init(|| Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-._]*:").unwrap());
+
+        let check = |field: &str, value: &str| -> Result<(), AnyError> {
+            if value.is_empty() {
+                return Err(anyhow!("Link {} must not be empty", field));
+            }
+            if !re.is_match(value) {
+                return Err(anyhow!(
+                    "Link {} is not a valid URI (must start with a scheme like 'did:', 'expression://', etc.): '{}'",
+                    field, value
+                ));
+            }
+            Ok(())
+        };
+
+        check("source", &self.source)?;
+        check("target", &self.target)?;
+
+        if let Some(predicate) = &self.predicate {
+            if !predicate.is_empty() {
+                check("predicate", predicate)?;
+            }
+        }
+
+        Ok(())
     }
 }
 
