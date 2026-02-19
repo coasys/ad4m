@@ -22,6 +22,99 @@ fn extract_key_from_did(did: &str) -> Option<String> {
     }
 }
 
+/// Decode a multibase/multicodec Ed25519 public key string to raw 32 bytes.
+///
+/// Expected format: base58btc-encoded (prefix 'z') with Ed25519 multicodec
+/// prefix bytes `0xed 0x01` followed by 32 bytes of public key.
+fn decode_ed25519_pubkey(key_str: &str) -> ExternResult<[u8; 32]> {
+    // Strip 'z' multibase prefix (base58btc)
+    let without_prefix = key_str.strip_prefix('z').unwrap_or(key_str);
+    let decoded = bs58::decode(without_prefix)
+        .into_vec()
+        .map_err(|e| err(&format!("Failed to base58-decode key: {}", e)))?;
+
+    // Ed25519 multicodec: 0xed 0x01 + 32 bytes = 34 bytes
+    if decoded.len() == 34 && decoded[0] == 0xed && decoded[1] == 0x01 {
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&decoded[2..]);
+        Ok(key)
+    } else if decoded.len() == 32 {
+        // Raw 32-byte key without multicodec prefix
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&decoded);
+        Ok(key)
+    } else {
+        Err(err(&format!(
+            "Invalid Ed25519 key: expected 34 bytes (multicodec) or 32 bytes (raw), got {}",
+            decoded.len()
+        )))
+    }
+}
+
+/// Decode a hex-encoded Ed25519 signature to a Signature (64 bytes).
+fn decode_signature(sig_hex: &str) -> ExternResult<Signature> {
+    let bytes = hex_decode(sig_hex)
+        .map_err(|e| err(&format!("Failed to decode signature hex: {}", e)))?;
+    if bytes.len() != 64 {
+        return Err(err(&format!(
+            "Invalid signature length: expected 64 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    let mut sig = [0u8; 64];
+    sig.copy_from_slice(&bytes);
+    Ok(Signature(sig))
+}
+
+/// Simple hex decoding (no external crate needed)
+fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
+    if hex.len() % 2 != 0 {
+        return Err("Hex string has odd length".to_string());
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&hex[i..i + 2], 16)
+                .map_err(|e| format!("Invalid hex at position {}: {}", i, e))
+        })
+        .collect()
+}
+
+/// Verify an Ed25519 signature using Holochain's built-in verify_signature_raw.
+///
+/// ## Signature message format
+///
+/// The signed message is the UTF-8 bytes of the concatenation:
+///   `<key> + <did> + <timestamp>`
+///
+/// Where:
+/// - `key` is the key being added or revoked (the multibase-encoded string)
+/// - `did` is the DID string (e.g., `did:key:z...`)
+/// - `timestamp` is the ISO 8601 timestamp string (e.g., `2024-01-01T00:00:00Z`)
+///
+/// Example: `"zABC123did:key:zXYZ7892024-01-01T00:00:00Z"`
+fn verify_key_signature(
+    signing_key_str: &str,
+    signature_hex: &str,
+    subject_key: &str,
+    did: &str,
+    timestamp: &str,
+) -> ExternResult<bool> {
+    // Skip verification for self-signed root keys
+    if signature_hex == "self" {
+        return Ok(true);
+    }
+
+    let pubkey_bytes = decode_ed25519_pubkey(signing_key_str)?;
+    let agent_pubkey = AgentPubKey::from_raw_32(pubkey_bytes.to_vec());
+    let signature = decode_signature(signature_hex)?;
+
+    // Message = subject_key + did + timestamp (UTF-8 bytes)
+    let message = format!("{}{}{}", subject_key, did, timestamp);
+
+    verify_signature_raw(agent_pubkey, signature, message.into_bytes())
+}
+
 #[hdk_extern]
 pub fn create_agent_expression(mut agent_expression: AgentExpression) -> ExternResult<()> {
     // Auto-populate authorised_keys with the DID root key if empty (migration path)
@@ -36,6 +129,7 @@ pub fn create_agent_expression(mut agent_expression: AgentExpression) -> ExternR
                 proof: KeyAuthorisation {
                     authorising_key: root_key,
                     signature: "self".to_string(),
+                    timestamp: now.to_rfc3339(),
                 },
             });
         }
@@ -92,6 +186,18 @@ pub fn add_authorised_key(input: AddAuthorisedKeyInput) -> ExternResult<AgentExp
 
     if is_revoked {
         return Err(err("Authorising key has been revoked"));
+    }
+
+    // Verify the signature over (new_key + did + timestamp)
+    let sig_valid = verify_key_signature(
+        &input.proof.authorising_key,
+        &input.proof.signature,
+        &input.key,
+        &input.did,
+        &input.proof.timestamp,
+    )?;
+    if !sig_valid {
+        return Err(err("Invalid signature: Ed25519 verification failed for add_authorised_key proof"));
     }
 
     // Check the new key isn't already authorised
@@ -152,11 +258,44 @@ pub fn revoke_key(input: RevokeKeyInput) -> ExternResult<AgentExpression> {
         return Err(err("Key is already revoked"));
     }
 
+    // Check that the revoking key is currently authorised
+    let revoker_valid = current
+        .data
+        .authorised_keys
+        .iter()
+        .any(|k| k.key == input.revoked_by_key);
+    if !revoker_valid {
+        return Err(err("Revoking key is not in the current authorised keys"));
+    }
+
+    // Check revoking key is not itself revoked
+    let revoker_revoked = current
+        .data
+        .revoked_keys
+        .iter()
+        .any(|r| r.revoked_key == input.revoked_by_key);
+    if revoker_revoked {
+        return Err(err("Revoking key has been revoked"));
+    }
+
+    // Verify the signature over (revoked_key + did + timestamp)
+    let sig_valid = verify_key_signature(
+        &input.revoked_by_key,
+        &input.signature,
+        &input.key,
+        &input.did,
+        &input.timestamp,
+    )?;
+    if !sig_valid {
+        return Err(err("Invalid signature: Ed25519 verification failed for revoke_key"));
+    }
+
     let now = chrono::Utc::now();
     let revocation = KeyRevocation {
         revoked_key: input.key.clone(),
         revoked_at: now,
         revoked_by: input.did.clone(),
+        revoked_by_key: input.revoked_by_key,
         signature: input.signature,
         reason: input.reason,
     };

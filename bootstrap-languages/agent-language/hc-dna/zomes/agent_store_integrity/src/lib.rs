@@ -60,6 +60,8 @@ app_entry!(AgentExpression);
 pub struct KeyAuthorisation {
     pub authorising_key: String,
     pub signature: String,
+    /// ISO 8601 timestamp that was included in the signed message
+    pub timestamp: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug)]
@@ -76,6 +78,8 @@ pub struct KeyRevocation {
     pub revoked_key: String,
     pub revoked_at: DateTime<Utc>,
     pub revoked_by: String,
+    /// The authorised key that signed this revocation
+    pub revoked_by_key: String,
     pub signature: String,
     pub reason: Option<String>,
 }
@@ -92,7 +96,11 @@ pub struct AddAuthorisedKeyInput {
 pub struct RevokeKeyInput {
     pub did: String,
     pub key: String,
+    /// The authorised key used to sign the revocation
+    pub revoked_by_key: String,
     pub signature: String,
+    /// ISO 8601 timestamp that was included in the signed message
+    pub timestamp: String,
     pub reason: Option<String>,
 }
 
