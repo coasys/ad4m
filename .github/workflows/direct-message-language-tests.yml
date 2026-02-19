@@ -20,24 +20,39 @@ jobs:
     steps:
     - uses: actions/checkout@v3
 
+    - name: Cache Rust dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          bootstrap-languages/direct-message-language/hc-dna/target/
+        key: ${{ runner.os }}-direct-message-rust-${{ hashFiles('bootstrap-languages/direct-message-language/hc-dna/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-direct-message-rust-
+
     # Rust toolchain configured via rust-toolchain.toml
     - name: Verify Rust toolchain
       run: rustc --version && cargo --version && hc --version
 
-    - name: Install dependencies
-      run: pnpm install --no-frozen-lockfile
-
-    - name: Build zomes
-      run: |
-        cd bootstrap-languages/direct-message-language/hc-dna
-        cargo build --release --target wasm32-unknown-unknown
-
     - name: Build DNA
-      run: |
-        cd bootstrap-languages/direct-message-language/hc-dna
-        hc dna pack workdir
+      working-directory: bootstrap-languages/direct-message-language/hc-dna
+      run: bash build.sh
 
-    - name: Run sweettest
-      run: |
-        cd bootstrap-languages/direct-message-language/hc-dna/tests/sweettest
-        cargo test --release -- --nocapture
+    - name: Run sweettest integration tests
+      working-directory: bootstrap-languages/direct-message-language/hc-dna/tests/sweettest
+      run: cargo test --test integration -- --nocapture
+
+    - name: Save Rust cache
+      if: success()
+      uses: actions/cache/save@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          bootstrap-languages/direct-message-language/hc-dna/target/
+        key: ${{ runner.os }}-direct-message-rust-${{ hashFiles('bootstrap-languages/direct-message-language/hc-dna/Cargo.lock') }}

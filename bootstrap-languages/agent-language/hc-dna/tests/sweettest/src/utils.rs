@@ -1,13 +1,12 @@
-//! Test utilities for direct-message-language sweettest tests
+//! Test utilities for agent_store sweettest tests
 
 use std::path::PathBuf;
 
 use chrono::Utc;
 use futures::future;
-use holochain::conductor::api::error::ConductorApiError;
 use holochain::sweettest::{SweetAgents, SweetCell, SweetConductor, SweetConductorBatch, SweetDnaFile};
 use holochain_types::prelude::*;
-use direct_message_integrity::ad4m::{ExpressionProof, Perspective, PerspectiveExpression};
+use agent_store_integrity::{AgentExpression, AgentExpressionData, ExpressionProof};
 use serde::{de::DeserializeOwned, Serialize};
 use uuid::Uuid;
 
@@ -15,10 +14,10 @@ use uuid::Uuid;
 pub fn dna_path() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     PathBuf::from(manifest_dir)
-        .join("../../workdir/direct-message-language.dna")
+        .join("../../workdir/agent-store.dna")
 }
 
-/// Load the direct-message-language DNA
+/// Load the agent-store DNA
 pub async fn load_dna() -> DnaFile {
     SweetDnaFile::from_bundle(&dna_path())
         .await
@@ -31,7 +30,7 @@ pub async fn setup_1_conductor() -> (SweetConductor, SweetCell) {
     let mut conductor = SweetConductor::standard().await;
     let agent = SweetAgents::one(conductor.keystore()).await;
     let app = conductor
-        .setup_app_for_agent("direct-message-test", agent, &[dna])
+        .setup_app_for_agent("agent-store-test", agent, &[dna])
         .await
         .expect("Failed to setup app");
     let cell = app.cells()[0].clone();
@@ -50,7 +49,7 @@ pub async fn setup_conductors(n: usize, network: bool) -> (SweetConductorBatch, 
     ).await;
 
     let apps = conductors
-        .setup_app_for_zipped_agents("direct-message-test", &agents, &[dna.clone()])
+        .setup_app_for_zipped_agents("agent-store-test", &agents, &[dna.clone()])
         .await
         .expect("Failed to setup apps");
 
@@ -62,7 +61,7 @@ pub async fn setup_conductors(n: usize, network: bool) -> (SweetConductorBatch, 
     (conductors, cells)
 }
 
-/// Helper to call a zome function on a cell
+/// Call a zome function with type-safe serialization
 pub async fn call_zome<I, O>(
     conductor: &SweetConductor,
     cell: &SweetCell,
@@ -73,41 +72,30 @@ where
     I: Serialize + std::fmt::Debug,
     O: DeserializeOwned + std::fmt::Debug,
 {
+    let zome = cell.zome("agent_store");
     conductor
-        .call(&cell.zome("direct-message"), fn_name, payload)
+        .call(&zome, fn_name, payload)
         .await
 }
 
-/// Helper to call a zome function that might fail
-pub async fn call_zome_fallible<I, O>(
-    conductor: &SweetConductor,
-    cell: &SweetCell,
-    fn_name: &str,
-    payload: I,
-) -> Result<O, ConductorApiError>
-where
-    I: Serialize + std::fmt::Debug,
-    O: DeserializeOwned + std::fmt::Debug,
-{
-    conductor
-        .call_fallible(&cell.zome("direct-message"), fn_name, payload)
-        .await
-}
-
-/// Create a test PerspectiveExpression with empty links
-pub fn create_test_perspective_expression(author: &str) -> PerspectiveExpression {
-    PerspectiveExpression {
-        author: author.to_string(),
+/// Create a test agent expression
+pub fn create_test_agent_expression(did: &str, direct_message_language: Option<String>) -> AgentExpression {
+    AgentExpression {
+        author: did.to_string(),
         timestamp: Utc::now(),
-        data: Perspective { links: vec![] },
+        data: AgentExpressionData {
+            did: did.to_string(),
+            perspective: None,
+            direct_message_language,
+        },
         proof: ExpressionProof {
             signature: format!("sig_{}", Uuid::new_v4()),
-            key: format!("{}#primary", author),
+            key: format!("key_{}", did),
         },
     }
 }
 
-/// Wait for DHT/signal propagation between conductors
-pub async fn await_consistency(delay_ms: u64) {
-    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+/// Helper to wait for DHT consistency between conductors
+pub async fn await_consistency(delay_secs: u64) {
+    tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
 }
