@@ -193,9 +193,9 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
       logger.info(`exit is called ${code}`);
     })
 
-    child.on('error', () => {
+    child.on('error', async () => {
       logger.error(`process error: ${child.pid}`)
-      findAndKillProcess('ad4m')
+      await findAndKillProcess('ad4m')
       reject()
     });
   });
