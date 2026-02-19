@@ -1,5 +1,5 @@
 use agent_store_integrity::{
-    AddAuthorisedKeyInput, AgentExpression, AuthorisedKey, Did, EntryTypes,
+    AddAuthorisedKeyInput, AgentExpression, AgentExpressionData, AuthorisedKey, Did, EntryTypes,
     IsKeyValidInput, KeyAuthorisation, KeyRevocation, LinkTypes, RevokeKeyInput,
 };
 use hdk::prelude::*;
@@ -14,11 +14,11 @@ fn init(_: ()) -> ExternResult<InitCallbackResult> {
 }
 
 /// Extract the key portion from a did:key: URI
-fn extract_key_from_did(did: &str) -> Option<String> {
+fn extract_key_from_did(did: &str) -> Result<String, WasmError> {
     if did.starts_with("did:key:") {
-        Some(did.trim_start_matches("did:key:").to_string())
+        Ok(did.trim_start_matches("did:key:").to_string())
     } else {
-        None
+        Err(err(&format!("Cannot extract key from non did:key DID: {}", did)))
     }
 }
 
@@ -119,7 +119,7 @@ fn verify_key_signature(
 pub fn create_agent_expression(mut agent_expression: AgentExpression) -> ExternResult<()> {
     // Auto-populate authorised_keys with the DID root key if empty (migration path)
     if agent_expression.data.authorised_keys.is_empty() {
-        if let Some(root_key) = extract_key_from_did(&agent_expression.author) {
+        if let Ok(root_key) = extract_key_from_did(&agent_expression.author) {
             let now = chrono::Utc::now();
             agent_expression.data.authorised_keys.push(AuthorisedKey {
                 key: root_key.clone(),
@@ -162,7 +162,7 @@ fn get_current_expression(did: &str) -> ExternResult<Option<AgentExpression>> {
 }
 
 #[hdk_extern]
-pub fn add_authorised_key(input: AddAuthorisedKeyInput) -> ExternResult<AgentExpression> {
+pub fn add_authorised_key(input: AddAuthorisedKeyInput) -> ExternResult<AgentExpressionData> {
     let current = get_current_expression(&input.did)?
         .ok_or_else(|| err("Agent expression not found"))?;
 
@@ -218,31 +218,12 @@ pub fn add_authorised_key(input: AddAuthorisedKeyInput) -> ExternResult<AgentExp
     let mut new_data = current.data.clone();
     new_data.authorised_keys.push(new_key);
 
-    let new_expression = AgentExpression {
-        author: current.author.clone(),
-        timestamp: now,
-        data: new_data,
-        proof: current.proof.clone(),
-    };
-
-    // Store updated expression
-    let did = EntryTypes::Did(Did(current.author.clone()));
-    let did_hash = hash_entry(&did)?;
-    let entry = EntryTypes::AgentExpression(new_expression.clone());
-    let entry_hash = hash_entry(&entry)?;
-    create_entry(&entry)?;
-    create_link(
-        did_hash,
-        entry_hash,
-        LinkTypes::ProfileLink,
-        LinkTag::new("profile"),
-    )?;
-
-    Ok(new_expression)
+    // Return updated data — the adapter is responsible for signing and storing
+    Ok(new_data)
 }
 
 #[hdk_extern]
-pub fn revoke_key(input: RevokeKeyInput) -> ExternResult<AgentExpression> {
+pub fn revoke_key(input: RevokeKeyInput) -> ExternResult<AgentExpressionData> {
     let current = get_current_expression(&input.did)?
         .ok_or_else(|| err("Agent expression not found"))?;
 
@@ -304,26 +285,8 @@ pub fn revoke_key(input: RevokeKeyInput) -> ExternResult<AgentExpression> {
     new_data.authorised_keys.retain(|k| k.key != input.key);
     new_data.revoked_keys.push(revocation);
 
-    let new_expression = AgentExpression {
-        author: current.author.clone(),
-        timestamp: now,
-        data: new_data,
-        proof: current.proof.clone(),
-    };
-
-    let did = EntryTypes::Did(Did(current.author.clone()));
-    let did_hash = hash_entry(&did)?;
-    let entry = EntryTypes::AgentExpression(new_expression.clone());
-    let entry_hash = hash_entry(&entry)?;
-    create_entry(&entry)?;
-    create_link(
-        did_hash,
-        entry_hash,
-        LinkTypes::ProfileLink,
-        LinkTag::new("profile"),
-    )?;
-
-    Ok(new_expression)
+    // Return updated data — the adapter is responsible for signing and storing
+    Ok(new_data)
 }
 
 #[hdk_extern]

@@ -24,22 +24,46 @@ export default class ExpressionAdapterImpl implements ExpressionAdapter {
     return expression
   };
 
-  async addAuthorisedKey(did: string, key: string, name: string, proof: { authorising_key: string, signature: string }): Promise<any> {
-    return await this.#DNA.call(
+  async addAuthorisedKey(did: string, key: string, name: string, proof: { authorising_key: string, signature: string, timestamp: string }): Promise<any> {
+    // Zome validates and returns updated AgentExpressionData
+    const updatedData = await this.#DNA.call(
       DNA_ROLE,
       ZOME_NAME,
       "add_authorised_key",
       { did, key, name, proof }
     );
+
+    // Re-sign with the agent's key and store the full expression
+    const signedExpression = this.#agent.createSignedExpression(updatedData);
+    await this.#DNA.call(
+      DNA_ROLE,
+      ZOME_NAME,
+      "create_agent_expression",
+      signedExpression
+    );
+
+    return signedExpression;
   }
 
-  async revokeKey(did: string, key: string, signature: string, reason?: string): Promise<any> {
-    return await this.#DNA.call(
+  async revokeKey(did: string, key: string, revokedByKey: string, signature: string, timestamp: string, reason?: string): Promise<any> {
+    // Zome validates and returns updated AgentExpressionData
+    const updatedData = await this.#DNA.call(
       DNA_ROLE,
       ZOME_NAME,
       "revoke_key",
-      { did, key, signature, reason: reason || null }
+      { did, key, revokedByKey, signature, timestamp, reason: reason ?? null }
     );
+
+    // Re-sign with the agent's key and store the full expression
+    const signedExpression = this.#agent.createSignedExpression(updatedData);
+    await this.#DNA.call(
+      DNA_ROLE,
+      ZOME_NAME,
+      "create_agent_expression",
+      signedExpression
+    );
+
+    return signedExpression;
   }
 
   async isKeyValid(did: string, key: string): Promise<boolean> {

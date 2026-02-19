@@ -2,22 +2,6 @@ import { Field, ObjectType, InputType } from "type-graphql";
 import { Perspective } from "../perspectives/Perspective";
 import { ExpressionGeneric } from "../expression/Expression";
 
-/**  AD4M's representation of an Agent
- *
- * AD4M Agents are build around DIDs, which are used to identify and authenticate the Agent.
- * Conceptually, an Agent is regarded as something that can speak and that can listen.
- *
- * Agents speak by creating Expressions in AD4M Languages which are signed by the Agent's DID key,
- * And they also speak (broadcast) by putting semantic statements into their public "Agent Perspective".
- * They listen (can receive messages) through their "direct message Language".
- *
- * These three aspects are represented by the three fields of this class.
- *
- * This class is used as format for the Expressions in the Agent language.
- * Since AD4M treats DID URIs as addresses for the Agent Language,
- * DIDs are resolved to Expressions that are objects of this class.
- * Thus, this is how agents see (other) agents.
- */
 @ObjectType()
 export class KeyAuthorisation {
   @Field()
@@ -98,6 +82,22 @@ export class KeyRevocation {
   }
 }
 
+/**  AD4M's representation of an Agent
+ *
+ * AD4M Agents are build around DIDs, which are used to identify and authenticate the Agent.
+ * Conceptually, an Agent is regarded as something that can speak and that can listen.
+ *
+ * Agents speak by creating Expressions in AD4M Languages which are signed by the Agent's DID key,
+ * And they also speak (broadcast) by putting semantic statements into their public "Agent Perspective".
+ * They listen (can receive messages) through their "direct message Language".
+ *
+ * These three aspects are represented by the three fields of this class.
+ *
+ * This class is used as format for the Expressions in the Agent language.
+ * Since AD4M treats DID URIs as addresses for the Agent Language,
+ * DIDs are resolved to Expressions that are objects of this class.
+ * Thus, this is how agents see (other) agents.
+ */
 @ObjectType()
 export class Agent {
   /** The DID of the Agent

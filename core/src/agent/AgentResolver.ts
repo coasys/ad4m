@@ -16,6 +16,7 @@ import {
   EntanglementProof,
   EntanglementProofInput,
   KeyAuthorisation,
+  KeyAuthorisationInput,
   KeyRevocation,
 } from "./Agent";
 import { AgentStatus } from "./AgentStatus";
@@ -267,19 +268,11 @@ export default class AgentResolver {
   @Mutation((returns) => Agent)
   agentAddAuthorisedKey(
     @Arg("key") key: string,
-    @Arg("name") name: string
+    @Arg("name") name: string,
+    @Arg("proof") proof: KeyAuthorisationInput
   ): Agent {
-    const agent = new Agent(TEST_AGENT_DID);
-    agent.authorisedKeys = [
-      new AuthorisedKey(
-        key,
-        name,
-        new Date().toISOString(),
-        TEST_AGENT_DID,
-        new KeyAuthorisation(key, "test-signature")
-      ),
-    ];
-    return agent;
+    // TODO: Wire through to executor's agent subsystem → adapter → zome
+    throw new Error("Not implemented - requires executor wiring for multi-key agent identity");
   }
 
   @Mutation((returns) => Agent)
@@ -287,35 +280,20 @@ export default class AgentResolver {
     @Arg("key") key: string,
     @Arg("reason", { nullable: true }) reason?: string
   ): Agent {
-    const agent = new Agent(TEST_AGENT_DID);
-    agent.revokedKeys = [
-      new KeyRevocation(
-        key,
-        new Date().toISOString(),
-        TEST_AGENT_DID,
-        "test-signature",
-        reason
-      ),
-    ];
-    return agent;
+    // TODO: Wire through to executor's agent subsystem → adapter → zome
+    throw new Error("Not implemented - requires executor wiring for multi-key agent identity");
   }
 
   @Query((returns) => [AuthorisedKey])
   agentAuthorisedKeys(): AuthorisedKey[] {
-    return [
-      new AuthorisedKey(
-        "test-key",
-        "Root Key",
-        new Date().toISOString(),
-        TEST_AGENT_DID,
-        new KeyAuthorisation("test-key", "self")
-      ),
-    ];
+    // TODO: Wire through to executor's agent subsystem → adapter → zome
+    throw new Error("Not implemented - requires executor wiring for multi-key agent identity");
   }
 
   @Query((returns) => [KeyRevocation])
   agentRevokedKeys(): KeyRevocation[] {
-    return [];
+    // TODO: Wire through to executor's agent subsystem → adapter → zome
+    throw new Error("Not implemented - requires executor wiring for multi-key agent identity");
   }
 
   @Query((returns) => Boolean)
@@ -323,6 +301,7 @@ export default class AgentResolver {
     @Arg("did") did: string,
     @Arg("key") key: string
   ): Boolean {
-    return true;
+    // TODO: Wire through to executor's agent subsystem → adapter → zome
+    throw new Error("Not implemented - requires executor wiring for multi-key agent identity");
   }
 }

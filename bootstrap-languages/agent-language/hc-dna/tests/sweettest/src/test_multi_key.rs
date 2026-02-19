@@ -2,6 +2,7 @@
 
 use crate::utils::{call_zome, create_test_agent_expression, setup_1_conductor};
 use agent_store_integrity::{
+    AgentExpressionData,
     AddAuthorisedKeyInput, AgentExpression, IsKeyValidInput, KeyAuthorisation, RevokeKeyInput,
 };
 use ed25519_dalek::{Signer, SigningKey};
@@ -98,11 +99,11 @@ async fn test_add_authorised_key_valid_signature() {
         },
     };
 
-    let result: AgentExpression = call_zome(&conductor, &cell, "add_authorised_key", input).await;
+    let result: AgentExpressionData = call_zome(&conductor, &cell, "add_authorised_key", input).await;
 
-    assert_eq!(result.data.authorised_keys.len(), 2);
-    assert_eq!(result.data.authorised_keys[1].key, new_key);
-    assert_eq!(result.data.authorised_keys[1].name, "My Phone");
+    assert_eq!(result.authorised_keys.len(), 2);
+    assert_eq!(result.authorised_keys[1].key, new_key);
+    assert_eq!(result.authorised_keys[1].name, "My Phone");
 }
 
 /// Test adding a key with an invalid/tampered signature fails
@@ -134,7 +135,7 @@ async fn test_add_authorised_key_invalid_signature_fails() {
         },
     };
 
-    let _: AgentExpression = call_zome(&conductor, &cell, "add_authorised_key", input).await;
+    let _: AgentExpressionData = call_zome(&conductor, &cell, "add_authorised_key", input).await;
 }
 
 /// Test adding a key with a tampered message (wrong key in message) fails
@@ -166,7 +167,7 @@ async fn test_add_authorised_key_tampered_message_fails() {
         },
     };
 
-    let _: AgentExpression = call_zome(&conductor, &cell, "add_authorised_key", input).await;
+    let _: AgentExpressionData = call_zome(&conductor, &cell, "add_authorised_key", input).await;
 }
 
 /// Test adding a key with an unauthorised (unknown) authorising key fails
@@ -196,7 +197,7 @@ async fn test_add_key_with_invalid_authorising_key_fails() {
         },
     };
 
-    let _: AgentExpression = call_zome(&conductor, &cell, "add_authorised_key", input).await;
+    let _: AgentExpressionData = call_zome(&conductor, &cell, "add_authorised_key", input).await;
 }
 
 /// Test adding a key that is already authorised fails
@@ -224,7 +225,7 @@ async fn test_add_duplicate_key_fails() {
         },
     };
 
-    let _: AgentExpression = call_zome(&conductor, &cell, "add_authorised_key", input).await;
+    let _: AgentExpressionData = call_zome(&conductor, &cell, "add_authorised_key", input).await;
 }
 
 /// Test revoking a key with valid signature moves it from authorised to revoked
@@ -252,7 +253,7 @@ async fn test_revoke_key_valid_signature() {
             timestamp: add_ts.to_string(),
         },
     };
-    let _: AgentExpression = call_zome(&conductor, &cell, "add_authorised_key", add_input).await;
+    let _: AgentExpressionData = call_zome(&conductor, &cell, "add_authorised_key", add_input).await;
 
     // Revoke the device key using root key
     let revoke_ts = "2025-01-02T00:00:00Z";
@@ -266,12 +267,12 @@ async fn test_revoke_key_valid_signature() {
         timestamp: revoke_ts.to_string(),
         reason: Some("Lost device".to_string()),
     };
-    let result: AgentExpression = call_zome(&conductor, &cell, "revoke_key", revoke_input).await;
+    let result: AgentExpressionData = call_zome(&conductor, &cell, "revoke_key", revoke_input).await;
 
-    assert_eq!(result.data.authorised_keys.len(), 1, "Revoked key should be removed");
-    assert_eq!(result.data.revoked_keys.len(), 1);
-    assert_eq!(result.data.revoked_keys[0].revoked_key, device_key);
-    assert_eq!(result.data.revoked_keys[0].reason, Some("Lost device".to_string()));
+    assert_eq!(result.authorised_keys.len(), 1, "Revoked key should be removed");
+    assert_eq!(result.revoked_keys.len(), 1);
+    assert_eq!(result.revoked_keys[0].revoked_key, device_key);
+    assert_eq!(result.revoked_keys[0].reason, Some("Lost device".to_string()));
 }
 
 /// Test revoking a key with invalid signature fails
@@ -300,7 +301,7 @@ async fn test_revoke_key_invalid_signature_fails() {
             timestamp: add_ts.to_string(),
         },
     };
-    let _: AgentExpression = call_zome(&conductor, &cell, "add_authorised_key", add_input).await;
+    let _: AgentExpressionData = call_zome(&conductor, &cell, "add_authorised_key", add_input).await;
 
     // Try to revoke with a bad signature
     let revoke_ts = "2025-01-02T00:00:00Z";
@@ -314,7 +315,7 @@ async fn test_revoke_key_invalid_signature_fails() {
         timestamp: revoke_ts.to_string(),
         reason: None,
     };
-    let _: AgentExpression = call_zome(&conductor, &cell, "revoke_key", revoke_input).await;
+    let _: AgentExpressionData = call_zome(&conductor, &cell, "revoke_key", revoke_input).await;
 }
 
 /// Test is_key_valid returns true for authorised keys, false for revoked/unknown
@@ -380,7 +381,7 @@ async fn test_revoked_key_cannot_add_new_keys() {
             timestamp: ts1.to_string(),
         },
     };
-    let _: AgentExpression = call_zome(&conductor, &cell, "add_authorised_key", add_input).await;
+    let _: AgentExpressionData = call_zome(&conductor, &cell, "add_authorised_key", add_input).await;
 
     // Revoke the secondary key
     let ts2 = "2025-01-02T00:00:00Z";
@@ -394,7 +395,7 @@ async fn test_revoked_key_cannot_add_new_keys() {
         timestamp: ts2.to_string(),
         reason: None,
     };
-    let _: AgentExpression = call_zome(&conductor, &cell, "revoke_key", revoke_input).await;
+    let _: AgentExpressionData = call_zome(&conductor, &cell, "revoke_key", revoke_input).await;
 
     // Try to use revoked key to add another — should fail
     let (new_key, _) = generate_test_keypair();
@@ -411,8 +412,89 @@ async fn test_revoked_key_cannot_add_new_keys() {
             timestamp: ts3.to_string(),
         },
     };
-    let _: AgentExpression =
+    let _: AgentExpressionData =
         call_zome(&conductor, &cell, "add_authorised_key", add_with_revoked).await;
+}
+
+/// Test that is_key_valid returns false after a key is revoked
+#[tokio::test(flavor = "multi_thread")]
+async fn test_is_key_valid_after_revocation() {
+    let (conductor, cell) = setup_1_conductor().await;
+
+    let (root_key, root_signing_key) = generate_test_keypair();
+    let did = format!("did:key:{}", root_key);
+    let agent_expression = create_test_agent_expression(&did, None);
+    let _: () = call_zome(&conductor, &cell, "create_agent_expression", agent_expression).await;
+
+    // Add a second key
+    let (device_key, _device_signing_key) = generate_test_keypair();
+    let add_ts = "2025-01-01T00:00:00Z";
+    let add_sig = sign_key_message(&root_signing_key, &device_key, &did, add_ts);
+
+    let add_input = AddAuthorisedKeyInput {
+        did: did.clone(),
+        key: device_key.clone(),
+        name: "Phone".to_string(),
+        proof: KeyAuthorisation {
+            authorising_key: root_key.clone(),
+            signature: add_sig,
+            timestamp: add_ts.to_string(),
+        },
+    };
+    let _: AgentExpressionData = call_zome(&conductor, &cell, "add_authorised_key", add_input).await;
+
+    // Verify device key is valid before revocation
+    let valid_before: bool = call_zome(
+        &conductor,
+        &cell,
+        "is_key_valid",
+        IsKeyValidInput {
+            did: did.clone(),
+            key: device_key.clone(),
+        },
+    )
+    .await;
+    assert!(valid_before, "Device key should be valid before revocation");
+
+    // Revoke the device key
+    let revoke_ts = "2025-01-02T00:00:00Z";
+    let revoke_sig = sign_key_message(&root_signing_key, &device_key, &did, revoke_ts);
+
+    let revoke_input = RevokeKeyInput {
+        did: did.clone(),
+        key: device_key.clone(),
+        revoked_by_key: root_key.clone(),
+        signature: revoke_sig,
+        timestamp: revoke_ts.to_string(),
+        reason: Some("Compromised".to_string()),
+    };
+    let _: AgentExpressionData = call_zome(&conductor, &cell, "revoke_key", revoke_input).await;
+
+    // Verify device key is now invalid
+    let valid_after: bool = call_zome(
+        &conductor,
+        &cell,
+        "is_key_valid",
+        IsKeyValidInput {
+            did: did.clone(),
+            key: device_key.clone(),
+        },
+    )
+    .await;
+    assert!(!valid_after, "Device key should be invalid after revocation");
+
+    // Root key should still be valid
+    let root_valid: bool = call_zome(
+        &conductor,
+        &cell,
+        "is_key_valid",
+        IsKeyValidInput {
+            did: did.clone(),
+            key: root_key.clone(),
+        },
+    )
+    .await;
+    assert!(root_valid, "Root key should still be valid");
 }
 
 /// Test backward compatibility: old-format expressions without authorised_keys

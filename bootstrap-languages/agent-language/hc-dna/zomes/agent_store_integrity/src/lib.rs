@@ -57,6 +57,7 @@ pub struct AgentExpression {
 app_entry!(AgentExpression);
 
 #[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct KeyAuthorisation {
     pub authorising_key: String,
     pub signature: String,
@@ -65,6 +66,7 @@ pub struct KeyAuthorisation {
 }
 
 #[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthorisedKey {
     pub key: String,
     pub name: String,
@@ -74,6 +76,7 @@ pub struct AuthorisedKey {
 }
 
 #[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct KeyRevocation {
     pub revoked_key: String,
     pub revoked_at: DateTime<Utc>,
@@ -85,6 +88,7 @@ pub struct KeyRevocation {
 }
 
 #[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct AddAuthorisedKeyInput {
     pub did: String,
     pub key: String,
@@ -93,6 +97,7 @@ pub struct AddAuthorisedKeyInput {
 }
 
 #[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct RevokeKeyInput {
     pub did: String,
     pub key: String,
@@ -105,6 +110,7 @@ pub struct RevokeKeyInput {
 }
 
 #[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct IsKeyValidInput {
     pub did: String,
     pub key: String,
@@ -117,8 +123,8 @@ pub struct AgentExpressionData {
     #[serde(rename(serialize = "directMessageLanguage"))]
     #[serde(rename(deserialize = "directMessageLanguage"))]
     pub direct_message_language: Option<String>,
-    #[serde(default)]
+    #[serde(default, rename = "authorisedKeys")]
     pub authorised_keys: Vec<AuthorisedKey>,
-    #[serde(default)]
+    #[serde(default, rename = "revokedKeys")]
     pub revoked_keys: Vec<KeyRevocation>,
 }

@@ -9,6 +9,7 @@ import {
   AuthorisedKey,
   EntanglementProof,
   EntanglementProofInput,
+  KeyAuthorisationInput,
   KeyRevocation,
   UserCreationResult,
 } from "./Agent";
@@ -138,6 +139,8 @@ export class AgentClient {
     );
     let agentObject = new Agent(agent.did, agent.perspective);
     agentObject.directMessageLanguage = agent.directMessageLanguage;
+    agentObject.authorisedKeys = agent.authorisedKeys;
+    agentObject.revokedKeys = agent.revokedKeys;
     return agentObject;
   }
 
@@ -255,6 +258,8 @@ export class AgentClient {
     const a = agentUpdatePublicPerspective;
     const agent = new Agent(a.did, a.perspective);
     agent.directMessageLanguage = a.directMessageLanguage;
+    agent.authorisedKeys = a.authorisedKeys;
+    agent.revokedKeys = a.revokedKeys;
     return agent;
   }
 
@@ -305,18 +310,20 @@ export class AgentClient {
     const a = agentUpdateDirectMessageLanguage;
     const agent = new Agent(a.did, a.perspective);
     agent.directMessageLanguage = a.directMessageLanguage;
+    agent.authorisedKeys = a.authorisedKeys;
+    agent.revokedKeys = a.revokedKeys;
     return agent;
   }
 
-  async addAuthorisedKey(key: string, name: string): Promise<Agent> {
+  async addAuthorisedKey(key: string, name: string, proof: KeyAuthorisationInput): Promise<Agent> {
     const { agentAddAuthorisedKey } = unwrapApolloResult(
       await this.#apolloClient.mutate({
-        mutation: gql`mutation agentAddAuthorisedKey($key: String!, $name: String!) {
-                agentAddAuthorisedKey(key: $key, name: $name) {
+        mutation: gql`mutation agentAddAuthorisedKey($key: String!, $name: String!, $proof: KeyAuthorisationInput!) {
+                agentAddAuthorisedKey(key: $key, name: $name, proof: $proof) {
                     ${AGENT_SUBITEMS}
                 }
             }`,
-        variables: { key, name },
+        variables: { key, name, proof },
       })
     );
     return agentAddAuthorisedKey as Agent;
