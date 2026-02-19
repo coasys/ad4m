@@ -87,6 +87,8 @@ pub fn create_test_agent_expression(did: &str, direct_message_language: Option<S
             did: did.to_string(),
             perspective: None,
             direct_message_language,
+            authorised_keys: vec![],
+            revoked_keys: vec![],
         },
         proof: ExpressionProof {
             signature: format!("sig_{}", Uuid::new_v4()),
