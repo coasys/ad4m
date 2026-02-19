@@ -73,20 +73,9 @@ describe("Prolog + Literals", () => {
             //console.log("UUID: " + perspective.uuid)
         })
 
-        it.skip("should register and retrieve Prolog SDNA (legacy test)", async () => {
-            let classes = await perspective!.subjectClasses();
-            expect(classes.length).to.equal(0)
-
-            let sdna = readFileSync("./sdna/subject.pl").toString()
-            await perspective!.addSdna("Todo", sdna, "subject_class")
-
-            let retrievedSdna = await perspective!.getSdna()
-            expect(retrievedSdna).to.deep.equal([sdna])
-            
-            classes = await perspective!.subjectClasses();
-            expect(classes.length).to.equal(1)
-            expect(classes[0]).to.equal("Todo")
-        })
+        // REMOVED: Legacy Prolog SDNA test - Prolog SDNA is superseded by SHACL
+        // The addSdna API now accepts optional sdnaCode with shaclJson being the primary input.
+        // See "SDNA creation decorators" tests below for the modern SHACL-based API.
 
         // NOTE: Legacy Subject proxy tests removed in SHACL migration PR.
         // The Subject proxy API (Subject.init(), getSubjectProxy()) requires Prolog queries
@@ -268,20 +257,9 @@ describe("Prolog + Literals", () => {
                 expect(await todos[0].state).to.equal("todo://done")
             })
 
-            it.skip("can retrieve matching instance through InstanceQuery(condition: ..)", async () => {
-                // @ts-ignore - allSelf method removed (was Prolog-only)
-                let todos = await Todo.allSelf(perspective!)
-                expect(todos.length).to.equal(0)
-
-                todos = await Todo.all(perspective!)
-                let todo = todos[0]
-                //@ts-ignore
-                await perspective!.add(new Link({source: "ad4m://self", target: todo.baseExpression}))
-
-                // @ts-ignore - allSelf method removed (was Prolog-only)
-                todos = await Todo.allSelf(perspective!)
-                expect(todos.length).to.equal(1)
-            })
+            // REMOVED: InstanceQuery(condition: ..) test - required Prolog-only allSelf method
+            // The InstanceQuery with condition parameter required Prolog inference.
+            // Future: Could be reimplemented with SHACL-based query conditions via SurrealDB.
 
             it("can deal with properties that resolve the URI and create Expressions", async () => {
                 let todos = await Todo.all(perspective!)
@@ -345,21 +323,9 @@ describe("Prolog + Literals", () => {
                 //console.log((await perspective!.getSdna())[1])
             })
 
-            it.skip("can use properties with custom getter prolog code", async () => {
-                let root = Literal.from("Custom getter test").toUrl()
-                let todo = new Todo(perspective!, root)
-                await todo.save()
-
-                // @ts-ignore
-                const liked1 = await todo.isLiked
-                expect(liked1).to.be.undefined
-
-                await perspective?.add(new Link({source: root, predicate: "flux://has_reaction", target: "flux://thumbsup"}))
-
-                // @ts-ignore
-                const liked2 = await todo.isLiked
-                expect(liked2).to.be.true
-            })
+            // REMOVED: Custom getter prolog code test - required Prolog-based property getters
+            // The isLiked property used custom Prolog code for computed values.
+            // Future: Could be reimplemented with SHACL-based computed properties or SurrealDB queries.
 
             describe("with Message subject class registered", () => {
                 before(async () => {
@@ -612,30 +578,9 @@ describe("Prolog + Literals", () => {
                     expect(updatedRecipies.length).to.equal(2)
                 })
 
-                it.skip("can constrain collection entries through 'where' clause with prolog condition", async () => {
-                    let root = Literal.from("Active record implementation collection test with where").toUrl();
-                    const recipe = new Recipe(perspective!, root);
-
-                    let recipeEntries = Literal.from("test recipes").toUrl();
-
-                    recipe.entries = [recipeEntries];
-                    // @ts-ignore
-                    recipe.comments = ['recipe://test', 'recipe://test1'];
-                    recipe.name = "Collection test";
-
-                    await recipe.save();
-
-                    await perspective?.add(new Link({source: recipeEntries, predicate: "recipe://has_ingredient", target: "recipe://test"}));
-
-                    await recipe.get();
-
-                    const recipe2 = new Recipe(perspective!, root);
-
-                    await recipe2.get();
-
-                    // @ts-ignore - ingredients property removed (was Prolog-only)
-                    expect(recipe2.ingredients.length).to.equal(1);
-                })
+                // REMOVED: Collection 'where' clause with prolog condition test
+                // The ingredients property used Prolog-based where clause filtering.
+                // The next test demonstrates the modern approach using SurrealDB conditions.
 
                 it("can constrain collection entries through 'where' clause with condition", async () => {
                     // Define a Recipe model with condition filtering
@@ -2257,60 +2202,10 @@ describe("Prolog + Literals", () => {
                         }
                     });
 
-                    it.skip("should produce identical results with SurrealDB and Prolog subscriptions", async () => {
-                        // 1. Setup subscriptions
-                        const surrealCallback = sinon.fake();
-                        const prologCallback = sinon.fake();
-
-                        // SurrealDB subscription (default)
-                        const surrealBuilder = TestModel.query(perspective).where({ status: "active" });
-                        await surrealBuilder.subscribe(surrealCallback);
-
-                        // Prolog subscription (explicit)
-                        const prologBuilder = TestModel.query(perspective).where({ status: "active" }).useSurrealDB(false);
-                        await prologBuilder.subscribe(prologCallback);
-
-                        // 2. Add data
-                        const startTime = Date.now();
-                        const count = 5;
-                        
-                        for (let i = 0; i < count; i++) {
-                            const model = new TestModel(perspective);
-                            model.name = `Item ${i}`;
-                            model.status = "active";
-                            await model.save();
-                        }
-
-                        // 3. Wait for updates
-                        // Give enough time for both to catch up
-                        await sleep(2000);
-
-                        // 4. Verify results match
-                        expect(surrealCallback.called).to.be.true;
-                        expect(prologCallback.called).to.be.true;
-
-                        const surrealLastResult = surrealCallback.lastCall.args[0];
-                        const prologLastResult = prologCallback.lastCall.args[0];
-
-                        expect(surrealLastResult.length).to.equal(count);
-                        expect(prologLastResult.length).to.equal(count);
-
-                        // Sort by name to ensure order doesn't affect comparison
-                        const sortByName = (a: TestModel, b: TestModel) => a.name.localeCompare(b.name);
-                        surrealLastResult.sort(sortByName);
-                        prologLastResult.sort(sortByName);
-
-                        for (let i = 0; i < count; i++) {
-                            expect(surrealLastResult[i].name).to.equal(prologLastResult[i].name);
-                            expect(surrealLastResult[i].status).to.equal(prologLastResult[i].status);
-                        }
-
-                        console.log(`SurrealDB vs Prolog subscription parity check passed with ${count} items.`);
-                        
-                        // Cleanup
-                        surrealBuilder.dispose();
-                        prologBuilder.dispose();
-                    });
+                    // REMOVED: SurrealDB vs Prolog parity test
+                    // This test compared SurrealDB and Prolog subscription results.
+                    // With SHACL migration, SurrealDB is now the primary query engine.
+                    // Prolog subscriptions are deprecated - no need for parity testing.
 
                     it("should demonstrate SurrealDB subscription performance", async () => {
                         // Measure latency of update
@@ -3111,7 +3006,10 @@ describe("Prolog + Literals", () => {
 
     })
 
-    // skipped because only applies to prolog-pooled moded
+    // SKIPPED: Embedding cache tests - only applies to Prolog-pooled mode
+    // These tests verify embedding URL post-processing with Prolog infer() queries.
+    // With SHACL migration, embedding queries should use SurrealDB vector search instead.
+    // Keeping as reference for future SurrealDB vector embedding implementation.
     describe.skip('Embedding cache', () => {
         let perspective: PerspectiveProxy | null = null;
         const EMBEDDING_LANG = "QmzSYwdbqjGGbYbWJvdKA4WnuFwmMx3AsTfgg7EwbeNUGyE555c";
