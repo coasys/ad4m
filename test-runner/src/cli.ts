@@ -152,13 +152,14 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
 
     let child: ChildProcessWithoutNullStreams;
 
-    const languageLanguageOnly = defaultLangPath ? 'false' : 'true';
+    // The bootstrap seed contains hashes for all system languages.
+    // The language-language fetches them from the bootstrap store at runtime.
     child = spawn(`${binaryPath}`, [
       'run',
       '--admin-credential', global.ad4mToken,
       '--app-data-path', relativePath,
       '--gql-port', port.toString(),
-      '--language-language-only', languageLanguageOnly,
+      '--language-language-only', 'false',
     ])
 
     const logFile = fs.createWriteStream(path.join(process.cwd(), 'ad4m-test.log'))
@@ -282,7 +283,8 @@ async function run() {
 
 
   if (args.ui) {
-    await startServer(relativePath, args.bundle!, args.meta!, 'expression', 4000, args.defaultLangPath, () => {
+    await installSystemLanguages(relativePath);
+    await startServer(relativePath, args.bundle!, args.meta!, 'expression', 4000, undefined, () => {
       const app = express();
 
       console.log(process.env.IP)
