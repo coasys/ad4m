@@ -1,7 +1,8 @@
 [workspace]
 members = [
   "zomes/integrity",
-  "zomes/file_storage"
+  "zomes/file_storage",
+  "tests/sweettest"
 ]
 resolver="2"
 

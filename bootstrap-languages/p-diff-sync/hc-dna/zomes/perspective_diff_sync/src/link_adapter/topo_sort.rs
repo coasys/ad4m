@@ -119,7 +119,10 @@ mod tests {
         let h3 = HoloHash::<holo_hash::hash_type::Action>::from_raw_36(vec![3; 36]);
         let h4 = HoloHash::<holo_hash::hash_type::Action>::from_raw_36(vec![4; 36]);
 
-        let r1 = PerspectiveDiffEntryReference::new(PerspectiveDiff::new(), Some(vec![h2.clone(), h3.clone()]));
+        let r1 = PerspectiveDiffEntryReference::new(
+            PerspectiveDiff::new(),
+            Some(vec![h2.clone(), h3.clone()]),
+        );
         let r2 = PerspectiveDiffEntryReference::new(PerspectiveDiff::new(), Some(vec![h4.clone()]));
         let r3 = PerspectiveDiffEntryReference::new(PerspectiveDiff::new(), Some(vec![h4.clone()]));
         let r4 = PerspectiveDiffEntryReference::new(PerspectiveDiff::new(), None);
@@ -128,20 +131,29 @@ mod tests {
 
         let sorted = topo_sort_diff_references(&example_arr)?;
         assert_eq!(sorted.len(), 4);
-        
+
         // Check that all diffs are empty (since we created them that way)
         for item in &sorted {
             assert!(item.1.diff.additions.is_empty() && item.1.diff.removals.is_empty());
         }
-        
+
         // Find the item with no parents (should be first in topo order)
-        let orphan_count = sorted.iter().filter(|item| item.1.parents.is_none()).count();
+        let orphan_count = sorted
+            .iter()
+            .filter(|item| item.1.parents.is_none())
+            .count();
         assert_eq!(orphan_count, 1, "Should have exactly one orphan node");
-        
+
         // Find the item with parents
-        let parent_count = sorted.iter().filter(|item| item.1.parents.is_some()).count();
-        assert_eq!(parent_count, 3, "Should have exactly three nodes with parents");
-        
+        let parent_count = sorted
+            .iter()
+            .filter(|item| item.1.parents.is_some())
+            .count();
+        assert_eq!(
+            parent_count, 3,
+            "Should have exactly three nodes with parents"
+        );
+
         Ok(())
     }
 }

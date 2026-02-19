@@ -174,6 +174,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     info!("js_core initialized.");
 
     LanguageController::init_global_instance(js_core_handle.clone());
+
+    // Set app data path for perspectives module (needed for file-based SurrealDB)
+    perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
+
     perspectives::initialize_from_db();
 
     let app_dir = config

@@ -90,9 +90,11 @@ export interface PropertyMetadata {
   /** Language for resolution (e.g., "literal") */
   resolveLanguage?: string;
   /** Custom Prolog getter code */
-  getter?: string;
+  prologGetter?: string;
   /** Custom Prolog setter code */
-  setter?: string;
+  prologSetter?: string;
+  /** Custom SurrealQL getter code */
+  getter?: string;
   /** Whether stored locally only */
   local?: boolean;
   /** Transform function */
@@ -110,7 +112,9 @@ export interface CollectionMetadata {
   /** The predicate URI (through value) */
   predicate: string;
   /** Filter conditions */
-  where?: { isInstance?: any; condition?: string };
+  where?: { isInstance?: any; prologCondition?: string; condition?: string };
+  /** Custom SurrealQL getter code */
+  getter?: string;
   /** Whether stored locally only */
   local?: boolean;
 }
@@ -409,7 +413,8 @@ export class Ad4mModel {
   #source: string;
   #perspective: PerspectiveProxy;
   author: string;
-  timestamp: string;
+  createdAt: any;
+  updatedAt: any;
 
   private static classNamesByClass = new WeakMap<typeof Ad4mModel, { [perspectiveId: string]: string }>();
 
@@ -436,6 +441,14 @@ export class Ad4mModel {
     }
 
     return classCache[perspectiveID];
+  }
+
+  /**
+   * Backwards compatibility alias for createdAt.
+   * @deprecated Use createdAt instead. This will be removed in a future version.
+   */
+  get timestamp(): any {
+    return (this as any).createdAt;
   }
 
   /**
@@ -502,8 +515,9 @@ export class Ad4mModel {
         writable: options.writable || false,
         ...(options.initial !== undefined && { initial: options.initial }),
         ...(options.resolveLanguage !== undefined && { resolveLanguage: options.resolveLanguage }),
+        ...(options.prologGetter !== undefined && { prologGetter: options.prologGetter }),
         ...(options.getter !== undefined && { getter: options.getter }),
-        ...(options.setter !== undefined && { setter: options.setter }),
+        ...(options.prologSetter !== undefined && { prologSetter: options.prologSetter }),
         ...(options.local !== undefined && { local: options.local }),
         ...(options.transform !== undefined && { transform: options.transform }),
         ...(options.flag !== undefined && { flag: options.flag })
@@ -520,7 +534,8 @@ export class Ad4mModel {
         name: collectionName,
         predicate: options.through || "",
         ...(options.where !== undefined && { where: options.where }),
-        ...(options.local !== undefined && { local: options.local })
+        ...(options.local !== undefined && { local: options.local }),
+        ...(options.getter !== undefined && { getter: options.getter })
       };
     }
     
@@ -644,10 +659,10 @@ export class Ad4mModel {
       throw new Error(`Property "${key}" is read-only and cannot be written`);
     }
 
-    if (metadata.setter) {
-      // Custom setter - throw error for now (Phase 2)
+    if (metadata.prologSetter) {
+      // Custom Prolog setter - throw error for now (Phase 2)
       throw new Error(
-        `Custom setter for property "${key}" not yet supported without Prolog. ` +
+        `Custom Prolog setter for property "${key}" not yet supported without Prolog. ` +
         `Use standard @Property decorator or enable Prolog for custom setters.`
       );
     }
@@ -743,8 +758,27 @@ export class Ad4mModel {
         })
       )
     );
+    // Filter out properties that are read-only (getters without setters)
+    const writableProps = Object.fromEntries(
+      Object.entries(propsObject).filter(([key]) => {
+        const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(instance), key);
+        if (!descriptor) {
+          // No descriptor means it's a regular property on the instance, allow it
+          return true;
+        }
+        // Check if it's an accessor descriptor (has get/set) vs data descriptor (has value/writable)
+        const isAccessor = descriptor.get !== undefined || descriptor.set !== undefined;
+        if (isAccessor) {
+          // Accessor descriptor: only allow if it has a setter
+          return descriptor.set !== undefined;
+        } else {
+          // Data descriptor: only allow if writable is not explicitly false
+          return descriptor.writable !== false;
+        }
+      })
+    );
     // Assign properties to instance
-    Object.assign(instance, propsObject);
+    Object.assign(instance, writableProps);
   }
 
   private async getData() {
@@ -769,11 +803,14 @@ export class Ad4mModel {
       const links = await this.#perspective.querySurrealDB(linksQuery);
 
       if (links && links.length > 0) {
+        let minTimestamp = null;
         let maxTimestamp = null;
         let latestAuthor = null;
+        let originalAuthor = null;
 
-        // Process properties
+        // Process properties (skip those with custom getter)
         for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+          if (propMeta.getter) continue; // Handle via custom getter evaluation
           const matching = links.filter((l: any) => l.predicate === propMeta.predicate);
           if (matching.length > 0) {
             // "Latest wins" semantics: select the last element since links are ordered ASC.
@@ -781,10 +818,16 @@ export class Ad4mModel {
             const link = matching[matching.length - 1];
             let value = link.target;
 
-            // Track timestamp/author
-            if (link.timestamp && (!maxTimestamp || link.timestamp > maxTimestamp)) {
-              maxTimestamp = link.timestamp;
-              latestAuthor = link.author;
+            // Track timestamps/authors for createdAt and updatedAt
+            if (link.timestamp) {
+              if (!minTimestamp || link.timestamp < minTimestamp) {
+                minTimestamp = link.timestamp;
+                originalAuthor = link.author;
+              }
+              if (!maxTimestamp || link.timestamp > maxTimestamp) {
+                maxTimestamp = link.timestamp;
+                latestAuthor = link.author;
+              }
             }
 
             // Handle resolveLanguage
@@ -820,20 +863,100 @@ export class Ad4mModel {
           }
         }
 
-        // Process collections
+        // Process collections (skip those with custom getter)
         for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+          if (collMeta.getter) continue; // Handle via custom getter evaluation
           const matching = links.filter((l: any) => l.predicate === collMeta.predicate);
           // Collections preserve chronological order: links are sorted ASC by timestamp,
           // so the collection reflects the order in which items were added (oldest to newest).
-          (this as any)[collName] = matching.map((l: any) => l.target);
+          let values = matching.map((l: any) => l.target);
+          
+          // Apply where.condition filtering if present
+          if (collMeta.where?.condition && values.length > 0) {
+            try {
+              // Filter values by evaluating condition for each value
+              const filteredValues: string[] = [];
+              
+              for (const value of values) {
+                let condition = collMeta.where.condition
+                  .replace(/\$perspective/g, `'${this.#perspective.uuid}'`)
+                  .replace(/\$base/g, `'${this.#baseExpression}'`)
+                  .replace(/Target/g, `'${value.replace(/'/g, "\\'")}'`);
+                
+                // If condition starts with WHERE, wrap it in array length check pattern
+                // Using array::len() to properly count matching links
+                if (condition.trim().startsWith('WHERE')) {
+                  condition = `array::len(SELECT * FROM link ${condition}) > 0`;
+                }
+                
+                const filterQuery = `RETURN ${condition}`;
+                const result = await this.#perspective.querySurrealDB(filterQuery);
+                
+                // RETURN can return the value directly or in an array
+                const isTrue = result === true || (Array.isArray(result) && result.length > 0 && result[0] === true);
+                if (isTrue) {
+                  filteredValues.push(value);
+                }
+              }
+              
+              values = filteredValues;
+            } catch (error) {
+              console.warn(`Failed to apply condition filter for ${collName}:`, error);
+              // Keep unfiltered values on error
+            }
+          }
+          
+          // Apply where.isInstance filtering if present
+          if (collMeta.where?.isInstance && values.length > 0) {
+            try {
+              const className = typeof collMeta.where.isInstance === 'string' 
+                ? collMeta.where.isInstance 
+                : collMeta.where.isInstance.name;
+              
+              const filterMetadata = await this.#perspective.getSubjectClassMetadataFromSDNA(className);
+              if (filterMetadata) {
+                values = await this.#perspective.batchCheckSubjectInstances(values, filterMetadata);
+              }
+            } catch (error) {
+              // Keep unfiltered values on error
+            }
+          }
+          
+          (this as any)[collName] = values;
         }
 
-        // Set author and timestamp
-        if (latestAuthor) {
-          (this as any).author = latestAuthor;
+        // Set author and timestamps
+        if (originalAuthor) {
+          (this as any).author = originalAuthor;
+        }
+        if (minTimestamp) {
+          (this as any).createdAt = minTimestamp;
         }
         if (maxTimestamp) {
-          (this as any).timestamp = maxTimestamp;
+          (this as any).updatedAt = maxTimestamp;
+        }
+      }
+
+      // Evaluate SurrealQL getters
+      await ctor.evaluateCustomGettersForInstance(this, this.#perspective, metadata);
+      
+      // Apply where.isInstance filtering to getter collections
+      // (non-getter collections were already filtered above)
+      for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+        if (collMeta.getter && collMeta.where?.isInstance && (this as any)[collName]?.length > 0) {
+          try {
+            const className = typeof collMeta.where.isInstance === 'string'
+              ? collMeta.where.isInstance
+              : collMeta.where.isInstance.name;
+            
+            const filterMetadata = await this.#perspective.getSubjectClassMetadataFromSDNA(className);
+            if (filterMetadata) {
+              const filtered = await this.#perspective.batchCheckSubjectInstances((this as any)[collName], filterMetadata);
+              (this as any)[collName] = filtered;
+            }
+          } catch (error) {
+            // Keep unfiltered values on error
+          }
         }
       }
     } catch (e) {
@@ -868,6 +991,60 @@ export class Ad4mModel {
     `;
 
     return fullQuery;
+  }
+
+  /**
+   * Evaluates custom SurrealQL getters for properties and collections on a specific instance.
+   * @private
+   */
+  private static async evaluateCustomGettersForInstance(
+    instance: any,
+    perspective: PerspectiveProxy,
+    metadata: any
+  ) {
+    const safeBaseExpression = this.formatSurrealValue(instance.baseExpression);
+
+    // Evaluate property getters
+    for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+      if ((propMeta as any).getter) {
+        try {
+          // Replace 'Base' placeholder with actual base expression
+          const query = (propMeta as any).getter.replace(/Base/g, safeBaseExpression);
+          // Query from node table to have graph traversal context
+          const result = await perspective.querySurrealDB(
+            `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`
+          );
+          if (result && result.length > 0 && result[0].value !== undefined && result[0].value !== null && result[0].value !== 'None' && result[0].value !== '') {
+            instance[propName] = result[0].value;
+          }
+        } catch (error) {
+          console.warn(`Failed to evaluate getter for ${propName}:`, error);
+        }
+      }
+    }
+
+    // Evaluate collection getters
+    for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+      if ((collMeta as any).getter) {
+        try {
+          // Replace 'Base' placeholder with actual base expression
+          const query = (collMeta as any).getter.replace(/Base/g, safeBaseExpression);
+          // Query from node table to have graph traversal context
+          const result = await perspective.querySurrealDB(
+            `SELECT (${query}) AS value FROM node WHERE uri = ${safeBaseExpression}`
+          );
+          if (result && result.length > 0 && result[0].value !== undefined && result[0].value !== null) {
+            // Filter out 'None' from collection results
+            const value = result[0].value;
+            instance[collName] = Array.isArray(value) 
+              ? value.filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None')
+              : value;
+          }
+        } catch (error) {
+          console.warn(`Failed to evaluate getter for ${collName}:`, error);
+        }
+      }
+    }
   }
 
   /**
@@ -1295,8 +1472,9 @@ WHERE ${whereConditions.join(' AND ')}
     }
     
     // Always add author and timestamp fields
-    fields.push(`(SELECT VALUE author FROM link WHERE source = source LIMIT 1) AS author`);
-    fields.push(`(SELECT VALUE timestamp FROM link WHERE source = source LIMIT 1) AS timestamp`);
+    fields.push(`(SELECT VALUE author FROM link WHERE source = source ORDER BY timestamp ASC LIMIT 1) AS author`);
+    fields.push(`(SELECT VALUE timestamp FROM link WHERE source = source ORDER BY timestamp ASC LIMIT 1) AS createdAt`);
+    fields.push(`(SELECT VALUE timestamp FROM link WHERE source = source ORDER BY timestamp DESC LIMIT 1) AS updatedAt`);
     
     return fields.join(',\n  ');
   }
@@ -1332,9 +1510,10 @@ WHERE ${whereConditions.join(' AND ')}
       fields.push(`target[WHERE predicate = '${escapedPredicate}'] AS ${collName}`);
     }
     
-    // Always add author and timestamp fields using array::first
+    // Always add author and timestamp fields
     fields.push(`array::first(author) AS author`);
-    fields.push(`array::first(timestamp) AS timestamp`);
+    fields.push(`array::first(timestamp) AS createdAt`);
+    fields.push(`array::last(timestamp) AS updatedAt`);
     
     return fields.join(',\n  ');
   }
@@ -1394,7 +1573,7 @@ WHERE ${whereConditions.join(' AND ')}
             });
           }
           // Collect values to assign to instance
-          const values = [...Properties, ...Collections, ["timestamp", Timestamp], ["author", Author]];
+          const values = [...Properties, ...Collections, ["createdAt", Timestamp], ["author", Author]];
           await Ad4mModel.assignValuesToInstance(perspective, instance, values);
 
           return instance;
@@ -1451,8 +1630,10 @@ WHERE ${whereConditions.join(' AND ')}
         
         const instance = new this(perspective, base) as any;
         
-        // Track the most recent timestamp and corresponding author
+        // Track both earliest (createdAt) and most recent (updatedAt) timestamps
+        let minTimestamp = null;
         let maxTimestamp = null;
+        let originalAuthor = null;
         let latestAuthor = null;
         
         // Process each link (track index for collection ordering)
@@ -1464,15 +1645,22 @@ WHERE ${whereConditions.join(' AND ')}
           // Skip 'None' values
           if (target === 'None') continue;
           
-          // Track the most recent timestamp and its author
-          if (link.timestamp && (!maxTimestamp || link.timestamp > maxTimestamp)) {
-            maxTimestamp = link.timestamp;
-            latestAuthor = link.author;
+          // Track both earliest (createdAt) and latest (updatedAt) timestamps with their authors
+          if (link.timestamp) {
+            if (!minTimestamp || link.timestamp < minTimestamp) {
+              minTimestamp = link.timestamp;
+              originalAuthor = link.author;
+            }
+            if (!maxTimestamp || link.timestamp > maxTimestamp) {
+              maxTimestamp = link.timestamp;
+              latestAuthor = link.author;
+            }
           }
           
-          // Find matching property
+          // Find matching property (skip those with getter)
           let foundProperty = false;
           for (const [propName, propMeta] of Object.entries(metadata.properties)) {
+            if (propMeta.getter) continue; // Handle via getter evaluation
             if (propMeta.predicate === predicate) {
               // For properties, take the first value (or we could use timestamp to get latest)
               // Note: Empty objects {} are truthy, so we need to check for them explicitly
@@ -1539,9 +1727,10 @@ WHERE ${whereConditions.join(' AND ')}
             }
           }
           
-          // If not a property, check if it's a collection
+          // If not a property, check if it's a collection (skip those with getter)
           if (!foundProperty) {
             for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+              if (collMeta.getter) continue; // Handle via getter evaluation
               if (collMeta.predicate === predicate) {
                 // For collections, accumulate all values with their timestamps and indices for sorting
                 if (!instance[collName]) {
@@ -1568,18 +1757,32 @@ WHERE ${whereConditions.join(' AND ')}
           }
         }
         
-        // Set author and timestamp from the most recent link
-        if (latestAuthor && maxTimestamp) {
-          instance.author = latestAuthor;
-          // Convert timestamp to number (milliseconds) if it's an ISO string
-          if (typeof maxTimestamp === 'string' && maxTimestamp.includes('T')) {
-            instance.timestamp = new Date(maxTimestamp).getTime();
-          } else if (typeof maxTimestamp === 'string') {
-            // Try to parse as number string
-            const parsed = parseInt(maxTimestamp, 10);
-            instance.timestamp = isNaN(parsed) ? maxTimestamp : parsed;
+        // Set author and timestamps
+        if (originalAuthor) {
+          instance.author = originalAuthor;
+        }
+        
+        // Set createdAt from earliest timestamp
+        if (minTimestamp) {
+          if (typeof minTimestamp === 'string' && minTimestamp.includes('T')) {
+            instance.createdAt = new Date(minTimestamp).getTime();
+          } else if (typeof minTimestamp === 'string') {
+            const parsed = parseInt(minTimestamp, 10);
+            instance.createdAt = isNaN(parsed) ? minTimestamp : parsed;
           } else {
-            instance.timestamp = maxTimestamp;
+            instance.createdAt = minTimestamp;
+          }
+        }
+        
+        // Set updatedAt from most recent timestamp
+        if (maxTimestamp) {
+          if (typeof maxTimestamp === 'string' && maxTimestamp.includes('T')) {
+            instance.updatedAt = new Date(maxTimestamp).getTime();
+          } else if (typeof maxTimestamp === 'string') {
+            const parsed = parseInt(maxTimestamp, 10);
+            instance.updatedAt = isNaN(parsed) ? maxTimestamp : parsed;
+          } else {
+            instance.updatedAt = maxTimestamp;
           }
         }
         
@@ -1603,8 +1806,10 @@ WHERE ${whereConditions.join(' AND ')}
               // Use original index as tiebreaker for stable sorting
               return a.originalIndex - b.originalIndex;
             });
-            // Replace collection with sorted values
-            instance[collName] = pairs.map(p => p.value);
+            // Replace collection with sorted values, filtering out empty strings and None
+            instance[collName] = pairs
+              .map(p => p.value)
+              .filter((v: any) => v !== undefined && v !== null && v !== '' && v !== 'None');
             // Clean up temporary arrays
             delete instance[timestampsKey];
             delete instance[indicesKey];
@@ -1615,8 +1820,9 @@ WHERE ${whereConditions.join(' AND ')}
         if (requestedProperties.length > 0 || requestedCollections.length > 0) {
           const requestedAttributes = [...requestedProperties, ...requestedCollections];
           Object.keys(instance).forEach((key) => {
-            // Keep only requested attributes, plus always keep timestamp and author
-            if (!requestedAttributes.includes(key) && key !== 'timestamp' && key !== 'author' && key !== 'baseExpression') {
+            // Keep only requested attributes, plus always keep createdAt, updatedAt, author, and baseExpression
+            // Note: timestamp is a getter alias for createdAt, so we preserve createdAt instead
+            if (!requestedAttributes.includes(key) && key !== 'createdAt' && key !== 'updatedAt' && key !== 'author' && key !== 'baseExpression') {
               delete instance[key];
             }
           });
@@ -1625,6 +1831,43 @@ WHERE ${whereConditions.join(' AND ')}
         instances.push(instance);
       } catch (error) {
         console.error(`Failed to process SurrealDB instance ${base}:`, error);
+      }
+    }
+    
+    // Evaluate custom getters for all instances (single pass)
+    // This populates collection values needed for where.isInstance filtering
+    for (const instance of instances) {
+      await this.evaluateCustomGettersForInstance(instance, perspective, metadata);
+    }
+    
+    // Filter collections by where.isInstance if specified
+    // Do this after initial evaluation so collection values exist for filtering
+    for (const instance of instances) {
+      for (const [collName, collMeta] of Object.entries(metadata.collections)) {
+        if (collMeta.where?.isInstance && instance[collName]?.length > 0) {
+          try {
+            const targetClass = collMeta.where.isInstance;
+            const subjects = instance[collName];
+            
+            // Get the class metadata from SDNA to pass to batchCheckSubjectInstances
+            const targetClassName = typeof targetClass === 'string' 
+              ? targetClass 
+              : (targetClass as any).prototype?.className || targetClass.name;
+            const classMetadata = await perspective.getSubjectClassMetadataFromSDNA(targetClassName);
+            
+            if (!classMetadata) {
+              continue;
+            }
+            
+            // Check which subjects are instances of the target class
+            const validSubjects = await perspective.batchCheckSubjectInstances(subjects, classMetadata);
+            
+            // Update the collection with filtered instances
+            instance[collName] = validSubjects;
+          } catch (error) {
+            // On error, leave the collection unfiltered rather than breaking everything
+          }
+        }
       }
     }
     

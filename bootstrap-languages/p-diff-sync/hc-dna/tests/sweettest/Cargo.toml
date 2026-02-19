@@ -1,0 +1,37 @@
+[package]
+name = "perspective_diff_sync_tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[test]]
+name = "integration"
+path = "src/integration_tests.rs"
+
+[dependencies]
+# Holochain dependencies - matching the zome's versions
+holochain = { git = "https://github.com/coasys/holochain.git", branch = "0.6.0-coasys", features = ["sweettest", "test_utils"] }
+hdk = { version = "0.6.0", git = "https://github.com/coasys/holochain.git", branch = "0.6.0-coasys" }
+hdi = { version = "0.7.0", git = "https://github.com/coasys/holochain.git", branch = "0.6.0-coasys" }
+holochain_types = { git = "https://github.com/coasys/holochain.git", branch = "0.6.0-coasys" }
+holochain_serialized_bytes = "=0.0.56"
+holochain_zome_types = { git = "https://github.com/coasys/holochain.git", branch = "0.6.0-coasys" }
+
+# Shared types from the integrity zome
+perspective_diff_sync_integrity = { path = "../../zomes/perspective_diff_sync_integrity" }
+
+# Standard dependencies
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full", "time"] }
+futures = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4"] }
+rand = "0.8"
+
+[dev-dependencies]
+# Test utilities
+pretty_assertions = "1.4"

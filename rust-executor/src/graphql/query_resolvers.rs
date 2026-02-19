@@ -557,27 +557,21 @@ impl Query {
 
         let mut result = Vec::new();
 
-        // Extract user DID from token for multi-user filtering
+        // Extract user email from token for multi-user ownership filtering
         let user_email = user_email_from_token(context.auth_token.clone());
 
-        // Check if this is an admin request (for launcher/debugging)
-        // Admin capability has wildcards in domain/pointers/can
-        let has_all_caps = match &context.capabilities {
-            Ok(caps) => caps
-                .iter()
-                .any(|cap| cap.with.domain == "*" && cap.can.iter().any(|c| c == "*")),
-            Err(_) => false,
-        };
-
-        let is_admin = has_all_caps && user_email.is_none();
+        // Only the launcher (authenticated via admin_credential) gets the full overview.
+        // Regular app tokens (JWT) — even those granted ALL_CAPABILITY — are not considered admin
+        // here and will only see perspectives they own or have joined.
+        let is_admin = context.is_admin_credential;
 
         for p in all_perspectives().iter() {
             let mut handle = p.persisted.lock().await.clone();
 
-            log::debug!("📋 perspectives(): perspective {} has owners: {:?}, is_admin: {}, user_email: {:?}", 
+            log::debug!("📋 perspectives(): perspective {} has owners: {:?}, is_admin: {}, user_email: {:?}",
                 handle.uuid, handle.owners, is_admin, user_email);
 
-            // Admin sees all perspectives (for launcher), otherwise filter by ownership
+            // Admin (launcher) sees all perspectives for the overview; others filter by ownership
             if is_admin {
                 log::debug!(
                     "📋 perspectives(): is_admin: true, Including perspective {}",
@@ -744,7 +738,11 @@ impl Query {
         context: &RequestContext,
     ) -> FieldResult<Vec<Notification>> {
         check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)?;
-        let notifications_result = Ad4mDb::with_global_instance(|db| db.get_notifications());
+        // Extract user context from auth token to filter notifications per user
+        let agent_context = crate::agent::AgentContext::from_auth_token(context.auth_token.clone());
+        let user_email = agent_context.user_email;
+        let notifications_result =
+            Ad4mDb::with_global_instance(|db| db.get_notifications_for_user(user_email));
         if let Err(e) = notifications_result {
             return Err(FieldError::new(e.to_string(), Value::null()));
         }

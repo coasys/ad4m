@@ -327,7 +327,7 @@ describe("Prolog + Literals", () => {
                 @InstanceQuery({where: { state: "todo://done" }})
                 static async allDone(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
-                @InstanceQuery({condition: 'triple("ad4m://self", _, Instance)'})
+                @InstanceQuery({ prologCondition: 'triple("ad4m://self", _, Instance)'})
                 static async allSelf(perspective: PerspectiveProxy): Promise<Todo[]> { return [] }
 
                 //@ts-ignore
@@ -345,7 +345,7 @@ describe("Prolog + Literals", () => {
                 title: string = ""
 
                 @ReadOnly({
-                    getter: `triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true`
+                    prologGetter: `triple(Base, "flux://has_reaction", "flux://thumbsup"), Value = true`
                 })
                 isLiked: boolean = false
 
@@ -363,7 +363,7 @@ describe("Prolog + Literals", () => {
 
                 @Collection({
                     through: "flux://entry_type",
-                    where: { condition: `triple(Target, "flux://has_reaction", "flux://thumbsup")` }
+                    where: { prologCondition: `triple(Target, "flux://has_reaction", "flux://thumbsup")` }
                 })
                 likedMessages: string[] = []
             }
@@ -492,27 +492,6 @@ describe("Prolog + Literals", () => {
                 //console.log((await perspective!.getSdna())[1])
             })
 
-            it.skip("can constrain collection entries through 'where' clause with prolog condition", async () => {
-                let root = Literal.from("Collection where test with prolog condition").toUrl()
-                let todo = await perspective!.createSubject(new Todo(), root)
-
-                let messageEntry = Literal.from("test message").toUrl()
-
-                // @ts-ignore
-                await todo.addEntries(messageEntry)
-
-                let entries = await todo.entries
-                expect(entries.length).to.equal(1)
-
-                let messageEntries = await todo.likedMessages
-                expect(messageEntries.length).to.equal(0)
-
-                await perspective?.add(new Link({source: messageEntry, predicate: "flux://has_reaction", target: "flux://thumbsup"}))
-
-                messageEntries = await todo.likedMessages
-                expect(messageEntries.length).to.equal(1)
-            })
-
             it.skip("can use properties with custom getter prolog code", async () => {
                 let root = Literal.from("Custom getter test").toUrl()
                 let todo = await perspective!.createSubject(new Todo(), root)
@@ -625,7 +604,7 @@ describe("Prolog + Literals", () => {
 
                     @Collection({
                         through: "recipe://entries",
-                        where: { condition: `triple(Target, "recipe://has_ingredient", "recipe://test")` }
+                        where: { prologCondition: `triple(Target, "recipe://has_ingredient", "recipe://test")` }
                     })
                     ingredients: string[] = []
 
@@ -806,6 +785,63 @@ describe("Prolog + Literals", () => {
                     expect(recipe2.ingredients.length).to.equal(1);
                 })
 
+                it("can constrain collection entries through 'where' clause with condition", async () => {
+                    // Define a Recipe model with condition filtering
+                    @ModelOptions({ name: "RecipeWithSurrealFilter" })
+                    class RecipeWithSurrealFilter extends Ad4mModel {
+                        @Optional({
+                            through: "recipe://name",
+                            resolveLanguage: "literal"
+                        })
+                        name: string = "";
+
+                        @Collection({ through: "recipe://entries" })
+                        entries: string[] = [];
+
+                        @Collection({
+                            through: "recipe://entries",
+                            where: { 
+                                condition: `WHERE in.uri = Target AND predicate = 'recipe://has_ingredient' AND out.uri = 'recipe://test'` 
+                            }
+                        })
+                        ingredients: string[] = [];
+                    }
+
+                    // Register the class
+                    await perspective!.ensureSDNASubjectClass(RecipeWithSurrealFilter);
+
+                    let root = Literal.from("Active record surreal condition test").toUrl();
+                    const recipe = new RecipeWithSurrealFilter(perspective!, root);
+
+                    let entry1 = Literal.from("entry with ingredient").toUrl();
+                    let entry2 = Literal.from("entry without ingredient").toUrl();
+
+                    recipe.entries = [entry1, entry2];
+                    recipe.name = "Condition test";
+
+                    await recipe.save();
+
+                    // Add the ingredient link to entry1 only
+                    await perspective?.add(new Link({
+                        source: entry1, 
+                        predicate: "recipe://has_ingredient", 
+                        target: "recipe://test"
+                    }));
+
+                    // Small delay for SurrealDB indexing
+                    await sleep(500);
+
+                    const recipe2 = new RecipeWithSurrealFilter(perspective!, root);
+                    await recipe2.get();
+
+                    // Should have 2 entries total
+                    expect(recipe2.entries.length).to.equal(2);
+                    
+                    // But only 1 ingredient (entry1 which has the ingredient link)
+                    expect(recipe2.ingredients.length).to.equal(1);
+                    expect(recipe2.ingredients[0]).to.equal(entry1);
+                })
+
                 it("can implement the resolveLanguage property type", async () => {
                     let root = Literal.from("Active record implementation test resolveLanguage").toUrl()
                     const recipe = new Recipe(perspective!, root)
@@ -871,14 +907,11 @@ describe("Prolog + Literals", () => {
                     const recipe = new Recipe(perspective!, root)
 
                     const longName = "This is a very long recipe name that goes on and on with many many characters to test that we can handle long property values without any issues whatsoever and keep going even longer to make absolutely sure we hit at least 300 characters in this test string that just keeps getting longer and longer until we are completely satisfied that it works properly with such lengthy content. But wait, there's more! We need to make this string even longer to properly test the system's ability to handle extremely long property values. Let's add some more meaningful content about recipes - ingredients like flour, sugar, eggs, milk, butter, vanilla extract, baking powder, salt, and detailed instructions for mixing them together in just the right way to create the perfect baked goods. We could go on about preheating the oven to the right temperature, greasing the pans properly, checking for doneness with a toothpick, and letting things cool completely before frosting. The possibilities are endless when it comes to recipe details and instructions that could make this string longer and longer. We want to be absolutely certain that our system can handle property values of any reasonable length without truncating or corrupting the data in any way. This is especially important for recipes where precise instructions and ingredient amounts can make the difference between success and failure in the kitchen. Testing with realistically long content helps ensure our system works reliably in real-world usage scenarios where users might enter detailed information that extends well beyond a few simple sentences."
-                    recipe.plain = longName
+                    // Use resolve (resolveLanguage: "literal") to store the long string value.
+                    // The plain property is for storing URI addresses; resolve encodes arbitrary strings.
                     recipe.resolve = longName
 
                     await recipe.save()
-
-                    let linksName = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://plain"}))
-                    expect(linksName.length).to.equal(1)
-                    expect(linksName[0].data.target).to.equal(longName)
 
                     let linksResolve = await perspective!.get(new LinkQuery({source: root, predicate: "recipe://resolve"}))
                     expect(linksResolve.length).to.equal(1)
@@ -887,9 +920,6 @@ describe("Prolog + Literals", () => {
 
                     const recipe2 = new Recipe(perspective!, root)
                     await recipe2.get()
-
-                    expect(recipe2.plain.length).to.equal(longName.length)
-                    expect(recipe2.plain).to.equal(longName)
 
                     expect(recipe2.resolve.length).to.equal(longName.length)
                     expect(recipe2.resolve).to.equal(longName)
@@ -970,13 +1000,13 @@ describe("Prolog + Literals", () => {
                 it("findAll() returns collections on instances", async () => {
                     let root1 = Literal.from("findAll test 1").toUrl()
                     let root2 = Literal.from("findAll test 2").toUrl()
-                    
+
                     const recipe1 = new Recipe(perspective!, root1)
-                    recipe1.comments = ["Recipe 1: Comment 1", "Recipe 1: Comment 2"];
+                    recipe1.comments = ["recipe://comment/r1/1", "recipe://comment/r1/2"];
                     await recipe1.save();
 
                     const recipe2 = new Recipe(perspective!, root2)
-                    recipe2.comments = ["Recipe 2: Comment 1", "Recipe 2: Comment 2"];
+                    recipe2.comments = ["recipe://comment/r2/1", "recipe://comment/r2/2"];
                     await recipe2.save();
 
                     // Test findAll
@@ -984,12 +1014,12 @@ describe("Prolog + Literals", () => {
 
                     expect(recipes.length).to.equal(2);
                     expect(recipes[0].comments.length).to.equal(2);
-                    expect(recipes[0].comments).to.include("Recipe 1: Comment 1");
-                    expect(recipes[0].comments).to.include("Recipe 1: Comment 2");
+                    expect(recipes[0].comments).to.include("recipe://comment/r1/1");
+                    expect(recipes[0].comments).to.include("recipe://comment/r1/2");
 
                     expect(recipes[1].comments.length).to.equal(2);
-                    expect(recipes[1].comments).to.include("Recipe 2: Comment 1");
-                    expect(recipes[1].comments).to.include("Recipe 2: Comment 2");
+                    expect(recipes[1].comments).to.include("recipe://comment/r2/1");
+                    expect(recipes[1].comments).to.include("recipe://comment/r2/2");
                 })
 
                 it("findAll() returns author & timestamp on instances", async () => {
@@ -1074,8 +1104,8 @@ describe("Prolog + Literals", () => {
                 it("findAll() works with collections query", async () => {
                     let root = Literal.from("findAll test 1").toUrl()
                     const recipe = new Recipe(perspective!, root);
-                    recipe.comments = ["Recipe 1: Comment 1", "Recipe 1: Comment 2"];
-                    recipe.entries = ["Recipe 1: Entry 1", "Recipe 1: Entry 2"];
+                    recipe.comments = ["recipe://comment/1", "recipe://comment/2"];
+                    recipe.entries = ["recipe://entry/1", "recipe://entry/2"];
                     await recipe.save();
 
                     // Test recipes with all collections
@@ -1465,15 +1495,15 @@ describe("Prolog + Literals", () => {
                     const recipe1 = new Recipe(perspective!);
                     recipe1.name = "Recipe 1";
                     recipe1.booleanTest = true;
-                    recipe1.comments = ["Recipe 1: Comment 1", "Recipe 1: Comment 2"];
-                    recipe1.entries = ["Recipe 1: Entry 1", "Recipe 1: Entry 2"];
+                    recipe1.comments = ["recipe://comment/r1/1", "recipe://comment/r1/2"];
+                    recipe1.entries = ["recipe://entry/r1/1", "recipe://entry/r1/2"];
                     await recipe1.save();
 
                     const recipe2 = new Recipe(perspective!);
                     recipe2.name = "Recipe 2";
                     recipe2.booleanTest = false;
-                    recipe2.comments = ["Recipe 2: Comment 1", "Recipe 2: Comment 2"];
-                    recipe2.entries = ["Recipe 2: Entry 1", "Recipe 2: Entry 2"];
+                    recipe2.comments = ["recipe://comment/r2/1", "recipe://comment/r2/2"];
+                    recipe2.entries = ["recipe://entry/r2/1", "recipe://entry/r2/2"];
                     await recipe2.save();
 
                     // Check all recipes are there
@@ -1699,17 +1729,21 @@ describe("Prolog + Literals", () => {
                         });
                     expect(subscription).to.equal(3);
 
+                    // Small delay to ensure subscription is fully registered before triggering changes
+                    await sleep(500);
+
                     // Add another recipe and verify callback is called
                     const recipe4 = new Recipe(perspective!);
                     recipe4.name = "Recipe 4";
                     await recipe4.save();
 
                     // Wait for subscription to process with proper condition checking
+                    // Use longer timeout for CI environments which may be slower
                     await waitForCondition(
                         () => lastCount === 4,
-                        { 
-                            timeoutMs: 5000, 
-                            errorMessage: 'Count subscription did not update after recipe save' 
+                        {
+                            timeoutMs: 15000,
+                            errorMessage: 'Count subscription did not update after recipe save'
                         }
                     );
                     expect(lastCount).to.equal(4);
@@ -1848,27 +1882,23 @@ describe("Prolog + Literals", () => {
                     // Reset lastResult to verify we get an update
                     lastResult = null;
 
+                    // Small delay to ensure subscription is fully registered before triggering changes
+                    await sleep(500);
+
                     // Add a new recipe and verify subscription updates
                     const newRecipe = new Recipe(perspective!);
                     newRecipe.name = "Recipe 11";
                     await newRecipe.save();
 
-                    
-
-                    // Wait for subscription update with a timeout
-                    const maxTries = 50;
-                    const sleepMs = 100;
-                    const timeout = maxTries * sleepMs;
-                    
-                    for (let i = 0; i < maxTries; i++) {
-                        if (lastResult) break;
-                        await sleep(sleepMs);
-                        console.log("Waiting for subscription update - try:", i + 1);
-                    }
-                    
-                    if (!lastResult) {
-                        throw new Error(`Subscription did not update after ${timeout}ms`);
-                    }
+                    // Wait for subscription update with proper condition checking
+                    // Use longer timeout for CI environments which may be slower
+                    await waitForCondition(
+                        () => lastResult !== null,
+                        {
+                            timeoutMs: 15000,
+                            errorMessage: 'Paginate subscription did not update after recipe save'
+                        }
+                    );
 
                     expect(lastResult.totalCount).to.equal(11);
 
@@ -2250,7 +2280,7 @@ describe("Prolog + Literals", () => {
                     // Create and save multiple models in batch
                     const recipe = new BatchRecipe(perspective!);
                     recipe.name = "Pasta";
-                    recipe.ingredients = ["pasta", "sauce", "cheese"];
+                    recipe.ingredients = ["recipe://ingredient/pasta", "recipe://ingredient/sauce", "recipe://ingredient/cheese"];
                     await recipe.save(batchId);
                     
 
@@ -2275,7 +2305,7 @@ describe("Prolog + Literals", () => {
                     const recipesAfterCommit = await BatchRecipe.findAll(perspective!);
                     expect(recipesAfterCommit.length).to.equal(1);
                     expect(recipesAfterCommit[0].name).to.equal("Pasta");
-                    expect(recipesAfterCommit[0].ingredients).to.have.members(["pasta", "sauce", "cheese"]);
+                    expect(recipesAfterCommit[0].ingredients).to.have.members(["recipe://ingredient/pasta", "recipe://ingredient/sauce", "recipe://ingredient/cheese"]);
 
                     const notesAfterCommit = await BatchNote.findAll(perspective!);
                     expect(notesAfterCommit.length).to.equal(1);
@@ -2284,7 +2314,7 @@ describe("Prolog + Literals", () => {
 
                     // Test updating models in batch
                     const updateBatchId = await perspective!.createBatch();
-                    recipe.ingredients.push("garlic");
+                    recipe.ingredients.push("recipe://ingredient/garlic");
                     await recipe.update(updateBatchId);
 
                     note.content = "Updated: Use fresh ingredients and add garlic";
@@ -2292,7 +2322,7 @@ describe("Prolog + Literals", () => {
 
                     // Verify models haven't changed before commit
                     const recipesBeforeUpdate = await BatchRecipe.findAll(perspective!);
-                    expect(recipesBeforeUpdate[0].ingredients).to.have.members(["pasta", "sauce", "cheese"]);
+                    expect(recipesBeforeUpdate[0].ingredients).to.have.members(["recipe://ingredient/pasta", "recipe://ingredient/sauce", "recipe://ingredient/cheese"]);
 
                     const notesBeforeUpdate = await BatchNote.findAll(perspective!);
                     expect(notesBeforeUpdate[0].content).to.equal("Make sure to use fresh ingredients");
@@ -2304,10 +2334,10 @@ describe("Prolog + Literals", () => {
                     // Verify models are updated
                     const recipesAfterUpdate = await BatchRecipe.findAll(perspective!);
                     expect(recipesAfterUpdate[0].ingredients.length).to.equal(4);
-                    expect(recipesAfterUpdate[0].ingredients.includes("pasta")).to.be.true;
-                    expect(recipesAfterUpdate[0].ingredients.includes("sauce")).to.be.true;
-                    expect(recipesAfterUpdate[0].ingredients.includes("cheese")).to.be.true;
-                    expect(recipesAfterUpdate[0].ingredients.includes("garlic")).to.be.true;
+                    expect(recipesAfterUpdate[0].ingredients.includes("recipe://ingredient/pasta")).to.be.true;
+                    expect(recipesAfterUpdate[0].ingredients.includes("recipe://ingredient/sauce")).to.be.true;
+                    expect(recipesAfterUpdate[0].ingredients.includes("recipe://ingredient/cheese")).to.be.true;
+                    expect(recipesAfterUpdate[0].ingredients.includes("recipe://ingredient/garlic")).to.be.true;
 
                     const notesAfterUpdate = await BatchNote.findAll(perspective!);
                     expect(notesAfterUpdate[0].content).to.equal("Updated: Use fresh ingredients and add garlic");
@@ -2566,6 +2596,9 @@ describe("Prolog + Literals", () => {
                         const initialCount = await builder.countSubscribe(countCallback);
                         expect(initialCount).to.equal(0);
 
+                        // Small delay to ensure subscription is fully registered before triggering changes
+                        await sleep(500);
+
                         // Add a matching model
                         const model = new TestModel(perspective);
                         model.name = "Test";
@@ -2573,11 +2606,12 @@ describe("Prolog + Literals", () => {
                         await model.save();
 
                         // Wait for subscription update with proper condition checking
+                        // Use longer timeout for CI environments which may be slower
                         await waitForCondition(
                             () => countCallback.called,
-                            { 
-                                timeoutMs: 5000, 
-                                errorMessage: 'Count callback was not called after model save' 
+                            {
+                                timeoutMs: 15000,
+                                errorMessage: 'Count callback was not called after model save'
                             }
                         );
 
@@ -2611,6 +2645,9 @@ describe("Prolog + Literals", () => {
                         expect(initialPage.results.length).to.equal(0);
                         expect(initialPage.totalCount).to.equal(0);
 
+                        // Small delay to ensure subscription is fully registered before triggering changes
+                        await sleep(500);
+
                         // Add models
                         const model1 = new TestModel(perspective);
                         model1.name = "Test 1";
@@ -2622,12 +2659,15 @@ describe("Prolog + Literals", () => {
                         model2.status = "active";
                         await model2.save();
 
-                        // Wait for subscription updates (with polling for reliability)
-                        let attempts = 0;
-                        while (attempts < 20 && (!pageCallback.called || pageCallback.lastCall.args[0].results.length < 2)) {
-                            await sleep(100);
-                            attempts++;
-                        }
+                        // Wait for subscription updates with proper condition checking
+                        // Use longer timeout for CI environments which may be slower
+                        await waitForCondition(
+                            () => pageCallback.called && pageCallback.lastCall.args[0].results.length >= 2,
+                            {
+                                timeoutMs: 15000,
+                                errorMessage: 'Paginate callback was not called with expected results after model saves'
+                            }
+                        );
 
                         // Verify callback was called with updated page
                         expect(pageCallback.called).to.be.true;
@@ -2837,6 +2877,323 @@ describe("Prolog + Literals", () => {
                         // Dispose the subscription to prevent cross-test interference
                         builder.dispose();
                     });
+                });
+            })
+
+            describe("getter feature tests", () => {
+                @ModelOptions({ name: "BlogPost" })
+                class BlogPost extends Ad4mModel {
+                    @Property({ 
+                        through: "blog://title",
+                        resolveLanguage: "literal"
+                    })
+                    title: string = "";
+
+                    @Optional({
+                        through: "blog://parent",
+                        getter: "(->link[WHERE perspective = $perspective AND predicate = 'blog://reply_to'].out.uri)[0]"
+                    })
+                    parentPost: string | undefined;
+
+                    @Collection({
+                        through: "blog://tags",
+                        getter: "(->link[WHERE perspective = $perspective AND predicate = 'blog://tagged_with'].out.uri)"
+                    })
+                    tags: string[] = [];
+                }
+
+                beforeEach(async () => {
+                    if(perspective) {
+                        await ad4m!.perspective.remove(perspective.uuid)
+                    }
+                    perspective = await ad4m!.perspective.add("getter-test")
+                    const { name, sdna } = (BlogPost as any).generateSDNA();
+                    await perspective!.addSdna(name, sdna, 'subject_class')
+                });
+
+                it("should evaluate getter for property", async () => {
+                    const postRoot = Literal.from("Blog post for getter property test").toUrl();
+                    const parentRoot = Literal.from("Parent blog post").toUrl();
+
+                    const post = new BlogPost(perspective!, postRoot);
+                    post.title = "Reply Post";
+                    await post.save();
+
+                    const parent = new BlogPost(perspective!, parentRoot);
+                    parent.title = "Original Post";
+                    await parent.save();
+
+                    // Create the link that getter should find
+                    await perspective!.add(new Link({
+                        source: postRoot,
+                        predicate: "blog://reply_to",
+                        target: parentRoot
+                    }));
+
+                    // Get the post and check if getter resolved the parent
+                    const retrievedPost = new BlogPost(perspective!, postRoot);
+                    await retrievedPost.get();
+
+                    expect(retrievedPost.parentPost).to.equal(parentRoot);
+                });
+
+                it("should evaluate getter for collection", async () => {
+                    const postRoot = Literal.from("Blog post for getter collection test").toUrl();
+                    const tag1 = Literal.from("tag:javascript").toUrl();
+                    const tag2 = Literal.from("tag:typescript").toUrl();
+
+                    const post = new BlogPost(perspective!, postRoot);
+                    post.title = "Test Post";
+                    await post.save();
+
+                    // Create links that getter should find
+                    await perspective!.add(new Link({
+                        source: postRoot,
+                        predicate: "blog://tagged_with",
+                        target: tag1
+                    }));
+                    await perspective!.add(new Link({
+                        source: postRoot,
+                        predicate: "blog://tagged_with",
+                        target: tag2
+                    }));
+
+                    // Get the post and check if getter resolved the tags
+                    const retrievedPost = new BlogPost(perspective!, postRoot);
+                    await retrievedPost.get();
+
+                    expect(retrievedPost.tags).to.include(tag1);
+                    expect(retrievedPost.tags).to.include(tag2);
+                    expect(retrievedPost.tags.length).to.equal(2);
+                });
+
+                it("should filter out 'None' and empty values from getter results", async () => {
+                    const postRoot = Literal.from("Blog post for None filtering test").toUrl();
+
+                    const post = new BlogPost(perspective!, postRoot);
+                    post.title = "Post without parent";
+                    await post.save();
+
+                    // Don't create any reply_to link, so getter should return None/empty
+
+                    const retrievedPost = new BlogPost(perspective!, postRoot);
+                    await retrievedPost.get();
+
+                    // Property should be undefined, not 'None' or empty string
+                    expect(retrievedPost.parentPost).to.be.undefined;
+                });
+            })
+
+            describe("isInstance filtering tests", () => {
+                @ModelOptions({ name: "Comment" })
+                class Comment extends Ad4mModel {
+                    @Flag({
+                        through: "ad4m://type",
+                        value: "ad4m://comment"
+                    })
+                    type!: string;
+
+                    @Property({ 
+                        through: "comment://text",
+                        resolveLanguage: "literal"
+                    })
+                    text: string = "";
+                }
+
+                @ModelOptions({ name: "Article" })
+                class Article extends Ad4mModel {
+                    @Property({ 
+                        through: "article://title",
+                        resolveLanguage: "literal"
+                    })
+                    title: string = "";
+
+                    @Collection({
+                        through: "article://has_comment",
+                        where: { isInstance: Comment }
+                    })
+                    comments: string[] = [];
+                }
+
+                @ModelOptions({ name: "ArticleWithString" })
+                class ArticleWithString extends Ad4mModel {
+                    @Property({ 
+                        through: "article://title",
+                        resolveLanguage: "literal"
+                    })
+                    title: string = "";
+
+                    @Collection({
+                        through: "article://has_comment",
+                        where: { isInstance: "Comment" }
+                    })
+                    comments: string[] = [];
+                }
+
+                beforeEach(async () => {
+                    if(perspective) {
+                        await ad4m!.perspective.remove(perspective.uuid)
+                    }
+                    perspective = await ad4m!.perspective.add("isInstance-test")
+                    
+                    // Register both Comment and Article classes using ensureSDNASubjectClass
+                    await perspective!.ensureSDNASubjectClass(Comment);
+                    await perspective!.ensureSDNASubjectClass(Article);
+                    await perspective!.ensureSDNASubjectClass(ArticleWithString);
+
+                    // Give perspective time to fully index the SDNA classes
+                    await sleep(200);
+                });
+
+                it("should filter collection by isInstance with class reference", async () => {
+                    const articleRoot = Literal.from("Article for isInstance test").toUrl();
+                    const validComment1 = Literal.from("Valid comment 1").toUrl();
+                    const validComment2 = Literal.from("Valid comment 2").toUrl();
+                    const invalidItem = Literal.from("Invalid item").toUrl();
+
+                    const article = new Article(perspective!, articleRoot);
+                    article.title = "Test Article";
+                    await article.save();
+
+                    // Create valid comments
+                    const comment1 = new Comment(perspective!, validComment1);
+                    comment1.text = "This is a valid comment";
+                    await comment1.save();
+
+                    const comment2 = new Comment(perspective!, validComment2);
+                    comment2.text = "This is another valid comment";
+                    await comment2.save();
+
+                    // Add delay to allow SurrealDB to finish indexing
+                    await sleep(1500);
+
+                    // Add links to article
+                    await perspective!.add(new Link({
+                        source: articleRoot,
+                        predicate: "article://has_comment",
+                        target: validComment1
+                    }));
+                    await perspective!.add(new Link({
+                        source: articleRoot,
+                        predicate: "article://has_comment",
+                        target: invalidItem
+                    }));
+                    await perspective!.add(new Link({
+                        source: articleRoot,
+                        predicate: "article://has_comment",
+                        target: validComment2
+                    }));
+
+                    const retrievedArticle = new Article(perspective!, articleRoot);
+                    await retrievedArticle.get();
+
+                    // Should only contain valid Comments, not the invalid item
+                    expect(retrievedArticle.comments).to.have.lengthOf(2);
+                    expect(retrievedArticle.comments).to.include(validComment1);
+                    expect(retrievedArticle.comments).to.include(validComment2);
+                    expect(retrievedArticle.comments).to.not.include(invalidItem);
+                });
+
+                it("should filter collection by isInstance with string class name", async () => {
+                    const articleRoot = Literal.from("Article for string isInstance test").toUrl();
+                    const validComment = Literal.from("Valid comment").toUrl();
+                    const invalidItem = Literal.from("Invalid item").toUrl();
+
+                    const article = new ArticleWithString(perspective!, articleRoot);
+                    article.title = "Test Article with String";
+                    await article.save();
+
+                    // Create one valid comment
+                    const comment = new Comment(perspective!, validComment);
+                    comment.text = "Valid comment text";
+                    await comment.save();
+
+                    // Add both to article
+                    await perspective!.add(new Link({
+                        source: articleRoot,
+                        predicate: "article://has_comment",
+                        target: validComment
+                    }));
+                    await perspective!.add(new Link({
+                        source: articleRoot,
+                        predicate: "article://has_comment",
+                        target: invalidItem
+                    }));
+
+                    const retrievedArticle = new ArticleWithString(perspective!, articleRoot);
+                    await retrievedArticle.get();
+
+                    expect(retrievedArticle.comments).to.have.lengthOf(1);
+                    expect(retrievedArticle.comments[0]).to.equal(validComment);
+                });
+
+                it("should filter results in findAll() by isInstance", async () => {
+                    // Create two articles
+                    const article1Root = Literal.from("Article 1 for findAll isInstance").toUrl();
+                    const article2Root = Literal.from("Article 2 for findAll isInstance").toUrl();
+                    
+                    const comment1 = Literal.from("Comment 1").toUrl();
+                    const invalid1 = Literal.from("Invalid 1").toUrl();
+                    const comment2 = Literal.from("Comment 2").toUrl();
+                    const invalid2 = Literal.from("Invalid 2").toUrl();
+
+                    // Create articles
+                    const article1 = new Article(perspective!, article1Root);
+                    article1.title = "Article 1";
+                    await article1.save();
+
+                    const article2 = new Article(perspective!, article2Root);
+                    article2.title = "Article 2";
+                    await article2.save();
+
+                    // Create valid comments
+                    const c1 = new Comment(perspective!, comment1);
+                    c1.text = "Comment 1 text";
+                    await c1.save();
+
+                    const c2 = new Comment(perspective!, comment2);
+                    c2.text = "Comment 2 text";
+                    await c2.save();
+
+                    // Add comments to articles (mix of valid and invalid)
+                    await perspective!.add(new Link({
+                        source: article1Root,
+                        predicate: "article://has_comment",
+                        target: comment1
+                    }));
+                    await perspective!.add(new Link({
+                        source: article1Root,
+                        predicate: "article://has_comment",
+                        target: invalid1
+                    }));
+                    await perspective!.add(new Link({
+                        source: article2Root,
+                        predicate: "article://has_comment",
+                        target: comment2
+                    }));
+                    await perspective!.add(new Link({
+                        source: article2Root,
+                        predicate: "article://has_comment",
+                        target: invalid2
+                    }));
+
+                    // Use findAll and verify filtering
+                    const articles = await Article.findAll(perspective!);
+                    
+                    expect(articles).to.have.lengthOf(2);
+                    
+                    const foundArticle1 = articles.find(a => a.title === "Article 1");
+                    const foundArticle2 = articles.find(a => a.title === "Article 2");
+                    
+                    expect(foundArticle1).to.not.be.undefined;
+                    expect(foundArticle2).to.not.be.undefined;
+                    
+                    // Each article should only have valid comments
+                    expect(foundArticle1!.comments).to.have.lengthOf(1);
+                    expect(foundArticle1!.comments[0]).to.equal(comment1);
+                    
+                    expect(foundArticle2!.comments).to.have.lengthOf(1);
+                    expect(foundArticle2!.comments[0]).to.equal(comment2);
                 });
             })
         })
@@ -3430,9 +3787,9 @@ describe("Prolog + Literals", () => {
                 
                 // Test array/collection handling
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                post1.tags = ["ad4m", "tutorial", "blockchain"]
+                post1.tags = ["tag://ad4m", "tag://tutorial", "tag://blockchain"]
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                post1.categories = ["technology", "development"]
+                post1.categories = ["category://technology", "category://development"]
                 
                 // Test complex object handling (should be stored as JSON)
                 // @ts-ignore - properties are added dynamically from JSON Schema
@@ -3449,9 +3806,9 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 post2.title = "Advanced AD4M Patterns"
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                post2.tags = ["ad4m", "advanced", "patterns"]
+                post2.tags = ["tag://ad4m", "tag://advanced", "tag://patterns"]
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                post2.categories = ["technology"]
+                post2.categories = ["category://technology"]
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 post2.metadata = {
                     created: "2025-09-22T11:00:00Z",
@@ -3472,7 +3829,7 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 expect(tutorialPost!.tags).to.be.an('array')
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                expect(tutorialPost!.tags).to.include.members(["ad4m", "tutorial", "blockchain"])
+                expect(tutorialPost!.tags).to.include.members(["tag://ad4m", "tag://tutorial", "tag://blockchain"])
                 
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 expect(tutorialPost!.metadata).to.be.an('object')
@@ -3541,7 +3898,7 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 person.email = "alice@example.com"
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                person.skills = ["javascript", "typescript", "ad4m"]
+                person.skills = ["skill://javascript", "skill://typescript", "skill://ad4m"]
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 person.profile = {
                     bio: "Software developer passionate about decentralized systems",
@@ -3559,7 +3916,7 @@ describe("Prolog + Literals", () => {
                 // @ts-ignore - properties are added dynamically from JSON Schema
                 expect(alice.profile.bio).to.equal("Software developer passionate about decentralized systems")
                 // @ts-ignore - properties are added dynamically from JSON Schema
-                expect(alice.skills).to.include.members(["javascript", "typescript", "ad4m"])
+                expect(alice.skills).to.include.members(["skill://javascript", "skill://typescript", "skill://ad4m"])
             })
         })
     })

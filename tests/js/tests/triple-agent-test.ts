@@ -38,73 +38,73 @@ export default function tripleAgentTests(testContext: TestContext) {
 
                 await sleep(1000)
 
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
                 await sleep(1000)
 
-                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 let tries = 1
 
                 while(bobLinks.length < 10 && tries < 20) {
                     console.log("Bob retrying getting links...");
                     await sleep(1000)
-                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                     tries++
                 }
                 
                 expect(bobLinks.length).to.be.equal(10)
 
-                await bob.perspective.addLink(bobP1.uuid, {source: 'root', target: 'test://test'})
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
-                await bob.perspective.addLink(bobP1.uuid, {source: 'root', target: 'test://test'})
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
-                await bob.perspective.addLink(bobP1.uuid, {source: 'root', target: 'test://test'})
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
-                await bob.perspective.addLink(bobP1.uuid, {source: 'root', target: 'test://test'})
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
-                await bob.perspective.addLink(bobP1.uuid, {source: 'root', target: 'test://test'})
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
+                await bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
-                let jimLinks = await jim.perspective.queryLinks(jimP1!.uuid, new LinkQuery({source: 'root'}))
+                let jimLinks = await jim.perspective.queryLinks(jimP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 let jimRetries = 1
 
                 while(jimLinks.length < 20 && jimRetries < 20) {
                     console.log("Jim retrying getting links...");
                     await sleep(1000)
-                    jimLinks = await jim.perspective.queryLinks(jimP1!.uuid, new LinkQuery({source: 'root'}))
+                    jimLinks = await jim.perspective.queryLinks(jimP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                     jimRetries++
                 }
                 
                 expect(jimLinks.length).to.be.equal(20)
 
                 //Alice bob and jim all collectively add 10 links and then check can be received by all agents
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
-                await bob.perspective.addLink(bobP1.uuid, {source: 'root', target: 'test://test'})
-                await jim.perspective.addLink(jimP1.uuid, {source: 'root', target: 'test://test'})
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
-                await bob.perspective.addLink(bobP1.uuid, {source: 'root', target: 'test://test'})
-                await jim.perspective.addLink(jimP1.uuid, {source: 'root', target: 'test://test'})
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'root', target: 'test://test'})
-                await bob.perspective.addLink(bobP1.uuid, {source: 'root', target: 'test://test'})
-                await jim.perspective.addLink(jimP1.uuid, {source: 'root', target: 'test://test'})
-                await jim.perspective.addLink(jimP1.uuid, {source: 'root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await jim.perspective.addLink(jimP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await jim.perspective.addLink(jimP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await jim.perspective.addLink(jimP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                await jim.perspective.addLink(jimP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
-                let aliceLinks = await alice.perspective.queryLinks(aliceP1!.uuid, new LinkQuery({source: 'root'}))
+                let aliceLinks = await alice.perspective.queryLinks(aliceP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 tries = 1
 
                 while(aliceLinks.length < 30 && tries < 20) {
                     console.log("Alice retrying getting links...");
                     await sleep(1000)
-                    aliceLinks = await alice.perspective.queryLinks(aliceP1!.uuid, new LinkQuery({source: 'root'}))
+                    aliceLinks = await alice.perspective.queryLinks(aliceP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                     tries++
                 }
                 
@@ -113,13 +113,13 @@ export default function tripleAgentTests(testContext: TestContext) {
 
 
 
-                bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 tries = 1
 
                 while(bobLinks.length < 30 && tries < 20) {
                     console.log("Bob retrying getting links...");
                     await sleep(1000)
-                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'root'}))
+                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                     tries++
                 }
                 
@@ -128,13 +128,13 @@ export default function tripleAgentTests(testContext: TestContext) {
 
 
 
-                jimLinks = await jim.perspective.queryLinks(jimP1!.uuid, new LinkQuery({source: 'root'}))
+                jimLinks = await jim.perspective.queryLinks(jimP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 tries = 1
 
                 while(jimLinks.length < 30 && tries < 20) {
                     console.log("Jim retrying getting links...");
                     await sleep(1000)
-                    jimLinks = await jim.perspective.queryLinks(jimP1!.uuid, new LinkQuery({source: 'root'}))
+                    jimLinks = await jim.perspective.queryLinks(jimP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                     tries++
                 }
                 

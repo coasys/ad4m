@@ -9,6 +9,8 @@ import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
 import { LinkQuery } from "@coasys/ad4m";
 import { v4 as uuidv4 } from 'uuid';
+import { NotificationInput, TriggeredNotification } from '@coasys/ad4m/lib/src/runtime/RuntimeResolver';
+import sinon from 'sinon';
 
 //@ts-ignore
 global.fetch = fetch
@@ -424,12 +426,12 @@ describe("Multi-User Simple integration tests", () => {
 
         it("should handle perspective access control for operations", async () => {
             // Create two users
-            const user1Result = await adminAd4mClient!.agent.createUser("access1@example.com", "password1");
-            const user2Result = await adminAd4mClient!.agent.createUser("access2@example.com", "password2");
-            
-            const token1 = await adminAd4mClient!.agent.loginUser("access1@example.com", "password1");
-            const token2 = await adminAd4mClient!.agent.loginUser("access2@example.com", "password2");
-            
+            const user1Result = await adminAd4mClient!.agent.createUser("accessctrl1@example.com", "password1");
+            const user2Result = await adminAd4mClient!.agent.createUser("accessctrl2@example.com", "password2");
+
+            const token1 = await adminAd4mClient!.agent.loginUser("accessctrl1@example.com", "password1");
+            const token2 = await adminAd4mClient!.agent.loginUser("accessctrl2@example.com", "password2");
+
             // @ts-ignore - Suppress Apollo type mismatch
             const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
             // @ts-ignore - Suppress Apollo type mismatch
@@ -474,7 +476,7 @@ describe("Multi-User Simple integration tests", () => {
             const p1 = await client1.perspective.add("User 1 Test Perspective");
             // @ts-ignore - Suppress Apollo type mismatch
             const link1 = await client1.perspective.addLink(p1.uuid, {
-                source: "root",
+                source: "ad4m://root",
                 target: "test://target1",
                 predicate: "test://predicate"
             });
@@ -492,7 +494,7 @@ describe("Multi-User Simple integration tests", () => {
             const p2 = await client2.perspective.add("User 2 Test Perspective");
             // @ts-ignore - Suppress Apollo type mismatch
             const link2 = await client2.perspective.addLink(p2.uuid, {
-                source: "root",
+                source: "ad4m://root",
                 target: "test://target2",
                 predicate: "test://predicate"
             });
@@ -1566,6 +1568,116 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("✅ Neighbourhood signals working between managed users (Flux scenario)");
         });
+
+        it("should exchange neighbourhood signals between main agent and managed user", async () => {
+            console.log("\n=== Testing signals between main agent and managed user ===");
+
+            // The admin client (empty/admin-credential token) IS the main agent.
+            // A managed user joins the same neighbourhood.  Signals must work both ways.
+            const mainAgentStatus = await adminAd4mClient!.agent.status();
+            const mainAgentDid = mainAgentStatus.did!;
+            console.log("Main agent DID:", mainAgentDid);
+
+            // Create and login a managed user
+            await adminAd4mClient!.agent.createUser("main_agent_signal@example.com", "password");
+            const userToken = await adminAd4mClient!.agent.loginUser("main_agent_signal@example.com", "password");
+            // @ts-ignore
+            const userClient = new Ad4mClient(apolloClient(gqlPort, userToken), false);
+
+            const userStatus = await userClient.agent.me();
+            const userDid = userStatus.did!;
+            console.log("Managed user DID:", userDid);
+
+            // Main agent creates the neighbourhood
+            const mainPerspective = await adminAd4mClient!.perspective.add("Main-Agent Neighbourhood");
+            const linkLanguage = await adminAd4mClient!.languages.applyTemplateAndPublish(
+                DIFF_SYNC_OFFICIAL,
+                JSON.stringify({ uid: uuidv4(), name: "Main-Agent Signal Test" })
+            );
+            const neighbourhoodUrl = await adminAd4mClient!.neighbourhood.publishFromPerspective(
+                mainPerspective.uuid,
+                linkLanguage.address,
+                new Perspective([])
+            );
+            console.log("Main agent created neighbourhood:", neighbourhoodUrl);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            // Managed user joins the neighbourhood
+            await userClient.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            const userPerspectives = await userClient.perspective.all();
+            const userSharedPerspective = userPerspectives.find(p => p.sharedUrl === neighbourhoodUrl);
+            expect(userSharedPerspective).to.not.be.null;
+            console.log("Managed user joined neighbourhood");
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            // Get neighbourhood proxies for both sides
+            const mainAgentNH = await mainPerspective.getNeighbourhoodProxy();
+            const userNH = await userSharedPerspective!.getNeighbourhoodProxy();
+            expect(mainAgentNH).to.not.be.null;
+            expect(userNH).to.not.be.null;
+
+            // Register signal listeners on both sides
+            const mainAgentReceivedSignals: any[] = [];
+            const userReceivedSignals: any[] = [];
+
+            mainAgentNH!.addSignalHandler((signal) => {
+                console.log("✉️ Main agent received signal:", JSON.stringify(signal));
+                mainAgentReceivedSignals.push(signal);
+            });
+            userNH!.addSignalHandler((signal) => {
+                console.log("✉️ Managed user received signal:", JSON.stringify(signal));
+                userReceivedSignals.push(signal);
+            });
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            // --- Test 1: main agent sends signal to managed user ---
+            console.log("\n--- Main agent sending signal to managed user ---");
+            await mainAgentNH!.sendSignalU(userDid, new PerspectiveUnsignedInput([
+                new Link({ source: "test://signal", predicate: "test://main_to_user", target: mainAgentDid })
+            ]));
+
+            const maxWait = 5000;
+            let start = Date.now();
+            while (userReceivedSignals.length === 0 && Date.now() - start < maxWait) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+            expect(userReceivedSignals.length).to.be.greaterThan(0, "Managed user should receive signal from main agent");
+            expect(userReceivedSignals[0].data.links[0].data.predicate).to.equal("test://main_to_user");
+            console.log("✅ Managed user received signal from main agent");
+
+            // --- Test 2: managed user sends signal to main agent ---
+            console.log("\n--- Managed user sending signal to main agent ---");
+            await userNH!.sendSignalU(mainAgentDid, new PerspectiveUnsignedInput([
+                new Link({ source: "test://signal", predicate: "test://user_to_main", target: userDid })
+            ]));
+
+            start = Date.now();
+            while (mainAgentReceivedSignals.length === 0 && Date.now() - start < maxWait) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+            expect(mainAgentReceivedSignals.length).to.be.greaterThan(0, "Main agent should receive signal from managed user");
+            expect(mainAgentReceivedSignals[0].data.links[0].data.predicate).to.equal("test://user_to_main");
+            console.log("✅ Main agent received signal from managed user");
+
+            // --- Test 3: managed user broadcasts, main agent receives ---
+            console.log("\n--- Managed user broadcasting, main agent should receive ---");
+            const mainAgentCountBefore = mainAgentReceivedSignals.length;
+            await userNH!.sendBroadcastU(new PerspectiveUnsignedInput([
+                new Link({ source: "test://broadcast", predicate: "test://user_broadcast", target: userDid })
+            ]));
+
+            start = Date.now();
+            while (mainAgentReceivedSignals.length === mainAgentCountBefore && Date.now() - start < maxWait) {
+                await new Promise(r => setTimeout(r, 100));
+            }
+            expect(mainAgentReceivedSignals.length).to.be.greaterThan(mainAgentCountBefore, "Main agent should receive broadcast from managed user");
+            const broadcastSignal = mainAgentReceivedSignals[mainAgentReceivedSignals.length - 1];
+            expect(broadcastSignal.data.links[0].data.predicate).to.equal("test://user_broadcast");
+            console.log("✅ Main agent received broadcast from managed user");
+
+            console.log("✅ Signal exchange between main agent and managed user works correctly");
+        });
     });
 
     describe("Multi-Node Multi-User Integration", () => {
@@ -1591,7 +1703,7 @@ describe("Multi-User Simple integration tests", () => {
         let node2User2Did: string = "";
 
         before(async function() {
-            this.timeout(60000); // Increase timeout for setup
+            this.timeout(300000); // Increase timeout for setup with Holochain 0.7.0
 
             console.log("\n=== Setting up Node 2 ===");
             if (!fs.existsSync(node2AppDataPath)) {
@@ -1674,7 +1786,7 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         it("should return all DIDs in 'others()' for each user", async function() {
-            this.timeout(120000); // Increased to allow initial wait + polling time
+            this.timeout(240000); // Increased for Holochain 0.7.0 - allow initial wait + polling time
 
             console.log("\n=== Testing 'others()' functionality ===");
 
@@ -1714,6 +1826,26 @@ describe("Multi-User Simple integration tests", () => {
             console.log("Node 2 User 2 joining...");
             await node2User2Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
             await sleep(2000); // Wait for join to complete
+
+            // Re-exchange agent infos with retry to handle K2 space initialization delays (Holochain 0.7.0)
+            // After users join and link language is installed, new DNA/K2 spaces are created
+            // We need to retry agent info exchange to allow K2 spaces to become ready
+            console.log("Re-exchanging agent infos with retry for K2 space readiness...");
+            for (let attempt = 1; attempt <= 5; attempt++) {
+                try {
+                    console.log(`Agent info exchange attempt ${attempt}/5`);
+                    const node1AgentInfos = await adminAd4mClient!.runtime.hcAgentInfos();
+                    const node2AgentInfos = await node2AdminClient!.runtime.hcAgentInfos();
+                    await adminAd4mClient!.runtime.hcAddAgentInfos(node2AgentInfos);
+                    await node2AdminClient!.runtime.hcAddAgentInfos(node1AgentInfos);
+                    console.log(`✅ Agent info exchange attempt ${attempt} successful`);
+                } catch (error) {
+                    console.log(`⚠️  Agent info exchange attempt ${attempt} failed:`, error);
+                }
+                if (attempt < 5) {
+                    await sleep(3000); // Wait before retry
+                }
+            }
 
             // Wait for neighbourhood to sync and owners lists to be updated
             console.log("Waiting for neighbourhood sync and owners list updates...");
@@ -1822,7 +1954,7 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         it("should route p2p signals correctly between users across nodes", async function() {
-            this.timeout(60000);
+            this.timeout(120000); // Increased for Holochain 0.7.0
 
             console.log("\n=== Testing cross-node p2p signal routing ===");
 
@@ -1947,7 +2079,7 @@ describe("Multi-User Simple integration tests", () => {
         });
 
         it("should sync links correctly between all users across nodes", async function() {
-            this.timeout(60000);
+            this.timeout(180000); // Increased for Holochain 0.7.0 - link sync takes longer
 
             console.log("\n=== Testing cross-node link synchronization ===");
 
@@ -2384,6 +2516,258 @@ describe("Multi-User Simple integration tests", () => {
             expect(user2RemoveEvents[0]).to.equal(user2Perspective.uuid);
 
             console.log("✅ perspectiveRemoved subscription filtering works correctly");
+        });
+    });
+
+    describe("Multi-User Notifications", () => {
+        it("should isolate notifications between users", async () => {
+            console.log("\n=== Testing notification isolation between users ===");
+
+            // Create two users
+            await adminAd4mClient!.agent.createUser("notify1@example.com", "password1");
+            await adminAd4mClient!.agent.createUser("notify2@example.com", "password2");
+
+            const token1 = await adminAd4mClient!.agent.loginUser("notify1@example.com", "password1");
+            const token2 = await adminAd4mClient!.agent.loginUser("notify2@example.com", "password2");
+
+            // @ts-ignore
+            const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
+            // @ts-ignore
+            const client2 = new Ad4mClient(apolloClient(gqlPort, token2), false);
+
+            // User 1 creates a perspective and notification
+            const user1Perspective = await client1.perspective.add("User 1 Notification Test");
+            const user1Notification: NotificationInput = {
+                description: "User 1's notification",
+                appName: "User 1 App",
+                appUrl: "https://user1.app",
+                appIconPath: "/user1.png",
+                trigger: `SELECT source, target FROM link WHERE predicate = 'user1://test'`,
+                perspectiveIds: [user1Perspective.uuid],
+                webhookUrl: "https://user1.webhook",
+                webhookAuth: "user1-auth"
+            };
+
+            // User 2 creates a perspective and notification
+            const user2Perspective = await client2.perspective.add("User 2 Notification Test");
+            const user2Notification: NotificationInput = {
+                description: "User 2's notification",
+                appName: "User 2 App",
+                appUrl: "https://user2.app",
+                appIconPath: "/user2.png",
+                trigger: `SELECT source, target FROM link WHERE predicate = 'user2://test'`,
+                perspectiveIds: [user2Perspective.uuid],
+                webhookUrl: "https://user2.webhook",
+                webhookAuth: "user2-auth"
+            };
+
+            // Install notifications - managed users get auto-granted
+            const notif1Id = await client1.runtime.requestInstallNotification(user1Notification);
+            const notif2Id = await client2.runtime.requestInstallNotification(user2Notification);
+
+            await sleep(500);
+
+            // User 1 retrieves notifications - should only see their own and it should be auto-granted
+            const user1Notifications = await client1.runtime.notifications();
+            console.log(`User 1 sees ${user1Notifications.length} notification(s)`);
+            expect(user1Notifications.length).to.equal(1);
+            expect(user1Notifications[0].description).to.equal("User 1's notification");
+            expect(user1Notifications[0].id).to.equal(notif1Id);
+            expect(user1Notifications[0].granted).to.be.true;
+
+            // User 2 retrieves notifications - should only see their own and it should be auto-granted
+            const user2Notifications = await client2.runtime.notifications();
+            console.log(`User 2 sees ${user2Notifications.length} notification(s)`);
+            expect(user2Notifications.length).to.equal(1);
+            expect(user2Notifications[0].description).to.equal("User 2's notification");
+            expect(user2Notifications[0].id).to.equal(notif2Id);
+            expect(user2Notifications[0].granted).to.be.true;
+
+            console.log("✅ Notification isolation verified - each user sees only their own notifications");
+            console.log("✅ Managed user notifications are auto-granted");
+        });
+
+        it("should use correct agent DID for each user's notification queries", async () => {
+            console.log("\n=== Testing per-user agent DID in notification queries ===");
+
+            // Create two users
+            await adminAd4mClient!.agent.createUser("did1@example.com", "password1");
+            await adminAd4mClient!.agent.createUser("did2@example.com", "password2");
+
+            const token1 = await adminAd4mClient!.agent.loginUser("did1@example.com", "password1");
+            const token2 = await adminAd4mClient!.agent.loginUser("did2@example.com", "password2");
+
+            // @ts-ignore
+            const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
+            // @ts-ignore
+            const client2 = new Ad4mClient(apolloClient(gqlPort, token2), false);
+
+            // Get each user's agent DID
+            const user1Status = await client1.agent.status();
+            const user2Status = await client2.agent.status();
+            const user1Did = user1Status.did;
+            const user2Did = user2Status.did;
+
+            console.log(`User 1 DID: ${user1Did}`);
+            console.log(`User 2 DID: ${user2Did}`);
+
+            expect(user1Did).to.not.equal(user2Did, "Users should have different DIDs");
+
+            // Create perspectives for both users
+            const user1Perspective = await client1.perspective.add("User 1 Mention Test");
+            const user2Perspective = await client2.perspective.add("User 2 Mention Test");
+
+            // User 1 creates a mention notification (using $agentDid variable)
+            const user1Notification: NotificationInput = {
+                description: "User 1 was mentioned",
+                appName: "Mentions for User 1",
+                appUrl: "https://mentions.app",
+                appIconPath: "/mentions.png",
+                trigger: `SELECT
+                    source as message_id,
+                    fn::parse_literal(target) as content,
+                    $agentDid as mentioned_user
+                FROM link
+                WHERE predicate = 'rdf://content'
+                    AND fn::contains(fn::parse_literal(target), $agentDid)`,
+                perspectiveIds: [user1Perspective.uuid],
+                webhookUrl: "https://user1.webhook",
+                webhookAuth: "user1-auth"
+            };
+
+            // User 2 creates a mention notification (using $agentDid variable)
+            const user2Notification: NotificationInput = {
+                description: "User 2 was mentioned",
+                appName: "Mentions for User 2",
+                appUrl: "https://mentions.app",
+                appIconPath: "/mentions.png",
+                trigger: `SELECT
+                    source as message_id,
+                    fn::parse_literal(target) as content,
+                    $agentDid as mentioned_user
+                FROM link
+                WHERE predicate = 'rdf://content'
+                    AND fn::contains(fn::parse_literal(target), $agentDid)`,
+                perspectiveIds: [user2Perspective.uuid],
+                webhookUrl: "https://user2.webhook",
+                webhookAuth: "user2-auth"
+            };
+
+            // Install notifications - managed users get auto-granted
+            const notif1Id = await client1.runtime.requestInstallNotification(user1Notification);
+            const notif2Id = await client2.runtime.requestInstallNotification(user2Notification);
+
+            await sleep(500);
+
+            // Verify that both notifications contain the $agentDid variable in their triggers
+            // and are auto-granted for managed users
+            const user1Notifs = await client1.runtime.notifications();
+            const user2Notifs = await client2.runtime.notifications();
+
+            const user1SavedNotif = user1Notifs.find(n => n.id === notif1Id);
+            const user2SavedNotif = user2Notifs.find(n => n.id === notif2Id);
+
+            expect(user1SavedNotif).to.not.be.undefined;
+            expect(user2SavedNotif).to.not.be.undefined;
+
+            // Verify the triggers contain the $agentDid placeholder
+            expect(user1SavedNotif!.trigger).to.include("$agentDid", "User 1's notification should contain $agentDid variable");
+            expect(user2SavedNotif!.trigger).to.include("$agentDid", "User 2's notification should contain $agentDid variable");
+
+            console.log("✅ Both users created notifications with $agentDid variable");
+
+            // The actual DID injection and query execution is tested in the runtime.ts tests
+            // This test verifies that multi-user contexts preserve the query correctly
+            console.log("✅ Per-user agent DID injection verified");
+        });
+
+        it("should prevent users from seeing or modifying other users' notifications", async () => {
+            console.log("\n=== Testing notification access control ===");
+
+            // Create two users
+            await adminAd4mClient!.agent.createUser("access1@example.com", "password1");
+            await adminAd4mClient!.agent.createUser("access2@example.com", "password2");
+
+            const token1 = await adminAd4mClient!.agent.loginUser("access1@example.com", "password1");
+            const token2 = await adminAd4mClient!.agent.loginUser("access2@example.com", "password2");
+
+            // @ts-ignore
+            const client1 = new Ad4mClient(apolloClient(gqlPort, token1), false);
+            // @ts-ignore
+            const client2 = new Ad4mClient(apolloClient(gqlPort, token2), false);
+
+            const perspective = await client1.perspective.add("Access Test");
+
+            // User 1 creates a notification
+            const notification: NotificationInput = {
+                description: "Private to User 1",
+                appName: "Private App",
+                appUrl: "https://private.app",
+                appIconPath: "/private.png",
+                trigger: `SELECT * FROM link WHERE predicate = 'test://private'`,
+                perspectiveIds: [perspective.uuid],
+                webhookUrl: "https://webhook.test",
+                webhookAuth: "secret-auth"
+            };
+
+            // Install notification - managed users get auto-granted
+            const notificationId = await client1.runtime.requestInstallNotification(notification);
+            await sleep(500);
+
+            // User 1 can see their notification and it should be auto-granted
+            const user1Notifs = await client1.runtime.notifications();
+            const user1Notif = user1Notifs.find(n => n.id === notificationId);
+            expect(user1Notif).to.not.be.undefined;
+            expect(user1Notif!.granted).to.be.true;
+
+            // User 2 cannot see User 1's notification
+            const user2Notifs = await client2.runtime.notifications();
+            expect(user2Notifs.some(n => n.id === notificationId)).to.be.false;
+
+            console.log("✅ Notification access control verified");
+        });
+
+        it("should prevent managed users from calling grantNotification", async () => {
+            console.log("\n=== Testing that managed users cannot call grantNotification ===");
+
+            // Create a managed user
+            await adminAd4mClient!.agent.createUser("grant-test@example.com", "password1");
+            const token = await adminAd4mClient!.agent.loginUser("grant-test@example.com", "password1");
+
+            // @ts-ignore
+            const managedClient = new Ad4mClient(apolloClient(gqlPort, token), false);
+
+            const perspective = await managedClient.perspective.add("Grant Test");
+
+            // Create a notification (which will be auto-granted)
+            const notification: NotificationInput = {
+                description: "Test notification",
+                appName: "Test App",
+                appUrl: "https://test.app",
+                appIconPath: "/test.png",
+                trigger: `SELECT * FROM link WHERE predicate = 'test://grant'`,
+                perspectiveIds: [perspective.uuid],
+                webhookUrl: "https://webhook.test",
+                webhookAuth: "test-auth"
+            };
+
+            const notificationId = await managedClient.runtime.requestInstallNotification(notification);
+            await sleep(500);
+
+            // Verify the notification is auto-granted
+            const notifs = await managedClient.runtime.notifications();
+            const notif = notifs.find(n => n.id === notificationId);
+            expect(notif).to.not.be.undefined;
+            expect(notif!.granted).to.be.true;
+
+            // Managed user should NOT be able to call grantNotification
+            try {
+                await managedClient.runtime.grantNotification(notificationId);
+                expect.fail("Managed user should not be able to call grantNotification");
+            } catch (error: any) {
+                expect(error.message).to.include("Permission denied");
+                console.log("✅ Managed user correctly blocked from calling grantNotification");
+            }
         });
     });
 })

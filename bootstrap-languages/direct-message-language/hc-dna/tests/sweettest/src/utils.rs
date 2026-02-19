@@ -1,4 +1,4 @@
-//! Test utilities for direct_message sweettest tests
+//! Test utilities for direct-message-language sweettest tests
 
 use std::path::PathBuf;
 
@@ -7,8 +7,9 @@ use futures::future;
 use holochain::conductor::api::error::ConductorApiError;
 use holochain::sweettest::{SweetAgents, SweetCell, SweetConductor, SweetConductorBatch, SweetDnaFile};
 use holochain_types::prelude::*;
-use direct_message_integrity::ad4m::{ExpressionProof, Link, LinkExpression, Perspective, PerspectiveExpression};
+use direct_message_integrity::ad4m::{ExpressionProof, Perspective, PerspectiveExpression};
 use serde::{de::DeserializeOwned, Serialize};
+use uuid::Uuid;
 
 /// Path to the compiled DNA file
 pub fn dna_path() -> PathBuf {
@@ -17,7 +18,7 @@ pub fn dna_path() -> PathBuf {
         .join("../../workdir/direct-message-language.dna")
 }
 
-/// Load the direct_message DNA
+/// Load the direct-message-language DNA
 pub async fn load_dna() -> DnaFile {
     SweetDnaFile::from_bundle(&dna_path())
         .await
@@ -27,10 +28,10 @@ pub async fn load_dna() -> DnaFile {
 /// Setup a single conductor with one agent
 pub async fn setup_1_conductor() -> (SweetConductor, SweetCell) {
     let dna = load_dna().await;
-    let mut conductor = SweetConductor::from_standard_config().await;
+    let mut conductor = SweetConductor::standard().await;
     let agent = SweetAgents::one(conductor.keystore()).await;
     let app = conductor
-        .setup_app_for_agent("test-app", agent, &[dna])
+        .setup_app_for_agent("direct-message-test", agent, &[dna])
         .await
         .expect("Failed to setup app");
     let cell = app.cells()[0].clone();
@@ -40,7 +41,7 @@ pub async fn setup_1_conductor() -> (SweetConductor, SweetCell) {
 /// Setup multiple conductors with agents, optionally networked together
 pub async fn setup_conductors(n: usize, network: bool) -> (SweetConductorBatch, Vec<SweetCell>) {
     let dna = load_dna().await;
-    let mut conductors = SweetConductorBatch::from_standard_config(n).await;
+    let mut conductors = SweetConductorBatch::standard(n).await;
 
     let agents: Vec<AgentPubKey> = future::join_all(
         conductors.iter().map(|c| async {
@@ -49,7 +50,7 @@ pub async fn setup_conductors(n: usize, network: bool) -> (SweetConductorBatch, 
     ).await;
 
     let apps = conductors
-        .setup_app_for_zipped_agents("test-app", &agents, &[dna.clone()])
+        .setup_app_for_zipped_agents("direct-message-test", &agents, &[dna.clone()])
         .await
         .expect("Failed to setup apps");
 
@@ -59,52 +60,6 @@ pub async fn setup_conductors(n: usize, network: bool) -> (SweetConductorBatch, 
 
     let cells: Vec<SweetCell> = apps.iter().map(|app| app.cells()[0].clone()).collect();
     (conductors, cells)
-}
-
-/// Generate a test PerspectiveExpression (message)
-pub fn generate_message(author: &str) -> PerspectiveExpression {
-    PerspectiveExpression {
-        author: format!("did:test:{}", author),
-        timestamp: Utc::now(),
-        data: Perspective {
-            links: vec![],
-        },
-        proof: ExpressionProof {
-            signature: format!("sig_{}", author),
-            key: format!("did:test:{}#primary", author),
-        },
-    }
-}
-
-/// Generate a test PerspectiveExpression with links
-pub fn generate_message_with_link(author: &str) -> PerspectiveExpression {
-    // Note: LinkExpression fields are private, so we need to use serde
-    let link_json = serde_json::json!({
-        "author": format!("did:test:{}", author),
-        "timestamp": Utc::now(),
-        "data": {
-            "source": format!("did:test:{}", author),
-            "target": "literal://string:online",
-            "predicate": null
-        },
-        "proof": {
-            "signature": format!("sig_{}", author),
-            "key": format!("did:test:{}#primary", author)
-        }
-    });
-    let link: LinkExpression = serde_json::from_value(link_json).expect("Failed to create LinkExpression");
-
-    PerspectiveExpression {
-        author: format!("did:test:{}", author),
-        timestamp: Utc::now(),
-        data: Perspective {
-            links: vec![link],
-        },
-        proof: ExpressionProof {
-            signature: format!("sig_{}", author),
-            key: format!("did:test:{}#primary", author),
-        },
-    }
 }
 
 /// Helper to call a zome function on a cell
@@ -119,7 +74,7 @@ where
     O: DeserializeOwned + std::fmt::Debug,
 {
     conductor
-        .call::<I, O>(&cell.zome("direct-message"), fn_name, payload)
+        .call(&cell.zome("direct-message"), fn_name, payload)
         .await
 }
 
@@ -135,11 +90,24 @@ where
     O: DeserializeOwned + std::fmt::Debug,
 {
     conductor
-        .call_fallible::<I, O>(&cell.zome("direct-message"), fn_name, payload)
+        .call_fallible(&cell.zome("direct-message"), fn_name, payload)
         .await
 }
 
-/// Wait for network consistency
-pub async fn await_consistency(ms: u64) {
-    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+/// Create a test PerspectiveExpression with empty links
+pub fn create_test_perspective_expression(author: &str) -> PerspectiveExpression {
+    PerspectiveExpression {
+        author: author.to_string(),
+        timestamp: Utc::now(),
+        data: Perspective { links: vec![] },
+        proof: ExpressionProof {
+            signature: format!("sig_{}", Uuid::new_v4()),
+            key: format!("{}#primary", author),
+        },
+    }
+}
+
+/// Wait for DHT/signal propagation between conductors
+pub async fn await_consistency(delay_ms: u64) {
+    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
 }

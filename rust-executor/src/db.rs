@@ -156,6 +156,15 @@ impl Ad4mDb {
         )?;
 
         conn.execute(
+            "CREATE TABLE IF NOT EXISTS perspective_link_migration (
+                id INTEGER PRIMARY KEY,
+                perspective_uuid TEXT NOT NULL UNIQUE,
+                migrated_at TEXT NOT NULL
+             )",
+            [],
+        )?;
+
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS outbox (
                 id INTEGER PRIMARY KEY,
                 message TEXT NOT NULL,
@@ -184,7 +193,8 @@ impl Ad4mDb {
                 trigger TEXT NOT NULL,
                 perspective_ids TEXT NOT NULL,
                 webhookUrl TEXT NOT NULL,
-                webhookAuth TEXT NOT NULL
+                webhookAuth TEXT NOT NULL,
+                user_email TEXT
              )",
             [],
         )?;
@@ -315,6 +325,10 @@ impl Ad4mDb {
             "UPDATE perspective_handle SET owners = json_array(owner_did) WHERE owner_did IS NOT NULL AND owners = '[]'",
             [],
         );
+
+        // Add user_email column to notifications table for multi-user support
+        // This column tracks which user created the notification (NULL for main agent)
+        let _ = conn.execute("ALTER TABLE notifications ADD COLUMN user_email TEXT", []);
 
         Ok(Self { conn })
     }
@@ -619,6 +633,7 @@ impl Ad4mDb {
     pub fn add_notification(
         &self,
         notification: NotificationInput,
+        user_email: Option<String>,
     ) -> Result<String, rusqlite::Error> {
         // Validate the trigger query before storing
         if let Err(e) = Self::validate_notification_query(&notification.trigger) {
@@ -630,7 +645,7 @@ impl Ad4mDb {
 
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO notifications (id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO notifications (id, granted, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, user_email) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 id,
                 false,
@@ -642,6 +657,7 @@ impl Ad4mDb {
                 serde_json::to_string(&notification.perspective_ids).unwrap(),
                 notification.webhook_url,
                 notification.webhook_auth,
+                user_email,
             ],
         )?;
         Ok(id)
@@ -661,6 +677,7 @@ impl Ad4mDb {
                 perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
                 webhook_url: row.get(8)?,
                 webhook_auth: row.get(9)?,
+                user_email: row.get(10)?,
             })
         })?;
 
@@ -668,6 +685,67 @@ impl Ad4mDb {
         for notification in notification_iter {
             notifications.push(notification?);
         }
+        Ok(notifications)
+    }
+
+    pub fn get_notifications_for_user(
+        &self,
+        user_email: Option<String>,
+    ) -> Result<Vec<Notification>, rusqlite::Error> {
+        let notifications = if let Some(email) = user_email {
+            // Query for specific user's notifications
+            let mut stmt = self
+                .conn
+                .prepare("SELECT * FROM notifications WHERE user_email = ?1")?;
+            let notification_iter = stmt.query_map(params![email], |row| {
+                Ok(Notification {
+                    id: row.get(0)?,
+                    granted: row.get(1)?,
+                    description: row.get(2)?,
+                    app_name: row.get(3)?,
+                    app_url: row.get(4)?,
+                    app_icon_path: row.get(5)?,
+                    trigger: row.get(6)?,
+                    perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
+                    webhook_url: row.get(8)?,
+                    webhook_auth: row.get(9)?,
+                    user_email: row.get(10)?,
+                })
+            })?;
+
+            let mut result = Vec::new();
+            for notification in notification_iter {
+                result.push(notification?);
+            }
+            result
+        } else {
+            // Query for main agent's notifications (user_email IS NULL)
+            let mut stmt = self
+                .conn
+                .prepare("SELECT * FROM notifications WHERE user_email IS NULL")?;
+            let notification_iter = stmt.query_map([], |row| {
+                Ok(Notification {
+                    id: row.get(0)?,
+                    granted: row.get(1)?,
+                    description: row.get(2)?,
+                    app_name: row.get(3)?,
+                    app_url: row.get(4)?,
+                    app_icon_path: row.get(5)?,
+                    trigger: row.get(6)?,
+                    perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
+                    webhook_url: row.get(8)?,
+                    webhook_auth: row.get(9)?,
+                    user_email: row.get(10)?,
+                })
+            })?;
+
+            let mut result = Vec::new();
+            for notification in notification_iter {
+                result.push(notification?);
+            }
+            result
+        };
+
         Ok(notifications)
     }
 
@@ -689,6 +767,7 @@ impl Ad4mDb {
                 perspective_ids: serde_json::from_str(&row.get::<_, String>(7)?).unwrap(),
                 webhook_url: row.get(8)?,
                 webhook_auth: row.get(9)?,
+                user_email: row.get(10)?,
             }))
         } else {
             Ok(None)
@@ -715,7 +794,7 @@ impl Ad4mDb {
         }
 
         let result = self.conn.execute(
-            "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10 WHERE id = ?1",
+            "UPDATE notifications SET description = ?2, appName = ?3, appUrl = ?4, appIconPath = ?5, trigger = ?6, perspective_ids = ?7, webhookUrl = ?8, webhookAuth = ?9, granted = ?10, user_email = ?11 WHERE id = ?1",
             params![
                 id,
                 updated_notification.description,
@@ -727,6 +806,7 @@ impl Ad4mDb {
                 updated_notification.webhook_url,
                 updated_notification.webhook_auth,
                 updated_notification.granted,
+                updated_notification.user_email,
             ],
         )?;
         Ok(result > 0)
@@ -1399,6 +1479,54 @@ impl Ad4mDb {
         Ok(links?)
     }
 
+    /// Check if a perspective's links have been migrated from Rusqlite to SurrealDB
+    ///
+    /// # Arguments
+    /// * `perspective_uuid` - UUID of the perspective to check
+    ///
+    /// # Returns
+    /// * `Ok(true)` if the perspective has been migrated
+    /// * `Ok(false)` if the perspective has not been migrated yet
+    pub fn is_perspective_migrated(&self, perspective_uuid: &str) -> Ad4mDbResult<bool> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COUNT(*) FROM perspective_link_migration WHERE perspective_uuid = ?1",
+        )?;
+        let count: i64 = stmt.query_row(params![perspective_uuid], |row| row.get(0))?;
+        Ok(count > 0)
+    }
+
+    /// Mark a perspective as having been migrated from Rusqlite to SurrealDB
+    ///
+    /// This function is idempotent - calling it multiple times for the same perspective is safe.
+    ///
+    /// # Arguments
+    /// * `perspective_uuid` - UUID of the perspective to mark as migrated
+    pub fn mark_perspective_as_migrated(&self, perspective_uuid: &str) -> Ad4mDbResult<()> {
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO perspective_link_migration (perspective_uuid, migrated_at) VALUES (?1, ?2)",
+            params![perspective_uuid, timestamp],
+        )?;
+        Ok(())
+    }
+
+    /// Delete all links for a perspective from Rusqlite storage
+    ///
+    /// This should only be called after successfully migrating links to SurrealDB.
+    ///
+    /// # Arguments
+    /// * `perspective_uuid` - UUID of the perspective whose links should be deleted
+    ///
+    /// # Returns
+    /// The number of links that were deleted
+    pub fn delete_all_links_for_perspective(&self, perspective_uuid: &str) -> Ad4mDbResult<usize> {
+        let count = self.conn.execute(
+            "DELETE FROM link WHERE perspective = ?1",
+            params![perspective_uuid],
+        )?;
+        Ok(count)
+    }
+
     pub fn add_pending_diff(
         &self,
         perspective_uuid: &str,
@@ -1852,7 +1980,7 @@ impl Ad4mDb {
 
         // Export notifications
         let notifications: Vec<serde_json::Value> = self.conn.prepare(
-            "SELECT id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted FROM notifications"
+            "SELECT id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted, user_email FROM notifications"
         )?.query_map([], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
@@ -1864,7 +1992,8 @@ impl Ad4mDb {
                 "perspective_ids": row.get::<_, String>(6)?,
                 "webhook_url": row.get::<_, String>(7)?,
                 "webhook_auth": row.get::<_, String>(8)?,
-                "granted": row.get::<_, bool>(9)?
+                "granted": row.get::<_, bool>(9)?,
+                "user_email": row.get::<_, Option<String>>(10)?
             }))
         })?.collect::<Result<Vec<_>, _>>()?;
         export_data.insert(
@@ -2211,8 +2340,8 @@ impl Ad4mDb {
                             .and_then(|id| id.as_str())
                             .unwrap_or("<unknown>");
                         match self.conn.execute(
-                            "INSERT INTO notifications (id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted) 
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                            "INSERT INTO notifications (id, description, appName, appUrl, appIconPath, trigger, perspective_ids, webhookUrl, webhookAuth, granted, user_email)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                             params![
                                 notification["id"].as_str().unwrap_or(""),
                                 notification["description"].as_str().unwrap_or(""),
@@ -2223,7 +2352,8 @@ impl Ad4mDb {
                                 notification["perspective_ids"].as_str().unwrap_or(""),
                                 notification["webhook_url"].as_str().unwrap_or(""),
                                 notification["webhook_auth"].as_str().unwrap_or(""),
-                                notification["granted"].as_bool().unwrap_or(false)
+                                notification["granted"].as_bool().unwrap_or(false),
+                                notification["user_email"].as_str()
                             ],
                         ) {
                             Ok(_) => result.notifications.imported += 1,
@@ -3048,7 +3178,7 @@ mod tests {
             webhook_url: "http://test.webhook".to_string(),
             webhook_auth: "test-auth".to_string(),
         };
-        let notification_id = db.add_notification(notification).unwrap();
+        let notification_id = db.add_notification(notification, None).unwrap();
 
         // Add tasks
         let task = AIPromptExamples {
@@ -3394,7 +3524,7 @@ mod tests {
         };
 
         // Add the test notification
-        let notification_id = db.add_notification(notification).unwrap();
+        let notification_id = db.add_notification(notification, None).unwrap();
         // Get all notifications
         let notifications = db.get_notifications().unwrap();
 
@@ -3433,6 +3563,7 @@ mod tests {
             perspective_ids: vec!["Test Perspective ID".to_string()],
             webhook_url: "Test Webhook URL".to_string(),
             webhook_auth: "Test Webhook Auth".to_string(),
+            user_email: None,
         };
 
         // Update the test notification
@@ -3477,7 +3608,7 @@ mod tests {
             webhook_auth: "".to_string(),
         };
 
-        let result1 = db.add_notification(notification1);
+        let result1 = db.add_notification(notification1, None);
         assert!(result1.is_ok(), "Should allow DELETE inside string literal");
 
         // Should reject: actual DELETE operation
@@ -3492,7 +3623,7 @@ mod tests {
             webhook_auth: "".to_string(),
         };
 
-        let result2 = db.add_notification(notification2);
+        let result2 = db.add_notification(notification2, None);
         assert!(result2.is_err(), "Should reject actual DELETE operation");
         assert!(result2.unwrap_err().to_string().contains("DELETE"));
 
@@ -3508,7 +3639,7 @@ mod tests {
             webhook_auth: "".to_string(),
         };
 
-        let result3 = db.add_notification(notification3);
+        let result3 = db.add_notification(notification3, None);
         assert!(result3.is_ok(), "Should allow DELETE inside escaped string");
     }
 

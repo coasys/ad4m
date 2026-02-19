@@ -34,6 +34,16 @@ lazy_static! {
 
 const CACHE_TTL_SECONDS: i64 = 300; // 5 minutes cache TTL
 
+/// Returns true if the given token is the admin_credential that grants launcher-level access.
+/// When admin_credential is Some, the token must match it exactly (constant-time).
+/// When admin_credential is None (legacy single-user mode), an empty token is treated as admin.
+pub fn is_admin_credential_token(token: &str, admin_credential: &Option<String>) -> bool {
+    match admin_credential {
+        Some(cred) => constant_time_eq(token, cred),
+        None => token.is_empty(),
+    }
+}
+
 pub fn check_capability(
     capabilities: &Result<Vec<Capability>, String>,
     expected: &Capability,
