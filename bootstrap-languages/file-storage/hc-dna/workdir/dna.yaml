@@ -10,3 +10,5 @@ coordinator:
   zomes:
     - name: file_storage
       path: ../target/wasm32-unknown-unknown/release/file_storage.wasm
+      dependencies:
+        - name: integrity
