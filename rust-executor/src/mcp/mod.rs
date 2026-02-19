@@ -3,7 +3,7 @@
 //! Exposes AD4M Subject operations via MCP, enabling AI agents to work with
 //! typed models instead of raw links.
 
-mod server;
+pub mod server;
 mod tools;
 
-pub use server::start_mcp_server;
+pub use server::{start_mcp_server, McpServerConfig};

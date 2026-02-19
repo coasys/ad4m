@@ -158,7 +158,11 @@ enum Domain {
         #[arg(long, action)]
         admin_credential: Option<String>,
         #[arg(long, action)]
-        enable_multi_user: bool
+        enable_multi_user: bool,
+        #[arg(long, action)]
+        enable_mcp: Option<bool>,
+        #[arg(long, action)]
+        mcp_port: Option<u16>,
     },
     RunLocalHcServices {},
     Eve {
@@ -236,7 +240,9 @@ async fn main() -> Result<()> {
         hc_bootstrap_url,
         connect_holochain,
         admin_credential,
-        enable_multi_user
+        enable_multi_user,
+        enable_mcp,
+        mcp_port,
     } = args.domain
     {
         let _ = tokio::spawn(async move {
@@ -257,6 +263,8 @@ async fn main() -> Result<()> {
                 connect_holochain,
                 admin_credential,
                 enable_multi_user,
+                enable_mcp,
+                mcp_port,
                 localhost: None,
                 auto_permit_cap_requests: None,
                 tls: None,

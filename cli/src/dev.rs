@@ -57,6 +57,8 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     tls: None,
                     log_holochain_metrics: None,
                     enable_multi_user: None,
+                    enable_mcp: None,
+                    mcp_port: None,
                     smtp_config: None,
                 })
                 .await
@@ -211,6 +213,8 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     tls: None,
                     log_holochain_metrics: None,
                     enable_multi_user: None,
+                    enable_mcp: None,
+                    mcp_port: None,
                     smtp_config: None,
                 })
                 .await

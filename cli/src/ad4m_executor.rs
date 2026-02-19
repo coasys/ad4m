@@ -221,6 +221,8 @@ async fn main() -> Result<()> {
                 log_holochain_metrics,
                 enable_multi_user,
                 smtp_config: None,
+                enable_mcp: None,
+                mcp_port: None,
             })
             .await;
         })

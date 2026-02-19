@@ -4,7 +4,10 @@ use super::tools::Ad4mMcpHandler;
 use crate::js_core::JsCoreHandle;
 use anyhow::Result;
 use log::info;
-use rmcp::{transport::stdio, ServiceExt};
+use rmcp::transport::streamable_http_server::{
+    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -16,16 +19,36 @@ pub struct McpContext {
     pub auth_token: Arc<RwLock<Option<String>>>,
 }
 
-/// Start the MCP server on stdio
+/// Configuration for the MCP HTTP server
+#[derive(Clone, Debug)]
+pub struct McpServerConfig {
+    /// Port to listen on (default: 3001)
+    pub port: u16,
+    /// Host to bind to (default: 127.0.0.1)
+    pub host: String,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            port: 3001,
+            host: "127.0.0.1".to_string(),
+        }
+    }
+}
+
+/// Start the MCP server with HTTP transport
 ///
-/// This is designed to be run alongside the GraphQL server, sharing the same
-/// JsCoreHandle for executing AD4M operations.
+/// This runs an HTTP server that accepts MCP protocol requests.
+/// AI agents can connect via HTTP to interact with AD4M.
 pub async fn start_mcp_server(
     js_core_handle: JsCoreHandle,
     admin_credential: Option<String>,
     auth_token: Option<String>,
+    config: McpServerConfig,
 ) -> Result<()> {
-    info!("Starting AD4M MCP server on stdio");
+    let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
+    info!("Starting AD4M MCP server on http://{}", addr);
 
     let context = McpContext {
         js_handle: js_core_handle,
@@ -33,23 +56,29 @@ pub async fn start_mcp_server(
         auth_token: Arc::new(RwLock::new(auth_token)),
     };
 
-    let handler = Ad4mMcpHandler::new(context);
-    let transport = stdio();
-    let running = handler.serve(transport).await?;
+    // Create the session manager for HTTP transport
+    let session_manager = Arc::new(LocalSessionManager::default());
 
-    info!("MCP server running");
-    running.waiting().await?;
+    // Create config for the HTTP server
+    let http_config = StreamableHttpServerConfig::default();
+
+    // Create the HTTP service with a factory that creates handlers
+    let context_clone = context.clone();
+    let service = StreamableHttpService::new(
+        move || Ok(Ad4mMcpHandler::new(context_clone.clone())),
+        session_manager,
+        http_config,
+    );
+
+    // Create the TCP listener and serve using axum
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!("MCP HTTP server listening on {}", addr);
+
+    // The StreamableHttpService implements tower::Service, so we can use it directly with axum
+    let app = axum::Router::new()
+        .fallback_service(service);
+
+    axum::serve(listener, app).await?;
 
     Ok(())
 }
-
-// TODO: HTTP transport implementation
-// The rmcp crate supports StreamableHttpService for HTTP transport,
-// but it requires hyper 1.x which conflicts with the project's hyper 0.14 (via reqwest).
-// Options to add HTTP support:
-// 1. Update reqwest to use hyper 1.x when available
-// 2. Use a warp-based wrapper that translates HTTP -> MCP protocol
-// 3. Run MCP HTTP on a separate process that communicates via IPC
-//
-// For now, Claude Desktop and other MCP clients can use the stdio transport
-// by running the executor as a subprocess.

@@ -213,10 +213,15 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                 .enable_all()
                 .build()
                 .unwrap();
+            let mcp_config = mcp::server::McpServerConfig {
+                port: config.mcp_port.unwrap_or(3001),
+                ..Default::default()
+            };
             if let Err(e) = runtime.block_on(mcp::start_mcp_server(
                 js_core_handle,
                 admin_credential,
                 None, // No pre-set auth token
+                mcp_config,
             )) {
                 error!("MCP server error: {:?}", e);
             }
