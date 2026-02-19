@@ -14,7 +14,7 @@ jobs:
     name: Rust Tests (Unit + Integration)
     runs-on: ubuntu-22.04
     container:
-      image: coasys/ad4m-ci-linux:latest@sha256:d0c3e9683811505955185782a5cd683952f846f1abc520c35c1293ad7f046593
+      image: coasys/ad4m-ci-linux:latest@sha256:a27ee5a0e144fadf031d47cefc0a91b596858a5bb10ccafb6d11f6d8653b0383
 
     steps:
       - name: Checkout code
