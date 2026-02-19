@@ -75,8 +75,7 @@ pub async fn start_mcp_server(
     info!("MCP HTTP server listening on {}", addr);
 
     // The StreamableHttpService implements tower::Service, so we can use it directly with axum
-    let app = axum::Router::new()
-        .fallback_service(service);
+    let app = axum::Router::new().fallback_service(service);
 
     axum::serve(listener, app).await?;
 
