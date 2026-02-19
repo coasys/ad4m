@@ -1,7 +1,8 @@
 [workspace]
 members = [
   "zomes/direct-message",
-  "zomes/direct-message-integrity"
+  "zomes/direct-message-integrity",
+  "tests/sweettest"
 ]
 resolver="2"
 

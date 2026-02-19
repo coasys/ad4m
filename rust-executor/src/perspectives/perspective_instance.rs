@@ -3094,46 +3094,64 @@ impl PerspectiveInstance {
 
         // Check if this perspective is part of a neighbourhood
         if current_perspective_handle.shared_url.is_some() {
-            // Get all local user emails
+            // Helper closure: publish a signal locally and return Ok(())
+            let publish_local = |handle: PerspectiveHandle,
+                                 mut signal: PerspectiveExpression,
+                                 recipient: String| async move {
+                signal.verify_signatures();
+                get_global_pubsub()
+                    .await
+                    .publish(
+                        &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                        &serde_json::to_string(&NeighbourhoodSignalFilter {
+                            perspective: handle,
+                            signal,
+                            recipient: Some(recipient),
+                        })
+                        .unwrap(),
+                    )
+                    .await;
+            };
+
+            // Check if any managed email user is the recipient
             if let Ok(user_emails) = AgentService::list_user_emails() {
-                // Check if any local user has the recipient DID
                 for user_email in user_emails {
                     if let Ok(user_did) = AgentService::get_user_did_by_email(&user_email) {
                         if user_did == remote_agent_did {
-                            // This is a locally managed user!
-                            // Check if they own a perspective for this neighbourhood
                             if let Some(owners) = &current_perspective_handle.owners {
                                 if owners.contains(&remote_agent_did) {
-                                    // The recipient owns this perspective (they're in the same neighbourhood)
-                                    // Send signal directly via local pubsub
                                     log::debug!(
-                                        "Routing signal locally to user {} in neighbourhood {:?}",
+                                        "Routing signal locally to managed user {} in neighbourhood {:?}",
                                         user_email,
                                         current_perspective_handle.shared_url
                                     );
-
                                     let handle = self.persisted.lock().await.clone();
-                                    let mut signal = payload.clone();
-                                    signal.verify_signatures();
-
-                                    get_global_pubsub()
-                                        .await
-                                        .publish(
-                                            &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                                            &serde_json::to_string(&NeighbourhoodSignalFilter {
-                                                perspective: handle,
-                                                signal,
-                                                recipient: Some(remote_agent_did.clone()),
-                                            })
-                                            .unwrap(),
-                                        )
-                                        .await;
-
-                                    // Signal delivered locally, no need to go through link language
+                                    publish_local(handle, payload, remote_agent_did).await;
                                     return Ok(());
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            // Check if the main agent is the recipient.
+            // Treat owners=None or owners=[] as implicit main-agent ownership (legacy perspectives).
+            let main_agent_did = AgentService::with_global_instance(|s| s.did.clone());
+            if let Some(main_agent_did) = main_agent_did {
+                if main_agent_did == remote_agent_did {
+                    let is_owner = current_perspective_handle
+                        .owners
+                        .as_ref()
+                        .map_or(true, |o| o.is_empty() || o.contains(&remote_agent_did));
+                    if is_owner {
+                        log::debug!(
+                            "Routing signal locally to main agent in neighbourhood {:?}",
+                            current_perspective_handle.shared_url
+                        );
+                        let handle = self.persisted.lock().await.clone();
+                        publish_local(handle, payload, remote_agent_did).await;
+                        return Ok(());
                     }
                 }
             }
@@ -3173,12 +3191,11 @@ impl PerspectiveInstance {
             });
         }
 
-        // Route signals to local managed users who are owners of this perspective
+        // Route signals to all local agents (managed users + main agent) who are owners
         if current_perspective_handle.shared_url.is_some() {
+            // Send to each local managed email user who is an explicit owner
             if let Some(owners) = &current_perspective_handle.owners {
-                // Get all local user emails
                 if let Ok(user_emails) = AgentService::list_user_emails() {
-                    // Send signal to each local managed user who is an owner
                     for user_email in user_emails {
                         if let Ok(user_did) = AgentService::get_user_did_by_email(&user_email) {
                             if owners.contains(&user_did) {
@@ -3186,22 +3203,57 @@ impl PerspectiveInstance {
                                 let mut signal = payload.clone();
                                 signal.verify_signatures();
 
-                                let filter_data = NeighbourhoodSignalFilter {
-                                    perspective: handle.clone(),
-                                    signal: signal.clone(),
-                                    recipient: Some(user_did.clone()),
-                                };
-
                                 get_global_pubsub()
                                     .await
                                     .publish(
                                         &NEIGHBOURHOOD_SIGNAL_TOPIC,
-                                        &serde_json::to_string(&filter_data).unwrap(),
+                                        &serde_json::to_string(&NeighbourhoodSignalFilter {
+                                            perspective: handle,
+                                            signal,
+                                            recipient: Some(user_did),
+                                        })
+                                        .unwrap(),
                                     )
                                     .await;
                             }
                         }
                     }
+                }
+            }
+
+            // Send to the main agent if it is an owner.
+            // The main agent is not in list_user_emails(), so it must be handled separately.
+            // Treat owners=None or owners=[] as implicit main-agent ownership (legacy perspectives).
+            let main_agent_did = AgentService::with_global_instance(|s| s.did.clone());
+            if let Some(main_agent_did) = main_agent_did {
+                let is_owner = current_perspective_handle
+                    .owners
+                    .as_ref()
+                    .map_or(true, |o| o.is_empty() || o.contains(&main_agent_did));
+                // Don't echo the broadcast back to the sender (loopback is handled separately).
+                let is_sender = payload.author == main_agent_did;
+                if is_owner && !is_sender {
+                    let handle = self.persisted.lock().await.clone();
+                    let mut signal = payload.clone();
+                    signal.verify_signatures();
+
+                    log::debug!(
+                        "Broadcasting signal locally to main agent in neighbourhood {:?}",
+                        current_perspective_handle.shared_url
+                    );
+
+                    get_global_pubsub()
+                        .await
+                        .publish(
+                            &NEIGHBOURHOOD_SIGNAL_TOPIC,
+                            &serde_json::to_string(&NeighbourhoodSignalFilter {
+                                perspective: handle,
+                                signal,
+                                recipient: Some(main_agent_did),
+                            })
+                            .unwrap(),
+                        )
+                        .await;
                 }
             }
         }

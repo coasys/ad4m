@@ -58,9 +58,9 @@ app_entry!(AgentExpression);
 
 #[derive(Serialize, Deserialize, Clone, SerializedBytes, Debug)]
 pub struct AgentExpressionData {
-    did: String,
-    perspective: Option<Perspective>,
+    pub did: String,
+    pub perspective: Option<Perspective>,
     #[serde(rename(serialize = "directMessageLanguage"))]
     #[serde(rename(deserialize = "directMessageLanguage"))]
-    direct_message_language: Option<String>,
+    pub direct_message_language: Option<String>,
 }

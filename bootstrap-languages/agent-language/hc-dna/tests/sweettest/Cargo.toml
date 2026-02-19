@@ -1,5 +1,5 @@
 [package]
-name = "direct_message_tests"
+name = "agent_store_tests"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -21,7 +21,7 @@ holochain_serialized_bytes = "=0.0.56"
 holochain_zome_types = { git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.10-coasys" }
 
 # Shared types from the integrity zome
-direct-message-integrity = { path = "../../zomes/direct-message-integrity" }
+agent_store_integrity = { path = "../../zomes/agent_store_integrity" }
 
 # Standard dependencies
 serde = { version = "1.0", features = ["derive"] }
