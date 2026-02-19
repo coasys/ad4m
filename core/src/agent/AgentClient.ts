@@ -6,8 +6,10 @@ import {
   Apps,
   AuthInfo,
   AuthInfoInput,
+  AuthorisedKey,
   EntanglementProof,
   EntanglementProofInput,
+  KeyRevocation,
   UserCreationResult,
 } from "./Agent";
 import { AgentStatus } from "./AgentStatus";
@@ -28,6 +30,23 @@ const AGENT_SUBITEMS = `
                 source, predicate, target
             }
         }
+    }
+    authorisedKeys {
+        key
+        name
+        addedAt
+        addedBy
+        proof {
+            authorisingKey
+            signature
+        }
+    }
+    revokedKeys {
+        revokedKey
+        revokedAt
+        revokedBy
+        signature
+        reason
     }
 `;
 
@@ -287,6 +306,83 @@ export class AgentClient {
     const agent = new Agent(a.did, a.perspective);
     agent.directMessageLanguage = a.directMessageLanguage;
     return agent;
+  }
+
+  async addAuthorisedKey(key: string, name: string): Promise<Agent> {
+    const { agentAddAuthorisedKey } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation agentAddAuthorisedKey($key: String!, $name: String!) {
+                agentAddAuthorisedKey(key: $key, name: $name) {
+                    ${AGENT_SUBITEMS}
+                }
+            }`,
+        variables: { key, name },
+      })
+    );
+    return agentAddAuthorisedKey as Agent;
+  }
+
+  async revokeKey(key: string, reason?: string): Promise<Agent> {
+    const { agentRevokeKey } = unwrapApolloResult(
+      await this.#apolloClient.mutate({
+        mutation: gql`mutation agentRevokeKey($key: String!, $reason: String) {
+                agentRevokeKey(key: $key, reason: $reason) {
+                    ${AGENT_SUBITEMS}
+                }
+            }`,
+        variables: { key, reason },
+      })
+    );
+    return agentRevokeKey as Agent;
+  }
+
+  async authorisedKeys(): Promise<AuthorisedKey[]> {
+    const { agentAuthorisedKeys } = unwrapApolloResult(
+      await this.#apolloClient.query({
+        query: gql`query agentAuthorisedKeys {
+                agentAuthorisedKeys {
+                    key
+                    name
+                    addedAt
+                    addedBy
+                    proof {
+                        authorisingKey
+                        signature
+                    }
+                }
+            }`,
+      })
+    );
+    return agentAuthorisedKeys;
+  }
+
+  async revokedKeys(): Promise<KeyRevocation[]> {
+    const { agentRevokedKeys } = unwrapApolloResult(
+      await this.#apolloClient.query({
+        query: gql`query agentRevokedKeys {
+                agentRevokedKeys {
+                    revokedKey
+                    revokedAt
+                    revokedBy
+                    signature
+                    reason
+                }
+            }`,
+      })
+    );
+    return agentRevokedKeys;
+  }
+
+  async isKeyValid(did: string, key: string): Promise<boolean> {
+    const { agentIsKeyValid } = unwrapApolloResult(
+      await this.#apolloClient.query({
+        query: gql`query agentIsKeyValid($did: String!, $key: String!) {
+                agentIsKeyValid(did: $did, key: $key)
+            }`,
+        variables: { did, key },
+      })
+    );
+    return agentIsKeyValid;
   }
 
   async addEntanglementProofs(

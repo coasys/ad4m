@@ -19,6 +19,86 @@ import { ExpressionGeneric } from "../expression/Expression";
  * Thus, this is how agents see (other) agents.
  */
 @ObjectType()
+export class KeyAuthorisation {
+  @Field()
+  authorisingKey: string;
+
+  @Field()
+  signature: string;
+
+  constructor(authorisingKey: string, signature: string) {
+    this.authorisingKey = authorisingKey;
+    this.signature = signature;
+  }
+}
+
+@InputType()
+export class KeyAuthorisationInput {
+  @Field()
+  authorisingKey: string;
+
+  @Field()
+  signature: string;
+
+  constructor(authorisingKey: string, signature: string) {
+    this.authorisingKey = authorisingKey;
+    this.signature = signature;
+  }
+}
+
+@ObjectType()
+export class AuthorisedKey {
+  @Field()
+  key: string;
+
+  @Field()
+  name: string;
+
+  @Field()
+  addedAt: string;
+
+  @Field()
+  addedBy: string;
+
+  @Field((type) => KeyAuthorisation)
+  proof: KeyAuthorisation;
+
+  constructor(key: string, name: string, addedAt: string, addedBy: string, proof: KeyAuthorisation) {
+    this.key = key;
+    this.name = name;
+    this.addedAt = addedAt;
+    this.addedBy = addedBy;
+    this.proof = proof;
+  }
+}
+
+@ObjectType()
+export class KeyRevocation {
+  @Field()
+  revokedKey: string;
+
+  @Field()
+  revokedAt: string;
+
+  @Field()
+  revokedBy: string;
+
+  @Field()
+  signature: string;
+
+  @Field({ nullable: true })
+  reason?: string;
+
+  constructor(revokedKey: string, revokedAt: string, revokedBy: string, signature: string, reason?: string) {
+    this.revokedKey = revokedKey;
+    this.revokedAt = revokedAt;
+    this.revokedBy = revokedBy;
+    this.signature = signature;
+    this.reason = reason;
+  }
+}
+
+@ObjectType()
 export class Agent {
   /** The DID of the Agent
    * All epxressions authored by them are signed with the keys mentioned
@@ -38,6 +118,14 @@ export class Agent {
   /** Address of the Language by which the Agent will receive DMs */
   @Field({ nullable: true })
   directMessageLanguage?: string;
+
+  /** List of authorised keys for this agent identity */
+  @Field((type) => [AuthorisedKey], { nullable: true })
+  authorisedKeys?: AuthorisedKey[];
+
+  /** List of revoked keys for this agent identity */
+  @Field((type) => [KeyRevocation], { nullable: true })
+  revokedKeys?: KeyRevocation[];
 
   constructor(did: string, perspective?: Perspective) {
     this.did = did;

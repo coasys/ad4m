@@ -12,8 +12,11 @@ import {
   AgentSignature,
   Apps,
   AuthInfoInput,
+  AuthorisedKey,
   EntanglementProof,
   EntanglementProofInput,
+  KeyAuthorisation,
+  KeyRevocation,
 } from "./Agent";
 import { AgentStatus } from "./AgentStatus";
 import { AGENT_STATUS_CHANGED, AGENT_UPDATED, APPS_CHANGED } from "../PubSub";
@@ -259,5 +262,67 @@ export default class AgentResolver {
   @Mutation((returns) => AgentSignature)
   agentSignMessage(@Arg("message") message: string): AgentSignature {
     return new AgentSignature("test-message-signature", "test-public-key");
+  }
+
+  @Mutation((returns) => Agent)
+  agentAddAuthorisedKey(
+    @Arg("key") key: string,
+    @Arg("name") name: string
+  ): Agent {
+    const agent = new Agent(TEST_AGENT_DID);
+    agent.authorisedKeys = [
+      new AuthorisedKey(
+        key,
+        name,
+        new Date().toISOString(),
+        TEST_AGENT_DID,
+        new KeyAuthorisation(key, "test-signature")
+      ),
+    ];
+    return agent;
+  }
+
+  @Mutation((returns) => Agent)
+  agentRevokeKey(
+    @Arg("key") key: string,
+    @Arg("reason", { nullable: true }) reason?: string
+  ): Agent {
+    const agent = new Agent(TEST_AGENT_DID);
+    agent.revokedKeys = [
+      new KeyRevocation(
+        key,
+        new Date().toISOString(),
+        TEST_AGENT_DID,
+        "test-signature",
+        reason
+      ),
+    ];
+    return agent;
+  }
+
+  @Query((returns) => [AuthorisedKey])
+  agentAuthorisedKeys(): AuthorisedKey[] {
+    return [
+      new AuthorisedKey(
+        "test-key",
+        "Root Key",
+        new Date().toISOString(),
+        TEST_AGENT_DID,
+        new KeyAuthorisation("test-key", "self")
+      ),
+    ];
+  }
+
+  @Query((returns) => [KeyRevocation])
+  agentRevokedKeys(): KeyRevocation[] {
+    return [];
+  }
+
+  @Query((returns) => Boolean)
+  agentIsKeyValid(
+    @Arg("did") did: string,
+    @Arg("key") key: string
+  ): Boolean {
+    return true;
   }
 }

@@ -23,6 +23,33 @@ export default class ExpressionAdapterImpl implements ExpressionAdapter {
 
     return expression
   };
+
+  async addAuthorisedKey(did: string, key: string, name: string, proof: { authorising_key: string, signature: string }): Promise<any> {
+    return await this.#DNA.call(
+      DNA_ROLE,
+      ZOME_NAME,
+      "add_authorised_key",
+      { did, key, name, proof }
+    );
+  }
+
+  async revokeKey(did: string, key: string, signature: string, reason?: string): Promise<any> {
+    return await this.#DNA.call(
+      DNA_ROLE,
+      ZOME_NAME,
+      "revoke_key",
+      { did, key, signature, reason: reason || null }
+    );
+  }
+
+  async isKeyValid(did: string, key: string): Promise<boolean> {
+    return await this.#DNA.call(
+      DNA_ROLE,
+      ZOME_NAME,
+      "is_key_valid",
+      { did, key }
+    );
+  }
 }
 
 class Sharing implements PublicSharing {

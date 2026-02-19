@@ -1,4 +1,7 @@
-use agent_store_integrity::{AgentExpression, Did, EntryTypes, LinkTypes};
+use agent_store_integrity::{
+    AddAuthorisedKeyInput, AgentExpression, AuthorisedKey, Did, EntryTypes,
+    IsKeyValidInput, KeyAuthorisation, KeyRevocation, LinkTypes, RevokeKeyInput,
+};
 use hdk::prelude::*;
 
 mod utils;
@@ -10,8 +13,34 @@ fn init(_: ()) -> ExternResult<InitCallbackResult> {
     Ok(InitCallbackResult::Pass)
 }
 
+/// Extract the key portion from a did:key: URI
+fn extract_key_from_did(did: &str) -> Option<String> {
+    if did.starts_with("did:key:") {
+        Some(did.trim_start_matches("did:key:").to_string())
+    } else {
+        None
+    }
+}
+
 #[hdk_extern]
-pub fn create_agent_expression(agent_expression: AgentExpression) -> ExternResult<()> {
+pub fn create_agent_expression(mut agent_expression: AgentExpression) -> ExternResult<()> {
+    // Auto-populate authorised_keys with the DID root key if empty (migration path)
+    if agent_expression.data.authorised_keys.is_empty() {
+        if let Some(root_key) = extract_key_from_did(&agent_expression.author) {
+            let now = chrono::Utc::now();
+            agent_expression.data.authorised_keys.push(AuthorisedKey {
+                key: root_key.clone(),
+                name: "Root Key".to_string(),
+                added_at: now,
+                added_by: agent_expression.author.clone(),
+                proof: KeyAuthorisation {
+                    authorising_key: root_key,
+                    signature: "self".to_string(),
+                },
+            });
+        }
+    }
+
     let did = EntryTypes::Did(Did(agent_expression.author.clone()));
     let did_hash = hash_entry(&did)?;
 
@@ -30,6 +59,145 @@ pub fn create_agent_expression(agent_expression: AgentExpression) -> ExternResul
     )?;
 
     Ok(())
+}
+
+/// Helper to get current agent expression for a DID
+fn get_current_expression(did: &str) -> ExternResult<Option<AgentExpression>> {
+    let did_entry = Did(did.to_string());
+    get_agent_expression(did_entry)
+}
+
+#[hdk_extern]
+pub fn add_authorised_key(input: AddAuthorisedKeyInput) -> ExternResult<AgentExpression> {
+    let current = get_current_expression(&input.did)?
+        .ok_or_else(|| err("Agent expression not found"))?;
+
+    // Check that the authorising key is in the current authorised_keys
+    let authorising_key_valid = current
+        .data
+        .authorised_keys
+        .iter()
+        .any(|k| k.key == input.proof.authorising_key);
+
+    if !authorising_key_valid {
+        return Err(err("Authorising key is not in the current authorised keys"));
+    }
+
+    // Check key is not already revoked
+    let is_revoked = current
+        .data
+        .revoked_keys
+        .iter()
+        .any(|r| r.revoked_key == input.proof.authorising_key);
+
+    if is_revoked {
+        return Err(err("Authorising key has been revoked"));
+    }
+
+    // Check the new key isn't already authorised
+    let already_exists = current.data.authorised_keys.iter().any(|k| k.key == input.key);
+    if already_exists {
+        return Err(err("Key is already authorised"));
+    }
+
+    let now = chrono::Utc::now();
+    let new_key = AuthorisedKey {
+        key: input.key,
+        name: input.name,
+        added_at: now,
+        added_by: input.did.clone(),
+        proof: input.proof,
+    };
+
+    let mut new_data = current.data.clone();
+    new_data.authorised_keys.push(new_key);
+
+    let new_expression = AgentExpression {
+        author: current.author.clone(),
+        timestamp: now,
+        data: new_data,
+        proof: current.proof.clone(),
+    };
+
+    // Store updated expression
+    let did = EntryTypes::Did(Did(current.author.clone()));
+    let did_hash = hash_entry(&did)?;
+    let entry = EntryTypes::AgentExpression(new_expression.clone());
+    let entry_hash = hash_entry(&entry)?;
+    create_entry(&entry)?;
+    create_link(
+        did_hash,
+        entry_hash,
+        LinkTypes::ProfileLink,
+        LinkTag::new("profile"),
+    )?;
+
+    Ok(new_expression)
+}
+
+#[hdk_extern]
+pub fn revoke_key(input: RevokeKeyInput) -> ExternResult<AgentExpression> {
+    let current = get_current_expression(&input.did)?
+        .ok_or_else(|| err("Agent expression not found"))?;
+
+    // Check the key exists in authorised_keys
+    let key_exists = current.data.authorised_keys.iter().any(|k| k.key == input.key);
+    if !key_exists {
+        return Err(err("Key not found in authorised keys"));
+    }
+
+    // Check not already revoked
+    let already_revoked = current.data.revoked_keys.iter().any(|r| r.revoked_key == input.key);
+    if already_revoked {
+        return Err(err("Key is already revoked"));
+    }
+
+    let now = chrono::Utc::now();
+    let revocation = KeyRevocation {
+        revoked_key: input.key.clone(),
+        revoked_at: now,
+        revoked_by: input.did.clone(),
+        signature: input.signature,
+        reason: input.reason,
+    };
+
+    let mut new_data = current.data.clone();
+    new_data.authorised_keys.retain(|k| k.key != input.key);
+    new_data.revoked_keys.push(revocation);
+
+    let new_expression = AgentExpression {
+        author: current.author.clone(),
+        timestamp: now,
+        data: new_data,
+        proof: current.proof.clone(),
+    };
+
+    let did = EntryTypes::Did(Did(current.author.clone()));
+    let did_hash = hash_entry(&did)?;
+    let entry = EntryTypes::AgentExpression(new_expression.clone());
+    let entry_hash = hash_entry(&entry)?;
+    create_entry(&entry)?;
+    create_link(
+        did_hash,
+        entry_hash,
+        LinkTypes::ProfileLink,
+        LinkTag::new("profile"),
+    )?;
+
+    Ok(new_expression)
+}
+
+#[hdk_extern]
+pub fn is_key_valid(input: IsKeyValidInput) -> ExternResult<bool> {
+    let current = match get_current_expression(&input.did)? {
+        Some(expr) => expr,
+        None => return Ok(false),
+    };
+
+    let in_authorised = current.data.authorised_keys.iter().any(|k| k.key == input.key);
+    let in_revoked = current.data.revoked_keys.iter().any(|r| r.revoked_key == input.key);
+
+    Ok(in_authorised && !in_revoked)
 }
 
 #[hdk_extern]
