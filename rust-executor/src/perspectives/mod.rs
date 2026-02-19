@@ -2,6 +2,7 @@ pub mod migration;
 pub mod perspective_instance;
 pub mod sdna;
 pub mod shacl_parser;
+pub mod shacl_to_prolog;
 pub mod utils; // TODO: Remove this module after all users have migrated to SurrealDB
 use crate::graphql::graphql_types::{
     LinkQuery, LinkStatus, PerspectiveExpression, PerspectiveHandle, PerspectiveRemovedWithOwner,
