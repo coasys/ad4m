@@ -14,6 +14,8 @@ import { PERSPECTIVE_QUERY_SUBSCRIPTION } from "./PerspectiveResolver";
 import { gql } from "@apollo/client/core";
 import { AllInstancesResult } from "../model/Ad4mModel";
 import { escapeSurrealString } from "../utils";
+import { SHACLShape } from "../shacl/SHACLShape";
+import { SHACLFlow } from "../shacl/SHACLFlow";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
@@ -1034,38 +1036,38 @@ export class PerspectiveProxy {
      * 
      * await perspective.addShacl('Recipe', shape);
      */
-    async addShacl(name: string, shape: import("../shacl/SHACLShape").SHACLShape): Promise<void> {
+    async addShacl(name: string, shape: SHACLShape): Promise<void> {
         // Serialize shape to links
-        const links = shape.toLinks();
+        const shapeLinks = shape.toLinks();
         
-        // Add all links to perspective
-        for (const link of links) {
-            await this.add({
-                source: link.source,
-                predicate: link.predicate,
-                target: link.target
-            });
-        }
-        
-        // Create a name -> shape mapping link for easy retrieval
+        // Create name -> shape mapping links
         const nameMapping = Literal.fromUrl(`literal://string:shacl://${name}`);
-        await this.add({
-            source: "ad4m://self",
-            predicate: "ad4m://has_shacl",
-            target: nameMapping.toUrl()
-        });
+        const allLinks: Link[] = [
+            ...shapeLinks.map(l => new Link({
+                source: l.source,
+                predicate: l.predicate,
+                target: l.target
+            })),
+            new Link({
+                source: "ad4m://self",
+                predicate: "ad4m://has_shacl",
+                target: nameMapping.toUrl()
+            }),
+            new Link({
+                source: nameMapping.toUrl(),
+                predicate: "ad4m://shacl_shape_uri",
+                target: shape.nodeShapeUri
+            })
+        ];
         
-        await this.add({
-            source: nameMapping.toUrl(),
-            predicate: "ad4m://shacl_shape_uri",
-            target: shape.nodeShapeUri
-        });
+        // Batch add all links at once
+        await this.addLinks(allLinks);
     }
     
     /**
      * Retrieve a SHACL shape by name from this Perspective
      */
-    async getShacl(name: string): Promise<import("../shacl/SHACLShape").SHACLShape | null> {
+    async getShacl(name: string): Promise<SHACLShape | null> {
         // Find the shape URI from the name mapping
         const nameMapping = Literal.fromUrl(`literal://string:shacl://${name}`);
         const shapeUriLinks = await this.get(new LinkQuery({
@@ -1078,84 +1080,34 @@ export class PerspectiveProxy {
         }
         
         const shapeUri = shapeUriLinks[0].data.target;
+        const escapedShapeUri = escapeSurrealString(shapeUri);
         
-        // Get all links that are part of this shape
-        // This includes the shape itself and all its property shapes
-        const shapeLinks: any[] = [];
-        
-        // Get shape type and target class
-        const shapeTypeLinks = await this.get(new LinkQuery({
-            source: shapeUri,
-            predicate: "rdf://type"
-        }));
-        shapeLinks.push(...shapeTypeLinks.map(l => l.data));
-        
-        const targetClassLinks = await this.get(new LinkQuery({
-            source: shapeUri,
-            predicate: "sh://targetClass"
-        }));
-        shapeLinks.push(...targetClassLinks.map(l => l.data));
-        
-        // Get constructor actions
-        const constructorLinks = await this.get(new LinkQuery({
-            source: shapeUri,
-            predicate: "ad4m://constructor"
-        }));
-        shapeLinks.push(...constructorLinks.map(l => l.data));
-        
-        // Get destructor actions
-        const destructorLinks = await this.get(new LinkQuery({
-            source: shapeUri,
-            predicate: "ad4m://destructor"
-        }));
-        shapeLinks.push(...destructorLinks.map(l => l.data));
-        
-        // Get property shapes
+        // First get property shape URIs so we can query everything in one go
         const propertyLinks = await this.get(new LinkQuery({
             source: shapeUri,
             predicate: "sh://property"
         }));
         
-        for (const propLink of propertyLinks) {
-            shapeLinks.push(propLink.data);
-            
-            // Get all links for this property shape (named URI or blank node)
-            const propShapeId = propLink.data.target;
-            
-            // Query targeted predicates for this property shape to avoid loading all links
-            const expectedPredicates = [
-                "sh://path",
-                "sh://datatype",
-                "sh://nodeKind",
-                "sh://minCount",
-                "sh://maxCount",
-                "ad4m://local",
-                "ad4m://writable",
-                "ad4m://resolveLanguage",
-                "ad4m://setter",
-                "ad4m://adder",
-                "ad4m://remover",
-                "rdf://type"  // For CollectionShape detection
-            ];
-            
-            for (const predicate of expectedPredicates) {
-                const links = await this.get(new LinkQuery({
-                    source: propShapeId,
-                    predicate
-                }));
-                shapeLinks.push(...links.map(l => l.data));
-            }
-        }
+        // Build a single surreal query that fetches all relevant links
+        const sourceUris = [shapeUri, ...propertyLinks.map(l => l.data.target)];
+        const escapedSources = sourceUris.map(u => `'${escapeSurrealString(u)}'`).join(', ');
         
-        // Reconstruct shape from links
-        const { SHACLShape } = await import("../shacl/SHACLShape");
+        const query = `SELECT in.uri AS source, predicate, out.uri AS target FROM link WHERE in.uri IN [${escapedSources}]`;
+        const result = await this.querySurrealDB(query);
+        
+        const shapeLinks = (result || []).map((r: any) => ({
+            source: r.source,
+            predicate: r.predicate,
+            target: r.target
+        }));
+        
         return SHACLShape.fromLinks(shapeLinks, shapeUri);
     }
     
     /**
      * Get all SHACL shapes stored in this Perspective
      */
-    async getAllShacl(): Promise<Array<{name: string, shape: import("../shacl/SHACLShape").SHACLShape}>> {
+    async getAllShacl(): Promise<Array<{name: string, shape: SHACLShape}>> {
         const nameLinks = await this.get(new LinkQuery({
             source: "ad4m://self",
             predicate: "ad4m://has_shacl"
@@ -1213,33 +1165,32 @@ export class PerspectiveProxy {
      * await perspective.addFlow('TODO', todoFlow);
      * ```
      */
-    async addFlow(name: string, flow: import("../shacl/SHACLFlow").SHACLFlow): Promise<void> {
+    async addFlow(name: string, flow: SHACLFlow): Promise<void> {
         // Serialize flow to links
-        const links = flow.toLinks();
+        const flowLinks = flow.toLinks();
         
-        // Add all links to perspective
-        for (const link of links) {
-            await this.add({
-                source: link.source,
-                predicate: link.predicate,
-                target: link.target
-            });
-        }
-        
-        // Create registration link matching ad4m://has_flow pattern
+        // Create registration and mapping links
         const flowNameLiteral = Literal.from(name).toUrl();
-        await this.add({
-            source: "ad4m://self",
-            predicate: "ad4m://has_flow",
-            target: flowNameLiteral
-        });
+        const allLinks: Link[] = [
+            ...flowLinks.map(l => new Link({
+                source: l.source,
+                predicate: l.predicate,
+                target: l.target
+            })),
+            new Link({
+                source: "ad4m://self",
+                predicate: "ad4m://has_flow",
+                target: flowNameLiteral
+            }),
+            new Link({
+                source: flowNameLiteral,
+                predicate: "ad4m://flow_uri",
+                target: flow.flowUri
+            })
+        ];
         
-        // Create mapping from name to flow URI
-        await this.add({
-            source: flowNameLiteral,
-            predicate: "ad4m://flow_uri",
-            target: flow.flowUri
-        });
+        // Batch add all links at once
+        await this.addLinks(allLinks);
     }
 
     /**
@@ -1248,7 +1199,7 @@ export class PerspectiveProxy {
      * @param name - Flow name to retrieve
      * @returns The SHACLFlow or null if not found
      */
-    async getFlow(name: string): Promise<import("../shacl/SHACLFlow").SHACLFlow | null> {
+    async getFlow(name: string): Promise<SHACLFlow | null> {
         const flowNameLiteral = Literal.from(name).toUrl();
         
         // Find flow URI from name mapping
@@ -1262,47 +1213,24 @@ export class PerspectiveProxy {
         }
         
         const flowUri = flowUriLinks[0].data.target;
+        const escapedFlowUri = escapeSurrealString(flowUri);
         
-        // Get all links related to this flow
-        // flowUri format: {namespace}{Name}Flow
-        // State/transition URIs format: {namespace}{Name}.{stateName}
-        // Compute alternate prefix by only replacing trailing "Flow" suffix
+        // Compute alternate prefix for state/transition URIs
         const alternatePrefix = flowUri.endsWith('Flow') 
-            ? flowUri.slice(0, -4) + '.'  // Remove trailing 'Flow', add '.'
+            ? flowUri.slice(0, -4) + '.'
             : flowUri + '.';
+        const escapedAltPrefix = escapeSurrealString(alternatePrefix);
         
-        // Query flow-related predicates to avoid fetching all links
-        const flowPredicates = [
-            "rdf://type",
-            "ad4m://flowName",
-            "ad4m://flowable",
-            "ad4m://startAction",
-            "ad4m://hasState",
-            "ad4m://hasTransition",
-            "ad4m://stateName",
-            "ad4m://stateValue",
-            "ad4m://stateCheck",
-            "ad4m://actionName",
-            "ad4m://fromState",
-            "ad4m://toState",
-            "ad4m://transitionActions"
-        ];
+        // Single surreal query to get all flow-related links
+        const query = `SELECT in.uri AS source, predicate, out.uri AS target FROM link WHERE in.uri = '${escapedFlowUri}' OR in.uri LIKE '${escapedAltPrefix}%'`;
+        const result = await this.querySurrealDB(query);
         
-        const allLinks: any[] = [];
-        for (const predicate of flowPredicates) {
-            const links = await this.get(new LinkQuery({ predicate }));
-            allLinks.push(...links);
-        }
+        const flowLinks = (result || []).map((r: any) => ({
+            source: r.source,
+            predicate: r.predicate,
+            target: r.target
+        }));
         
-        const flowLinks = allLinks
-            .map(l => l.data)
-            .filter(l => 
-                l.source === flowUri || 
-                l.source.startsWith(alternatePrefix)
-            );
-        
-        // Reconstruct flow from links
-        const { SHACLFlow } = await import("../shacl/SHACLFlow");
         return SHACLFlow.fromLinks(flowLinks, flowUri);
     }
 
