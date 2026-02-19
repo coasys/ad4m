@@ -27,8 +27,7 @@ export async function installSystemLanguages(relativePath = '') {
     binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary', `ad4m`);
   }
 
-  await findAndKillProcess('holochain')
-  await findAndKillProcess('lair-keystore')
+  await findAndKillProcess('ad4m')
 
   // Look for bootstrap seed in order of preference:
   // 1. Adjacent to package root (../bootstrapSeed.json from build/) — installed package
