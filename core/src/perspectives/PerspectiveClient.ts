@@ -452,14 +452,15 @@ export class PerspectiveClient {
 
     /**
      * Adds Social DNA code to a perspective.
-     * @param shaclJson - Optional SHACL JSON string for SHACL-based SDNA (recommended for new code)
+     * @param sdnaCode - Optional Prolog code (deprecated, use shaclJson instead)
+     * @param shaclJson - SHACL JSON string for SHACL-based SDNA (recommended)
      */
-    async addSdna(uuid: string,  name: string, sdnaCode: string, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string): Promise<boolean> {
+    async addSdna(uuid: string, name: string, sdnaCode: string | undefined, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string): Promise<boolean> {
         return unwrapApolloResult(await this.#apolloClient.mutate({
-            mutation: gql`mutation perspectiveAddSdna($uuid: String!, $name: String!, $sdnaCode: String!, $sdnaType: String!, $shaclJson: String) {
+            mutation: gql`mutation perspectiveAddSdna($uuid: String!, $name: String!, $sdnaCode: String, $sdnaType: String!, $shaclJson: String) {
                 perspectiveAddSdna(uuid: $uuid, name: $name, sdnaCode: $sdnaCode, sdnaType: $sdnaType, shaclJson: $shaclJson)
             }`,
-            variables: { uuid, name, sdnaCode, sdnaType, shaclJson }
+            variables: { uuid, name, sdnaCode: sdnaCode || "", sdnaType, shaclJson }
         })).perspectiveAddSdna
     }
 
