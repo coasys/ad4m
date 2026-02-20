@@ -29,10 +29,14 @@ path = "src/bin/generate_snapshot.rs"
 
 [features]
 # Pass metal and cuda features (set through build.rs) through to kalosm
-default = []
+default = ["surrealdb-links"]
 metal = ["kalosm/metal"]
 cuda = ["kalosm/cuda"]
 generate_snapshot = []  # Feature flag for snapshot generation mode
+wasm-languages = ["dep:wasmer"]
+# Link storage backend selection (mutually exclusive)
+surrealdb-links = ["dep:surrealdb"]
+sqlite-links = ["dep:urlencoding"]
 
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -134,6 +138,9 @@ portpicker = "0.1.1"
 deno_error = "0.5.6"
 thiserror = "2.0.12"
 surrealdb = { version = "2.4", default-features = false, features = ["kv-mem", "scripting"] }
+surrealdb = { version = "2.4", default-features = false, features = ["kv-rocksdb", "kv-mem", "scripting"], optional = true }
+urlencoding = { version = "2", optional = true }
+wasmer = { version = "6.1.0", optional = true, features = ["sys", "cranelift"] }
 
 [dev-dependencies]
 maplit = "1.0.2"
