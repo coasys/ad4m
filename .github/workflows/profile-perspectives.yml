@@ -1,0 +1,57 @@
+name: Profile Perspective Scaling
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'tests/js/profile-perspectives.ts'
+
+jobs:
+  profile:
+    name: Perspective Scaling Benchmark
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Download AD4M executor v0.10.1
+        run: |
+          mkdir -p $HOME/.local/bin
+          curl -fSL "https://github.com/perspect3vism/ad4m/releases/download/v0.10.1/ad4m-cli-executor-linux-0.10.1-x64" \
+            -o $HOME/.local/bin/ad4m-executor
+          chmod +x $HOME/.local/bin/ad4m-executor
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install test dependencies
+        working-directory: tests/js
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Prepare bootstrap seed
+        working-directory: tests/js
+        run: |
+          # If bootstrapSeed.json doesn't exist, use the checked-in one or generate
+          if [ ! -f bootstrapSeed.json ]; then
+            echo '{"trustedAgents":[],"knownLinkLanguages":[],"directMessageLanguage":"","agentLanguage":"","perspectiveLanguage":"","neighbourhoodLanguage":"","languageLanguageBundle":""}' > bootstrapSeed.json
+          fi
+
+      - name: Run profiler
+        working-directory: tests/js
+        env:
+          AD4M_EXECUTOR_PATH: /home/runner/.local/bin/ad4m-executor
+        run: |
+          npx tsx profile-perspectives.ts 2>&1 | tee /tmp/profile-output.txt
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: profile-results
+          path: /tmp/profile-output.txt
