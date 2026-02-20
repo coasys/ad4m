@@ -1,10 +1,10 @@
+use log::{error, info};
+use serde_json::Value as JsonValue;
 use tokio::runtime::Builder;
 use tokio::sync::{
     mpsc::{self, UnboundedSender},
     oneshot,
 };
-use serde_json::Value as JsonValue;
-use log::{error, info};
 
 use super::language_runtime::{LanguageOperation, LanguageRuntime, LanguageRuntimeRequest};
 
@@ -49,7 +49,10 @@ impl LanguageRuntimeHandle {
             .map_err(|e| format!("Failed to spawn language thread: {}", e))?;
 
         info!("LanguageRuntimeHandle spawned for: {}", language_address);
-        Ok(Self { language_address, tx })
+        Ok(Self {
+            language_address,
+            tx,
+        })
     }
 
     /// Send an operation and wait for the result.
@@ -57,10 +60,14 @@ impl LanguageRuntimeHandle {
         let (response_tx, response_rx) = oneshot::channel();
 
         self.tx
-            .send(LanguageRuntimeRequest { operation, response_tx })
+            .send(LanguageRuntimeRequest {
+                operation,
+                response_tx,
+            })
             .map_err(|e| format!("Language runtime channel closed: {}", e))?;
 
-        response_rx.await
+        response_rx
+            .await
             .map_err(|e| format!("Language runtime dropped without responding: {}", e))?
     }
 
@@ -69,11 +76,15 @@ impl LanguageRuntimeHandle {
     }
 
     pub async fn load_module(&self, path: String) -> Result<(), String> {
-        self.send(LanguageOperation::LoadModule(path)).await.map(|_| ())
+        self.send(LanguageOperation::LoadModule(path))
+            .await
+            .map(|_| ())
     }
 
     pub async fn load_language(&self, context: JsonValue) -> Result<(), String> {
-        self.send(LanguageOperation::LoadLanguage(context)).await.map(|_| ())
+        self.send(LanguageOperation::LoadLanguage(context))
+            .await
+            .map(|_| ())
     }
 
     pub async fn register_callbacks(&self) -> Result<(bool, bool), String> {

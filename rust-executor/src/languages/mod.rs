@@ -85,13 +85,12 @@ impl LanguageController {
 
         // Get agent information for language context
         let agent_context = AgentContext::main_agent();
-        let agent_did = did_for_context(&agent_context)
-            .map_err(|e| LanguageError::LoadError {
-                address: language_address.clone(),
-                message: format!("Failed to get agent DID: {}", e),
-            })?;
-        let agent_signing_key_id = signing_key_id_for_context(&agent_context)
-            .map_err(|e| LanguageError::LoadError {
+        let agent_did = did_for_context(&agent_context).map_err(|e| LanguageError::LoadError {
+            address: language_address.clone(),
+            message: format!("Failed to get agent DID: {}", e),
+        })?;
+        let agent_signing_key_id =
+            signing_key_id_for_context(&agent_context).map_err(|e| LanguageError::LoadError {
                 address: language_address.clone(),
                 message: format!("Failed to get signing key ID: {}", e),
             })?;
@@ -106,29 +105,37 @@ impl LanguageController {
         );
 
         // Spawn dedicated runtime in its own thread
-        let runtime_handle = LanguageRuntimeHandle::spawn(language_address.clone())
-            .map_err(|e| LanguageError::LoadError {
-                address: language_address.clone(),
-                message: e,
+        let runtime_handle =
+            LanguageRuntimeHandle::spawn(language_address.clone()).map_err(|e| {
+                LanguageError::LoadError {
+                    address: language_address.clone(),
+                    message: e,
+                }
             })?;
 
         // Load the language bundle module
         let bundle_path_str = bundle_path.to_string_lossy().to_string();
-        runtime_handle.load_module(bundle_path_str).await
+        runtime_handle
+            .load_module(bundle_path_str)
+            .await
             .map_err(|e| LanguageError::LoadError {
                 address: language_address.clone(),
                 message: format!("Failed to load language module: {}", e),
             })?;
 
         // Initialize the language with context
-        runtime_handle.load_language(language_context.to_json()).await
+        runtime_handle
+            .load_language(language_context.to_json())
+            .await
             .map_err(|e| LanguageError::LoadError {
                 address: language_address.clone(),
                 message: format!("Failed to initialize language: {}", e),
             })?;
 
         // Register callbacks for adapters
-        runtime_handle.register_callbacks().await
+        runtime_handle
+            .register_callbacks()
+            .await
             .map_err(|e| LanguageError::LoadError {
                 address: language_address.clone(),
                 message: format!("Failed to register callbacks: {}", e),
@@ -149,7 +156,9 @@ impl LanguageController {
         let mut runtimes = self.runtimes.lock().await;
         if let Some(runtime) = runtimes.remove(language_address) {
             // Teardown the runtime (cleanup language instance, drop thread)
-            runtime.teardown().await
+            runtime
+                .teardown()
+                .await
                 .map_err(|e| LanguageError::RuntimeError {
                     address: language_address.to_string(),
                     message: format!("Failed to teardown runtime: {}", e),
@@ -177,7 +186,8 @@ impl LanguageController {
     ) -> Result<String, LanguageError> {
         let handle = {
             let runtimes = self.runtimes.lock().await;
-            runtimes.get(language_address)
+            runtimes
+                .get(language_address)
                 .ok_or_else(|| LanguageError::RuntimeError {
                     address: language_address.to_string(),
                     message: "Language not loaded".to_string(),
@@ -185,7 +195,8 @@ impl LanguageController {
                 .clone()
         };
 
-        handle.execute(script.to_string())
+        handle
+            .execute(script.to_string())
             .await
             .map_err(|e| LanguageError::RuntimeError {
                 address: language_address.to_string(),

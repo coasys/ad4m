@@ -149,7 +149,11 @@ impl Default for JsCore {
 
 impl JsCore {
     pub fn new() -> Self {
-        Self::new_with_options(options::main_module_url(), options::module_loader(), options::main_worker_options())
+        Self::new_with_options(
+            options::main_module_url(),
+            options::module_loader(),
+            options::main_worker_options(),
+        )
     }
 
     /// Create a new language-specific JsCore instance
@@ -239,7 +243,12 @@ impl JsCore {
         worker
             .execute_main_module(&options::language_main_module_url())
             .await
-            .map_err(|e| anyhow!("init_for_language(): could not execute bootstrap module: {}", e))?;
+            .map_err(|e| {
+                anyhow!(
+                    "init_for_language(): could not execute bootstrap module: {}",
+                    e
+                )
+            })?;
         Ok(())
     }
 

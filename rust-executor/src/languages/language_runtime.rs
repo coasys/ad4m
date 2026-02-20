@@ -1,7 +1,7 @@
-use serde_json::Value as JsonValue;
-use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use crate::js_core::JsCore;
 use log::{debug, error, info, warn};
+use serde_json::Value as JsonValue;
+use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 
 /// Request sent to a LanguageRuntime via its channel
 #[derive(Debug)]
@@ -43,13 +43,19 @@ impl LanguageRuntime {
     /// Initialize the language runtime by executing the bootstrap module.
     /// Must be called before processing requests to make Deno ops available.
     pub async fn init(&self) -> Result<(), String> {
-        self.js_core.init_for_language().await
-            .map_err(|e| format!("Bootstrap failed for language {}: {}", self.language_address, e))
+        self.js_core.init_for_language().await.map_err(|e| {
+            format!(
+                "Bootstrap failed for language {}: {}",
+                self.language_address, e
+            )
+        })
     }
 
     /// Load a module (typically the language bundle)
     pub async fn load_module(&self, path: &str) -> Result<(), String> {
-        self.js_core.load_module(path).await
+        self.js_core
+            .load_module(path)
+            .await
             .map_err(|e| format!("Failed to load module {}: {}", path, e))
     }
 
@@ -67,8 +73,12 @@ impl LanguageRuntime {
             context_json
         );
 
-        self.js_core.execute(&script).await
-            .map_err(|e| format!("Failed to call language constructor for {}: {}", self.language_address, e))?;
+        self.js_core.execute(&script).await.map_err(|e| {
+            format!(
+                "Failed to call language constructor for {}: {}",
+                self.language_address, e
+            )
+        })?;
 
         Ok(())
     }
@@ -143,10 +153,15 @@ impl LanguageRuntime {
         "#;
 
         if let Err(e) = self.execute(cleanup_script).await {
-            error!("Error during language cleanup for {}: {}", self.language_address, e);
+            error!(
+                "Error during language cleanup for {}: {}",
+                self.language_address, e
+            );
         }
 
-        let _ = self.execute("delete globalThis.__ad4m_language_instance__;").await;
+        let _ = self
+            .execute("delete globalThis.__ad4m_language_instance__;")
+            .await;
 
         info!("Tore down language runtime: {}", self.language_address);
         Ok(())
