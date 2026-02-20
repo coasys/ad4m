@@ -1,6 +1,6 @@
 import path from "path";
 import fs from 'fs-extra';
-import { ad4mDataDirectory, deleteAllAd4mData, findAndKillProcess, getAd4mHostBinary, logger } from "./utils";
+import { ad4mDataDirectory, deleteAllAd4mData, getAd4mHostBinary, logger } from "./utils";
 
 /**
  * Prepare the test environment by setting up the bootstrap seed and initializing
@@ -27,7 +27,6 @@ export async function installSystemLanguages(relativePath = '') {
     binaryPath = path.join(ad4mDataDirectory(relativePath), 'binary', `ad4m`);
   }
 
-  await findAndKillProcess('ad4m')
 
   // Look for bootstrap seed in order of preference:
   // 1. Adjacent to package root (../bootstrapSeed.json from build/) — installed package

@@ -9,7 +9,7 @@ import { hideBin } from 'yargs/helpers';
 import { ChildProcessWithoutNullStreams, execFileSync, spawn } from 'child_process';
 import kill from 'tree-kill'
 import { resolve as resolvePath} from 'path'
-import { ad4mDataDirectory, cleanOutput, deleteAllAd4mData, findAndKillProcess, getAd4mHostBinary, getTestFiles, logger } from './utils.js';
+import { ad4mDataDirectory, cleanOutput, deleteAllAd4mData, getAd4mHostBinary, getTestFiles, logger } from './utils.js';
 import process from 'process';
 import { installSystemLanguages } from './installSystemLanguages.js';
 import { buildAd4mClient } from './client.js';
@@ -86,7 +86,6 @@ async function installLanguage(child: any, binaryPath: string, bundle: string, m
           neighbourhood,
           clear: () => {
             kill(child.pid!, async () => {
-              await findAndKillProcess('ad4m')
               deleteAllAd4mData(relativePath);
               resolve(null);
             })
@@ -112,7 +111,6 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
       binaryPath = path.join(ad4mDataDirectory(`.ad4m-test`), 'binary', `ad4m`);
     }
 
-    await findAndKillProcess('ad4m')
     const seedFile = path.join(__dirname, '../bootstrapSeed.json')
     const agentSeedFile = path.join(__dirname, `../${relativePath}-bootstrapSeed.json`);
 
@@ -195,7 +193,6 @@ export function startServer(relativePath: string, bundle: string, meta: string, 
 
     child.on('error', async () => {
       logger.error(`process error: ${child.pid}`)
-      await findAndKillProcess('ad4m')
       reject()
     });
   });
