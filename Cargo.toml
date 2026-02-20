@@ -6,6 +6,10 @@ members = [
     "rust-executor",
     "ui/src-tauri"
 ]
+exclude = [
+    "wasm-language-sdk",
+    "examples/wasm-languages/note-store",
+]
 
 [patch.crates-io]
 # DEBUG: Using forked kitsune2 with debugging instrumentation and fixed default behavior

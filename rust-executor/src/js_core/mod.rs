@@ -32,7 +32,7 @@ mod options;
 pub mod pubsub_extension;
 pub mod signature_extension;
 mod string_module_loader;
-mod utils;
+pub mod utils;
 pub mod utils_extension;
 pub mod wallet_extension;
 
