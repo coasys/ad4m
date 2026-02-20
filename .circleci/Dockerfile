@@ -1,14 +1,34 @@
-# Use the CircleCI base image
-FROM cimg/base:edge-22.04
+# Use the CircleCI base image - Ubuntu 24.04 for webkit2gtk-4.1 support
+FROM cimg/base:edge-24.04
 
 USER root
 
 # Install system dependencies or any other tools you need
+# Note: Ubuntu 24.04 uses webkit2gtk-4.1 (not 4.0) and libsoup-3.0
 RUN apt-get update && sudo apt-get install -y \
-    libgtk-3-dev webkit2gtk-4.0 libappindicator3-dev librsvg2-dev patchelf protobuf-compiler cmake gobjc clang gnustep-devel libobjc4 libgnustep-base-dev libasound2-dev pkg-config fuse libfuse2 mesa-utils mesa-vulkan-drivers
+    libgtk-3-dev \
+    libwebkit2gtk-4.1-dev \
+    libjavascriptcoregtk-4.1-dev \
+    libsoup-3.0-dev \
+    libayatana-appindicator3-dev \
+    librsvg2-dev \
+    patchelf \
+    protobuf-compiler \
+    cmake \
+    gobjc \
+    clang \
+    gnustep-devel \
+    libobjc4 \
+    libgnustep-base-dev \
+    libasound2-dev \
+    pkg-config \
+    fuse3 \
+    libfuse3-dev \
+    mesa-utils \
+    mesa-vulkan-drivers
 
 # Install Go
-ENV GO_VERSION 1.24.6
+ENV GO_VERSION 1.22.6
 RUN wget https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz -O go.tar.gz \
     && tar -C /usr/local -xzf go.tar.gz \
     && rm go.tar.gz
