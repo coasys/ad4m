@@ -187,6 +187,153 @@ interface Snapshot {
   childProcesses: number;
 }
 
+interface SmapsRegion {
+  name: string;
+  rssKB: number;
+  pssKB: number;
+  sharedKB: number;
+  privateKB: number;
+}
+
+function parseSmaps(pid: number): SmapsRegion[] {
+  try {
+    const raw = execSync(`cat /proc/${pid}/smaps 2>/dev/null || true`, {
+      encoding: "utf-8",
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    if (!raw.trim()) return [];
+
+    const regions: SmapsRegion[] = [];
+    let current: SmapsRegion | null = null;
+
+    for (const line of raw.split("\n")) {
+      // Header line: address perms offset dev inode pathname
+      const headerMatch = line.match(
+        /^[0-9a-f]+-[0-9a-f]+\s+\S+\s+\S+\s+\S+\s+\d+\s*(.*)/
+      );
+      if (headerMatch) {
+        if (current) regions.push(current);
+        current = {
+          name: headerMatch[1].trim() || "[anon]",
+          rssKB: 0,
+          pssKB: 0,
+          sharedKB: 0,
+          privateKB: 0,
+        };
+        continue;
+      }
+      if (!current) continue;
+      const kv = line.match(/^(\w[\w_]*?):\s+(\d+)\s+kB/);
+      if (kv) {
+        const val = parseInt(kv[2], 10);
+        switch (kv[1]) {
+          case "Rss":
+            current.rssKB = val;
+            break;
+          case "Pss":
+            current.pssKB = val;
+            break;
+          case "Shared_Clean":
+          case "Shared_Dirty":
+            current.sharedKB += val;
+            break;
+          case "Private_Clean":
+          case "Private_Dirty":
+            current.privateKB += val;
+            break;
+        }
+      }
+    }
+    if (current) regions.push(current);
+    return regions;
+  } catch {
+    return [];
+  }
+}
+
+function printSmapsSummary(pid: number): void {
+  const regions = parseSmaps(pid);
+  if (regions.length === 0) {
+    console.log("  smaps: not available (Linux /proc required)");
+    return;
+  }
+
+  // Aggregate by mapped file/category
+  const buckets = new Map<string, { rssKB: number; pssKB: number; privateKB: number; count: number }>();
+
+  for (const r of regions) {
+    if (r.rssKB === 0) continue;
+
+    let category: string;
+    const name = r.name;
+
+    if (name.includes("libholochain") || name.includes("holochain"))
+      category = "holochain";
+    else if (name.includes("libv8") || name.includes("v8_") || name.includes("libdeno") || name.includes("deno"))
+      category = "v8/deno";
+    else if (name.includes("surreal") || name.includes("rocksdb") || name.includes("librocksdb"))
+      category = "surrealdb/rocksdb";
+    else if (name.includes("lair") || name.includes("sodiumoxide") || name.includes("libsodium"))
+      category = "lair/crypto";
+    else if (name.includes("libssl") || name.includes("libcrypto"))
+      category = "tls/openssl";
+    else if (name.includes("libc-") || name.includes("libc.so") || name.includes("libm.so") || name.includes("libpthread") || name.includes("ld-linux") || name.includes("libdl") || name.includes("librt"))
+      category = "libc/system";
+    else if (name.includes("libwasmtime") || name.includes("wasmer") || name.includes("wasm"))
+      category = "wasm-runtime";
+    else if (name.includes("ad4m") || name.includes("executor"))
+      category = "ad4m-executor";
+    else if (name === "[heap]")
+      category = "[heap]";
+    else if (name === "[stack]" || name.startsWith("[stack:"))
+      category = "[stack]";
+    else if (name === "[anon]" || name === "")
+      category = "[anonymous]";
+    else if (name.startsWith("/usr/lib") || name.startsWith("/lib"))
+      category = "system-libs";
+    else
+      category = "other";
+
+    const b = buckets.get(category) || { rssKB: 0, pssKB: 0, privateKB: 0, count: 0 };
+    b.rssKB += r.rssKB;
+    b.pssKB += r.pssKB;
+    b.privateKB += r.privateKB;
+    b.count++;
+    buckets.set(category, b);
+  }
+
+  // Sort by RSS descending
+  const sorted = [...buckets.entries()].sort((a, b) => b[1].rssKB - a[1].rssKB);
+  const totalRSS = sorted.reduce((s, [, v]) => s + v.rssKB, 0);
+
+  console.log("\n  === MEMORY MAP (smaps) ===");
+  console.log(
+    "  " +
+      "Category".padEnd(22) +
+      "| RSS (MB)  | PSS (MB)  | Private MB | Regions"
+  );
+  console.log(
+    "  " +
+      "----------------------|-----------|-----------|------------|--------"
+  );
+  for (const [cat, v] of sorted) {
+    const pct = ((v.rssKB / totalRSS) * 100).toFixed(0);
+    console.log(
+      "  " +
+        cat.padEnd(22) +
+        `| ${(v.rssKB / 1024).toFixed(1).padStart(7)}   ` +
+        `| ${(v.pssKB / 1024).toFixed(1).padStart(7)}   ` +
+        `| ${(v.privateKB / 1024).toFixed(1).padStart(8)}   ` +
+        `| ${String(v.count).padStart(5)}  (${pct}%)`
+    );
+  }
+  console.log(
+    "  " +
+      "TOTAL".padEnd(22) +
+      `| ${(totalRSS / 1024).toFixed(1).padStart(7)}   |           |            |`
+  );
+}
+
 function measureProcessTree(pid: number): {
   rssKB: number;
   vszKB: number;
@@ -354,6 +501,8 @@ async function main() {
     console.log("========================================\n");
 
     perspectiveSnapshots.push(await takeSnapshot("Baseline (0 perspectives)", pid, 0));
+    console.log("\n--- Baseline memory map ---");
+    printSmapsSummary(pid);
 
     console.log("\n--- Creating 1 perspective ---");
     await client.perspective.add("local-test-1");
@@ -424,6 +573,8 @@ async function main() {
         await createNeighbourhood(`neighbourhood-${i}`);
       }
       neighbourhoodSnapshots.push(await takeSnapshot("After 10 neighbourhoods", pid, 10));
+      console.log("\n--- Memory map after 10 neighbourhoods ---");
+      printSmapsSummary(pid);
     }
 
     // ── Summary ──
