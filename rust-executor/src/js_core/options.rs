@@ -80,3 +80,44 @@ pub fn main_worker_options() -> WorkerOptions {
         ..Default::default()
     }
 }
+
+/// Create a minimal module loader for language runtimes that only loads from file paths
+/// and doesn't include the main.js and executor bundle
+pub fn language_module_loader() -> Rc<StringModuleLoader> {
+    // Create an empty loader - languages load their bundles from file paths
+    Rc::new(StringModuleLoader::new())
+}
+
+/// Get a minimal main module URL for language runtimes
+pub fn language_main_module_url() -> Url {
+    Url::parse("https://ad4m.language/bootstrap").unwrap()
+}
+
+/// Create worker options for language-specific runtimes
+/// These runtimes have the same Rust service extensions but minimal JS bootstrap
+pub fn language_worker_options() -> WorkerOptions {
+    WorkerOptions {
+        startup_snapshot: {
+            #[cfg(feature = "generate_snapshot")]
+            {
+                None
+            }
+            #[cfg(not(feature = "generate_snapshot"))]
+            {
+                Some(include_bytes!("../../CUSTOM_DENO_SNAPSHOT.bin"))
+            }
+        },
+        extensions: vec![
+            wallet_service::init(),
+            utils_service::init(),
+            pubsub_service::init(),
+            holochain_service::init(),
+            signature_service::init(),
+            agent_service::init(),
+            entanglement_service::init(),
+            runtime_service::init(),
+            language_service::init(),
+        ],
+        ..Default::default()
+    }
+}

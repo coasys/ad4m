@@ -3,18 +3,22 @@ pub mod error;
 pub mod language;
 pub mod language_context;
 pub mod language_runtime;
+pub mod language_runtime_handle;
 
 use deno_core::error::AnyError;
 use std::sync::{Arc, Mutex};
 
 use crate::types::Address;
 use crate::{
+    agent::{did_for_context, signing_key_id_for_context, AgentContext},
     graphql::graphql_types::{DecoratedNeighbourhoodExpression, Neighbourhood},
     js_core::JsCoreHandle,
     utils::{language_storage_directory, languages_directory},
 };
 use error::LanguageError;
 use language::Language;
+use language_context::LanguageContext;
+use language_runtime_handle::LanguageRuntimeHandle;
 use log::{error, info};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -29,28 +33,11 @@ lazy_static! {
 
 #[derive(Clone)]
 pub struct LanguageController {
-    // Legacy field for backward compatibility during migration
+    // Legacy field for backward compatibility (still used for neighbourhood operations)
     js_core: JsCoreHandle,
 
-    // Phase 1: Track loaded languages by address for validation
-    // Phase 2 TODO: Replace with actual per-language runtime handles
-    loaded_languages: Arc<TokioMutex<HashMap<String, LanguageMetadata>>>,
-}
-
-/// Metadata about a loaded language (Phase 1 implementation)
-#[derive(Clone, Debug)]
-pub struct LanguageMetadata {
-    #[allow(dead_code)]
-    pub address: String,
-    #[allow(dead_code)]
-    pub bundle_path: PathBuf,
-    #[allow(dead_code)]
-    pub storage_directory: PathBuf,
-    #[allow(dead_code)]
-    pub custom_settings: Option<JsonValue>,
-    #[allow(dead_code)]
-    pub has_links_adapter: bool,
-    pub has_telepresence_adapter: bool,
+    // Per-language runtime handles (isolated Deno instances per language)
+    runtimes: Arc<TokioMutex<HashMap<String, LanguageRuntimeHandle>>>,
 }
 
 impl LanguageController {
@@ -71,14 +58,13 @@ impl LanguageController {
     fn new(js_core: JsCoreHandle) -> Self {
         Self {
             js_core,
-            loaded_languages: Arc::new(TokioMutex::new(HashMap::new())),
+            runtimes: Arc::new(TokioMutex::new(HashMap::new())),
         }
     }
 
     /// Load a language from a bundle path
     ///
-    /// Phase 1: Delegates to JS LanguageController for actual loading,
-    /// but tracks metadata in Rust for management
+    /// Creates a dedicated per-language runtime with isolated Deno worker
     pub async fn load_language(&self, bundle_path: PathBuf) -> Result<String, LanguageError> {
         info!("Loading language from bundle: {:?}", bundle_path);
 
@@ -97,51 +83,66 @@ impl LanguageController {
         // Create storage directory if it doesn't exist
         fs::create_dir_all(&storage_directory)?;
 
-        // Phase 1: Use JS LanguageController to actually load the language
-        let mut js_core = self.js_core.clone();
-        let bundle_path_str = bundle_path.to_string_lossy().to_string();
-        let load_script = format!(
-            r#"
-            await core.languageController.loadLanguageFromBundle("{}")
-            "#,
-            bundle_path_str
+        // Get agent information for language context
+        let agent_context = AgentContext::main_agent();
+        let agent_did = did_for_context(&agent_context)
+            .map_err(|e| LanguageError::LoadError {
+                address: language_address.clone(),
+                message: format!("Failed to get agent DID: {}", e),
+            })?;
+        let agent_signing_key_id = signing_key_id_for_context(&agent_context)
+            .map_err(|e| LanguageError::LoadError {
+                address: language_address.clone(),
+                message: format!("Failed to get signing key ID: {}", e),
+            })?;
+
+        // Create language context
+        let language_context = LanguageContext::new(
+            agent_did,
+            agent_signing_key_id,
+            custom_settings.clone(),
+            storage_directory.clone(),
+            language_address.clone(),
         );
 
-        js_core.execute(load_script).await.map_err(|e| LanguageError::LoadError {
-            address: language_address.clone(),
-            message: e.to_string(),
-        })?;
-
-        // Check for adapters via JS
-        let check_adapters_script = format!(
-            r#"
-            JSON.stringify({{
-                hasLinksAdapter: !!core.languageController.languageByRef({{address: "{}"}})?.linksAdapter,
-                hasTelepresenceAdapter: !!core.languageController.languageByRef({{address: "{}"}})?.telepresenceAdapter
-            }})
-            "#,
-            language_address, language_address
-        );
-
-        let adapters_result = js_core.execute(check_adapters_script).await.map_err(|e| LanguageError::LoadError {
-            address: language_address.clone(),
-            message: e.to_string(),
-        })?;
-
-        let adapters: serde_json::Value = serde_json::from_str(&adapters_result).unwrap_or_default();
-
-        // Store metadata
-        let metadata = LanguageMetadata {
-            address: language_address.clone(),
-            bundle_path: bundle_path.clone(),
+        // Create dedicated runtime handle for this language
+        let mut runtime_handle = LanguageRuntimeHandle::new(
+            language_address.clone(),
+            bundle_path.clone(),
             storage_directory,
             custom_settings,
-            has_links_adapter: adapters["hasLinksAdapter"].as_bool().unwrap_or(false),
-            has_telepresence_adapter: adapters["hasTelepresenceAdapter"].as_bool().unwrap_or(false),
-        };
+        )
+        .await
+        .map_err(|e| LanguageError::LoadError {
+            address: language_address.clone(),
+            message: e,
+        })?;
 
-        let mut loaded = self.loaded_languages.lock().await;
-        loaded.insert(language_address.clone(), metadata);
+        // Load the language bundle module
+        let bundle_path_str = bundle_path.to_string_lossy().to_string();
+        runtime_handle.load_module(bundle_path_str).await
+            .map_err(|e| LanguageError::LoadError {
+                address: language_address.clone(),
+                message: format!("Failed to load language module: {}", e),
+            })?;
+
+        // Initialize the language with context
+        runtime_handle.load_language(language_context.to_json()).await
+            .map_err(|e| LanguageError::LoadError {
+                address: language_address.clone(),
+                message: format!("Failed to initialize language: {}", e),
+            })?;
+
+        // Register callbacks for adapters
+        runtime_handle.register_callbacks().await
+            .map_err(|e| LanguageError::LoadError {
+                address: language_address.clone(),
+                message: format!("Failed to register callbacks: {}", e),
+            })?;
+
+        // Store the runtime handle
+        let mut runtimes = self.runtimes.lock().await;
+        runtimes.insert(language_address.clone(), runtime_handle);
 
         info!("Successfully loaded language: {}", language_address);
         Ok(language_address)
@@ -151,10 +152,15 @@ impl LanguageController {
     pub async fn unload_language(&self, language_address: &str) -> Result<(), LanguageError> {
         info!("Unloading language: {}", language_address);
 
-        let mut loaded = self.loaded_languages.lock().await;
-        loaded.remove(language_address);
-
-        // TODO Phase 2: Call teardown on per-language runtime
+        let mut runtimes = self.runtimes.lock().await;
+        if let Some(mut runtime) = runtimes.remove(language_address) {
+            // Teardown the runtime (cleanup language instance, drop thread)
+            runtime.teardown().await
+                .map_err(|e| LanguageError::RuntimeError {
+                    address: language_address.to_string(),
+                    message: format!("Failed to teardown runtime: {}", e),
+                })?;
+        }
 
         info!("Successfully unloaded language: {}", language_address);
         Ok(())
@@ -162,55 +168,32 @@ impl LanguageController {
 
     /// Check if a language is loaded
     pub async fn is_language_loaded(&self, language_address: &str) -> bool {
-        let loaded = self.loaded_languages.lock().await;
-        loaded.contains_key(language_address)
-    }
-
-    /// Get language metadata
-    pub async fn get_language_metadata(&self, language_address: &str) -> Option<LanguageMetadata> {
-        let loaded = self.loaded_languages.lock().await;
-        loaded.get(language_address).cloned()
+        let runtimes = self.runtimes.lock().await;
+        runtimes.contains_key(language_address)
     }
 
     /// Execute a script on a specific language runtime
     ///
-    /// Phase 1 Implementation: Delegates to JS LanguageController
-    /// Phase 2 TODO: Implement per-language execution handles with proper thread isolation
+    /// Uses dedicated per-language runtime with proper thread isolation
     pub async fn execute_on_language(
         &self,
         language_address: &str,
         script: &str,
     ) -> Result<String, LanguageError> {
-        // Phase 1: Delegate directly to JS without checking Rust registry
-        // Languages are loaded by JS LanguageController in this phase
-        let wrapped_script = format!(
-            r#"
-            (async function() {{
-                const language = await core.languageController.languageByRef({{address:"{}"}});
-                if (!language) throw new Error("Language not found: {}");
+        let mut runtimes = self.runtimes.lock().await;
 
-                // Set as global for backward compatibility with scripts that reference it
-                globalThis.__ad4m_language_instance__ = language;
+        let runtime = runtimes.get_mut(language_address)
+            .ok_or_else(|| LanguageError::RuntimeError {
+                address: language_address.to_string(),
+                message: "Language not loaded".to_string(),
+            })?;
 
-                // Execute the script (which is already an async IIFE)
-                const result = await {};
-
-                // Clean up global
-                delete globalThis.__ad4m_language_instance__;
-
-                return result;
-            }})()
-            "#,
-            language_address, language_address, script
-        );
-
-        let mut js_core_handle = self.js_core.clone();
-        js_core_handle
-            .execute(wrapped_script)
+        // Scripts already reference 'language' which is set as globalThis.__ad4m_language_instance__
+        runtime.execute(script.to_string())
             .await
             .map_err(|e| LanguageError::RuntimeError {
                 address: language_address.to_string(),
-                message: e.to_string(),
+                message: e,
             })
     }
 
@@ -257,10 +240,15 @@ impl LanguageController {
     pub async fn shutdown(&self) -> Result<(), LanguageError> {
         info!("Shutting down language controller");
 
-        let mut loaded = self.loaded_languages.lock().await;
-        loaded.clear();
+        let mut runtimes = self.runtimes.lock().await;
 
-        // TODO Phase 2: Teardown per-language runtimes
+        // Teardown all language runtimes
+        for (address, mut runtime) in runtimes.drain() {
+            info!("Shutting down language runtime: {}", address);
+            if let Err(e) = runtime.teardown().await {
+                error!("Error shutting down language {}: {}", address, e);
+            }
+        }
 
         info!("Language controller shut down");
         Ok(())

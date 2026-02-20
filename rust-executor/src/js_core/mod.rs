@@ -7,13 +7,13 @@ use deno_resolver::npm::DenoInNpmPackageChecker;
 use deno_resolver::npm::NpmResolver;
 use deno_runtime::deno_permissions::PermissionsContainer;
 use deno_runtime::permissions::RuntimePermissionDescriptorParser;
-use deno_runtime::worker::{MainWorker, WorkerServiceOptions};
+use deno_runtime::worker::{MainWorker, WorkerOptions, WorkerServiceOptions};
 use holochain::prelude::{ExternIO, Signal};
 use log::{error, info};
 use once_cell::sync::Lazy;
-use options::{main_module_url, main_worker_options, module_loader};
 use std::collections::HashSet;
 use std::env::current_dir;
+use std::rc::Rc;
 use std::sync::Arc;
 use tokio::runtime::Builder;
 use tokio::sync::broadcast;
@@ -23,6 +23,7 @@ use tokio::sync::{
     mpsc::{self, UnboundedReceiver, UnboundedSender},
     oneshot,
 };
+use url::Url;
 
 pub mod agent_extension;
 pub mod error;
@@ -148,6 +149,24 @@ impl Default for JsCore {
 
 impl JsCore {
     pub fn new() -> Self {
+        Self::new_with_options(options::main_module_url(), options::module_loader(), options::main_worker_options())
+    }
+
+    /// Create a new language-specific JsCore instance
+    /// This uses a minimal bootstrap and doesn't load main.js or executor
+    pub fn new_for_language() -> Self {
+        Self::new_with_options(
+            options::language_main_module_url(),
+            options::language_module_loader(),
+            options::language_worker_options(),
+        )
+    }
+
+    fn new_with_options(
+        module_url: Url,
+        module_loader: Rc<string_module_loader::StringModuleLoader>,
+        worker_options: WorkerOptions,
+    ) -> Self {
         deno_core::v8::V8::set_flags_from_string("--no-opt");
         let fs = Arc::new(RealFs);
         let permission_desc_parser = Arc::new(RuntimePermissionDescriptorParser::new(
@@ -155,14 +174,14 @@ impl JsCore {
         ));
 
         let worker = MainWorker::bootstrap_from_options(
-            &main_module_url(),
+            &module_url,
             WorkerServiceOptions::<
                 DenoInNpmPackageChecker,
                 NpmResolver<sys_traits::impls::RealSys>,
                 sys_traits::impls::RealSys,
             > {
                 deno_rt_native_addon_loader: None,
-                module_loader: module_loader(),
+                module_loader,
                 permissions: PermissionsContainer::allow_all(permission_desc_parser),
                 blob_store: Default::default(),
                 broadcast_channel: Default::default(),
@@ -176,7 +195,7 @@ impl JsCore {
                 v8_code_cache: Default::default(),
                 fs,
             },
-            main_worker_options(),
+            worker_options,
         );
 
         JsCore {
@@ -207,7 +226,7 @@ impl JsCore {
     pub async fn init_engine(&self) -> Result<(), AnyError> {
         let mut worker = self.worker.lock().await;
         worker
-            .execute_main_module(&main_module_url())
+            .execute_main_module(&options::main_module_url())
             .await
             .map_err(|e| anyhow!("init_engine(): could not execute main module: {}", e))?;
         Ok(())

@@ -11,7 +11,8 @@ use deno_core::error::AnyError;
 #[derive(Clone)]
 pub struct Language {
     address: String,
-    // Legacy field for backward compatibility
+    // Legacy field for backward compatibility - not used anymore
+    #[allow(dead_code)]
     js_core: JsCoreHandle,
 }
 
