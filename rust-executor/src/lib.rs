@@ -8,9 +8,14 @@ mod globals;
 pub mod graphql;
 pub mod holochain_service;
 pub mod js_core;
+#[cfg(feature = "wasm-languages")]
+pub mod wasm_core;
 mod prolog_service;
 pub mod runtime_service;
+#[cfg(feature = "surrealdb-links")]
 mod surreal_service;
+#[cfg(feature = "sqlite-links")]
+mod sqlite_service;
 pub mod utils;
 mod wallet;
 
